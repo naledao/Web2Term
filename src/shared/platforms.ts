@@ -111,6 +111,8 @@ export interface PageAdapter {
   stopButtonSelectors: string[]
   /** One element per assistant turn. */
   assistantSelectors: string[]
+  /** Exclude hidden cached turns when selecting replies and send baselines. */
+  ignoreHiddenReplyNodes?: boolean
   /**
    * Explicit assistant-role markers on the turn itself, independent of answer markup.
    * Sites with unmarked turns continue to identify the role by assistantReplySelectors.
@@ -508,6 +510,8 @@ export const CHATGPT_PAGE: PageAdapter = {
    * attributes on the SAME element.
    */
   assistantSelectors: ['[data-chatgpt-selection-message-id]'],
+  // Cached ChatGPT turns can follow the active conversation in document order.
+  ignoreHiddenReplyNodes: true,
   /*
    * NEW, and the reason the role can move out of the turn selector: the answer lives in a
    * marked markdown root, so `readReplyText` returns the reply and nothing else, and

@@ -130,3 +130,29 @@ test('watchdog identifiers and age values are validated and missing scan ages re
   assert.equal(value.visibleAnswerTextLength, undefined)
   assert.equal(value.lastVisibleReplyKind, undefined)
 })
+
+test('rendered-turn selection and hidden-turn skips are retained without page content', (t) => {
+  const log = new ReplyDiagnosticLog(directory(t))
+  const path = log.write('chatgpt', {
+    event: 'scan', reason: 'no-visible-turns', assistantTurnCount: 2, hiddenTurnCount: 2,
+    selectedFromRenderedTurns: true, lastMatchedMessageId: 'hidden-message',
+    text: 'private-answer-sentinel'
+  }, context)
+  const value = records(path)[0]
+  assert.equal(value.reason, 'no-visible-turns')
+  assert.equal(value.assistantTurnCount, 2)
+  assert.equal(value.hiddenTurnCount, 2)
+  assert.equal(value.selectedFromRenderedTurns, true)
+  assert.equal(value.lastMatchedMessageId, 'hidden-message')
+  assert.ok(!readFileSync(path, 'utf8').includes('private-answer-sentinel'))
+})
+
+test('selection diagnostics reject invalid counts, flags and identifiers', () => {
+  const value = replyDiagnosticMetadata('chatgpt', {
+    event: 'scan', hiddenTurnCount: -1, selectedFromRenderedTurns: 'private-flag',
+    lastMatchedMessageId: 'https://private.test/secret'
+  }, context)
+  assert.equal(value.hiddenTurnCount, undefined)
+  assert.equal(value.selectedFromRenderedTurns, undefined)
+  assert.equal(value.lastMatchedMessageId, null)
+})

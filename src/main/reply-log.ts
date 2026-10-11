@@ -19,7 +19,7 @@ const events = new Set([
   'question-cleared', 'command', 'read-files', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog'
 ])
 const reasons = new Set([
-  'no-turns', 'not-assistant-turn', 'no-key', 'already-handled', 'question-still-generating',
+  'no-turns', 'no-visible-turns', 'not-assistant-turn', 'no-key', 'already-handled', 'question-still-generating',
   'question-not-live', 'invalid-question', 'invalid-read-files', 'no-command', 'still-generating',
   'terminal-mode-off', 'result-sent', 'user-sent', 'question-detected', 'non-command-reply',
   'history-baseline', 'manual-resume', 'file-send-submitted', 'configured-baseline', 'task-ended'
@@ -44,11 +44,11 @@ export function replyDiagnosticMetadata(
     mainPendingQuestion: context.mainPendingQuestion === true
   }
   if (payload.reason !== undefined) details.reason = reasons.has(payload.reason) ? payload.reason : 'unknown'
-  for (const key of ['messageId', 'lastHandledMessageId', 'lastVisibleMessageId', 'visibleAnswerOwnerMessageId'] as const) {
+  for (const key of ['messageId', 'lastHandledMessageId', 'lastMatchedMessageId', 'lastVisibleMessageId', 'visibleAnswerOwnerMessageId'] as const) {
     if (payload[key] !== undefined) details[key] = identifier(payload[key])
   }
   for (const key of [
-    'taskPromptGeneration', 'assistantTurnCount', 'replyTextLength', 'codeBlockCount', 'textLength', 'objectCount',
+    'taskPromptGeneration', 'assistantTurnCount', 'hiddenTurnCount', 'replyTextLength', 'codeBlockCount', 'textLength', 'objectCount',
     'selectedNodeTextLength', 'replyTextContentLength', 'visibleAssistantTurnCount', 'lastVisibleReplyTextLength',
     'lastVisibleReplyCodeBlockCount', 'visibleAnswerMarkerCount', 'visibleAnswerTextLength',
     'visibleAnswerCodeBlockCount', 'visibleCodeBlockCount', 'lastScanAgeMs', 'lastMutationAgeMs'
@@ -60,7 +60,7 @@ export function replyDiagnosticMetadata(
     'enabled', 'awaitingReply', 'awaitingReplyBefore', 'taskActive', 'pendingQuestionFound', 'replySnapshotAvailable',
     'answerMarkerFound', 'replyRootIsTurn', 'stopButtonFound', 'stopButtonOnPage',
     'composerFound', 'toolbarRootFound', 'bracesBalanced', 'live', 'completed', 'selectedNodeVisible',
-    'selectedReplyVisible', 'selectedMatchesLastVisible', 'replySettlePending', 'fileSendPending'
+    'selectedReplyVisible', 'selectedMatchesLastVisible', 'selectedFromRenderedTurns', 'replySettlePending', 'fileSendPending'
   ] as const) {
     if (typeof payload[key] === 'boolean') details[key] = payload[key]!
   }

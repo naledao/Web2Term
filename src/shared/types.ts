@@ -1283,6 +1283,9 @@ export interface InterceptorPageEvent {
   pendingQuestionFound?: boolean
   lastHandledMessageId?: string | null
   assistantTurnCount?: number
+  hiddenTurnCount?: number
+  lastMatchedMessageId?: string | null
+  selectedFromRenderedTurns?: boolean
   replySnapshotAvailable?: boolean
   replyTextLength?: number
   selectedNodeVisible?: boolean

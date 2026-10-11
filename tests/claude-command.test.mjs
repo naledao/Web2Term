@@ -300,15 +300,137 @@ test('an already-handled reply logs changed content and generation state without
   assert.equal(app.commands().length, 1, 'diagnostic changes must not bypass command deduplication')
 })
 
-test('diagnostics distinguish a hidden selected message from a visible answer missing its wrapper', () => {
+test('ChatGPT detects a new rendered reply before a hidden already-handled turn exactly once', () => {
+  const oldReply = chatgptReply('old-message', 'pwd')
+  const app = fixture([oldReply], CHATGPT_PAGE)
+  app.controller.checkNow()
+  oldReply.rendered = false
+  app.replaceNodes([chatgptReply('new-message', 'Get-Command mysqlsh'), oldReply])
+  app.scan()
+  const detected = app.commands().at(-1)
+  assert.equal(app.commands().length, 2)
+  assert.equal(detected.messageId, 'new-message')
+  assert.equal(detected.command, 'Get-Command mysqlsh')
+  assert.equal(detected.hiddenTurnCount, 1)
+  assert.equal(detected.lastMatchedMessageId, 'old-message')
+  assert.equal(detected.selectedFromRenderedTurns, true)
+  assert.equal(detected.selectedMatchesLastVisible, true)
+  app.scan()
+  assert.equal(app.commands().length, 2, 'repeated scans must not dispatch the new command again')
+})
+
+test('ChatGPT excludes turns hidden by an ancestor without relying on viewport position', () => {
+  for (const attributes of [{ hidden: '' }, { inert: '' }, { 'aria-hidden': 'true' }]) {
+    const hiddenBranch = element('div', attributes, [chatgptReply('hidden-message', 'old-command')])
+    const current = chatgptReply('current-message', 'pwd')
+    current.getBoundingClientRect = () => ({ top: -1000, bottom: -900 })
+    const app = fixture([current, hiddenBranch], CHATGPT_PAGE)
+    app.controller.checkNow()
+    assert.equal(app.commands().length, 1)
+    assert.equal(app.commands()[0].messageId, 'current-message')
+    assert.equal(app.commands()[0].hiddenTurnCount, 1)
+  }
+})
+
+test('an empty latest ChatGPT turn waits for its own content instead of executing an older reply', () => {
+  for (const hasAnswerMarker of [false, true]) {
+    const oldReply = chatgptReply('old-message', 'old-command')
+    const placeholder = element('div', { 'data-chatgpt-selection-message-id': 'new-message' },
+      hasAnswerMarker ? [element('div', { 'data-markdown-text-style': 'assistant-message' })] : [])
+    const app = fixture([oldReply, placeholder], CHATGPT_PAGE)
+    app.controller.checkNow()
+    assert.equal(app.commands().length, 0)
+    assert.equal(app.controller.status().awaitingReplySince !== 0, true)
+    app.replaceNodes([oldReply, chatgptReply('new-message', 'Get-Command mysqlsh')])
+    app.scan()
+    assert.equal(app.commands().length, 1)
+    assert.equal(app.commands()[0].messageId, 'new-message')
+    assert.equal(app.commands()[0].live, true)
+  }
+})
+
+test('a latest ChatGPT user turn never falls back to an older assistant command', () => {
+  const user = element('div', { 'data-chatgpt-selection-message-id': 'user-message' }, '继续')
+  const app = fixture([chatgptReply('old-message', 'old-command'), user], CHATGPT_PAGE)
+  app.controller.checkNow()
+  assert.equal(app.commands().length, 0)
+  assert.ok(app.events.some((event) => event.reason === 'not-assistant-turn' && event.messageId === 'user-message'))
+})
+
+test('a latest ChatGPT prose reply does not cause an earlier command to be executed', () => {
+  const prose = element('div', { 'data-chatgpt-selection-message-id': 'new-message' }, [
+    element('div', { 'data-markdown-text-style': 'assistant-message' }, '【任务完成】检查完毕')
+  ])
+  const app = fixture([chatgptReply('old-message', 'old-command'), prose], CHATGPT_PAGE)
+  app.controller.checkNow()
+  assert.equal(app.commands().length, 0)
+  assert.ok(app.events.some((event) => event.event === 'task-finished' && event.messageId === 'new-message'))
+})
+
+test('ChatGPT waits for a new rendered command to finish generating despite a hidden old turn', () => {
+  const oldReply = chatgptReply('old-message', 'old-command')
+  oldReply.rendered = false
+  const current = chatgptReply('new-message', 'pwd')
+  const stop = element('button', { 'aria-label': '停止' })
+  const app = fixture([current, oldReply, stop], CHATGPT_PAGE)
+  app.controller.checkNow()
+  assert.equal(app.commands().length, 0)
+  assert.ok(app.events.some((event) => event.reason === 'still-generating' && event.messageId === 'new-message'))
+  app.replaceNodes([current, oldReply])
+  app.scan()
+  assert.equal(app.commands().length, 1)
+  assert.equal(app.commands()[0].messageId, 'new-message')
+})
+
+test('ending a ChatGPT task baselines the rendered reply rather than the hidden last DOM node', () => {
+  const oldReply = chatgptReply('old-message', 'old-command')
+  oldReply.rendered = false
+  const current = chatgptReply('current-message', 'pwd')
+  const app = fixture([current, oldReply], CHATGPT_PAGE)
+  app.controller.endTask()
+  assert.equal(app.controller.status().lastCommandMessageId, 'current-message')
+  app.scan()
+  assert.equal(app.commands().length, 0, 'the visible reply at the task boundary must remain handled')
+})
+
+test('ChatGPT questions use the same rendered turn selection as commands', () => {
+  const oldReply = chatgptReply('old-message', 'old-command')
+  oldReply.rendered = false
+  const question = JSON.stringify({ type: 'questions', questions: [{ question: '选择哪个安装方式？' }] })
+  const current = element('div', { 'data-chatgpt-selection-message-id': 'question-message' }, [
+    element('div', { 'data-markdown-text-style': 'assistant-message' }, question)
+  ])
+  const app = fixture([current, oldReply], CHATGPT_PAGE)
+  app.controller.checkNow()
+  assert.equal(app.commands().length, 0)
+  const detected = app.events.filter((event) => event.event === 'question')
+  assert.equal(detected.length, 1)
+  assert.equal(detected[0].messageId, 'question-message')
+  assert.equal(detected[0].live, true)
+})
+
+test('reconfiguring the adapter does not carry ChatGPT hidden-node filtering into Claude', () => {
+  const reply = codeReply('pwd')
+  reply.rendered = false
+  const app = fixture([], CHATGPT_PAGE)
+  app.controller.configure({ page: CLAUDE_PAGE })
+  app.replaceNodes([reply])
+  app.controller.checkNow()
+  assert.equal(app.commands().length, 1)
+  assert.equal(app.commands()[0].selectedFromRenderedTurns, false)
+})
+
+test('diagnostics distinguish hidden cached turns from a visible answer missing its wrapper', () => {
   const oldReply = chatgptReply('old-message', 'pwd')
   const app = fixture([oldReply], CHATGPT_PAGE)
   app.controller.checkNow()
   oldReply.rendered = false
   app.replaceNodes([chatgptAnswer('Get-Command mysqlsh'), oldReply])
   app.scan()
-  const skipped = app.events.find((event) => event.reason === 'already-handled')
-  assert.equal(skipped.messageId, 'old-message')
+  const skipped = app.events.find((event) => event.reason === 'no-visible-turns')
+  assert.equal(skipped.messageId, '')
+  assert.equal(skipped.lastMatchedMessageId, 'old-message')
+  assert.equal(skipped.hiddenTurnCount, 1)
   assert.equal(skipped.selectedNodeVisible, false)
   assert.equal(skipped.selectedReplyVisible, false)
   assert.equal(skipped.visibleAssistantTurnCount, 0)
@@ -320,6 +442,21 @@ test('diagnostics distinguish a hidden selected message from a visible answer mi
   assert.equal(app.commands().length, 1)
 })
 
+test('all-hidden ChatGPT replies leave the task waiting until a rendered reply arrives', () => {
+  const hidden = chatgptReply('hidden-message', 'old-command')
+  hidden.rendered = false
+  const app = fixture([hidden], CHATGPT_PAGE)
+  app.controller.checkNow()
+  assert.equal(app.commands().length, 0)
+  assert.equal(app.controller.status().awaitingReplySince !== 0, true)
+  assert.ok(app.events.some((event) => event.reason === 'no-visible-turns' && event.hiddenTurnCount === 1))
+  app.replaceNodes([chatgptReply('new-message', 'pwd'), hidden])
+  app.scan()
+  assert.equal(app.commands().length, 1)
+  assert.equal(app.commands()[0].messageId, 'new-message')
+  assert.equal(app.commands()[0].live, true)
+})
+
 test('a passive watchdog records a visible new reply while mutations keep the scanner pending', () => {
   const oldReply = chatgptReply('old-message', 'pwd')
   const app = fixture([oldReply], CHATGPT_PAGE)
@@ -329,10 +466,12 @@ test('a passive watchdog records a visible new reply while mutations keep the sc
   app.mutate() // Leave the 800 ms settle callback pending, as on a continually mutating page.
   app.tick(5000)
   const heartbeat = app.events.find((event) => event.event === 'reply-watchdog')
-  assert.equal(heartbeat.messageId, 'old-message')
+  assert.equal(heartbeat.messageId, 'new-message')
+  assert.equal(heartbeat.lastMatchedMessageId, 'old-message')
+  assert.equal(heartbeat.hiddenTurnCount, 1)
   assert.equal(heartbeat.lastVisibleMessageId, 'new-message')
   assert.equal(heartbeat.visibleAnswerOwnerMessageId, 'new-message')
-  assert.equal(heartbeat.selectedMatchesLastVisible, false)
+  assert.equal(heartbeat.selectedMatchesLastVisible, true)
   assert.equal(heartbeat.replySettlePending, true)
   assert.equal(heartbeat.lastVisibleReplyKind, 'command')
   assert.equal(typeof heartbeat.lastScanAgeMs, 'number')

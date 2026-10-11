@@ -61,6 +61,7 @@
       'button[aria-label="停止生成"]'
     ],
     assistantSelectors: ['[data-chatgpt-selection-message-id]'],
+    ignoreHiddenReplyNodes: true,
     assistantRoleSelectors: [],
     replyStreamingAttribute: '',
     assistantReplySelectors: ['[data-markdown-text-style="assistant-message"]'],
@@ -515,6 +516,17 @@
 
   const queryAllAssistant = () => queryAll(PAGE.assistantSelectors)
   const queryAllMessages = () => queryAll(PAGE.messageSelectors)
+
+  // ChatGPT can keep hidden old turns after the active thread in document order.
+  // Use the same candidates for scanning and baselines; visibility here does not
+  // depend on whether a rendered turn is currently inside the scroll viewport.
+  const replyCandidatesOf = (nodes) => PAGE.ignoreHiddenReplyNodes ? nodes.filter(isVisibleElement) : nodes
+  const latestReplyNode = (nodes) => {
+    const candidates = replyCandidatesOf(nodes)
+    // Keep the newest candidate even when it is empty or not yet marked as an
+    // assistant. Searching backwards for a command would replay older replies.
+    return candidates[candidates.length - 1] || null
+  }
 
   /**
    * A stable id for one message, or null when the site has no such attribute.
@@ -2129,7 +2141,9 @@
       const replyRoot = replyRootOf(node)
       const toolbar = composerToolbarRoot()
       const streaming = node && PAGE.replyStreamingAttribute ? node.getAttribute(PAGE.replyStreamingAttribute) : null
-      const visibleTurns = nodes.filter((candidate) => isAssistantTurn(candidate) && isVisibleElement(candidate))
+      const renderedTurns = nodes.filter(isVisibleElement)
+      const lastMatchedTurn = nodes[nodes.length - 1] || null
+      const visibleTurns = renderedTurns.filter(isAssistantTurn)
       const lastVisibleTurn = visibleTurns[visibleTurns.length - 1] || null
       const lastVisibleText = readReplyText(lastVisibleTurn)
       // Query answer markers independently: a new reply may lack the wrapper/id selector.
@@ -2141,6 +2155,9 @@
       return {
         replySnapshotAvailable: true,
         assistantTurnCount: nodes.length,
+        hiddenTurnCount: nodes.length - renderedTurns.length,
+        lastMatchedMessageId: lastMatchedTurn ? turnKeyOf(lastMatchedTurn) : null,
+        selectedFromRenderedTurns: PAGE.ignoreHiddenReplyNodes === true,
         replyTextLength: text.length,
         replyKind: diagnosticReplyKind(text),
         answerMarkerFound: !!node && PAGE.assistantReplySelectors.some((selector) => node.matches(selector) || node.querySelector(selector)),
@@ -2187,13 +2204,17 @@
       if (fileSend?.submitted) return
     }
     const nodes = queryAllAssistant()
-    replyScanSnapshot = snapshotReplyScan(nodes[nodes.length - 1] || null, nodes)
+    const node = latestReplyNode(nodes)
+    replyScanSnapshot = snapshotReplyScan(node, nodes)
     if (nodes.length === 0) {
       noteScan('', 'no-turns', { selectors: PAGE.assistantSelectors })
       return
     }
 
-    const node = nodes[nodes.length - 1]
+    if (!node) {
+      noteScan('', 'no-visible-turns')
+      return
+    }
 
     /*
      * Only assistant turns count, and this is checked FIRST.
@@ -2440,7 +2461,7 @@
   }
 
   /**
-   * The turn key of the newest ASSISTANT turn currently in the DOM.
+   * The turn key of the newest ASSISTANT turn among the active reply candidates.
    *
    * `turnKeyOf` for the same reason as above: this value becomes
    * `state.lastCommandMessageId`, and a null there would disable the suppression that
@@ -2451,7 +2472,7 @@
    * would leave the real reply looking like something we had already handled.
    */
   const lastAssistantId = () => {
-    const nodes = queryAllAssistant()
+    const nodes = replyCandidatesOf(queryAllAssistant())
     for (let i = nodes.length - 1; i >= 0; i -= 1) {
       if (isAssistantTurn(nodes[i])) return turnKeyOf(nodes[i])
     }
@@ -3114,7 +3135,7 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing
       // it renders can be a reply to us.
@@ -3342,7 +3363,7 @@
     try {
       if (state.awaitingReplySince !== 0 || state.taskActive) {
         const nodes = queryAllAssistant()
-        const node = nodes[nodes.length - 1] || null
+        const node = latestReplyNode(nodes)
         const now = Date.now()
         report({
           event: 'reply-watchdog',
