@@ -271,11 +271,11 @@ function describeOutcome(result: ShellResult): string {
 /**
  * The message handed back to the model after a command ran.
  *
- * The command is echoed back on purpose, so the transcript reads as a
- * self-contained log, and the working directory is included because it persists
- * between commands — without it a `cd` two steps back is invisible to the model.
+ * The requested command is already in the preceding assistant reply and stays
+ * in the local terminal and execution record. Return its outcome, exit code,
+ * current directory and output without echoing the command into the chat again.
  */
-function buildResultMessage(command: string, result: ShellResult): string {
+function buildResultMessage(result: ShellResult): string {
   // Interactive tools such as git write carriage returns and ANSI erase codes
   // to redraw progress in a terminal. They are not useful in a chat message and
   // can make a browser textarea normalize the text after insertion.
@@ -284,9 +284,10 @@ function buildResultMessage(command: string, result: ShellResult): string {
     .replace(/\r\n?/g, '\n')
   const body = readableOutput.trim() === '' ? '(命令没有任何输出)' : truncateOutput(readableOutput)
   const header = [
-    `命令: ${command}`,
-    `目录: ${result.cwd}`,
-    `结果: ${describeOutcome(result)}`
+    '【上一条命令执行结果】',
+    `结果: ${describeOutcome(result)}`,
+    `退出码: ${formatExitCode(result.exitCode)}`,
+    `目录: ${result.cwd}`
   ].join('\n')
 
   return `${header}\n\n${body}`
@@ -874,7 +875,7 @@ export class CommandRunner {
       this.flushTerminal()
       return
     }
-    const message = buildResultMessage(record.command, result)
+    const message = buildResultMessage(result)
     this.appendLine({ kind: 'notice', text: '正在发送...' })
     const outcome = await this.deps.sendRawToPage(message)
     if (this.disposed) return
