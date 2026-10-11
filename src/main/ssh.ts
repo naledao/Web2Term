@@ -23,6 +23,10 @@ const PROXY_TIMEOUT_MS = 15_000
 /** How many times a dying command channel is reopened before giving up. */
 const MAX_EXEC_ATTEMPTS = 3
 
+/** Maximum consecutive attempts after an unexpected SSH disconnect. */
+const MAX_SSH_RECONNECT_ATTEMPTS = 3
+const SSH_RECONNECT_DELAY_MS = 2_000
+
 /** Coalesce bursts of mirrored output into one push per tick. */
 const MIRROR_PUSH_INTERVAL_MS = 150
 
@@ -164,6 +168,11 @@ export class SshManager {
   /** The channel the model's commands run on, once it is up. */
   private exec: RemoteShell | null = null
   private execAttempts = 0
+  private reconnectTimer: NodeJS.Timeout | null = null
+  private reconnectAttempts = 0
+  private reconnectEnabled = false
+  private reconnectCwd = ''
+  private reconnectPtyCwd = ''
   private mirrorTimer: NodeJS.Timeout | null = null
   private readonly downloads = new Map<string, SshDownloadTask>()
   private readonly downloadChannels = new Map<string, SFTPWrapper>()
@@ -226,11 +235,17 @@ export class SshManager {
    * `onChanged`. A handshake can take twenty seconds, and blocking an IPC reply
    * on it would freeze the dialog that started it.
    */
-  connect(target: SshTarget, resumeCwd = '', resumePtyCwd = resumeCwd): SshState {
+  connect(target: SshTarget, resumeCwd = '', resumePtyCwd = resumeCwd, automatic = false): SshState {
+    if (!automatic) {
+      this.reconnectAttempts = 0
+      this.reconnectEnabled = false
+      this.reconnectCwd = resumeCwd
+      this.reconnectPtyCwd = resumePtyCwd
+    }
     this.teardown()
     this.connectionTarget = { ...target }
 
-    this.lines = []
+    if (!automatic) this.lines = []
     this.buffer = ''
     this.partialLineIndex = null
     this.manualInputPending = false
@@ -243,9 +258,11 @@ export class SshManager {
       name: target.name,
       target: `${target.host}:${target.port}`,
       hostId: target.hostId,
-      message: target.proxy
-        ? `正在通过代理 ${target.proxy} 连接 ${target.username}@${target.host}:${target.port}…`
-        : `正在连接 ${target.username}@${target.host}:${target.port}…`,
+      message: automatic
+        ? `正在自动重连 ${target.username}@${target.host}:${target.port}（${this.reconnectAttempts}/${MAX_SSH_RECONNECT_ATTEMPTS}）…`
+        : target.proxy
+          ? `正在通过代理 ${target.proxy} 连接 ${target.username}@${target.host}:${target.port}…`
+          : `正在连接 ${target.username}@${target.host}:${target.port}…`,
       // Both are derived in getState(); these are only the values for the window
       // before a command channel exists.
       remoteExec: false,
@@ -272,16 +289,17 @@ export class SshManager {
         }
         this.stream = stream
         this.state = { ...this.state, status: 'connected', message: `已连接 ${this.state.target}` }
+        this.reconnectEnabled = true
+        this.reconnectAttempts = 0
+        this.reconnectCwd = resumeCwd
+        this.reconnectPtyCwd = resumePtyCwd
         this.pushLine('notice', `已连接 ${this.state.target}`)
 
         stream.on('data', (chunk: Buffer) => { if (this.client === client) this.consume(chunk.toString('utf8')) })
         stream.stderr.on('data', (chunk: Buffer) => { if (this.client === client) this.consume(chunk.toString('utf8')) })
         stream.on('close', () => {
           if (this.client !== client) return
-          this.pushLine('notice', '远程会话已关闭')
-          this.teardown()
-          this.state = { ...this.state, status: 'disconnected', message: '远程会话已关闭' }
-          this.emit()
+          this.handleConnectionLost('远程会话已关闭')
         })
         this.emit()
         if (resumePtyCwd.trim() !== '') stream.write(`cd ${posixQuote(resumePtyCwd.trim())}\n`)
@@ -296,14 +314,10 @@ export class SshManager {
     client.on('error', (error: Error) => { if (this.client === client) this.fail(error.message) })
 
     client.on('close', () => {
-      // Fires after both a clean disconnect and a failure; only report it when we
-      // were actually connected, so an error message is not overwritten by it.
-      if (this.client === client && this.state.status === 'connected') {
-        this.teardown()
-        this.state = { ...this.state, status: 'disconnected', message: '连接已断开' }
-        this.pushLine('notice', '连接已断开')
-        this.emit()
-      }
+      // A prior error already invalidates this client, preventing duplicate retries.
+      if (this.client !== client) return
+      if (this.state.status === 'connected') this.handleConnectionLost('连接已断开')
+      else if (this.state.status === 'connecting') this.fail('SSH 连接已关闭')
     })
 
     /*
@@ -954,13 +968,49 @@ export class SshManager {
   }
 
   private fail(reason: string): void {
+    this.handleConnectionLost(reason, true)
+  }
+
+  private handleConnectionLost(reason: string, error = false): void {
+    const target = this.connectionTarget
+    const cwd = this.exec?.cwd || this.ptyCwd || this.reconnectCwd
+    const ptyCwd = this.ptyCwd || this.reconnectPtyCwd || cwd
     this.teardown()
-    this.state = { ...this.state, status: 'error', message: reason }
-    this.pushLine('error', reason)
+
+    if (!this.reconnectEnabled || !target) {
+      this.state = { ...this.state, status: error ? 'error' : 'disconnected', message: reason }
+      this.pushLine(error ? 'error' : 'notice', reason)
+      this.emit()
+      return
+    }
+
+    if (this.reconnectAttempts >= MAX_SSH_RECONNECT_ATTEMPTS) {
+      this.reconnectEnabled = false
+      const message = `SSH 自动重连连续失败 ${MAX_SSH_RECONNECT_ATTEMPTS} 次，已停止重试：${reason}`
+      this.state = { ...this.state, status: 'error', message }
+      this.pushLine('error', message)
+      this.emit()
+      return
+    }
+
+    this.reconnectCwd = cwd
+    this.reconnectPtyCwd = ptyCwd
+    const attempt = ++this.reconnectAttempts
+    const message = `${reason}，${SSH_RECONNECT_DELAY_MS / 1000} 秒后自动重连（${attempt}/${MAX_SSH_RECONNECT_ATTEMPTS}）`
+    this.state = { ...this.state, status: 'connecting', message }
+    this.pushLine('notice', message)
     this.emit()
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      this.connect(target, cwd, ptyCwd, true)
+    }, SSH_RECONNECT_DELAY_MS)
   }
 
   private teardown(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     const client = this.client
     this.client = null
     this.connectionTarget = null
