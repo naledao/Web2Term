@@ -76,6 +76,7 @@
     fileUserTurnFallbackSelector: '[data-content-search-unit-key$=":user"]',
     fileUserTurnKeyAttr: 'data-chatgpt-search-unit-key',
     fileImagesMayUseNames: false,
+    fileDuplicateNameSuffix: true,
     fileAttachmentCardSelector: ''
   }
 
@@ -2649,46 +2650,39 @@
     }
     return candidate
   }
-  const attachmentCardText = (card, referenceAttribute = '') => {
-    const clone = card.cloneNode(true)
+  const attachmentNameSources = (root, referenceAttribute = '') => {
+    const clone = root.cloneNode(true)
     clone.querySelectorAll('textarea, [contenteditable]:not([contenteditable="false"]), input').forEach((node) => node.remove())
-    const labels = [clone, ...clone.querySelectorAll('[title], [aria-label], [alt]')].map((node) =>
-      [node.getAttribute('title'), node.getAttribute('aria-label'), node.getAttribute('alt')].filter(Boolean).join(' ')).join(' ')
-    const references = referenceAttribute ? [card, ...card.querySelectorAll(`[${referenceAttribute}]`)].flatMap((node) =>
+    if (PAGE.fileDraftIgnoreSelector) clone.querySelectorAll(PAGE.fileDraftIgnoreSelector).forEach((node) => node.remove())
+    // Keep every filename node/label as its own source. A container's textContent
+    // concatenates sibling cards without spaces ("first...second.mdthird...").
+    // Inspecting each subtree also preserves filenames split across inline spans.
+    const sources = [clone, ...clone.querySelectorAll('*')].flatMap((node) => [
+      collapse(node.textContent || ''), node.getAttribute('title'), node.getAttribute('aria-label'), node.getAttribute('alt')
+    ])
+    const references = referenceAttribute ? [root, ...root.querySelectorAll(`[${referenceAttribute}]`)].flatMap((node) =>
       String(node.getAttribute(referenceAttribute) || '').split(/\s+/).filter(Boolean).slice(0, 8).map((id) => {
         const target = document.getElementById(id)
         // Gemini's current card links a hidden CDK tooltip. Never search all
         // tooltips or read arbitrary referenced conversation nodes.
         return target?.getAttribute('role') === 'tooltip' ? String(target.textContent || '') : ''
       })) : []
-    return collapse(clone.textContent || '') + ' ' + labels + ' ' + references.join(' ')
+    return [...new Set([...sources, ...references].filter(Boolean))]
   }
   const attachmentSnapshot = () => {
     const root = attachmentRoot()
     const inputFiles = [...document.querySelectorAll('input[type="file"]')].reduce((sum, input) => sum + (input.files?.length || 0), 0)
-    if (!root) return { rootFound: false, text: '', images: 0, cards: 0, uploading: false, error: false, inputFiles }
-    const clone = root.cloneNode(true)
-    // Attachment cards can themselves be clickable controls. Keep their text;
-    // remove editable values, native inputs and measured toolbar controls.
-    clone.querySelectorAll('textarea, [contenteditable]:not([contenteditable="false"]), input').forEach((node) => node.remove())
-    // Model versions and truncated toolbar labels can match the filename fallback.
-    // Exclude the whole measured control, including nested title/aria-label hints,
-    // while preserving clickable attachment previews elsewhere in the composer.
-    if (PAGE.fileDraftIgnoreSelector) clone.querySelectorAll(PAGE.fileDraftIgnoreSelector).forEach((node) => node.remove())
+    if (!root) return { rootFound: false, text: '', nameSources: [], images: 0, cards: 0, uploading: false, error: false, inputFiles }
     const cardSelector = PAGE.fileDraftCardSelector || PAGE.fileAttachmentCardSelector
     const cards = cardSelector ? [...root.querySelectorAll(cardSelector)] : []
     const previewImages = PAGE.fileDraftImageSelector ? cards.flatMap((card) => [...card.querySelectorAll(PAGE.fileDraftImageSelector)])
       : cardSelector ? cards.flatMap(collectImages) : [...root.querySelectorAll('img')]
     const images = previewImages.filter((img) => /^(blob:|data:)/.test(img.currentSrc || img.src || '') || (img.naturalWidth >= 40 && img.naturalHeight >= 40))
-    // Claude renders PDF filenames in thumbnail alt text; even a small or not-yet-loaded
-    // preview carries valid name evidence inside its measured native attachment card.
-    const labelImages = cardSelector ? previewImages : images
-    const imageLabels = labelImages.map((img) => [img.alt, img.title, img.getAttribute('aria-label')].filter(Boolean).join(' ')).join(' ')
-    const cardLabels = [...clone.querySelectorAll('[title], [aria-label]')].map((node) => [node.getAttribute('title'), node.getAttribute('aria-label')].filter(Boolean).join(' ')).join(' ')
+    const nameSources = [...new Set((PAGE.fileDraftCardSelector ? cards : [root])
+      .flatMap((node) => attachmentNameSources(node, PAGE.fileDraftNameReferenceAttribute)))]
     return {
       rootFound: true,
-      text: PAGE.fileDraftCardSelector ? cards.map((card) => attachmentCardText(card, PAGE.fileDraftNameReferenceAttribute)).join(' ')
-        : collapse(clone.textContent || '') + ' ' + cardLabels + ' ' + imageLabels,
+      text: nameSources.join(' '), nameSources,
       images: images.length,
       cards: cards.length,
       uploading: cardSelector
@@ -2701,34 +2695,73 @@
   }
   const normalizeAttachmentName = (text) => String(text || '').normalize('NFC')
     .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, '').replace(/\s+/g, ' ').trim()
-  const attachmentNameEvidence = (text, files) => {
-    const raw = String(text || '')
-    const normalized = normalizeAttachmentName(raw)
+  const attachmentNameEvidence = (sources, files) => {
+    const raw = (Array.isArray(sources) ? sources : [sources]).map((source) => String(source || ''))
+    const normalized = raw.map(normalizeAttachmentName)
     const names = files.map((file) => normalizeAttachmentName(file.fileName))
+    const nameCharacter = (character) => !!character && /[\p{L}\p{N}_.-]/u.test(character)
+    const containsName = (source, name) => {
+      if (!name) return false
+      for (let offset = source.indexOf(name); offset !== -1; offset = source.indexOf(name, offset + 1)) {
+        if (!nameCharacter(source[offset - 1]) && !nameCharacter(source[offset + name.length])) return true
+      }
+      return false
+    }
     const evidence = names.map((name, index) => ({
       index, nameLength: String(files[index].fileName || '').length,
-      method: !name ? 'missing' : raw.includes(files[index].fileName) ? 'exact' : normalized.includes(name) ? 'normalized' : 'missing'
+      method: !name ? 'missing' : raw.some((source) => containsName(source, files[index].fileName)) ? 'exact'
+        : normalized.some((source) => containsName(source, name)) ? 'normalized' : 'missing'
     }))
+    const escapePattern = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const nameParts = names.map((name) => {
+      const dot = name.lastIndexOf('.')
+      return { stem: dot > 0 ? name.slice(0, dot) : name, extension: dot > 0 ? name.slice(dot) : '' }
+    })
+    const duplicatePatterns = PAGE.fileDuplicateNameSuffix ? nameParts.map(({ stem, extension }) =>
+      `${escapePattern(stem)} ?\\([1-9]\\d*\\)${escapePattern(extension)}`) : []
+    const duplicateNames = duplicatePatterns.map((pattern) => new RegExp(`^${pattern}$`, 'u'))
+    // ChatGPT can replace the original upload label with name(1).ext after
+    // processing. Accept only a unique alias in THIS batch; report(1).md may
+    // itself be another requested file and must not also acknowledge report.md.
+    duplicatePatterns.forEach((pattern, index) => {
+      if (evidence[index].method !== 'missing') return
+      for (const source of normalized) {
+        for (const match of source.matchAll(new RegExp(pattern, 'gu'))) {
+          const alias = match[0]
+          if (!containsName(source, alias)) continue
+          const candidates = names.filter((name, candidate) => name === alias || duplicateNames[candidate].test(alias))
+          if (candidates.length === 1) evidence[index].method = 'renamed'
+        }
+      }
+    })
     // Some file cards replace part of a long name with an actual ellipsis after
     // upload. A displayed prefix/suffix must identify ONE file in this batch;
     // two similarly named files must never be acknowledged by the same card.
-    for (const match of normalized.matchAll(/…+|\.{3,}/g)) {
-      const before = normalized.slice(0, match.index)
-      const after = normalized.slice(match.index + match[0].length)
-      const candidates = []
-      names.forEach((name, index) => {
-        let head = Math.min(name.length - 1, before.length)
-        while (head > 0 && !before.endsWith(name.slice(0, head))) head--
-        if (name.slice(0, head).replace(/\s/g, '').length < 12) return
-        const boundary = before[before.length - head - 1]
-        if (boundary && /[\p{L}\p{N}_.-]/u.test(boundary)) return
-        let tail = Math.min(name.length - head - 1, after.length)
-        while (tail > 0 && !after.startsWith(name.slice(-tail))) tail--
-        // Do not accept a different continuous name following the ellipsis.
-        if (after[tail] && /[\p{L}\p{N}_.-]/u.test(after[tail])) return
-        candidates.push(index)
-      })
-      if (candidates.length === 1 && evidence[candidates[0]].method === 'missing') evidence[candidates[0]].method = 'truncated'
+    for (const source of normalized) {
+      for (const match of source.matchAll(/…+|\.{3,}/g)) {
+        const before = source.slice(0, match.index)
+        const after = source.slice(match.index + match[0].length)
+        const candidates = []
+        names.forEach((name, index) => {
+          let head = Math.min(name.length - 1, before.length)
+          while (head > 0 && !before.endsWith(name.slice(0, head))) head--
+          if (name.slice(0, head).replace(/\s/g, '').length < 12) return
+          const boundary = before[before.length - head - 1]
+          if (boundary && /[\p{L}\p{N}_.-]/u.test(boundary)) return
+          // A renamed card may also show a literal ellipsis: prefix…(1).md.
+          // Remove only the observed counter immediately before this extension.
+          const extension = nameParts[index].extension
+          const suffix = PAGE.fileDuplicateNameSuffix && extension
+            ? after.replace(new RegExp(` ?\\([1-9]\\d*\\)(?=${escapePattern(extension)}(?:$|[^\\p{L}\\p{N}_.-]))`, 'u'), '')
+            : after
+          let tail = Math.min(name.length - head - 1, suffix.length)
+          while (tail > 0 && !suffix.startsWith(name.slice(-tail))) tail--
+          // Do not accept a different continuous name following the ellipsis.
+          if (suffix[tail] && /[\p{L}\p{N}_.()-]/u.test(suffix[tail])) return
+          candidates.push(index)
+        })
+        if (candidates.length === 1 && evidence[candidates[0]].method === 'missing') evidence[candidates[0]].method = 'truncated'
+      }
     }
     return evidence
   }
@@ -2834,9 +2867,7 @@
     }
     return root
   }
-  const fileTurnText = (root) => String(root.textContent || root.innerText || '') + ' ' +
-    [root, ...(root.querySelectorAll?.('[title], [aria-label]') || [])].map((node) =>
-      [node.getAttribute('title'), node.getAttribute('aria-label')].filter(Boolean).join(' ')).join(' ')
+  const fileTurnText = (root) => attachmentNameSources(root).join(' ')
   const fileTurnPositionNode = (node) => PAGE.fileTurnPositionSelector ? node?.closest?.(PAGE.fileTurnPositionSelector) : node
   const fileUserTurnKey = (node) => (PAGE.fileUserTurnKeyAttr ? node?.getAttribute(PAGE.fileUserTurnKeyAttr) : '') ||
     node?.getAttribute('data-content-search-unit-key') || messageIdOf(node) ||
@@ -2868,11 +2899,9 @@
       ? [...(root.matches?.(PAGE.fileAttachmentCardSelector) ? [root] : []), ...root.querySelectorAll(PAGE.fileAttachmentCardSelector)] : [root]
     const allImages = [...new Set(PAGE.fileSentImageSelector ? cards.flatMap((card) => [...card.querySelectorAll(PAGE.fileSentImageSelector)]) : cards.flatMap(collectImages))]
     const images = allImages.filter(imageLooksLikeAttachment)
-    const labelImages = PAGE.fileAttachmentCardSelector ? allImages : images
-    const labels = labelImages.map((image) => [image.alt, image.title, image.getAttribute('aria-label')].filter(Boolean).join(' ')).join(' ')
-    const text = cards.map(fileTurnText).join(' ') + ' ' + labels
+    const nameSources = cards.flatMap((card) => attachmentNameSources(card))
     const imagesExpected = files.filter((file) => file.mimeType.startsWith('image/')).length
-    const names = attachmentNameEvidence(text, files)
+    const names = attachmentNameEvidence(nameSources, files)
     if (PAGE.fileImagesMayUseNames && names.every((name) => name.method !== 'missing')) return true
     return images.length >= imagesExpected && files.every((file, index) => file.mimeType.startsWith('image/') || names[index].method !== 'missing')
   }
@@ -2920,7 +2949,7 @@
     if (fileSend.edited || !composerMatches(composer, '')) return { status: 'busy' }
     if (snapshot.error) return { status: 'upload-failed', ...snapshot }
     const imagesExpected = fileSend.files.filter((item) => item.mimeType.startsWith('image/')).length
-    const nameEvidence = attachmentNameEvidence(snapshot.text, fileSend.files)
+    const nameEvidence = attachmentNameEvidence(snapshot.nameSources, fileSend.files)
     nameEvidence.forEach((name, index) => {
       if (name.method === 'missing' && fileSend.files[index].mimeType.startsWith('image/') && snapshot.images >= imagesExpected) name.method = 'image'
     })
@@ -2928,9 +2957,14 @@
     const button = findSendButton()
     const sendDisabled = button ? controlDisabled(button) : null
     const stopFound = !!findStopButton()
+    const readyBlockReason = !fileSend.selected ? 'files-not-selected' : !snapshot.rootFound ? 'attachment-root-missing'
+      : !namesSeen ? 'attachment-names-missing' : snapshot.uploading ? 'upload-in-progress'
+        : !button ? 'send-button-missing' : sendDisabled ? 'send-button-disabled' : stopFound ? 'still-generating' : ''
     return {
-      status: fileSend.selected && snapshot.rootFound && namesSeen && !snapshot.uploading && button && !sendDisabled && !stopFound ? 'ready' : 'uploading',
-      ...snapshot, imagesExpected, namesSeen, nameEvidence, sendFound: !!button, sendDisabled, stopFound
+      status: readyBlockReason ? 'uploading' : 'ready',
+      ...snapshot, imagesExpected, namesSeen, nameEvidence, sendFound: !!button, sendDisabled, stopFound,
+      readyBlockReason, nameSourceCount: snapshot.nameSources.length,
+      missingNameCount: nameEvidence.filter((name) => name.method === 'missing').length
     }
   }
 
@@ -2943,7 +2977,7 @@
         if (fileSend.edited) return 'busy'
         state.programmatic = true
         const snapshot = attachmentSnapshot()
-        if (fileSend.files.length && !snapshot.images && !snapshot.inputFiles && !snapshot.uploading && attachmentNameEvidence(snapshot.text, fileSend.files).every((name) => name.method === 'missing')) fileSend.selected = false
+        if (fileSend.files.length && !snapshot.images && !snapshot.inputFiles && !snapshot.uploading && attachmentNameEvidence(snapshot.nameSources, fileSend.files).every((name) => name.method === 'missing')) fileSend.selected = false
         if (!fileSend.selected) { fileSend.chooserControls = new WeakSet(); fileSend.chooserSteps = {} }
         return fileSend.selected ? 'resume' : 'ok'
       }
@@ -3034,7 +3068,8 @@
       return {
         ...snapshot, composerFound: !!composer,
         rootIsForm: !!root?.matches('form'),
-        nameEvidence: attachmentNameEvidence(snapshot.text, files),
+        nameEvidence: attachmentNameEvidence(snapshot.nameSources, files),
+        nameSourceCount: snapshot.nameSources.length,
         sendFound: !!send, sendDisabled: send ? controlDisabled(send) : null,
         draftEmpty: composer ? collapse(readComposer(composer)) === '' : null, stopFound: !!findStopButton(),
         // Counts only: diagnostics never return file-card or conversation text.
@@ -3135,7 +3170,7 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing
       // it renders can be a reply to us.

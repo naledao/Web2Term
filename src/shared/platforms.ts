@@ -160,6 +160,8 @@ export interface PageAdapter {
   fileUserTurnKeyAttr?: string
   /** A site may render uploaded images as filename cards rather than thumbnails. */
   fileImagesMayUseNames?: boolean
+  /** The native uploader can insert a positive duplicate counter before the extension. */
+  fileDuplicateNameSuffix?: boolean
   /** Restrict file evidence to measured native attachment cards, excluding message text. */
   fileAttachmentCardSelector?: string
   /** Some sites use different native cards in the composer and sent message. */
@@ -531,6 +533,8 @@ export const CHATGPT_PAGE: PageAdapter = {
   fileUserTurnSelector: '[class~="group/user-message"][data-chatgpt-search-unit-key]',
   fileUserTurnFallbackSelector: '[data-content-search-unit-key$=":user"]',
   fileUserTurnKeyAttr: 'data-chatgpt-search-unit-key',
+  // 2026-10-11 upload: user_login_api.md becomes user_login_api(1).md.
+  fileDuplicateNameSuffix: true,
   // 2026-10-05 attachment capture: this button contains the selected model.
   // Version text such as GPT-6.1 must not look like a file draft or uncleared upload.
   fileDraftIgnoreSelector: 'button[aria-label="选择 ChatGPT 模型"]',
