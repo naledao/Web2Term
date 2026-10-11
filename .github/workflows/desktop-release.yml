@@ -15,6 +15,7 @@ concurrency:
 jobs:
   prepare-release:
     runs-on: ubuntu-latest
+    environment: release-main
     outputs:
       version: ${{ steps.version.outputs.version }}
       commit: ${{ steps.version.outputs.commit }}
@@ -24,6 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PUSH_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
