@@ -158,11 +158,30 @@ let settings: AppSettings = { theme: 'light', backendUrl: '', embedProxy: {}, ss
 const runtimes = new Map<string, SessionRuntime>()
 let currentSessionId: string | null = null
 const unseenCompletedTasks = new Map<string, number>()
+const pendingQuestionsBySession = new Map<string, Map<string, number>>()
 
 function refreshTaskbarCount(): void {
   if (process.platform !== 'win32' || !managerWindow || managerWindow.isDestroyed()) return
-  const count = [...unseenCompletedTasks.values()].reduce((sum, value) => sum + value, 0)
-  managerWindow.setOverlayIcon(count > 0 ? taskbarCountIcon(count) : null, count > 0 ? `${count} 个已完成任务尚未查看` : '')
+  const completedCount = [...unseenCompletedTasks.values()].reduce((sum, value) => sum + value, 0)
+  const pendingCount = [...pendingQuestionsBySession.values()].reduce((sum, platforms) => sum + [...platforms.values()].reduce((total, value) => total + value, 0), 0)
+  const overlay = pendingCount > 0 ? taskbarCountIcon(pendingCount, 'orange') : completedCount > 0 ? taskbarCountIcon(completedCount) : null
+  const description = pendingCount > 0 ? `${pendingCount} 个问题等待处理` : completedCount > 0 ? `${completedCount} 个已完成任务尚未查看` : ''
+  managerWindow.setOverlayIcon(overlay, description)
+}
+
+function recordPendingQuestions(id: string, platformId: string, count: number): void {
+  let platforms = pendingQuestionsBySession.get(id)
+  if (!platforms && count > 0) {
+    platforms = new Map()
+    pendingQuestionsBySession.set(id, platforms)
+  }
+  if (!platforms || (platforms.get(platformId) ?? 0) === count) return
+  if (count > 0) platforms.set(platformId, count)
+  else {
+    platforms.delete(platformId)
+    if (platforms.size === 0) pendingQuestionsBySession.delete(id)
+  }
+  refreshTaskbarCount()
 }
 
 function markSessionViewed(id: string | null): void {
@@ -739,6 +758,7 @@ function createSession(
     onTerminalNotesSaved: (owner) => {
       for (const other of runtimes.values()) other.refreshTerminalNotesForOwner(owner)
     },
+    onPendingQuestionsChanged: recordPendingQuestions,
     onTaskCompleted: recordCompletedTask,
     onActivate: (id) => { selectSession(id) },
     /*
@@ -779,6 +799,7 @@ function destroySession(id: string): boolean {
   }
 
   markSessionViewed(id)
+  if (pendingQuestionsBySession.delete(id)) refreshTaskbarCount()
   runtimes.delete(id)
   store?.removeManagedSession(id)
   store?.setSetting(`web2termSession:${id}`, '')
@@ -870,6 +891,7 @@ function createManagerWindow(): void {
     for (const runtime of runtimes.values()) runtime.dispose()
     runtimes.clear()
     unseenCompletedTasks.clear()
+    pendingQuestionsBySession.clear()
     currentSessionId = null
     workspaceOpenSshDialog = false
     // The console view is a child of THIS window, so it dies with it; dropping the

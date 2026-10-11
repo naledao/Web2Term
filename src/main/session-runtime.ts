@@ -179,6 +179,7 @@ export interface SessionRuntimeOptions {
   onSummaryChanged: () => void
   onTransfersChanged: () => void
   onTerminalNotesSaved: (owner: TerminalNotesOwner) => void
+  onPendingQuestionsChanged: (id: string, platformId: string, count: number) => void
   onTaskCompleted: (id: string) => void
   onActivate: (id: string) => void
   /**
@@ -547,12 +548,16 @@ export class SessionRuntime {
       },
       onInterceptor: (status) => {
         this.captureGoal(status.lastSentText)
+        if (!this.disposed) this.options.onPendingQuestionsChanged(this.id, platform.id, status.pendingQuestion?.questions.length ?? 0)
         const taskRunning = status.taskStartedAt !== null && status.taskFinishedAt === null
         if (isActive() && taskRunning !== this.lastSummaryTaskRunning) {
           this.lastSummaryTaskRunning = taskRunning
           this.options.onSummaryChanged()
         }
         if (isActive()) this.send(IpcChannels.interceptorEvent, status)
+      },
+      onQuestion: (question, count) => {
+        if (isActive()) this.notifyQuestion(question, count)
       },
       onTaskCompleted: () => {
         if (isActive()) this.notifyTaskCompleted('任务已完成')
@@ -1777,6 +1782,19 @@ export class SessionRuntime {
     this.send(IpcChannels.conversationsChanged, this.currentMachineConversations())
   }
 
+  private notifyQuestion(question: string, count: number): void {
+    const window = this.window
+    if (this.active && window && !window.isDestroyed() && window.isFocused()) return
+    if (!Notification.isSupported()) return
+    const summary = question.replace(/\s+/g, ' ').trim()
+    const excerpt = summary.length > 140 ? `${summary.slice(0, 137)}...` : summary
+    const notification = new Notification({
+      title: '有问题等待回答',
+      body: count > 1 ? `共 ${count} 个问题：${excerpt}` : excerpt
+    })
+    notification.on('click', () => this.focus())
+    notification.show()
+  }
   private notifyTaskCompleted(body: string): void {
     const window = this.window
     this.options.onTaskCompleted(this.id)

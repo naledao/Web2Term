@@ -29,13 +29,14 @@ function pngChunk(type: string, data: Buffer): Buffer {
 }
 
 /** Windows taskbar overlay: red badge with a white unread-completion count. */
-export function taskbarCountIcon(count: number): Electron.NativeImage {
+export function taskbarCountIcon(count: number, color: 'red' | 'orange' = 'red'): Electron.NativeImage {
   const size = 32
   const label = String(Math.min(99, Math.max(1, Math.floor(count))))
   const scale = label.length === 1 ? 4 : 3
   const textWidth = label.length * 3 * scale + (label.length - 1) * scale
   const textX = Math.floor((size - textWidth) / 2)
   const textY = Math.floor((size - 5 * scale) / 2)
+  const rgb = color === 'orange' ? [234, 88, 12] : [224, 50, 65]
   const rowBytes = size * 4 + 1
   const pixels = Buffer.alloc(size * rowBytes)
 
@@ -46,9 +47,9 @@ export function taskbarCountIcon(count: number): Electron.NativeImage {
         if ((x + dx - 16) ** 2 + (y + dy - 16) ** 2 <= 15.5 ** 2) samples++
       }
       const offset = y * rowBytes + 1 + x * 4
-      pixels[offset] = 224
-      pixels[offset + 1] = 50
-      pixels[offset + 2] = 65
+      pixels[offset] = rgb[0]
+      pixels[offset + 1] = rgb[1]
+      pixels[offset + 2] = rgb[2]
       pixels[offset + 3] = Math.round(samples * 255 / 4)
     }
   }

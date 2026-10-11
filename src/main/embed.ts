@@ -257,6 +257,7 @@ export interface EmbedHandlers {
   /** The model's reply contained a command. */
   onCommand(command: ParsedAction): void
   /** An explicitly marked plain-text reply reports that the task is complete. */
+  onQuestion(question: string, count: number): void
   onTaskCompleted(): void
   /**
    * This view finished loading its page for the first time since it was created.
@@ -1313,6 +1314,7 @@ export class ChatGptEmbed {
           )
           questionAccepted = validQuestion
           if (validQuestion) {
+            const isNewQuestion = this.interceptor.pendingQuestion?.messageId !== messageId
             this.interceptor.pendingQuestion = {
               messageId,
               questions
@@ -1322,6 +1324,7 @@ export class ChatGptEmbed {
             // shows the model's questions alongside the later user answers. The injected
             // page script also reports assistant-message for this turn; the database's
             // source-message uniqueness makes that duplicate harmless.
+            if (isNewQuestion) this.handlers.onQuestion(questions[0].question, questions.length)
             this.handlers.onAssistantMessage(
               messageId,
               questions.map((item, index) => `${index + 1}. ${item.question}`).join('\n')
