@@ -12,7 +12,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import xyz.kangnasi.web2termback.feignclient.UserServiceClient;
 import xyz.kangnasi.web2termback.mapper.UserDeviceMapper;
-import xyz.kangnasi.web2termback.websocket.AgentDesktopClientRegistry;
+import xyz.kangnasi.web2termback.websocket.AgentWebSocketHandler;
 
 import java.util.List;
 
@@ -25,16 +25,16 @@ public class UserDeviceController {
 
     private final UserServiceClient userServiceClient;
     private final UserDeviceMapper userDeviceMapper;
-    private final AgentDesktopClientRegistry agentDesktopClientRegistry;
+    private final AgentWebSocketHandler agentWebSocketHandler;
     private final ObjectMapper objectMapper;
 
     public UserDeviceController(UserServiceClient userServiceClient,
                                 UserDeviceMapper userDeviceMapper,
-                                AgentDesktopClientRegistry agentDesktopClientRegistry,
+                                AgentWebSocketHandler agentWebSocketHandler,
                                 ObjectMapper objectMapper) {
         this.userServiceClient = userServiceClient;
         this.userDeviceMapper = userDeviceMapper;
-        this.agentDesktopClientRegistry = agentDesktopClientRegistry;
+        this.agentWebSocketHandler = agentWebSocketHandler;
         this.objectMapper = objectMapper;
     }
 
@@ -45,17 +45,12 @@ public class UserDeviceController {
         long userId = extractUserId(authResponse.getBody());
         return userDeviceMapper.findByUserId(userId).stream()
                 .map(device -> {
-                    if (agentDesktopClientRegistry.isBound(device.deviceId())) {
-                        return device;
-                    }
-                    if (Integer.valueOf(1).equals(device.onlineStatus())) {
-                        userDeviceMapper.markOfflineIfOnline(userId, device.deviceId());
-                    }
+                    int onlineStatus = agentWebSocketHandler.getSession(device.deviceId()) != null ? 1 : 0;
                     return new UserDeviceMapper.UserDeviceRecord(
                                 device.deviceId(),
                                 device.deviceName(),
                                 device.enabled(),
-                                0,
+                                onlineStatus,
                                 device.lastConnectedAt(),
                                 device.lastHeartbeatAt(),
                                 device.lastDisconnectedAt(),
