@@ -1367,6 +1367,7 @@ export class ChatGptEmbed {
             command: payload.command,
             description: payload.description ?? '',
             timeoutSeconds: Number(payload.timeoutSeconds ?? 120),
+            rawJson: typeof payload.rawJson === 'string' ? payload.rawJson : undefined,
             live: payload.live === true
           })
         }

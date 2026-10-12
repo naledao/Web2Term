@@ -497,6 +497,14 @@ export class CommandRunner {
       createdAt: Date.now()
     })
 
+    if (created) {
+      this.deps.store.saveRecentCommandJson(
+        conversationId,
+        key,
+        parsed.rawJson ?? JSON.stringify({ command: parsed.command, description: parsed.description, timeout_seconds: parsed.timeoutSeconds })
+      )
+    }
+
     // Already known: this is the idempotency guard, and it is what makes a page
     // reload (which re-renders every old message) harmless.
     if (!created) {

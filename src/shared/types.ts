@@ -79,6 +79,8 @@ export const IpcChannels = {
   automationSetMode: 'automation:set-mode',
   automationSetPaused: 'automation:set-paused',
   automationCheckNow: 'automation:check-now',
+  recentCommandList: 'recent-command:list',
+  recentCommandSend: 'recent-command:send',
   automationChanged: 'automation:changed',
   executionList: 'execution:list',
   executionRun: 'execution:run',
@@ -1127,6 +1129,8 @@ export interface InterceptorControl {
 
 /** Events reported by the injected page script (over the console bridge). */
 export interface InterceptorPageEvent {
+  /** Complete JSON payload of a detected command. */
+  rawJson?: string
   event:
     | 'installed'
     | 'configured'
@@ -1364,6 +1368,13 @@ export type ExecutionStatus =
   | 'timeout'
   | 'skipped'
 
+/** Saved complete JSON for one recently detected command. */
+export interface RecentCommandJson {
+  messageId: string
+  payloadJson: string
+  createdAt: number
+}
+
 /** One command lifted out of an assistant reply, and what happened to it. */
 export interface ExecutionRecord {
   /** ChatGPT's own assistant message id — the idempotency key. */
@@ -1392,6 +1403,8 @@ export interface ParsedCommand {
   description: string
   /** Absolute runtime limit selected for this command, in seconds. */
   timeoutSeconds: number
+  /** Complete command JSON object from the assistant reply. */
+  rawJson?: string
   /**
    * The only thing that matters for safety: is this reply an answer to a message
    * the app just sent, or is it history that happened to be on screen?
@@ -2083,6 +2096,10 @@ export interface AppApi {
   getAutomationState(): Promise<AutomationState>
   setAutomationMode(mode: ExecutionMode): Promise<AutomationState>
   setAutomationPaused(paused: boolean): Promise<AutomationState>
+  /** The three most recent complete command JSON payloads for the current conversation. */
+  listRecentCommandJson(conversationId: string): Promise<RecentCommandJson[]>
+  /** Ask the AI to execute a selected saved instruction; never execute it directly in the shell. */
+  sendRecentCommandJson(conversationId: string, messageId: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable'>
   /** Re-scan the last reply right now, ignoring the "already seen" guard. */
   checkLastReply(): Promise<AutomationState>
   onAutomationChanged(listener: (state: AutomationState) => void): () => void

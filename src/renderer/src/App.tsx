@@ -36,6 +36,7 @@ import type {
   EmbedState,
   ExecutionMode,
   ExecutionRecord,
+  RecentCommandJson,
   ExecutionStatus,
   InterceptorStatus,
   ManagedSessionSummary,
@@ -384,6 +385,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [promptInjectionError, setPromptInjectionError] = useState('')
   const [automation, setAutomation] = useState<AutomationState | null>(null)
   const [executions, setExecutions] = useState<ExecutionRecord[]>([])
+  const [recentCommandOpen, setRecentCommandOpen] = useState(false)
+  const [recentCommands, setRecentCommands] = useState<RecentCommandJson[]>([])
+  const [recentCommandLoading, setRecentCommandLoading] = useState(false)
+  const [recentCommandSending, setRecentCommandSending] = useState<string | null>(null)
+  const [recentCommandError, setRecentCommandError] = useState('')
   const [conversationTranscript, setConversationTranscript] = useState<{ ownerKey: string | null; messages: ConversationMessage[] }>({ ownerKey: null, messages: [] })
   const conversationRequestRef = useRef(0)
   const [terminal, setTerminal] = useState<TerminalState | null>(null)
@@ -1034,15 +1040,53 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     }
   }, [])
 
-  /** Escape hatch: re-read the last reply even though it counted as pre-existing. */
-  const checkLastReply = useCallback(async (): Promise<void> => {
-    try {
-      setAutomation(await window.api.checkLastReply())
-      await refreshExecutions()
-    } catch {
-      /* ignore */
+  /** Open a picker without automatically re-running the last assistant reply. */
+  const openRecentCommands = useCallback(async (): Promise<void> => {
+    if (!conversationId || taskRunning || recentCommandSending) return
+    if (recentCommandOpen) {
+      setRecentCommandOpen(false)
+      return
     }
-  }, [refreshExecutions])
+
+    setRecentCommandError('')
+    setRecentCommandLoading(true)
+    setRecentCommandOpen(true)
+    try {
+      setRecentCommands(await window.api.listRecentCommandJson(conversationId))
+    } catch {
+      setRecentCommandError('读取历史指令失败，请关闭后重试。')
+    } finally {
+      setRecentCommandLoading(false)
+    }
+  }, [conversationId, taskRunning, recentCommandSending, recentCommandOpen])
+
+  const sendRecentCommand = useCallback(async (messageId: string): Promise<void> => {
+    if (!conversationId || taskRunning || recentCommandSending) return
+    setRecentCommandSending(messageId)
+    setRecentCommandError('')
+    try {
+      const result = await window.api.sendRecentCommandJson(conversationId, messageId)
+      if (result === 'ok') {
+        setRecentCommandOpen(false)
+      } else {
+        setRecentCommandError(result === 'busy' ? 'AI 正在生成或输入框已有内容，请稍后重试。' : result === 'stuck' ? '未确认发送成功，请检查 AI 输入框，避免重复发送。' : result === 'unavailable' ? '当前对话或所选指令已失效，请重新打开。' : '发送失败，请确认 AI 页面及输入框可用。')
+      }
+    } catch {
+      setRecentCommandError('发送失败，请检查当前会话连接。')
+    } finally {
+      setRecentCommandSending(null)
+    }
+  }, [conversationId, taskRunning, recentCommandSending])
+
+  useEffect(() => {
+    setRecentCommandOpen(false)
+    setRecentCommands([])
+    setRecentCommandError('')
+  }, [conversationId])
+
+  useEffect(() => {
+    if (taskRunning) setRecentCommandOpen(false)
+  }, [taskRunning])
 
   const endTask = useCallback(async (): Promise<void> => {
     try {
@@ -2245,13 +2289,56 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               type="button"
               className="btn"
               disabled={!conversationId || taskRunning}
-              title="重新解析上一条回复，用于恢复中断的任务"
-              onClick={() => void checkLastReply()}
+              aria-expanded={recentCommandOpen}
+              title="从最近三条完整指令中选择一条发送给 AI"
+              onClick={() => void openRecentCommands()}
             >
-              检查上一条
+              重新执行指令
             </button>
           </div>
 
+          {recentCommandOpen ? (
+            <div
+              className="recent-command-picker"
+              role="dialog"
+              aria-label="选择历史指令"
+            >
+              <div className="recent-command-picker__header">
+                <div>
+                  <strong>选择历史指令</strong>
+                  <p>最近三条 · 选择后将完整 JSON 发给 AI</p>
+                </div>
+                <button type="button" className="recent-command-picker__close" aria-label="关闭选择区域" onClick={() => setRecentCommandOpen(false)}>×</button>
+              </div>
+              {recentCommandLoading ? (
+                <p className="recent-command-picker__empty">正在读取历史指令…</p>
+              ) : recentCommands.length === 0 ? (
+                <p className="recent-command-picker__empty">当前对话暂无已保存的指令。</p>
+              ) : (
+                <div className="recent-command-picker__list">
+                  {recentCommands.map((item, index) => (
+                    <div className="recent-command-picker__item" key={item.messageId}>
+                      <div className="recent-command-picker__meta">
+                        <strong>第 {index + 1} 条{index === 0 ? ' · 最新' : ''}</strong>
+                        <time>{new Date(item.createdAt).toLocaleString('zh-CN')}</time>
+                      </div>
+                      <pre className="recent-command-picker__json">{item.payloadJson}</pre>
+                      <button
+                        type="button"
+                        className="btn btn--primary recent-command-picker__send"
+                        disabled={recentCommandSending !== null}
+                        onClick={() => void sendRecentCommand(item.messageId)}
+                      >
+                        {recentCommandSending === item.messageId ? '正在发送…' : '发送此指令给 AI'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {recentCommandError ? <p className="recent-command-picker__error" role="alert">{recentCommandError}</p> : null}
+              <p className="recent-command-picker__foot">不会直接在终端执行；AI 回复后按当前自动化模式处理。</p>
+            </div>
+          ) : null}
 
           <div className="terminal__stats">
             <span className="terminal__count">已注入 {interceptor?.injectedCount ?? 0} 次</span>

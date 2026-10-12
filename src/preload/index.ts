@@ -28,6 +28,7 @@ import type {
   EnvironmentInfo,
   ExecutionMode,
   ExecutionRecord,
+  RecentCommandJson,
   InterceptorStatus,
   GitFileDiff,
   GitLogResult,
@@ -337,6 +338,11 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   setAutomationPaused: (paused: boolean): Promise<AutomationState> =>
     ipcRenderer.invoke(IpcChannels.automationSetPaused, paused),
 
+  listRecentCommandJson: (conversationId: string): Promise<RecentCommandJson[]> =>
+    ipcRenderer.invoke(IpcChannels.recentCommandList, conversationId),
+
+  sendRecentCommandJson: (conversationId: string, messageId: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable'> =>
+    ipcRenderer.invoke(IpcChannels.recentCommandSend, conversationId, messageId),
   checkLastReply: (): Promise<AutomationState> =>
     ipcRenderer.invoke(IpcChannels.automationCheckNow),
 

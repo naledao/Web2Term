@@ -1952,7 +1952,8 @@
     return {
       command: command.trim(),
       description: (description ?? '').trim(),
-      timeoutSeconds: normalizeTimeoutSeconds(timeoutMatch?.[1], command)
+      timeoutSeconds: normalizeTimeoutSeconds(timeoutMatch?.[1], command),
+      rawJson: JSON.stringify({ command: command.trim(), description: (description ?? '').trim(), timeout_seconds: normalizeTimeoutSeconds(timeoutMatch?.[1], command) })
     }
   }
 
@@ -1969,7 +1970,8 @@
       return {
         command: parsed.command.trim(),
         description: typeof parsed.description === 'string' ? parsed.description.trim() : '',
-        timeoutSeconds: normalizeTimeoutSeconds(parsed.timeout_seconds, parsed.command)
+        timeoutSeconds: normalizeTimeoutSeconds(parsed.timeout_seconds, parsed.command),
+        rawJson: attempt
       }
     }
 
@@ -2457,6 +2459,7 @@
       command: parsed.command,
       description: parsed.description,
       timeoutSeconds: parsed.timeoutSeconds,
+      rawJson: parsed.rawJson,
       live
     })
   }

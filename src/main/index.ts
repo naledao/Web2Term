@@ -1236,6 +1236,20 @@ function registerIpcHandlers(): void {
     return runtime.runner.getAutomation()
   })
 
+  ipcMain.handle(IpcChannels.recentCommandList, (event, conversationId: string) => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime || !store || typeof conversationId !== 'string' || runtime.embed.getState().conversationId !== conversationId) return []
+    return store.listRecentCommandJson(conversationId)
+  })
+  ipcMain.handle(IpcChannels.recentCommandSend, async (event, conversationId: string, messageId: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable'> => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime || !store || typeof conversationId !== 'string' || runtime.embed.getState().conversationId !== conversationId || typeof messageId !== 'string') return 'unavailable'
+    const status = runtime.embed.getInterceptorStatus()
+    if (status.taskStartedAt !== null && status.taskFinishedAt === null) return 'busy'
+    const selected = store.listRecentCommandJson(conversationId).find((item) => item.messageId === messageId)
+    if (!selected) return 'unavailable'
+    return runtime.embed.sendRaw(selected.payloadJson)
+  })
   ipcMain.handle(IpcChannels.executionList, (event, conversationId: string): ExecutionRecord[] => {
     if (!runtimeForEvent(event) || !store) return []
     const id = typeof conversationId === 'string' ? conversationId : ''

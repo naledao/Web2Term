@@ -176,6 +176,17 @@ CREATE TABLE IF NOT EXISTS executions (
 CREATE INDEX IF NOT EXISTS idx_executions_conversation
   ON executions (conversation_id, created_at);
 
+-- Keep the three newest complete command JSON objects per conversation.
+-- Execution history remains intact for duplicate-execution protection.
+CREATE TABLE IF NOT EXISTS recent_command_json (
+  conversation_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_recent_command_json_conversation
+  ON recent_command_json (conversation_id, created_at DESC);
 -- Managed workspace sessions. Unlike ChatGPT conversations, these rows describe
 -- the app-level session cards shown by the session manager and survive restarts.
 CREATE TABLE IF NOT EXISTS managed_sessions (
@@ -819,6 +830,32 @@ export class ConversationStore {
     return true
   }
 
+  /** Persist a complete command JSON object; keep only the latest three per conversation. */
+  saveRecentCommandJson(conversationId: string, messageId: string, payloadJson: string): void {
+    const payload: unknown = JSON.parse(payloadJson)
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || typeof (payload as { command?: unknown }).command !== 'string') {
+      throw new Error('Invalid command JSON payload')
+    }
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('INSERT OR IGNORE INTO recent_command_json (conversation_id, message_id, payload_json, created_at) VALUES (?, ?, ?, ?)')
+        .run(conversationId, messageId, payloadJson, Date.now())
+      this.db.prepare(`DELETE FROM recent_command_json WHERE conversation_id = ? AND message_id NOT IN (
+        SELECT message_id FROM recent_command_json WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 3
+      )`).run(conversationId, conversationId)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+  /** Read the three newest command JSON payloads for one conversation. */
+  listRecentCommandJson(conversationId: string): Array<{ messageId: string; payloadJson: string; createdAt: number }> {
+    const rows = this.db.prepare(`SELECT message_id, payload_json, created_at FROM recent_command_json
+      WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 3`)
+      .all(conversationId) as unknown as Array<{ message_id: string; payload_json: string; created_at: number }>
+    return rows.map((row) => ({ messageId: row.message_id, payloadJson: row.payload_json, createdAt: row.created_at }))
+  }
   /** Persist one clean chat turn plus any user image attachments. */
   appendConversationMessage(
     conversationId: string,
