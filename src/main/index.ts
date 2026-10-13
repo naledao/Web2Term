@@ -185,12 +185,16 @@ function recordPendingQuestions(id: string, platformId: string, count: number): 
 }
 
 function markSessionViewed(id: string | null): void {
-  if (id && unseenCompletedTasks.delete(id)) refreshTaskbarCount()
+  if (id && unseenCompletedTasks.delete(id)) {
+    refreshTaskbarCount()
+    broadcastManagedSessions()
+  }
 }
 
 function recordCompletedTask(id: string): void {
   if (id === currentSessionId && managerWindow && !managerWindow.isDestroyed() && managerWindow.isFocused()) return
   unseenCompletedTasks.set(id, (unseenCompletedTasks.get(id) ?? 0) + 1)
+  broadcastManagedSessions()
   refreshTaskbarCount()
 }
 let workspaceOpenSshDialog = false
@@ -598,7 +602,7 @@ function applyAppTheme(theme: AppTheme): void {
 
 function managedSessions(): ManagedSessionSummary[] {
   return [...runtimes.values()]
-    .map((runtime) => runtime.summary())
+    .map((runtime) => ({ ...runtime.summary(), unseenCompletedCount: unseenCompletedTasks.get(runtime.id) ?? 0 }))
     .sort((a, b) => a.createdAt - b.createdAt)
 }
 

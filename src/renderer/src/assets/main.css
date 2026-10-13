@@ -15036,3 +15036,8 @@ body {
   border-color: #38485a;
   --recent-muted: #aab7c7;
 }
+/* Completed tasks awaiting review in the session sidebar. */
+.workspace__session-unseen { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 999px; background: #e4f7ed; color: #087b53; font-size: 10px; font-weight: 700; line-height: 1.45; white-space: nowrap; vertical-align: baseline; }
+.workspace__session-unseen::before { content: ""; width: 5px; height: 5px; margin-right: 4px; border-radius: 50%; background: #12a66e; flex: none; }
+.workspace[data-theme=dark] .workspace__session-unseen { background: #173f34; color: #8be6b7; }
+.workspace[data-theme=dark] .workspace__session-unseen::before { background: #65dba5; }

@@ -205,6 +205,8 @@ export interface ManagedSessionSummary {
   platformId: string
   /** True while this session has an unfinished model task. */
   taskRunning: boolean
+  /** Number of completed tasks not yet viewed in this session. */
+  unseenCompletedCount?: number
   createdAt: number
 }
 

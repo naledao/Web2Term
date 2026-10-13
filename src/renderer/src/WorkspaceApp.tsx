@@ -311,6 +311,7 @@ export default function WorkspaceApp(): ReactElement {
                   <span className={`workspace__session-platform workspace__session-platform--${item.platformId}`} title={platformById(item.platformId)?.label ?? item.platformId}>{item.platformId === 'chatgpt' ? <img src={chatGptIcon} alt="ChatGPT" className="workspace__session-platform-icon" /> : item.platformId === 'deepseek' ? <img src={deepseekIcon} alt="DeepSeek" className="workspace__session-platform-icon" /> : item.platformId === 'claude' ? <img src={claudeIcon} alt="Claude" className="workspace__session-platform-icon" /> : item.platformId === 'gemini' ? <img src={geminiIcon} alt="Gemini" className="workspace__session-platform-icon" /> : (platformById(item.platformId)?.label ?? item.platformId)}</span>
                 </span>
                 <span className="workspace__session-meta">
+                  {item.unseenCompletedCount ? <><span className="workspace__session-unseen" title={`${item.unseenCompletedCount} 个已完成任务尚未查看`}>已完成{item.unseenCompletedCount > 1 ? ` ${item.unseenCompletedCount}` : null}</span><span aria-hidden="true"> · </span></> : null}
                   {item.taskRunning ? <span className="workspace__session-running"><svg viewBox="0 0 8 8" width="7" height="7" fill="currentColor"><circle cx="4" cy="4" r="3.2" /></svg> 执行中 · </span> : null}
                   {item.kind === 'web2term' ? 'web2term' : item.kind === 'ssh' ? 'SSH' : '本地'} · {item.target}
                 </span>
