@@ -129,7 +129,7 @@ const modelPlatforms = [
     id: 'gemini',
     name: 'Gemini',
     icon: '/models/gemini.svg',
-    detail: '支持导入浏览器登录态',
+    detail: '内置网页会话 · 独立登录态',
     tone: 'violet',
   },
 ]
@@ -310,7 +310,7 @@ export default function Home() {
               <ArrowIcon />
             </article>
           ))}
-          <p className="model-deck__note"><span className="status-dot" /> Gemini 需要先从浏览器导入登录态；其余平台可在工作区内直接登录。</p>
+          <p className="model-deck__note"><span className="status-dot" /> 四个平台都可在工作区内直接登录，Gemini 使用 Google 账号登录即可。</p>
         </div>
       </section>
 

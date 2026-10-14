@@ -591,11 +591,14 @@ const GOOGLE_CRITICAL_COOKIES = ['SID', '__Secure-1PSID', '__Secure-3PSID']
  * Google session is neither: it is a SET of cookies, and the whole set is the credential. There
  * is no chunking to undo and no single name that decides anything.
  *
- * WHY IT IS THE ONLY ROUTE FOR GEMINI. Google refuses a first-party sign-in inside an embedded
- * view (无法登录 / "此浏览器或应用可能不安全"), which is the third time this wall has appeared in
- * this project. Unlike ChatGPT, the flow cannot be handed to the system browser either, because
- * the site itself IS a Google host. Measured with `tools/diag/gemini-cookie-probe.js`: copied
- * cookies do produce a real session — first try, real conversation list, every composer present.
+ * WHY IT EXISTS FOR GEMINI. It was the only route while Google refused a first-party sign-in inside
+ * the embedded view (无法登录 / "此浏览器或应用可能不安全"). That refusal was the Chrome-shaped
+ * identity; with the Firefox identity on the Google auth hosts (`GOOGLE_AUTH_HOSTS` in `embed.ts`)
+ * the sign-in now completes in the embed, and this is the FALLBACK for when Google changes that.
+ * The flow still cannot be handed to the system browser, because the site itself IS a Google host.
+ * Measured with `tools/diag/gemini-cookie-probe.js`: copied cookies do produce a real session —
+ * first try, real conversation list, every composer present. Another Electron app measured
+ * imported Google cookies going stale after about an hour (stablyai/orca#12884); not measured here.
  *
  * THE ONE THING THAT IS EASY TO GET WRONG, and did cost a full probe run: `expirationDate`.
  * Without it Electron writes a SESSION cookie, Chromium keeps it in memory only, the import looks

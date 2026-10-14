@@ -822,13 +822,16 @@ export const CLAUDE_PLATFORM: ChatPlatform = {
  * Every value below came back as a direct HIT, and the two transient ones were caught by
  * shortening the probe's tick to 5s after a 15s tick stepped straight over the whole reply.
  *
- * THE THING TO KNOW FIRST: **Gemini cannot be signed into from inside the embed.** Google answers
- * 无法登录 / "此浏览器或应用可能不安全" to a first-party sign-in in an embedded view — the third
- * time this wall has come up here, after third-party OAuth and Apple. And unlike ChatGPT, the
- * sign-in CANNOT be handed to the system browser either, because the site itself is a Google
- * host. The session has to be imported from a real browser; `tools/diag/gemini-cookie-probe.js`
- * proves that works, including the part that is easy to get wrong (cookies must be written with
- * an expiry, or Chromium never persists them).
+ * THE THING TO KNOW FIRST: **Gemini is signed into inside the embed ONLY because the Google auth
+ * hosts are shown a Firefox identity** (`GOOGLE_AUTH_HOSTS` in `main/embed.ts`). Under the
+ * Chrome-shaped identity every other host gets, Google answered 无法登录 / "此浏览器或应用可能不安全"
+ * — the third time this wall came up here, after third-party OAuth and Apple — and unlike
+ * ChatGPT the sign-in cannot be handed to the system browser, because the site itself is a Google
+ * host. With the Firefox identity the sign-in completed inside the embed (user-run, 2026-10-14).
+ *
+ * The fallback, if Google closes that door again, is importing the session from a real browser;
+ * `tools/diag/gemini-cookie-probe.js` proved that works, including the part that is easy to get
+ * wrong (cookies must be written with an expiry, or Chromium never persists them).
  *
  * WHAT THE PAGE LOOKS LIKE:
  *

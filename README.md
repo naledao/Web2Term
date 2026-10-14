@@ -41,7 +41,7 @@ GPT Web to Codex Terminal 是一个桌面工作区：把 ChatGPT、DeepSeek、Cl
 | 能力 | 说明 |
 | --- | --- |
 | 多会话 | 为本机、SSH 主机或 Web2Term 设备创建独立会话；会话名称、当前模型、对话地址和设备绑定会持久化。 |
-| 多模型页面 | 在同一个会话中切换 ChatGPT、DeepSeek、Claude 与 Gemini；各平台分别保留登录态和对话。 |
+| 多模型页面 | 在同一个会话中切换 ChatGPT、DeepSeek、Claude 与 Gemini；各平台分别保留登录态和对话，均可在页面内直接登录，Gemini 使用 Google 账号登录。 |
 | 终端循环 | 支持手动执行和自动执行。模型一次提出一条命令，应用执行后把退出码、输出和状态回传。 |
 | 三种连接方式 | 本机使用持久 Shell：Windows 为 PowerShell，macOS 为 zsh；SSH 使用交互终端和独立的模型命令通道；Web2Term 经后端连接 Linux 设备，无需设备运行 sshd。 |
 | 工具箱 | Git 管理、MySQL 连接、Redis 只读浏览和嵌入式 Nacos 控制台。 |
@@ -158,6 +158,7 @@ electron-builder.yml   安装包配置
 ### 安全边界与已知限制
 
 - 每个嵌入平台使用独立的持久 cookie 分区；页面自身的导航**不再限制域名**（放行 Cloudflare 校验所必需），但页面请求打开新窗口的链接仍交给系统浏览器。
+- Google 会拒绝 Chrome 形态的嵌入式登录，因此发往 Google 登录页（`accounts.google.com`、`accounts.youtube.com`）的请求使用 Firefox User-Agent 并去掉 `Sec-CH-UA*`，页面在这两个域名上也呈现 Firefox；其他站点（包括 `gemini.google.com`）仍使用 Chrome 身份。这一适配依赖 Google 当前的检测策略，策略变化时可能需要调整；若登录再次被拒，可改用 **设置 → 浏览器登录态** 从浏览器导入 Gemini 登录态。
 - 会话导入值只作为一次 IPC 参数写入 cookie，不写入日志或项目文件；它仍然是 bearer credential，应按密码保护。
 - SSH 的交互终端和模型命令通道使用两个独立 Shell；应用会尝试根据交互终端提示符同步目录，但环境变量、交互程序状态不共享。Web2Term 的手动输入与模型命令则使用同一工作区 Shell。
 - Web2Term 终端以运行设备端工具的 Linux 用户权限执行命令；后端负责客户端认证、设备归属校验和终端消息路由。设备在线或 WebSocket 已连接不等于终端已就绪。
@@ -209,7 +210,7 @@ The image shows the workspace page with the session list on the left, the termin
 | Capability | Description |
 | --- | --- |
 | Multiple sessions | Create independent sessions for the local machine, SSH hosts, or Web2Term devices; names, model choice, conversation URLs, and device bindings persist. |
-| Multiple model sites | Switch between ChatGPT, DeepSeek, Claude, and Gemini inside one session. Each site keeps its own page, account, cookie jar, and conversation. |
+| Multiple model sites | Switch between ChatGPT, DeepSeek, Claude, and Gemini inside one session. Each site keeps its own page, account, cookie jar, and conversation, and each can be signed into inside the page; Gemini uses a Google account sign-in. |
 | Terminal loop | Manual and automatic execution modes. The model proposes one command at a time; the app returns output, exit code, and execution state. |
 | Three connection methods | A persistent local Shell: PowerShell on Windows or zsh on macOS; an interactive SSH terminal and a separate model command channel; or a Linux device terminal relayed through the Web2Term backend without a device-side sshd. |
 | Toolbox | Git inspection, MySQL connections, a read-only Redis browser, and an embedded Nacos console. |
@@ -326,6 +327,7 @@ electron-builder.yml   Installer configuration
 ### Security boundaries and known limits
 
 - Each embedded platform uses a separate persistent cookie partition. Navigation the page performs **is no longer restricted by domain** (required for Cloudflare's challenge to complete); links the page asks to open in a new window still go to the system browser.
+- Google refuses an embedded sign-in that presents as Chrome, so requests to the Google sign-in hosts (`accounts.google.com`, `accounts.youtube.com`) carry a Firefox User-Agent with the `Sec-CH-UA*` headers removed, and pages on those two hosts also present as Firefox. Every other site, `gemini.google.com` included, keeps the Chrome identity. This depends on Google's current detection and may need adjusting if it changes; if sign-in is refused again, a Gemini session can still be imported from a browser under **设置 → 浏览器登录态** (Settings → Browser sign-in state).
 - Imported session values are passed through one IPC call and are not written to logs or project files. They are still bearer credentials and must be protected like passwords.
 - The interactive SSH terminal and the model command channel use separate Shells. The app attempts to synchronize directories from the interactive prompt, but environment variables and interactive program state are not shared. Web2Term manual input and model commands use the same workspace Shell.
 - Web2Term commands run with the permissions of the Linux user running the agent. The backend handles client authentication, device ownership checks, and terminal routing. An online device or an open WebSocket does not by itself mean the terminal is ready.

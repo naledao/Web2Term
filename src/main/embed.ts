@@ -111,11 +111,134 @@ function chromeFullVersionList(): string {
   return `"Google Chrome";v="${version}", "Chromium";v="${version}", "Not(A:Brand";v="24.0.0.0"`
 }
 
+/**
+ * Hosts where Google decides whether a sign-in is admitted, and whether the session it creates
+ * keeps renewing afterwards. These two present FIREFOX instead of the Chrome identity above.
+ *
+ * WHY. Measured by another Electron app (stablyai/orca#11518 and #12884, Electron 43, macOS), and
+ * confirmed here for the part that matters first: with this identity a Gemini sign-in completed
+ * inside the embed (user-run, Electron 44, Windows, 2026-10-14). Whether the session keeps
+ * renewing past the hour is what the cookie log below is for. The measurement:
+ *
+ *  - A User-Agent shaped exactly like stock Chrome, which is what `chromeLikeUserAgent` produces,
+ *    was sent to `/v3/signin/rejected` 12 times out of 12. Forged client hints, anti-detection
+ *    scripts and an attached debugger made no difference either way.
+ *  - A session that did get in under an Electron/Chrome-shaped identity stopped rotating
+ *    `__Secure-1PSIDTS` / `__Secure-3PSIDTS` and was dead in about an hour; re-importing cookies
+ *    from a desktop browser only restarted that clock.
+ *  - Firefox on exactly these two hosts, with the Chromium client hints removed, was admitted and
+ *    kept the session renewing every ~10 minutes for 8h+.
+ *
+ * Both refusals this repo recorded earlier (`google-login-probe.js`, `gemini-dom-probe.js`) were
+ * taken with the Chrome-shaped identity, so they say nothing about this one.
+ *
+ * Exact hostname match, so a lookalike such as `accounts.google.com.evil.test` never qualifies.
+ * Every other host — gemini.google.com included — keeps the Chrome identity, because that is
+ * what Cloudflare on the other two sites needs and what Gemini itself was measured against.
+ */
+const GOOGLE_AUTH_HOSTS = new Set(['accounts.google.com', 'accounts.youtube.com'])
+
+function isGoogleAuthUrl(url: string): boolean {
+  try {
+    return GOOGLE_AUTH_HOSTS.has(new URL(url).hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+/** The version the measurement above used. Bump it if Google starts calling it outdated. */
+const FIREFOX_VERSION = '140.0'
+
+function googleAuthUserAgent(): string {
+  const platformToken =
+    process.platform === 'win32'
+      ? 'Windows NT 10.0; Win64; x64'
+      : process.platform === 'darwin'
+        ? 'Macintosh; Intel Mac OS X 10.15'
+        : 'X11; Linux x86_64'
+
+  return `Mozilla/5.0 (${platformToken}; rv:${FIREFOX_VERSION}) Gecko/20100101 Firefox/${FIREFOX_VERSION}`
+}
+
+/** Origin and path only: Google's sign-in URLs carry continue URLs and account hints in the query. */
+function urlForLog(url: string): string {
+  try {
+    const parsed = new URL(url)
+    return `${parsed.origin}${parsed.pathname}`
+  } catch {
+    return '(unparseable url)'
+  }
+}
+
+/**
+ * The cookies whose movement says whether a Google session is alive.
+ *
+ * The `*PSIDTS` / `*SIDCC` ones are the short-lived half: a healthy session re-sets them every few
+ * minutes, and the measured failure looked like exactly those going quiet — absent or frozen at
+ * the time of sign-in — about an hour before the page signed out.
+ */
+const GOOGLE_SESSION_COOKIES = new Set([
+  'SID',
+  '__Secure-1PSID',
+  '__Secure-3PSID',
+  '__Secure-1PSIDTS',
+  '__Secure-3PSIDTS',
+  'SIDCC',
+  '__Secure-1PSIDCC',
+  '__Secure-3PSIDCC'
+])
+
+const googleCookiesWatched = new Set<string>()
+
+/**
+ * Log every write to a Google session cookie in this partition — name, length and expiry, NEVER
+ * the value — so whether a session keeps renewing can be read off the app log after an hour or
+ * more instead of being guessed at.
+ */
+function watchGoogleSessionCookies(partition: string): void {
+  if (googleCookiesWatched.has(partition)) return
+  googleCookiesWatched.add(partition)
+
+  const ses = session.fromPartition(partition)
+
+  ses.cookies.on('changed', (_event, cookie, cause, removed) => {
+    if (!GOOGLE_SESSION_COOKIES.has(cookie.name)) return
+    const domain = (cookie.domain ?? '').replace(/^\./, '').toLowerCase()
+    if (domain !== 'google.com' && !domain.endsWith('.google.com')) return
+    // A rotation arrives as the old value being removed and the new one set; the second says it all.
+    if (removed && cause === 'overwrite') return
+
+    const expiry =
+      typeof cookie.expirationDate === 'number'
+        ? `expires ${new Date(cookie.expirationDate * 1000).toISOString()}`
+        : 'session-only'
+    console.info(
+      `[embed] google cookie ${removed ? `removed (${cause})` : 'set'} on ${partition}: ` +
+        `${cookie.name} @${cookie.domain ?? '?'} len=${cookie.value.length} ${expiry}`
+    )
+  })
+
+  void ses.cookies
+    .get({ domain: 'google.com' })
+    .then((cookies) => {
+      const present = [...new Set(cookies.map((cookie) => cookie.name))].filter((name) =>
+        GOOGLE_SESSION_COOKIES.has(name)
+      )
+      console.info(
+        `[embed] google session cookies on ${partition} at start: ${present.length > 0 ? present.join(', ') : '(none)'}`
+      )
+    })
+    .catch(() => {})
+}
+
 /** Partitions already patched. `onBeforeSendHeaders` holds ONE handler, so this must be once. */
 const identityPatched = new Set<string>()
 
 /** Partitions whose patch has already been reported, so the log carries one line each. */
 const identityLogged = new Set<string>()
+
+/** The same, for the Google auth identity. */
+const googleAuthIdentityLogged = new Set<string>()
 
 /**
  * Make the client hints agree with the User-Agent the view already presents.
@@ -129,6 +252,9 @@ const identityLogged = new Set<string>()
  * User-Agent, so a brand list that disagrees with it is a fingerprint on all three sites — there
  * is nothing site-specific about this, and scoping it to the one site that happened to break
  * first would leave the same inconsistency behind on the other two.
+ *
+ * The one exception is requests TO a Google auth host (see `GOOGLE_AUTH_HOSTS`), which get the
+ * Firefox identity instead. It lives in this same handler because there is only one slot.
  */
 function installChromeIdentity(partition: string): void {
   if (identityPatched.has(partition)) return
@@ -139,9 +265,25 @@ function installChromeIdentity(partition: string): void {
     (details, callback) => {
       const headers = { ...details.requestHeaders }
       let touched = false
+      const googleAuth = isGoogleAuthUrl(details.url)
 
       for (const name of Object.keys(headers)) {
         const lower = name.toLowerCase()
+        if (googleAuth) {
+          /*
+           * Every `sec-ch-ua*` goes, not just the brand list: real Firefox sends no client hints
+           * at all, and Chromium's hints under a Firefox User-Agent are a sharper tell than
+           * either identity on its own.
+           */
+          if (lower.startsWith('sec-ch-ua')) {
+            delete headers[name]
+            touched = true
+          } else if (lower === 'user-agent') {
+            headers[name] = googleAuthUserAgent()
+            touched = true
+          }
+          continue
+        }
         if (lower === 'sec-ch-ua') {
           headers[name] = chromeBrandList()
           touched = true
@@ -157,7 +299,15 @@ function installChromeIdentity(partition: string): void {
         }
       }
 
-      if (touched) {
+      if (touched && googleAuth) {
+        if (!googleAuthIdentityLogged.has(partition)) {
+          googleAuthIdentityLogged.add(partition)
+          console.info(
+            `[embed] google auth identity on ${partition}: ${urlForLog(details.url)} -> ` +
+              `${JSON.stringify(googleAuthUserAgent())}, sec-ch-ua* removed`
+          )
+        }
+      } else if (touched) {
         /*
          * Logged once per partition, with the value that was there before.
          *
@@ -212,6 +362,9 @@ function normalizeUrl(input: string): string | null {
  * The consequence, stated plainly so nobody has to rediscover it: **a Google sign-in started in
  * the embedded view now runs to that refusal instead of escaping to a browser that would have
  * completed it.** Email/OTP sign-in is unaffected, and it is what the ChatGPT platform supports.
+ * That refusal was measured under the Chrome identity; the auth hosts now present Firefox instead
+ * (`GOOGLE_AUTH_HOSTS`), under which Gemini's own sign-in completes. A Google sign-in into ChatGPT
+ * or Claude passes the same hosts but has not been tried.
  *
  * Ordinary outbound links are unchanged — a new window the page asks for still opens in the real
  * browser (see `openExternalUrl`).
@@ -404,6 +557,7 @@ export class ChatGptEmbed {
     // Before the view exists, so the very first request of the very first navigation already
     // carries a brand list that agrees with the User-Agent below.
     installChromeIdentity(this.platform.partition)
+    watchGoogleSessionCookies(this.platform.partition)
 
     const view = new WebContentsView({
       webPreferences: {
@@ -429,7 +583,48 @@ export class ChatGptEmbed {
     parent.contentView.addChildView(view)
 
     const contents = view.webContents
-    contents.setUserAgent(process.env.EMBED_USER_AGENT ?? chromeLikeUserAgent())
+    const baseUserAgent = process.env.EMBED_USER_AGENT ?? chromeLikeUserAgent()
+    contents.setUserAgent(baseUserAgent)
+
+    /*
+     * Keep `navigator.userAgent` in step with the header on the Google auth hosts.
+     *
+     * The header is already Firefox there (`installChromeIdentity`), but a page reads its own
+     * identity from the view, and a sign-in page whose script says Chrome while every request
+     * says Firefox is the two-identity split the measurement warned about.
+     *
+     * Switched in `did-start-navigation` and nowhere else: an override set there is applied to
+     * the navigation that is starting, whereas Chromium answers one set later in a load by
+     * reloading the page. So a REDIRECT into or out of an auth host commits with the previous
+     * script-visible identity — the header is still right, and that is what Google's servers
+     * see — and the next navigation puts it back.
+     *
+     * Main-frame navigations on the auth hosts are logged by path, in-page ones included: the
+     * sign-in steps are mostly in-page, and `/v3/signin/rejected` vs. a password or challenge
+     * step is the whole answer to "was this sign-in admitted".
+     */
+    const followGoogleAuthIdentity = (url: string, isSameDocument: boolean, kind: string): void => {
+      const googleAuth = isGoogleAuthUrl(url)
+      if (googleAuth) {
+        console.info(
+          `[embed:${this.platform.id}] google auth ${kind}${isSameDocument ? ' (in-page)' : ''}: ${urlForLog(url)}`
+        )
+      }
+      if (isSameDocument || kind !== 'navigation') return
+
+      const wanted = googleAuth ? googleAuthUserAgent() : baseUserAgent
+      if (contents.getUserAgent() === wanted) return
+      contents.setUserAgent(wanted)
+      console.info(
+        `[embed:${this.platform.id}] page identity -> ${googleAuth ? 'firefox' : 'chrome'} for ${urlForLog(url)}`
+      )
+    }
+    contents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame) followGoogleAuthIdentity(details.url, details.isSameDocument, 'navigation')
+    })
+    contents.on('did-redirect-navigation', (details) => {
+      if (details.isMainFrame) followGoogleAuthIdentity(details.url, false, 'redirect')
+    })
 
     // Ordinary outbound links — a new window the page asks for — still go to the real browser.
     // Navigation the page performs ITSELF is no longer policed; see `isAllowedNavigation`.
