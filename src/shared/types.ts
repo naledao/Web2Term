@@ -812,9 +812,9 @@ const ASK_USER_SECTION = [
   '目标含糊、缺少用户信息、方案会改变结果或工具未安装时，暂停并询问；不擅自安装或选差方案。',
   '询问时只输出一个 JSON 代码块，外面不要有文字：',
   '```json',
-  '{"type":"questions","questions":[{"question":"需要用户回答的问题","placeholder":"可选提示"}]}',
+  '{"type":"questions","questions":[{"question":"需要用户回答的问题","options":["选项A","选项B"],"placeholder":"可选提示"}]}',
   '```',
-  'questions 为 1~20 项；question 必填，placeholder 可省略。软件逐页收集回答，按题号合并后一次发回。',
+  'questions 为 1~20 项；question 必填，options（最多 8 个短字符串，可省略）会显示为可点选项，placeholder 可省略。每题界面依次为题干、选项、自定义答案输入框。软件逐页收集回答，按题号合并后一次发回。',
   'question 支持 Markdown。需要用户手动执行命令时，在 question 内用对应语言的代码块给出完整命令，保留所有换行和缩进；JSON 字符串中的换行写成 \\n。',
   '删除、覆盖、格式化、改权限、发布、发消息、付费等不可逆动作，范围不明先询问；目标明确的代码修改、构建、测试可直接做。用户回答会发回并恢复循环。'
 ].join('\n')
@@ -1104,6 +1104,8 @@ export interface PendingQuestionItem {
   question: string
   /** Optional input hint supplied by the model. */
   placeholder: string
+  /** Optional preset answers shown between the question and the free-text box (at most 8). */
+  options: string[]
 }
 
 export interface PendingQuestion {
@@ -1198,6 +1200,7 @@ export interface InterceptorPageEvent {
   /** Present on `question` events. */
   question?: string
   placeholder?: string
+  options?: string[]
   /** Present on `question` events; one page is rendered for each item. */
   questions?: PendingQuestionItem[]
   /** Present on command events: absolute runtime limit selected for this command, in seconds. */

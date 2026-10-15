@@ -1487,18 +1487,24 @@ export class ChatGptEmbed {
           const candidates: unknown[] = Array.isArray(payload.questions)
             ? payload.questions
             : typeof payload.question === 'string'
-              ? [{ question: payload.question, placeholder: payload.placeholder }]
+              ? [{ question: payload.question, placeholder: payload.placeholder, options: payload.options }]
               : []
           const questions: PendingQuestionItem[] = candidates.map((item) => {
             if (!item || typeof item !== 'object') return null
-            const value = item as { question?: unknown; placeholder?: unknown }
+            const value = item as { question?: unknown; placeholder?: unknown; options?: unknown }
             if (
               typeof value.question !== 'string' || value.question.trim() === '' || value.question.length > 16000 ||
               (value.placeholder !== undefined && (typeof value.placeholder !== 'string' || value.placeholder.length > 1000))
             ) return null
+            if (
+              value.options !== undefined &&
+              (!Array.isArray(value.options) || value.options.length > 8 ||
+                value.options.some((option) => typeof option !== 'string' || option.trim() === '' || option.length > 300))
+            ) return null
             return {
               question: value.question.trim(),
-              placeholder: typeof value.placeholder === 'string' ? value.placeholder.trim() : ''
+              placeholder: typeof value.placeholder === 'string' ? value.placeholder.trim() : '',
+              options: ((value.options ?? []) as string[]).map((option) => option.trim())
             }
           }).filter((item): item is PendingQuestionItem => item !== null)
           const messageId = payload.messageId

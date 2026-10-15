@@ -454,6 +454,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [commandPreview, setCommandPreview] = useState<{ command: string; description: string; language: CommandLanguage } | null>(null)
   const commandPreviewOpen = commandPreview !== null
   const [questionDrafts, setQuestionDrafts] = useState<string[]>([])
+  const [questionChoices, setQuestionChoices] = useState<number[]>([])
   const [questionPage, setQuestionPage] = useState(0)
   const [questionError, setQuestionError] = useState('')
   const [answeringQuestion, setAnsweringQuestion] = useState(false)
@@ -588,6 +589,14 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const questionCount = pendingQuestion?.questions.length ?? 0
   const currentQuestion = pendingQuestion?.questions[questionPage] ?? null
   const currentQuestionDraft = questionDrafts[questionPage] ?? ''
+  const currentQuestionChoice = questionChoices[questionPage] ?? -1
+  // The answer for one page: the picked option, the free text, or both ("option；补充：text").
+  const resolveQuestionAnswer = (index: number): string => {
+    const text = (questionDrafts[index] ?? '').trim()
+    const option = pendingQuestion?.questions[index]?.options[questionChoices[index] ?? -1] ?? ''
+    return option && text ? `${option}；补充：${text}` : option || text
+  }
+  const currentQuestionAnswered = resolveQuestionAnswer(questionPage) !== ''
   const showQuestionShortcut = Boolean(pendingQuestion && currentQuestion && (questionMinimized || terminalCollapsed))
 
   const waiting = useMemo(
@@ -1099,6 +1108,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
   useEffect(() => {
     setQuestionDrafts(pendingQuestion ? pendingQuestion.questions.map(() => '') : [])
+    setQuestionChoices(pendingQuestion ? pendingQuestion.questions.map(() => -1) : [])
     setQuestionPage(0)
     setQuestionError('')
     setAnsweringQuestion(false)
@@ -1121,17 +1131,17 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [])
 
   const nextQuestion = useCallback((): void => {
-    if (!currentQuestionDraft.trim()) {
+    if (!currentQuestionAnswered) {
       setQuestionError('请先回答当前问题。')
       return
     }
     setQuestionError('')
     setQuestionPage((page) => Math.min(questionCount - 1, page + 1))
-  }, [currentQuestionDraft, questionCount])
+  }, [currentQuestionAnswered, questionCount])
 
   const answerQuestion = useCallback(async (): Promise<void> => {
     if (!pendingQuestion || questionBusy) return
-    const answers = pendingQuestion.questions.map((_, index) => (questionDrafts[index] ?? '').trim())
+    const answers = pendingQuestion.questions.map((_, index) => resolveQuestionAnswer(index))
     const missingIndex = answers.findIndex((answer) => answer === '')
     if (missingIndex >= 0) {
       setQuestionPage(missingIndex)
@@ -1154,7 +1164,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     } finally {
       setAnsweringQuestion(false)
     }
-  }, [questionBusy, pendingQuestion, questionDrafts])
+  }, [questionBusy, pendingQuestion, questionDrafts, questionChoices])
 
   const cancelQuestion = useCallback(async (): Promise<void> => {
     if (!pendingQuestion || questionBusy) return
@@ -3264,11 +3274,35 @@ ${record.command}`
                   <div className="question-modal__question">
                     <MDEditor.Markdown source={currentQuestion.question} wrapperElement={{ 'data-color-mode': theme }} />
                   </div>
+                  {currentQuestion.options.length > 0 ? (
+                    <div className="question-modal__options" role="radiogroup" aria-label="可选答案">
+                      {currentQuestion.options.map((option, optionIndex) => (
+                        <button
+                          key={optionIndex}
+                          type="button"
+                          role="radio"
+                          aria-checked={currentQuestionChoice === optionIndex}
+                          className={currentQuestionChoice === optionIndex ? 'question-modal__option question-modal__option--on' : 'question-modal__option'}
+                          disabled={questionBusy}
+                          onClick={() => {
+                            setQuestionChoices((previous) => {
+                              const next = [...previous]
+                              next[questionPage] = previous[questionPage] === optionIndex ? -1 : optionIndex
+                              return next
+                            })
+                            setQuestionError('')
+                          }}
+                        >
+                          {option}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                   <textarea
                     key={questionPage}
                     className="question-modal__input"
                     value={currentQuestionDraft}
-                    placeholder={currentQuestion.placeholder || '输入你的回答…'}
+                    placeholder={currentQuestion.placeholder || (currentQuestion.options.length > 0 ? '或输入自定义答案…' : '输入你的回答…')}
                     aria-label="回答模型的问题"
                     disabled={questionBusy}
                     onChange={(event) => {
@@ -3292,7 +3326,7 @@ ${record.command}`
                   <button
                     type="button"
                     className="question-modal__confirm"
-                    disabled={questionBusy || !currentQuestionDraft.trim()}
+                    disabled={questionBusy || !currentQuestionAnswered}
                     onClick={() => {
                       if (questionPage + 1 < questionCount) nextQuestion()
                       else void answerQuestion()

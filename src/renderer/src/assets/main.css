@@ -5014,6 +5014,22 @@ body {
   font-size: 14px;
   line-height: 1.55;
 }
+.question-modal__options { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.question-modal__option {
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg-input, var(--bg));
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+.question-modal__option:hover:not(:disabled) { border-color: #746cf0; }
+.question-modal__option--on { border-color: #746cf0; background: rgba(99, 91, 218, .12); box-shadow: 0 0 0 3px rgba(99, 91, 218, .16); }
+.question-modal__option:disabled { cursor: default; opacity: .55; }
 .question-modal__input:focus { border-color: #746cf0; box-shadow: 0 0 0 3px rgba(99, 91, 218, .16); }
 .question-modal__input::placeholder { color: var(--text-muted); }
 .question-modal__error { margin: 9px 0 0; color: #d9534f; font-size: 12px; }

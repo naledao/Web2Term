@@ -2051,14 +2051,20 @@
         if ('command' in parsed) return null
         const items = parsed.type === 'questions'
           ? parsed.questions
-          : [{ question: parsed.question, placeholder: parsed.placeholder }]
+          : [{ question: parsed.question, placeholder: parsed.placeholder, options: parsed.options }]
         if (!Array.isArray(items) || items.length < 1 || items.length > 20) return null
         const questions = []
         for (const item of items) {
           if (!item || typeof item !== 'object') return null
           if (typeof item.question !== 'string' || !item.question.trim() || item.question.length > 16000) return null
           if (item.placeholder !== undefined && (typeof item.placeholder !== 'string' || item.placeholder.length > 1000)) return null
-          questions.push({ question: item.question.trim(), placeholder: (item.placeholder || '').trim() })
+          if (item.options !== undefined && (!Array.isArray(item.options) || item.options.length > 8 ||
+            item.options.some((option) => typeof option !== 'string' || !option.trim() || option.length > 300))) return null
+          questions.push({
+            question: item.question.trim(),
+            placeholder: (item.placeholder || '').trim(),
+            options: (item.options || []).map((option) => option.trim())
+          })
         }
         return { questions }
       }
