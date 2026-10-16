@@ -1,3 +1,4 @@
+import { useToolSurface } from './ToolSurfaceContext'
 ﻿import { useEffect } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 
@@ -39,14 +40,15 @@ export default function ConfirmDialog({
   onConfirm,
   onCancel
 }: ConfirmDialogProps): ReactElement | null {
+  const { visible } = useToolSurface()
   useEffect(() => {
-    if (!open || busy || !dismissOnEscape) return
+    if (!open || !visible || busy || !dismissOnEscape) return
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') onCancel()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, busy, dismissOnEscape, onCancel])
+  }, [open, visible, busy, dismissOnEscape, onCancel])
 
   if (!open) return null
 

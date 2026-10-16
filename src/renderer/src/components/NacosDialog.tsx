@@ -1,3 +1,4 @@
+import { useToolApi, useToolSurface, ToolMinimizeButton } from './ToolSurfaceContext'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import ConfirmDialog from './ConfirmDialog'
@@ -125,6 +126,8 @@ function sameConsole(view: NacosViewState, url: string): boolean {
  * framing, so the page lives in its own out-of-process view. See src/main/nacos-view.ts.
  */
 export default function NacosDialog({ open, theme, onClose }: NacosDialogProps): ReactElement | null {
+  const api = useToolApi()
+  const { visible, active } = useToolSurface()
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -145,7 +148,7 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
   const refresh = useCallback(async (): Promise<void> => {
     setLoading(true)
     try {
-      setState(await window.api.listNacosConnections())
+      setState(await api.listNacosConnections())
       setError('')
     } catch {
       setError('读取连接列表失败，请重试。')
@@ -157,10 +160,10 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
   // Load the list on open, and follow it while the dialog is up: another window (or a
   // machine switch) can change which consoles belong to this machine.
   useEffect(() => {
-    if (!open) return
+    if (!open || !active) return
     void refresh()
-    return window.api.onNacosConnectionChanged(setState)
-  }, [open, refresh])
+    return api.onNacosConnectionChanged(setState)
+  }, [open, active, refresh])
 
   /*
    * Mirror the live view into the console page that is showing it. A state arriving while a
@@ -169,7 +172,7 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
    */
   useEffect(() => {
     if (!open) return
-    return window.api.onNacosState((view) => {
+    return api.onNacosState((view) => {
       setTabs((current) =>
         current.map((tab) =>
           tab.kind === 'console' && tab.key === activeKey ? { ...tab, view } : tab
@@ -193,7 +196,7 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
 
     let cancelled = false
     void (async () => {
-      const current = await window.api.getNacosState()
+      const current = await api.getNacosState()
       if (cancelled) return
       if (sameConsole(current, tab.url)) {
         setTabs((now) =>
@@ -203,26 +206,31 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
         )
         return
       }
-      const view = await window.api.openNacosView(tab.url)
+      const view = await api.openNacosView(tab.url)
       if (cancelled) return
       setTabs((now) =>
         now.map((item) => (item.kind === 'console' && item.key === tab.key ? { ...item, view } : item))
       )
-    })()
+    })().catch((error: unknown) => {
+      if (!cancelled) setError(error instanceof Error ? error.message : '打开控制台失败，请检查地址。')
+    })
 
     return () => {
       cancelled = true
     }
   }, [open, activeKey])
 
-  // Leaving the dialog takes the page down; the tabs must not claim otherwise next time.
+  // Minimize only hides the native view. Destroy it when this tool really closes.
+  useEffect(() => () => { void api.closeNacosView().catch(() => {}) }, [api])
+
   useEffect(() => {
-    if (open) return
-    setTabs((current) =>
-      current.map((item) => (item.kind === 'console' ? { ...item, view: EMPTY_NACOS_VIEW_STATE } : item))
-    )
-    void window.api.closeNacosView()
-  }, [open])
+    if (!visible) return
+    const keydown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && !event.defaultPrevented && !pendingDelete) onClose()
+    }
+    window.addEventListener('keydown', keydown)
+    return () => window.removeEventListener('keydown', keydown)
+  }, [visible, onClose, pendingDelete])
 
   const addTab = useCallback((): void => {
     newTabRef.current += 1
@@ -285,7 +293,7 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
 
     setSaving(true)
     try {
-      const result = await window.api.saveNacosConnection(draftFromForm(tab.form))
+      const result = await api.saveNacosConnection(draftFromForm(tab.form))
       setState(result)
       // The temporary key has to become the real row id, or the tab is orphaned the moment
       // the list refreshes and the sidebar highlights a row that no longer matches it.
@@ -326,7 +334,7 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
     try {
       let id = tab.form.id
       if (!tab.saved) {
-        const result = await window.api.saveNacosConnection(draftFromForm(tab.form))
+        const result = await api.saveNacosConnection(draftFromForm(tab.form))
         setState(result)
         id = result.id
         setTabs((current) =>
@@ -357,7 +365,7 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
   const confirmDelete = useCallback(async (): Promise<void> => {
     if (!pendingDelete) return
     try {
-      const next = await window.api.removeNacosConnection(pendingDelete.id)
+      const next = await api.removeNacosConnection(pendingDelete.id)
       setState(next)
       // The console page for a deleted row has nothing left to point at, so it goes too.
       const consoleKey = consoleKeyFor(pendingDelete.id)
@@ -435,6 +443,7 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
             </button>
           </div>
 
+          <ToolMinimizeButton />
           <button type="button" className="nacos-page__close" aria-label="关闭" onClick={onClose}>
             <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
               <path d="M4 4l8 8M12 4l-8 8" />
@@ -593,6 +602,8 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
  * on screen — and hidden the moment this page goes away, which is what unmounting does here.
  */
 function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
+  const api = useToolApi()
+  const { visible } = useToolSurface()
   const slotRef = useRef<HTMLDivElement>(null)
   const [editing, setEditing] = useState(false)
   const [address, setAddress] = useState(tab.view.url)
@@ -603,11 +614,14 @@ function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
 
   useEffect(() => {
     const element = slotRef.current
-    if (!element) return
+    if (!visible || !element) {
+      api.setNacosVisible(false)
+      return
+    }
 
     const report = (): void => {
       const rect = element.getBoundingClientRect()
-      window.api.setNacosBounds({
+      api.setNacosBounds({
         x: Math.round(rect.left),
         y: Math.round(rect.top),
         width: Math.round(rect.width),
@@ -615,7 +629,7 @@ function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
       })
     }
 
-    window.api.setNacosVisible(true)
+    api.setNacosVisible(true)
     report()
     const observer = new ResizeObserver(report)
     observer.observe(element)
@@ -625,10 +639,10 @@ function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
       observer.disconnect()
       window.removeEventListener('resize', report)
       // A native view outlives the DOM that anchored it, so it has to be told to go away.
-      window.api.setNacosVisible(false)
-      window.api.setNacosBounds({ x: 0, y: 0, width: 0, height: 0 })
+      api.setNacosVisible(false)
+      api.setNacosBounds({ x: 0, y: 0, width: 0, height: 0 })
     }
-  }, [])
+  }, [visible, api])
 
   return (
     <div className="nacos-page__console">
@@ -639,7 +653,7 @@ function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
           title="后退"
           aria-label="后退"
           disabled={!tab.view.canGoBack}
-          onClick={() => window.api.sendNacosCommand('back')}
+          onClick={() => api.sendNacosCommand('back')}
         >
           <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <path d="M10 3 5 8l5 5" />
@@ -651,7 +665,7 @@ function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
           title="前进"
           aria-label="前进"
           disabled={!tab.view.canGoForward}
-          onClick={() => window.api.sendNacosCommand('forward')}
+          onClick={() => api.sendNacosCommand('forward')}
         >
           <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <path d="M6 3l5 5-5 5" />
@@ -662,7 +676,7 @@ function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
           className="nacos-page__nav"
           title={tab.view.isLoading ? '停止加载' : '刷新'}
           aria-label={tab.view.isLoading ? '停止加载' : '刷新'}
-          onClick={() => window.api.sendNacosCommand(tab.view.isLoading ? 'stop' : 'reload')}
+          onClick={() => api.sendNacosCommand(tab.view.isLoading ? 'stop' : 'reload')}
         >
           {tab.view.isLoading ? (
             <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -683,7 +697,7 @@ function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
             setEditing(false)
             const url = address.trim()
             if (url === '' || url === tab.view.url) return
-            void window.api.navigateNacos(url)
+            void api.navigateNacos(url)
           }}
         >
           <input

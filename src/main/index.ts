@@ -1,3 +1,7 @@
+import { ToolboxRouter } from './toolbox-router'
+import { TOOLBOX_METHODS } from '../shared/toolbox'
+import type { ToolboxInvocation, ToolboxMethod } from '../shared/toolbox'
+import type { AppApi } from '../shared/types'
 import { join, posix } from 'node:path'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -10,8 +14,9 @@ import {
   isConversationId
 } from '../shared/types'
 import { readGitDiff, readGitLog } from './git'
+import { registerPdfAssetHandler, registerPdfAssetScheme } from './pdf-assets'
+import { sshWorkingDirectory } from '../shared/ssh-directory'
 import { nodeFallback } from './environment'
-import { emptyRedisKeyPage, emptyRedisKeyData } from './redis-reader'
 import { normalizeBackendUrl, readBackendUrl } from '../shared/backend-url'
 import { BackendAuthService } from './backend-auth'
 import { Web2termConnection } from './web2term-connection'
@@ -36,14 +41,13 @@ import type {
   EmbedState,
   ExecutionMode,
   ExecutionRecord,
-  GitFileDiff,
-  GitLogResult,
   InterceptorStatus,
   ManagedSessionSummary,
   WorkspaceState,
   SessionImportDraft,
   SessionImportResult,
   SshHost,
+  SshPdfPreviewRequest,
   SshHostDraft,
   SshDownloadTask,
   SshUploadTask,
@@ -54,25 +58,7 @@ import type {
   TerminalNotes,
   TerminalNotesOwner,
   TerminalState,
-
-  MysqlConnectionDraft,
-  MysqlConnectionsState,
-  MysqlDatabaseList,
-  MysqlTableData,
-  MysqlRowKey,
-  MysqlRowDeleteResult,
-  MysqlSqlExecutionResult,
-  MysqlTableDdl,
-  MysqlTableList,
-  MysqlSaveResult,
-  RedisConnectionDraft,
-  RedisConnectionsState,
-  RedisSaveResult,
-  UpdateStatus,
-  NacosConnectionDraft,
-  NacosConnectionsState,
-  NacosSaveResult,
-  NacosViewState
+  UpdateStatus
 } from '../shared/types'
 import { embedAuthState, importCookieSet, importSessionToken, previewSessionImport } from './session-import'
 import { ConversationStore } from './db'
@@ -113,6 +99,7 @@ if (unresolvableHosts.length > 0) {
 
 const rendererDevServerUrl = process.env['ELECTRON_RENDERER_URL']
 const isDev = !app.isPackaged
+registerPdfAssetScheme()
 const SETTING_EXECUTION_MODE = 'executionMode'
 const SETTING_THEME = 'theme'
 const SETTING_BACKEND_URL = 'backendUrl'
@@ -200,7 +187,7 @@ function recordCompletedTask(id: string): void {
 let workspaceOpenSshDialog = false
 
 /** The user's own Nacos console, shown inside the window on demand. Null until first opened. */
-let nacosView: NacosView | null = null
+const nacosViews = new Map<string, NacosView>()
 
 /*
  * The startup splash.
@@ -497,7 +484,6 @@ const FALLBACK_TERMINAL_STATE: TerminalState = {
   alive: false, cwd: '', lines: [], sendDelaySeconds: 0
 }
 const EMPTY_NOTES: TerminalNotes = { scope: 'local', hostId: '', directoryKey: '', directory: '', label: '', text: '', legacyText: '' }
-const EMPTY_MYSQL: MysqlConnectionsState = { machineLabel: '', connections: [] }
 
 function normalizeProxy(raw: string): string {
   const trimmed = raw.trim()
@@ -598,6 +584,7 @@ function applyAppTheme(theme: AppTheme): void {
   )
 
   for (const runtime of runtimes.values()) runtime.setTheme(theme)
+  for (const view of nacosViews.values()) view.setTheme(theme)
 }
 
 function managedSessions(): ManagedSessionSummary[] {
@@ -658,6 +645,7 @@ function selectSession(id: string, openSshDialog = false): boolean {
   const runtime = runtimes.get(id)
   if (!runtime) return false
   if (currentSessionId && currentSessionId !== id) runtimes.get(currentSessionId)?.setActive(false)
+  for (const [owner, view] of nacosViews) if (owner !== id) view.setVisible(false)
   currentSessionId = id
   workspaceOpenSshDialog = openSshDialog
   runtime.setActive(true)
@@ -696,20 +684,22 @@ function isManagerEvent(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
   return Boolean(managerWindow && !managerWindow.isDestroyed() && event.sender === managerWindow.webContents)
 }
 /**
- * The Nacos console view, created on first use and kept for the window's lifetime.
+ * One Nacos view per session, retained while that session's tool is minimized.
  *
  * Lazy rather than eager: most sessions never open it, and a WebContentsView costs a
  * whole renderer process whether or not anyone looks at it.
  */
-function nacosForWindow(window: BrowserWindow): NacosView {
-  if (!nacosView) {
-    nacosView = new NacosView({
+function nacosForSession(window: BrowserWindow, sessionId: string): NacosView {
+  let view = nacosViews.get(sessionId)
+  if (!view) {
+    view = new NacosView({
       onState: (state): void => {
-        if (!window.isDestroyed()) window.webContents.send(IpcChannels.nacosState, state)
+        if (!window.isDestroyed() && runtimes.has(sessionId)) window.webContents.send(IpcChannels.nacosState, state, sessionId)
       }
     })
+    nacosViews.set(sessionId, view)
   }
-  return nacosView
+  return view
 }
 
 
@@ -804,6 +794,8 @@ function destroySession(id: string): boolean {
 
   markSessionViewed(id)
   if (pendingQuestionsBySession.delete(id)) refreshTaskbarCount()
+  if (managerWindow && !managerWindow.isDestroyed()) nacosViews.get(id)?.destroy(managerWindow)
+  nacosViews.delete(id)
   runtimes.delete(id)
   store?.removeManagedSession(id)
   store?.setSetting(`web2termSession:${id}`, '')
@@ -900,7 +892,7 @@ function createManagerWindow(): void {
     workspaceOpenSshDialog = false
     // The console view is a child of THIS window, so it dies with it; dropping the
     // reference keeps a destroyed WebContentsView from being reused after a reopen.
-    nacosView = null
+    nacosViews.clear()
     managerReadyToShow = false
     managerWindow = null
   })
@@ -923,30 +915,37 @@ function registerIpcHandlers(): void {
   const fromManager = (event: IpcMainEvent | IpcMainInvokeEvent): boolean =>
     managerWindow !== null && !managerWindow.isDestroyed() && event.sender === managerWindow.webContents
 
-  ipcMain.handle(IpcChannels.gitLog, async (event, cwd: string): Promise<GitLogResult> => {
-    const ssh = runtimeForEvent(event)?.ssh
-    if (ssh?.getState().attached) {
-      const state = ssh.getState()
-      const remoteCwd = state.ptyCwd || state.modelCwd
-      if (!remoteCwd) throw new Error('SSH 工作目录尚未确定。')
-      return readGitLog(remoteCwd, ssh.gitBackend())
-    }
-    return readGitLog(cwd)
+  const toolbox = new ToolboxRouter<SessionRuntime>((id) => runtimes.get(id))
+  const tool = <K extends ToolboxMethod>(method: K, handler: (runtime: SessionRuntime, ...args: Parameters<AppApi[K]>) => unknown): void => {
+    toolbox.register(method, handler)
+    ipcMain.handle(TOOLBOX_METHODS[method], (event, ...args: unknown[]) => {
+      if (!fromManager(event)) throw new Error('请求不是来自应用窗口。')
+      return toolbox.invoke({ sessionId: currentSessionId ?? '', method, args })
+    })
+  }
+  ipcMain.handle(IpcChannels.toolboxInvoke, (event, request: ToolboxInvocation) => {
+    if (!fromManager(event)) throw new Error('请求不是来自应用窗口。')
+    return toolbox.invoke(request)
   })
-
-  ipcMain.handle(
-    IpcChannels.gitDiff,
-    async (event, cwd: string, path: string): Promise<GitFileDiff> => {
-      const ssh = runtimeForEvent(event)?.ssh
-      if (ssh?.getState().attached) {
-        const state = ssh.getState()
-        const remoteCwd = state.ptyCwd || state.modelCwd
-        if (!remoteCwd) throw new Error('SSH 工作目录尚未确定。')
-        return readGitDiff(remoteCwd, path, ssh.gitBackend())
-      }
-      return readGitDiff(cwd, path)
+  tool('getGitLog', async (runtime, cwd, mode) => {
+    if (mode !== undefined && !['all', 'files', 'history', 'stats'].includes(mode)) throw new Error('Git 读取类型无效。')
+    const ssh = runtime.ssh
+    if (ssh.getState().attached) {
+      const remoteCwd = cwd || sshWorkingDirectory(ssh.getState())
+      if (!remoteCwd) throw new Error('SSH 工作目录尚未确定。')
+      return readGitLog(remoteCwd, ssh.gitBackend(), mode)
     }
-  )
+    return readGitLog(cwd, undefined, mode)
+  })
+  tool('getGitDiff', async (runtime, cwd, path) => {
+    const ssh = runtime.ssh
+    if (ssh.getState().attached) {
+      const remoteCwd = cwd || sshWorkingDirectory(ssh.getState())
+      if (!remoteCwd) throw new Error('SSH 工作目录尚未确定。')
+      return readGitDiff(remoteCwd, path, ssh.gitBackend())
+    }
+    return readGitDiff(cwd, path)
+  })
 
   ipcMain.handle(IpcChannels.getAppInfo, (): AppInfo => ({
     name: app.getName(),
@@ -1118,61 +1117,46 @@ function registerIpcHandlers(): void {
    * Simpler than the chat embed by design — no scraping, no interception, no injected
    * script — so the whole surface is an address, a rectangle and four navigation buttons.
    */
-  ipcMain.handle(IpcChannels.nacosOpen, async (event, url: string): Promise<NacosViewState> => {
-    const window = managerWindow
-    if (!window || window.isDestroyed() || event.sender !== window.webContents) return EMPTY_NACOS_VIEW_STATE
-    const view = nacosForWindow(window)
+  tool('openNacosView', async (runtime, url) => {
+    const window = managerWindow!
+    const view = nacosForSession(window, runtime.id)
     view.setTheme(settings.theme)
     await view.open(window, String(url))
     return view.getState()
   })
-  ipcMain.handle(IpcChannels.nacosNavigate, async (event, url: string): Promise<NacosViewState> => {
-    const window = managerWindow
-    if (!window || window.isDestroyed() || event.sender !== window.webContents) return EMPTY_NACOS_VIEW_STATE
-    const view = nacosForWindow(window)
-    await view.open(window, String(url))
+  tool('navigateNacos', async (runtime, url) => {
+    const view = nacosForSession(managerWindow!, runtime.id)
+    await view.open(managerWindow!, String(url))
     return view.getState()
   })
-  ipcMain.on(IpcChannels.nacosCommand, (event, command: EmbedCommand) => {
-    const window = managerWindow
-    if (!window || window.isDestroyed() || event.sender !== window.webContents) return
-    nacosForWindow(window).command(command)
+  const nacosOwner = (event: IpcMainEvent, requested?: string): string | null => {
+    const id = requested === undefined ? currentSessionId : requested
+    return fromManager(event) && typeof id === 'string' && runtimes.has(id) ? id : null
+  }
+  ipcMain.on(IpcChannels.nacosCommand, (event, command: EmbedCommand, sessionId?: string) => {
+    const id = nacosOwner(event, sessionId)
+    if (id && id === currentSessionId) nacosViews.get(id)?.command(command)
   })
-  ipcMain.on(IpcChannels.nacosSetBounds, (event, bounds: EmbedBounds) => {
-    const window = managerWindow
-    if (!window || window.isDestroyed() || event.sender !== window.webContents) return
-    nacosForWindow(window).setBounds(bounds)
+  ipcMain.on(IpcChannels.nacosSetBounds, (event, bounds: EmbedBounds, sessionId?: string) => {
+    const id = nacosOwner(event, sessionId)
+    if (id && id === currentSessionId) nacosViews.get(id)?.setBounds(bounds)
   })
-  ipcMain.on(IpcChannels.nacosSetVisible, (event, visible: boolean) => {
-    const window = managerWindow
-    if (!window || window.isDestroyed() || event.sender !== window.webContents) return
-    nacosForWindow(window).setVisible(Boolean(visible))
+  ipcMain.on(IpcChannels.nacosSetVisible, (event, visible: boolean, sessionId?: string) => {
+    const id = nacosOwner(event, sessionId)
+    if (!id) return
+    if (visible && id === currentSessionId) nacosForSession(managerWindow!, id).setVisible(true)
+    else if (!visible) nacosViews.get(id)?.setVisible(false)
   })
-  ipcMain.handle(IpcChannels.nacosGetState, (event): NacosViewState => {
-    const window = managerWindow
-    if (!window || window.isDestroyed() || event.sender !== window.webContents) return EMPTY_NACOS_VIEW_STATE
-    return nacosView ? nacosView.getState() : EMPTY_NACOS_VIEW_STATE
-  })
-  ipcMain.handle(IpcChannels.nacosClose, async (event): Promise<NacosViewState> => {
-    const window = managerWindow
-    if (!window || window.isDestroyed() || event.sender !== window.webContents) return EMPTY_NACOS_VIEW_STATE
-    nacosView?.destroy(window)
+  tool('getNacosState', (runtime) => nacosViews.get(runtime.id)?.getState() ?? EMPTY_NACOS_VIEW_STATE)
+  tool('closeNacosView', (runtime) => {
+    nacosViews.get(runtime.id)?.destroy(managerWindow!)
+    nacosViews.delete(runtime.id)
     return EMPTY_NACOS_VIEW_STATE
   })
-  ipcMain.handle(IpcChannels.nacosConnList, (event): NacosConnectionsState => {
-    const runtime = runtimeForEvent(event)
-    return runtime ? runtime.listNacosConnections() : { machineLabel: '', connections: [] }
-  })
-  ipcMain.handle(IpcChannels.nacosConnSave, (event, draft: NacosConnectionDraft): NacosSaveResult => {
-    const runtime = runtimeForEvent(event)
-    if (!runtime) throw new Error('当前会话不可用。')
-    return runtime.saveNacosConnection(draft)
-  })
-  ipcMain.handle(IpcChannels.nacosConnRemove, (event, id: string): NacosConnectionsState => {
-    const runtime = runtimeForEvent(event)
-    if (!runtime) return { machineLabel: '', connections: [] }
-    return runtime.removeNacosConnection(String(id ?? ''))
-  })
+  tool('listNacosConnections', (runtime) => runtime.listNacosConnections())
+  tool('saveNacosConnection', (runtime, draft) => runtime.saveNacosConnection(draft))
+  tool('removeNacosConnection', (runtime, id) => runtime.removeNacosConnection(String(id ?? '')))
+
   ipcMain.on(IpcChannels.openChatgptExternal, (event) => {
     const runtime = runtimeForEvent(event)
     // The active session's OWN site: opening chatgpt.com from a DeepSeek session would
@@ -1350,31 +1334,22 @@ function registerIpcHandlers(): void {
     if (!runtime || typeof text !== 'string') throw new Error('当前会话不可用。')
     return runtime.applyTerminalNotes(text, owner)
   })
-  ipcMain.handle(IpcChannels.mysqlConnList, (event): MysqlConnectionsState => runtimeForEvent(event)?.listMysqlConnections() ?? EMPTY_MYSQL)
-  ipcMain.handle(IpcChannels.mysqlConnSave, (event, draft: MysqlConnectionDraft): MysqlSaveResult => runtimeForEvent(event)?.saveMysqlConnection(draft) ?? { ...EMPTY_MYSQL, id: '' })
-  ipcMain.handle(IpcChannels.mysqlConnListDatabases, (event, draft: MysqlConnectionDraft): Promise<MysqlDatabaseList> => runtimeForEvent(event)?.listMysqlDatabases(draft) ?? Promise.resolve({ ok: false, databases: [], message: '当前会话不可用。' }))
-  ipcMain.handle(IpcChannels.mysqlConnListTables, (event, draft: MysqlConnectionDraft, database: string): Promise<MysqlTableList> => runtimeForEvent(event)?.listMysqlTables(draft, database) ?? Promise.resolve({ ok: false, tables: [], message: '当前会话不可用。' }))
-  ipcMain.handle(IpcChannels.mysqlConnQueryTable, (event, draft: MysqlConnectionDraft, database: string, table: string): Promise<MysqlTableData> => runtimeForEvent(event)?.queryMysqlTable(draft, database, table) ?? Promise.resolve({ ok: false, sql: '', columns: [], columnComments: [], columnCommentsMessage: '', rows: [], rowKeys: [], rowDeleteMessage: '', truncated: false, message: '当前会话不可用。' }))
-  ipcMain.handle(IpcChannels.mysqlConnDeleteRow, (event, draft: MysqlConnectionDraft, database: string, table: string, key: MysqlRowKey): Promise<MysqlRowDeleteResult> => runtimeForEvent(event)?.deleteMysqlTableRow(draft, database, table, key) ?? Promise.resolve({ ok: false, affectedRows: 0, message: '当前会话不可用。' }))
-  ipcMain.handle(IpcChannels.mysqlConnExecuteSql, (event, draft: MysqlConnectionDraft, database: string, sql: string): Promise<MysqlSqlExecutionResult> => runtimeForEvent(event)?.executeMysqlSql(draft, database, sql) ?? Promise.resolve({ ok: false, columns: [], rows: [], affectedRows: null, truncated: false, message: '当前会话不可用。' }))
-  ipcMain.handle(IpcChannels.mysqlConnCreateTable, (event, draft: MysqlConnectionDraft, database: string, sql: string): Promise<{ ok: boolean; message: string }> => runtimeForEvent(event)?.createMysqlTable(draft, database, sql) ?? Promise.resolve({ ok: false, message: '当前会话不可用。' }))
-  ipcMain.handle(IpcChannels.mysqlConnTableDdl, (event, draft: MysqlConnectionDraft, database: string, table: string): Promise<MysqlTableDdl> => runtimeForEvent(event)?.getMysqlTableDdl(draft, database, table) ?? Promise.resolve({ ok: false, ddl: '', message: '当前会话不可用。' }))
-  ipcMain.handle(IpcChannels.mysqlConnRemove, (event, id: string): MysqlConnectionsState => runtimeForEvent(event)?.removeMysqlConnection(id) ?? EMPTY_MYSQL)
-
-  const emptyRedis: RedisConnectionsState = { machineLabel: '', ownerKey: '', connections: [] }
-  ipcMain.handle(IpcChannels.redisConnList, (event) => runtimeForEvent(event)?.listRedisConnections() ?? emptyRedis)
-  ipcMain.handle(IpcChannels.redisConnSave, (event, draft: RedisConnectionDraft): RedisSaveResult => {
-    const runtime = runtimeForEvent(event)
-    if (!runtime) throw new Error('当前会话不可用。')
-    return runtime.saveRedisConnection(draft)
-  })
-  ipcMain.handle(IpcChannels.redisConnRemove, (event, id: string) => runtimeForEvent(event)?.removeRedisConnection(id) ?? emptyRedis)
-  ipcMain.handle(IpcChannels.redisTestConnection, (event, draft: RedisConnectionDraft) =>
-    runtimeForEvent(event)?.testRedisConnection(draft) ?? { ok: false, message: '当前会话不可用。' })
-  ipcMain.handle(IpcChannels.redisScanKeys, (event, draft: RedisConnectionDraft, cursor: string, search: string) =>
-    runtimeForEvent(event)?.scanRedisKeys(draft, cursor, search) ?? emptyRedisKeyPage('当前会话不可用。'))
-  ipcMain.handle(IpcChannels.redisReadKey, (event, draft: RedisConnectionDraft, keyId: string, cursor: string) =>
-    runtimeForEvent(event)?.readRedisKey(draft, keyId, cursor) ?? emptyRedisKeyData('当前会话不可用。'))
+  tool('listMysqlConnections', (runtime) => runtime.listMysqlConnections())
+  tool('saveMysqlConnection', (runtime, draft) => runtime.saveMysqlConnection(draft))
+  tool('listMysqlDatabases', (runtime, draft) => runtime.listMysqlDatabases(draft))
+  tool('listMysqlTables', (runtime, draft, database) => runtime.listMysqlTables(draft, database))
+  tool('queryMysqlTable', (runtime, draft, database, table) => runtime.queryMysqlTable(draft, database, table))
+  tool('deleteMysqlTableRow', (runtime, draft, database, table, key) => runtime.deleteMysqlTableRow(draft, database, table, key))
+  tool('executeMysqlSql', (runtime, draft, database, sql) => runtime.executeMysqlSql(draft, database, sql))
+  tool('createMysqlTable', (runtime, draft, database, sql) => runtime.createMysqlTable(draft, database, sql))
+  tool('getMysqlTableDdl', (runtime, draft, database, table) => runtime.getMysqlTableDdl(draft, database, table))
+  tool('removeMysqlConnection', (runtime, id) => runtime.removeMysqlConnection(id))
+  tool('listRedisConnections', (runtime) => runtime.listRedisConnections())
+  tool('saveRedisConnection', (runtime, draft) => runtime.saveRedisConnection(draft))
+  tool('removeRedisConnection', (runtime, id) => runtime.removeRedisConnection(id))
+  tool('testRedisConnection', (runtime, draft) => runtime.testRedisConnection(draft))
+  tool('scanRedisKeys', (runtime, draft, cursor, search) => runtime.scanRedisKeys(draft, cursor, search))
+  tool('readRedisKey', (runtime, draft, keyId, cursor) => runtime.readRedisKey(draft, keyId, cursor))
 
   ipcMain.handle(IpcChannels.sshGetState, (event): SshState => runtimeForEvent(event)?.ssh.getState() ?? { ...EMPTY_SSH_STATE })
   ipcMain.handle(IpcChannels.sshListHosts, (event): SshHost[] => runtimeForEvent(event)?.listSshHosts() ?? [])
@@ -1403,19 +1378,34 @@ function registerIpcHandlers(): void {
       /* Diagnostics must never interrupt the picker. */
     }
   })
-  ipcMain.handle(IpcChannels.sshDownloadFile, async (event, remotePath: string): Promise<boolean> => {
+  ipcMain.handle(IpcChannels.sshDownloadFile, async (event, remotePath: string, expectedHostId?: string): Promise<boolean> => {
     const runtime = runtimeForEvent(event)
     if (!runtime) return false
     const source = String(remotePath ?? '').trim()
     if (source === '') return false
+    const hostId = expectedHostId ?? runtime.ssh.getState().hostId
+    const verifyHost = (): void => {
+      const state = runtime.ssh.getState()
+      if (state.status !== 'connected' || !hostId || state.hostId !== hostId) throw new Error('原 SSH 主机已断开或切换，请重新下载。')
+    }
+    verifyHost()
     const window = runtime.window
     const options = { title: '保存 SSH 文件', defaultPath: posix.basename(source) || 'download' }
     const result = window && !window.isDestroyed()
       ? await dialog.showSaveDialog(window, options)
       : await dialog.showSaveDialog(options)
     if (result.canceled || !result.filePath) return false
+    verifyHost()
     runtime.ssh.downloadFile(source, result.filePath)
     return true
+  })
+  ipcMain.handle(IpcChannels.sshPdfPreview, (event, request: SshPdfPreviewRequest) => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime) throw new Error('当前 SSH 会话不可用。')
+    return runtime.ssh.previewPdf(request)
+  })
+  ipcMain.handle(IpcChannels.sshPdfPreviewCancel, (event, requestId: string): void => {
+    if (typeof requestId === 'string') runtimeForEvent(event)?.ssh.cancelPdfPreview(requestId)
   })
   ipcMain.handle(IpcChannels.sshDownloadsGet, (event): SshDownloadTask[] =>
     runtimeForEvent(event)?.ssh.getDownloads() ?? [])
@@ -1598,6 +1588,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => createManagerWindow())
 
   void app.whenReady().then(async () => {
+    registerPdfAssetHandler()
     if (process.platform === 'win32') app.setAppUserModelId('com.example.gptweb2codexterminal')
 
     if (appLogFile) {

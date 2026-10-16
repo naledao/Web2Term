@@ -1,3 +1,4 @@
+import type { ToolboxInvocation } from './toolbox'
 /**
  * Types shared between the Electron main process, the preload bridge and the
  * React renderer. Keep this module free of runtime dependencies on `electron`
@@ -7,6 +8,7 @@
 import { MAX_READ_FILES } from './file-requests'
 
 export const IpcChannels = {
+  toolboxInvoke: 'toolbox:invoke',
   getAppInfo: 'app:get-info',
   embedSetBounds: 'embed:set-bounds',
   embedSetVisible: 'embed:set-visible',
@@ -112,6 +114,8 @@ export const IpcChannels = {
   sshListFiles: 'ssh:list-files',
   sshCwdDebugLog: 'ssh:cwd-debug-log',
   sshDownloadFile: 'ssh:download-file',
+  sshPdfPreview: 'ssh:pdf-preview',
+  sshPdfPreviewCancel: 'ssh:pdf-preview-cancel',
   sshDownloadsGet: 'ssh:downloads-get',
   sshDownloadCancel: 'ssh:download-cancel',
   sshDownloadsChanged: 'ssh:downloads-changed',
@@ -1628,8 +1632,9 @@ export interface SshState {
   /**
    * Working directory of the shell that runs the MODEL's commands.
    *
-   * Shown separately from the interactive prompt because they are two different
-   * sessions: typing `cd /tmp` in the pane does not move the model's shell.
+   * Used by the workbench while remoteExec is true. The independent interactive
+   * PTY directory is tracked separately; manual directory changes are mirrored
+   * to the model shell when that shell can accept them.
    */
   modelCwd: string
   /**
@@ -1952,9 +1957,10 @@ export interface NacosSaveResult extends NacosConnectionsState {
  * renderer consumes it, so the two can never drift apart.
  */
 export interface AppApi {
+  invokeToolbox(request: ToolboxInvocation): Promise<unknown>
   getAppInfo(): Promise<AppInfo>
-  /** Read the Git history of the repository that contains `cwd`. */
-  getGitLog(cwd: string): Promise<GitLogResult>
+  /** Read only the requested part of the repository; omitted mode reads all. */
+  getGitLog(cwd: string, mode?: GitReadMode): Promise<GitLogResult>
   /** Read the unified diff of one changed path. */
   getGitDiff(cwd: string, path: string): Promise<GitFileDiff>
   /** Sessions currently owned by the outer manager. */
@@ -2185,12 +2191,12 @@ export interface AppApi {
   createMysqlTable(draft: MysqlConnectionDraft, database: string, sql: string): Promise<{ ok: boolean; message: string }>
   /** Read the CREATE statement without changing the database. */
   getMysqlTableDdl(draft: MysqlConnectionDraft, database: string, table: string): Promise<MysqlTableDdl>
-  onMysqlConnectionChanged(listener: (state: MysqlConnectionsState) => void): () => void
+  onMysqlConnectionChanged(listener: (state: MysqlConnectionsState) => void, sessionId?: string): () => void
 
   listRedisConnections(): Promise<RedisConnectionsState>
   saveRedisConnection(draft: RedisConnectionDraft): Promise<RedisSaveResult>
   removeRedisConnection(id: string): Promise<RedisConnectionsState>
-  onRedisConnectionChanged(listener: (state: RedisConnectionsState) => void): () => void
+  onRedisConnectionChanged(listener: (state: RedisConnectionsState) => void, sessionId?: string): () => void
   testRedisConnection(draft: RedisConnectionDraft): Promise<RedisConnectionResult>
   scanRedisKeys(draft: RedisConnectionDraft, cursor: string, search: string): Promise<RedisKeyPage>
   readRedisKey(draft: RedisConnectionDraft, keyId: string, cursor: string): Promise<RedisKeyData>
@@ -2204,15 +2210,15 @@ export interface AppApi {
   listNacosConnections(): Promise<NacosConnectionsState>
   saveNacosConnection(draft: NacosConnectionDraft): Promise<NacosSaveResult>
   removeNacosConnection(id: string): Promise<NacosConnectionsState>
-  onNacosConnectionChanged(listener: (state: NacosConnectionsState) => void): () => void
+  onNacosConnectionChanged(listener: (state: NacosConnectionsState) => void, sessionId?: string): () => void
   openNacosView(url: string): Promise<NacosViewState>
   navigateNacos(url: string): Promise<NacosViewState>
-  sendNacosCommand(command: EmbedCommand): void
+  sendNacosCommand(command: EmbedCommand, sessionId?: string): void
   closeNacosView(): Promise<NacosViewState>
-  setNacosBounds(bounds: EmbedBounds): void
-  setNacosVisible(visible: boolean): void
+  setNacosBounds(bounds: EmbedBounds, sessionId?: string): void
+  setNacosVisible(visible: boolean, sessionId?: string): void
   getNacosState(): Promise<NacosViewState>
-  onNacosState(listener: (state: NacosViewState) => void): () => void
+  onNacosState(listener: (state: NacosViewState) => void, sessionId?: string): () => void
 
   /** Saved SSH targets, newest first. */
   listSshHosts(): Promise<SshHost[]>
@@ -2237,7 +2243,10 @@ export interface AppApi {
   /** Append one SSH directory-picker diagnostic line to the local debug log. */
   logSshCwdDebug(message: string): void
   /** Pick a local destination and start downloading one remote file over SFTP. */
-  downloadSshFile(path: string): Promise<boolean>
+  downloadSshFile(path: string, expectedHostId?: string): Promise<boolean>
+  /** Read one PDF from the selected host into memory for the app's viewer. */
+  previewSshPdf(request: SshPdfPreviewRequest): Promise<SshPdfPreviewData>
+  cancelSshPdfPreview(requestId: string): Promise<void>
   /** Current and recently finished downloads for this SSH session. */
   getSshDownloads(): Promise<SshDownloadTask[]>
   /** Cancel one in-progress download. */
@@ -2254,6 +2263,19 @@ export interface AppApi {
   installUpdate(): Promise<void>
   /** Fires on every updater phase/progress change. */
   onUpdateChanged(listener: (status: UpdateStatus) => void): () => void
+}
+
+/** One cancellable PDF read bound to its original SSH host. */
+export interface SshPdfPreviewRequest {
+  requestId: string
+  hostId: string
+  path: string
+}
+
+export interface SshPdfPreviewData {
+  hostId: string
+  path: string
+  data: ArrayBuffer
 }
 
 /** Author of a Git commit. */
@@ -2293,6 +2315,8 @@ export interface GitFileChange {
   code: string
   additions: number
   deletions: number
+  /** False until line counts are available; untracked files are read on selection. */
+  statsLoaded?: boolean
 }
 
 /** One line of a unified diff. */
@@ -2328,12 +2352,24 @@ export interface GitFileDiff {
 }
 
 /** Result of inspecting the repository that contains a directory. */
+export type GitReadMode = 'all' | 'files' | 'history' | 'stats'
+
+export interface GitFileStat {
+  path: string
+  additions: number
+  deletions: number
+}
+
 export interface GitLogResult {
   isRepo: boolean
   currentBranch: string
   entries: GitLogEntry[]
   indexStatus: GitIndexStatus
   files: GitFileChange[]
+  /** A failed status read must not appear as a clean work tree. */
+  statusLoaded?: boolean
+  /** Present only when the requested numstat read succeeded. */
+  fileStats?: GitFileStat[]
   error?: string
 }
 

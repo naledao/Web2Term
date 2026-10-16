@@ -1,3 +1,4 @@
+import { useToolApi } from './ToolSurfaceContext'
 ﻿import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { DiffModeEnum, DiffView } from '@git-diff-view/react'
@@ -29,6 +30,7 @@ interface Totals {
   count: number
   additions: number
   deletions: number
+  statsLoaded: boolean
 }
 
 function badgeFor(file: GitFileChange): { letter: string; tone: string } {
@@ -97,21 +99,27 @@ function rollUp(node: FolderNode): Totals {
   let count = node.files.length
   let additions = 0
   let deletions = 0
+  let statsLoaded = true
   for (const file of node.files) {
     additions += file.additions
     deletions += file.deletions
+    if (file.statsLoaded === false) statsLoaded = false
   }
   for (const child of node.folders) {
     const sub = rollUp(child)
     count += sub.count
     additions += sub.additions
     deletions += sub.deletions
+    if (!sub.statsLoaded) statsLoaded = false
   }
-  return { count, additions, deletions }
+  return { count, additions, deletions, statsLoaded }
 }
 
 /** Zero counts read as a plain grey 0 rather than a signed value. */
-function Delta({ additions, deletions }: { additions: number; deletions: number }): ReactElement {
+function Delta({ additions, deletions, statsLoaded = true }: { additions: number; deletions: number; statsLoaded?: boolean }): ReactElement {
+  if (!statsLoaded) {
+    return <span className="gitfiles__delta" title="行数尚未统计，选中文件可查看差异和行数"><em className="gitfiles__zero">—</em></span>
+  }
   return (
     <span className="gitfiles__delta">
       {additions > 0 ? <em className="gitfiles__plus">+{additions}</em> : <em className="gitfiles__zero">0</em>}
@@ -160,6 +168,7 @@ function DiffViewer({ diff, theme, mode }: ViewerProps & { mode: DiffMode }): Re
 }
 
 export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): ReactElement {
+  const api = useToolApi()
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState('')
@@ -206,7 +215,7 @@ export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): 
       additions += file.additions
       deletions += file.deletions
     }
-    return { additions, deletions }
+    return { additions, deletions, statsLoaded: files.every((file) => file.statsLoaded !== false) }
   }, [files])
 
   const visible = useMemo(() => {
@@ -236,7 +245,8 @@ export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): 
     }
     let cancelled = false
     setDiffLoading(true)
-    void window.api
+    setDiff(null)
+    void api
       .getGitDiff(cwd, selected)
       .then((result) => {
         if (!cancelled) setDiff(result)
@@ -309,7 +319,7 @@ export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): 
         <span className={'gitfiles__ext gitfiles__ext--' + extTone(file.path)}>{extLabel(file.path)}</span>
         <span className="gitfiles__name">{fileName(file.path)}</span>
         <em className={'gitfiles__badge gitfiles__badge--' + badge.tone}>{badge.letter}</em>
-        <Delta additions={file.additions} deletions={file.deletions} />
+        <Delta additions={file.additions} deletions={file.deletions} statsLoaded={file.statsLoaded} />
       </button>
     )
   }
@@ -337,7 +347,7 @@ export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): 
         </span>
         <span className="gitfiles__name">{node.name}</span>
         <em className="gitfiles__folder-count">{totals.count}</em>
-        <Delta additions={totals.additions} deletions={totals.deletions} />
+        <Delta additions={totals.additions} deletions={totals.deletions} statsLoaded={totals.statsLoaded} />
       </button>
     ]
     if (!isCollapsed) {
@@ -355,9 +365,9 @@ export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): 
     <div className="gitfiles" style={{ gridTemplateColumns: paneWidth + 'px minmax(0, 1fr)' }}>
       <div className="gitfiles__pane">
         <div className="gitfiles__head">
-          <span className="gitfiles__title">本地未提交的改动</span>
+          <span className="gitfiles__title">未提交的改动</span>
           <span className="gitfiles__count">{counts.all}</span>
-          <Delta additions={grand.additions} deletions={grand.deletions} />
+          <Delta additions={grand.additions} deletions={grand.deletions} statsLoaded={grand.statsLoaded} />
         </div>
 
         <div className="gitfiles__filters">
@@ -434,8 +444,7 @@ export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): 
                 </button>
               </div>
               <span className="gitdiff__totals">
-                <em className="gitfiles__plus">+{diff ? diff.additions : 0}</em>
-                <em className="gitfiles__minus">-{diff ? diff.deletions : 0}</em>
+                <Delta additions={diff?.additions ?? 0} deletions={diff?.deletions ?? 0} statsLoaded={!!diff && !diffLoading} />
               </span>
             </div>
             <div className="gitdiff__body">

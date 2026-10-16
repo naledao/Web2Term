@@ -1,3 +1,4 @@
+import { useToolApi, useToolSurface, ToolMinimizeButton } from './ToolSurfaceContext'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type {
@@ -92,6 +93,8 @@ function Cell({ value }: { value: RedisValueCell }): ReactElement {
 export default function RedisDialog({ open, theme, onClose }: {
   open: boolean; theme: AppTheme; onClose: () => void
 }): ReactElement | null {
+  const api = useToolApi()
+  const { visible, active } = useToolSurface()
   const [state, setState] = useState<RedisConnectionsState | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -129,31 +132,31 @@ export default function RedisDialog({ open, theme, onClose }: {
   }, [])
 
   useEffect(() => {
-    if (!open) return
+    if (!open || !active) return
     let cancelled = false
     let receivedEvent = false
     setLoading(true)
     setError('')
-    const unsubscribe = window.api.onRedisConnectionChanged((next) => {
+    const unsubscribe = api.onRedisConnectionChanged((next) => {
       receivedEvent = true
       applyState(next)
     })
-    void window.api.listRedisConnections().then((next) => {
+    void api.listRedisConnections().then((next) => {
       if (!cancelled && !receivedEvent) applyState(next)
     }).catch(() => {
       if (!cancelled) setError('读取已保存连接失败，请检查系统密码加密服务后重试。')
     }).finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true; unsubscribe() }
-  }, [open, applyState])
+  }, [open, active, applyState])
 
   useEffect(() => {
-    if (!open) return
+    if (!open || !visible) return
     const keydown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape' && !event.defaultPrevented && !pendingDelete) onClose()
     }
     window.addEventListener('keydown', keydown)
     return () => window.removeEventListener('keydown', keydown)
-  }, [open, onClose, pendingDelete])
+  }, [open, visible, onClose, pendingDelete])
 
   const loadKeys = useCallback(async (tab: ConnectionTab, append = false): Promise<void> => {
     const request = ++requestRef.current
@@ -164,7 +167,7 @@ export default function RedisDialog({ open, theme, onClose }: {
       keysRequest: request, keysError: '', appliedSearch: search
     } : item))
     let result: RedisKeyPage
-    try { result = await window.api.scanRedisKeys(draftFromForm(tab.form, tab.database), cursor, search) }
+    try { result = await api.scanRedisKeys(draftFromForm(tab.form, tab.database), cursor, search) }
     catch { result = { ok: false, keys: [], cursor: '0', complete: true, total: null, message: '读取失败，请重试。', notice: '' } }
     setTabs((current) => current.map((item) => {
       if (item.key !== tab.key || item.keysRequest !== request) return item
@@ -181,7 +184,7 @@ export default function RedisDialog({ open, theme, onClose }: {
       valueFormat: append ? item.valueFormat : 'json'
     } : item))
     let result: RedisKeyData
-    try { result = await window.api.readRedisKey(draftFromForm(tab.form, tab.database), key.id, append ? tab.value?.nextCursor ?? '0' : '0') }
+    try { result = await api.readRedisKey(draftFromForm(tab.form, tab.database), key.id, append ? tab.value?.nextCursor ?? '0' : '0') }
     catch { result = { ok: false, key: null, columns: [], rows: [], value: null, total: null, nextCursor: null, message: '读取失败，请重试。', notice: '' } }
     setTabs((current) => current.map((item) => {
       if (item.key !== tab.key || item.valueRequest !== request) return item
@@ -198,10 +201,10 @@ export default function RedisDialog({ open, theme, onClose }: {
 
   // Saved connections load only when explicitly opened. Tab switches reuse loaded data.
   useEffect(() => {
-    if (!open) return
+    if (!open || !visible) return
     const tab = tabsRef.current.find((item) => item.key === activeKey)
     if (tab?.view === 'data' && tab.page === null && !tab.keysLoading && !tab.keysError) void loadKeys(tab)
-  }, [open, activeKey, loadKeys])
+  }, [open, visible, activeKey, loadKeys])
 
   const updateForm = (patch: Partial<ConnectionForm>): void => {
     setError('')
@@ -216,7 +219,7 @@ export default function RedisDialog({ open, theme, onClose }: {
     setError('')
     const owner = ownerRef.current
     try {
-      const result = await window.api.saveRedisConnection(draftFromForm(tab.form))
+      const result = await api.saveRedisConnection(draftFromForm(tab.form))
       if (ownerRef.current !== owner || result.ownerKey !== owner) return
       applyState(result)
       const saved = result.connections.find((connection) => connection.id === result.id)
@@ -231,7 +234,7 @@ export default function RedisDialog({ open, theme, onClose }: {
     const request = ++requestRef.current
     setTabs((current) => current.map((item) => item.key === tab.key ? { ...item, testing: true, testRequest: request, testResult: null } : item))
     let result: RedisConnectionResult
-    try { result = await window.api.testRedisConnection(draftFromForm(tab.form)) }
+    try { result = await api.testRedisConnection(draftFromForm(tab.form)) }
     catch { result = { ok: false, message: '连接失败，请重试。' } }
     setTabs((current) => current.map((item) => item.key === tab.key && item.testRequest === request ? { ...item, testing: false, testResult: result } : item))
   }
@@ -249,7 +252,7 @@ export default function RedisDialog({ open, theme, onClose }: {
     const owner = ownerRef.current
     setRemoving(true)
     try {
-      const next = await window.api.removeRedisConnection(id)
+      const next = await api.removeRedisConnection(id)
       if (ownerRef.current !== owner) return
       applyState(next)
       const remaining = tabsRef.current.filter((tab) => tab.form.id !== id)
@@ -282,6 +285,7 @@ export default function RedisDialog({ open, theme, onClose }: {
         </div>
         <span className="panel__spacer" />
         <span className="redis-page__readonly">只读</span>
+        <ToolMinimizeButton />
         <button type="button" className="mysql-page__close" aria-label="关闭 Redis 工具页" onClick={onClose}>×</button>
       </header>
       <div className="mysql-page__body">

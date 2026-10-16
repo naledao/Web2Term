@@ -1855,6 +1855,10 @@ export class SessionRuntime {
   private send(channel: string, payload: unknown): void {
     const window = this.window
     if (!this.active || !window || window.isDestroyed()) return
-    window.webContents.send(channel, payload)
+    if (channel === IpcChannels.mysqlConnChanged || channel === IpcChannels.redisConnChanged || channel === IpcChannels.nacosConnChanged) {
+      window.webContents.send(channel, payload, this.id)
+    } else {
+      window.webContents.send(channel, payload)
+    }
   }
 }

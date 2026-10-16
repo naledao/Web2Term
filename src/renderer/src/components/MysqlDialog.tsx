@@ -1,3 +1,4 @@
+import { useToolApi, useToolSurface, ToolMinimizeButton } from './ToolSurfaceContext'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { Tooltip } from '@base-ui/react/tooltip'
@@ -239,6 +240,8 @@ function matchesSaved(form: ConnectionForm, saved: MysqlConnection): boolean {
  * later; nothing here pretends to have tested the connection.
  */
 export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps): ReactElement | null {
+  const api = useToolApi()
+  const { visible, active } = useToolSurface()
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -307,7 +310,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
   useEffect(() => { setCellDetail(null) }, [activeKey, open])
   useEffect(() => { setRowSelection(null) }, [activeKey, open])
   useEffect(() => {
-    if (cellDetail === null) return
+    if (cellDetail === null || !visible) return
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         event.stopPropagation()
@@ -316,7 +319,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [cellDetail])
+  }, [cellDetail, visible])
 
   const connections = state?.connections ?? []
   const activeTab = tabs.find((tab) => tab.key === activeKey) ?? null
@@ -358,11 +361,11 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
   }, [open, connectionVisitScope, latestTableVisits, updateTableVisits])
 
   useEffect(() => {
-    if (!open) return
+    if (!open || !active) return
     let cancelled = false
     setLoading(true)
     setError('')
-    void window.api
+    void api
       .listMysqlConnections()
       .then((next) => {
         if (!cancelled) setState(next)
@@ -376,23 +379,23 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
     return () => {
       cancelled = true
     }
-  }, [open])
+  }, [open, active])
 
   // Another window, or a machine change, can rewrite the list underneath this one.
   useEffect(() => {
-    if (!open) return
-    return window.api.onMysqlConnectionChanged((next) => setState(next))
-  }, [open])
+    if (!open || !active) return
+    return api.onMysqlConnectionChanged((next) => setState(next))
+  }, [open, active])
 
   // Escape closes the page, like every other dialog on the platform.
   useEffect(() => {
-    if (!open) return
+    if (!open || !visible) return
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape' && !event.defaultPrevented && pendingDelete === null && pendingRowDelete === null) onClose()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, onClose, pendingDelete, pendingRowDelete])
+  }, [open, visible, onClose, pendingDelete, pendingRowDelete])
 
   /**
    * Open a saved connection in its own tab, or bring the tab it already has to the front.
@@ -508,7 +511,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
     )
     let result: MysqlTableList
     try {
-      result = await window.api.listMysqlTables(draftFromForm(form), form.database.trim())
+      result = await api.listMysqlTables(draftFromForm(form), form.database.trim())
     } catch {
       result = { ok: false, tables: [], message: '连接失败，请检查连接信息。' }
     }
@@ -538,7 +541,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
     setCreateTableBusy(true)
     setCreateTableError('')
     try {
-      const result = await window.api.createMysqlTable(draftFromForm(form), form.database.trim(), sql)
+      const result = await api.createMysqlTable(draftFromForm(form), form.database.trim(), sql)
       if (!result.ok) {
         setCreateTableError(result.message || '创建数据表失败。')
         return
@@ -561,7 +564,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
       ))
       let result: MysqlTableData
       try {
-        result = await window.api.queryMysqlTable(draft, database, table)
+        result = await api.queryMysqlTable(draft, database, table)
       } catch {
         result = { ok: false, sql: '', columns: [], columnComments: [], columnCommentsMessage: '', rows: [], rowKeys: [], rowDeleteMessage: '', truncated: false, message: '读取失败，请重试。' }
       }
@@ -584,7 +587,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
       : item))
     let result: MysqlSqlExecutionResult
     try {
-      result = await window.api.executeMysqlSql(tab.draft, tab.database, sql)
+      result = await api.executeMysqlSql(tab.draft, tab.database, sql)
     } catch {
       result = { ok: false, columns: [], rows: [], affectedRows: null, truncated: false, message: 'SQL 执行失败，请检查数据库连接。' }
     }
@@ -631,7 +634,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
     try {
       for (const rowKey of target.rowKeys) {
         try {
-          const result = await window.api.deleteMysqlTableRow(target.draft, target.database, target.table, rowKey)
+          const result = await api.deleteMysqlTableRow(target.draft, target.database, target.table, rowKey)
           if (!result.ok) { failure = result.message; break }
           deleted += 1
         } catch {
@@ -689,7 +692,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
       )
       let result: MysqlTableDdl
       try {
-        result = await window.api.getMysqlTableDdl(draft, database, table)
+        result = await api.getMysqlTableDdl(draft, database, table)
       } catch {
         result = { ok: false, ddl: '', message: '读取 DDL 失败，请重试。' }
       }
@@ -706,14 +709,13 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
   )
 
   const openDdlTab = useCallback(
-    async (connectionId: string, form: ConnectionForm, table: string, comment: string): Promise<void> => {
-      const database = form.database.trim()
-      const draft = draftFromForm(form)
+    async (connectionId: string, draft: MysqlConnectionDraft, table: string, comment: string): Promise<void> => {
+      const database = draft.database.trim()
       const existing = tabs.find((tab) => tab.kind === 'ddl' && tab.connectionId === connectionId && tab.database === database && tab.table === table)
       const key = existing?.key ?? `ddl:${JSON.stringify([connectionId, database, table])}`
       setTabs((current) =>
         current.some((tab) => tab.key === key)
-          ? current.map((tab) => tab.key === key && tab.kind === 'ddl' ? { ...tab, tableComment: comment.trim() } : tab)
+          ? current.map((tab) => tab.key === key && tab.kind === 'ddl' ? { ...tab, tableComment: comment.trim(), draft } : tab)
           : [
               ...current,
               {
@@ -763,7 +765,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
     if (dbResult !== null) return
     setDbLoading(true)
     try {
-      setDbResult(await window.api.listMysqlDatabases(draftFromForm(activeForm)))
+      setDbResult(await api.listMysqlDatabases(draftFromForm(activeForm)))
     } catch {
       setDbResult({ ok: false, databases: [], message: '连接失败，请检查连接信息。' })
     } finally {
@@ -784,7 +786,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
     setError('')
     const key = activeConnection.key
     try {
-      const result = await window.api.saveMysqlConnection(draftFromForm(activeForm))
+      const result = await api.saveMysqlConnection(draftFromForm(activeForm))
       setState({ machineLabel: result.machineLabel, connections: result.connections })
       const saved = result.connections.find((connection) => connection.id === result.id) ?? null
       const nextForm = saved ? formFromConnection(saved) : { ...activeForm, id: result.id }
@@ -841,13 +843,13 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
 
   // Clicking anywhere else closes the dropdown, the way a select behaves.
   useEffect(() => {
-    if (!dbPickerOpen) return
+    if (!dbPickerOpen || !visible) return
     const onPointerDown = (event: PointerEvent): void => {
       if (dbBoxRef.current && !dbBoxRef.current.contains(event.target as Node)) setDbPickerOpen(false)
     }
     window.addEventListener('pointerdown', onPointerDown)
     return () => window.removeEventListener('pointerdown', onPointerDown)
-  }, [dbPickerOpen])
+  }, [dbPickerOpen, visible])
   /**
    * Delete the connection the confirm dialog is showing.
    *
@@ -860,7 +862,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
     if (connection === null) return
     setError("")
     try {
-      const next = await window.api.removeMysqlConnection(connection.id)
+      const next = await api.removeMysqlConnection(connection.id)
       setState(next)
       const index = tabs.findIndex((tab) => tab.key === connection.id)
       const remaining = tabs.filter((tab) => tab.key !== connection.id)
@@ -947,6 +949,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
           </div>
 
           <span className="panel__spacer" />
+          <ToolMinimizeButton />
           <button type="button" className="mysql-page__close" aria-label="关闭" onClick={onClose}>
             <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
               <path d="M4 4l8 8M12 4l-8 8" />
@@ -1082,7 +1085,18 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
               <div className="mysql-page__table">
                 <div className="mysql-page__card-head mysql-page__table-head">
                   <div className="mysql-page__table-heading">
-                    <span className="mysql-page__card-title">{activeTab.table}</span>
+                    <div className="mysql-page__table-name-row">
+                      <span className="mysql-page__card-title">{activeTab.table}</span>
+                      <button
+                        type="button"
+                        className="mysql-page__btn mysql-page__table-header-ddl"
+                        aria-label={`查看 ${activeTab.table} 的 DDL`}
+                        title="查看当前表的建表语句"
+                        onClick={() => void openDdlTab(activeTab.connectionId, { ...activeTab.draft, database: activeTab.database }, activeTab.table, activeTab.tableComment)}
+                      >
+                        查看 DDL
+                      </button>
+                    </div>
                     {activeTab.tableComment?.trim() ? (
                       <span className="mysql-page__card-note mysql-page__table-caption">{activeTab.tableComment.trim()}</span>
                     ) : null}
@@ -1562,7 +1576,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
                             className="mysql-page__btn mysql-page__table-ddl"
                             aria-label={`查看 ${table.name} 的 DDL`}
                             onClick={() => {
-                              if (activeForm !== null && activeConnection !== null) void openDdlTab(activeConnection.key, activeForm, table.name, table.comment)
+                              if (activeForm !== null && activeConnection !== null) void openDdlTab(activeConnection.key, draftFromForm(activeForm), table.name, table.comment)
                             }}
                           >
                             查看 DDL

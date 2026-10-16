@@ -9,6 +9,10 @@ import { basename, posix } from 'node:path'
 import type { SshDownloadTask, SshFileEntry, SshState, SshUploadTask, TerminalLine } from '../shared/types'
 import { REMOTE_SHELL_COMMAND, RemoteShell } from './remote-shell'
 import type { GitBackend } from './git'
+import { writeGitDiagnostic } from './git-diagnostic'
+import { sshWorkingDirectory } from '../shared/ssh-directory'
+import { SshPdfPreviewReader } from './ssh-pdf-preview'
+import type { SshPdfPreviewRequest, SshPdfPreviewData } from '../shared/types'
 
 /** Strips ANSI/VT and OSC sequences — there is no terminal emulator to render them. */
 const ANSI_RE = /\u001B(?:\][^\u0007]*(?:\u0007|\u001B\\)|[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g
@@ -137,8 +141,8 @@ const EMPTY: SshState = {
  * They remain separate because the PTY echoes every byte and prints a prompt between
  * commands, while the exec channel has neither and can therefore be framed exactly
  * for the model. User input is sent to the PTY, so password prompts, `read`, Ctrl-C,
- * and other interactive programs work there. The cost — the two do not share a
- * working directory — is shown in the UI rather than hidden.
+ * and other interactive programs work there. Their directories are tracked
+ * independently; the workbench follows the live model execution directory.
  *
  * Worth stating explicitly: SSH traffic does NOT go through the ChatGPT proxy
  * setting. `ssh2` opens its own socket through Node's `net`, and the proxy is
@@ -180,6 +184,7 @@ export class SshManager {
   private readonly uploads = new Map<string, SshUploadTask>()
   private readonly uploadChannels = new Map<string, SFTPWrapper>()
   private readonly uploadEmitAt = new Map<string, number>()
+  private readonly pdfPreview = new SshPdfPreviewReader(this)
 
   constructor(
     private readonly onChanged: (state: SshState) => void,
@@ -426,21 +431,37 @@ export class SshManager {
       }
     }
     return {
-      runGit: (cwd, args) => {
+      kind: 'ssh',
+      runGit: (cwd, args, diagnostic) => {
         verify()
         if (!cwd.startsWith('/')) return Promise.reject(new Error('SSH Git 工作目录无效。'))
         const command = `GIT_OPTIONAL_LOCKS=0 GIT_PAGER=cat git -C ${posixQuote(cwd)} ${args.map(posixQuote).join(' ')}`
         return new Promise<string>((resolve, reject) => {
+          const requestedAt = performance.now()
+          let openedAt: number | null = null
           let channel: ClientChannel | null = null
           let finished = false
           let bytes = 0
           const chunks: Buffer[] = []
           const errors: Buffer[] = []
-          const done = (error?: Error, exitCode?: number | null): void => {
+          const done = (error?: Error, exitCode?: number | null, failure?: 'timeout' | 'output-limit'): void => {
             if (finished) return
             finished = true
             clearTimeout(timer)
-            try { verify() } catch (connectionError) { reject(connectionError); return }
+            let connectionChanged = false
+            try { verify() } catch (connectionError) {
+              connectionChanged = true
+              error = connectionError instanceof Error ? connectionError : new Error('SSH 连接已经变化。')
+            }
+            const endedAt = performance.now()
+            if (diagnostic) writeGitDiagnostic(diagnostic, {
+              event: 'ssh-finish',
+              status: connectionChanged ? 'connection-changed' : failure ?? (error ? 'error' : exitCode !== 0 ? 'exit-failed' : 'ok'),
+              elapsedMs: endedAt - requestedAt,
+              channelWaitMs: (openedAt ?? endedAt) - requestedAt,
+              executionMs: openedAt === null ? undefined : endedAt - openedAt,
+              bytes, exitCode: exitCode ?? null
+            })
             if (error) { reject(error); return }
             if (exitCode !== 0) {
               reject(new Error(Buffer.concat(errors).toString('utf8').trim() || `远程 Git 退出码：${exitCode ?? '未知'}`))
@@ -449,18 +470,20 @@ export class SshManager {
             resolve(Buffer.concat(chunks).toString('utf8'))
           }
           const timer = setTimeout(() => {
+            done(new Error('远程 Git 命令超过 60 秒。'), undefined, 'timeout')
             try { channel?.close() } catch { /* channel already gone */ }
-            done(new Error('远程 Git 命令超过 60 秒。'))
           }, 60000)
           client.exec(command, (error, stream) => {
             if (finished) { try { stream?.close() } catch { /* already gone */ }; return }
             if (error || !stream) { done(error || new Error('无法打开远程 Git 通道。')); return }
             channel = stream
+            openedAt = performance.now()
+            if (diagnostic) writeGitDiagnostic(diagnostic, { event: 'ssh-open', channelWaitMs: openedAt - requestedAt })
             const collect = (chunk: Buffer, target: Buffer[]): void => {
               bytes += chunk.length
               if (bytes > 32 * 1024 * 1024) {
+                done(new Error('远程 Git 输出超过 32 MiB。'), undefined, 'output-limit')
                 try { stream.close() } catch { /* already gone */ }
-                done(new Error('远程 Git 输出超过 32 MiB。'))
               } else target.push(chunk)
             }
             stream.on('data', (chunk: Buffer) => collect(chunk, chunks))
@@ -481,7 +504,16 @@ export class SshManager {
       }
     }
   }
-  /** List one remote directory over SFTP for the file manager. */
+  /** Read a PDF for the app viewer, scoped to the original host and request. */
+  previewPdf(request: SshPdfPreviewRequest): Promise<SshPdfPreviewData> {
+    return this.pdfPreview.read(request)
+  }
+
+  cancelPdfPreview(requestId: string): void {
+    this.pdfPreview.cancel(requestId)
+  }
+
+  /** Read one remote file without modifying it or its parent shell. */
   async readFileForModel(remotePath: string, expectedHostId: string, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
     signal.throwIfAborted()
     const client = this.client
@@ -697,7 +729,7 @@ export class SshManager {
     const files = localPaths.filter((path) => typeof path === 'string' && path !== '')
     if (files.length === 0) return this.getState()
 
-    const remoteDir = this.exec?.cwd || '.'
+    const remoteDir = sshWorkingDirectory(this.getState()) || '.'
     for (const localPath of files) {
       const name = basename(localPath)
       const task: SshUploadTask = {
@@ -912,6 +944,11 @@ export class SshManager {
 
       const shell = new RemoteShell(stream, {
         onOutput: (chunk) => { if (this.client === client) this.pushModelOutput(chunk) },
+        onCwdChanged: () => {
+          // Initial probing happens before this.exec is published. An older
+          // channel must not update a reconnected host or resurrect a dead one.
+          if (this.client === client && this.exec === shell && shell.alive) this.emit()
+        },
         onClosed: (interrupted) => {
           // Deliberate command interruption is not a flaky-channel retry.
           // Cancel the attempt consumed by the channel we intentionally killed,
@@ -1007,6 +1044,7 @@ export class SshManager {
   }
 
   private teardown(): void {
+    this.pdfPreview.cancel()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null

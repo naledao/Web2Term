@@ -1,6 +1,12 @@
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { join, sep } from 'node:path'
+import { createGitDiagnostic, writeGitDiagnostic } from './git-diagnostic'
+import type { GitDiagnosticContext } from './git-diagnostic'
+import type {
+  GitChangeKind, GitDiffHunk, GitFileChange, GitFileDiff, GitFileStat,
+  GitIndexStatus, GitLogEntry, GitLogResult, GitReadMode
+} from '../shared/types'
 
 /**
  * Read-only Git inspection for the toolbox -> Git panel.
@@ -8,80 +14,6 @@ import { join, sep } from 'node:path'
  * Everything here shells out to the system `git`. Nothing is ever written to the
  * repository: the panel only visualises history, the index and diffs.
  */
-
-export interface GitAuthor {
-  name?: string
-  email?: string
-}
-
-export interface GitLogEntry {
-  hash: string
-  branch: string
-  parents: string[]
-  message: string
-  author?: GitAuthor
-  committerDate: string
-  authorDate?: string
-}
-
-export interface GitIndexStatus {
-  modified: number
-  added: number
-  deleted: number
-}
-
-export type GitChangeKind = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked'
-
-/** One changed path, with the line counts the file list shows. */
-export interface GitFileChange {
-  path: string
-  /** Previous path, only set for renames. */
-  oldPath?: string
-  kind: GitChangeKind
-  /** Single-letter status as Git reports it, for the badge. */
-  code: string
-  additions: number
-  deletions: number
-}
-
-export interface GitDiffLine {
-  kind: 'context' | 'add' | 'del'
-  oldNumber?: number
-  newNumber?: number
-  text: string
-}
-
-export interface GitDiffHunk {
-  header: string
-  lines: GitDiffLine[]
-}
-
-export interface GitFileDiff {
-  path: string
-  /** True when Git refuses to show a text diff. */
-  binary: boolean
-  hunks: GitDiffHunk[]
-  additions: number
-  deletions: number
-  /** Raw `@@` hunks, fed straight to the diff viewer. */
-  rawHunks: string[]
-  /** File contents before the change; empty for a new file. */
-  oldContent: string
-  /** File contents as they are on disk now. */
-  newContent: string
-  /** Language hint for the highlighter. */
-  lang: string
-}
-
-export interface GitLogResult {
-  /** False when the directory is not inside a Git work tree. */
-  isRepo: boolean
-  currentBranch: string
-  entries: GitLogEntry[]
-  indexStatus: GitIndexStatus
-  files: GitFileChange[]
-  error?: string
-}
 
 const FIELD = String.fromCharCode(31)
 const RECORD = String.fromCharCode(30)
@@ -96,7 +28,10 @@ function runGit(cwd: string, args: string[]): Promise<string> {
     execFile(
       'git',
       ['-C', cwd, ...args],
-      { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, windowsHide: true },
+      {
+        encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, windowsHide: true, timeout: 60000,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_PAGER: 'cat' }
+      },
       (error, stdout) => {
         if (error) reject(error)
         else resolve(stdout)
@@ -106,13 +41,42 @@ function runGit(cwd: string, args: string[]): Promise<string> {
 }
 
 export interface GitBackend {
-  runGit(cwd: string, args: string[]): Promise<string>
-  readWorkingFile(cwd: string, path: string): Promise<string>
+  kind?: 'local' | 'ssh'
+  runGit(cwd: string, args: string[], diagnostic?: GitDiagnosticContext): Promise<string>
+  readWorkingFile(cwd: string, path: string, diagnostic?: GitDiagnosticContext): Promise<string>
 }
 
 const LOCAL_GIT_BACKEND: GitBackend = {
+  kind: 'local',
   runGit,
   readWorkingFile: (cwd, path) => readFile(join(cwd, path.split('/').join(sep)), 'utf8')
+}
+
+/** One request ID follows an operation through Git, SFTP and SSH channel timings. */
+function traceGitRequest(cwd: string, backend: GitBackend, operation: GitDiagnosticContext['operation']) {
+  const context = createGitDiagnostic(backend.kind ?? 'local', operation)
+  const started = performance.now()
+  writeGitDiagnostic(context, { event: 'request-start' })
+  const stage = async (name: NonNullable<GitDiagnosticContext['stage']>, read: (details: GitDiagnosticContext) => Promise<string>): Promise<string> => {
+    const details = { ...context, stage: name }
+    const start = performance.now()
+    writeGitDiagnostic(details, { event: 'stage-start' })
+    try {
+      const output = await read(details)
+      writeGitDiagnostic(details, { event: 'stage-finish', status: 'ok', elapsedMs: performance.now() - start, bytes: Buffer.byteLength(output) })
+      return output
+    } catch (error) {
+      writeGitDiagnostic(details, { event: 'stage-finish', status: 'error', elapsedMs: performance.now() - start })
+      throw error
+    }
+  }
+  return {
+    runGit: (name: NonNullable<GitDiagnosticContext['stage']>, args: string[]) => stage(name, (details) => backend.runGit(cwd, args, details)),
+    readWorkingFile: (path: string) => stage('working-file', (details) => backend.readWorkingFile(cwd, path, details)),
+    finish: (status: 'ok' | 'error', files?: number, commits?: number): void => {
+      writeGitDiagnostic(context, { event: 'request-finish', status, elapsedMs: performance.now() - started, files, commits })
+    }
+  }
 }
 /**
  * Git on Windows emits CRLF. Every consumer below splits on LF alone, so a
@@ -157,28 +121,23 @@ function parseLog(output: string, fallbackBranch: string): GitLogEntry[] {
   return entries
 }
 
-/**
- * `git diff --numstat` prints add, del and a path. A rename reports the path as
- * either `old => new` or a braced `dir/{old => new}/file`; both resolve to the
- * name the file has now.
- */
-function resolveNumstatPath(raw: string): string {
-  const braced = raw.match(/^(.*)\{(.*) => (.*)\}(.*)$/)
-  if (braced) return (braced[1] + braced[3] + braced[4]).split('//').join('/')
-  const arrow = raw.indexOf(' => ')
-  if (arrow >= 0) return raw.slice(arrow + 4)
-  return raw
-}
-
+/** NUL-delimited paths keep Chinese names, tabs, newlines and renames intact. */
 function parseNumstat(output: string): Map<string, { additions: number; deletions: number }> {
   const counts = new Map<string, { additions: number; deletions: number }>()
-  for (const line of toLf(output).split('\n')) {
-    if (!line) continue
-    const parts = line.split('\t')
-    if (parts.length < 3) continue
-    const additions = parts[0] === '-' ? 0 : Number(parts[0])
-    const deletions = parts[1] === '-' ? 0 : Number(parts[1])
-    counts.set(resolveNumstatPath(parts.slice(2).join('\t')), {
+  const records = output.split('\0')
+  for (let i = 0; i < records.length; i += 1) {
+    const match = records[i].match(/^([^\t]+)\t([^\t]+)\t([\s\S]*)$/)
+    if (!match) continue
+    const additions = match[1] === '-' ? 0 : Number(match[1])
+    const deletions = match[2] === '-' ? 0 : Number(match[2])
+    let path = match[3]
+    if (!path) {
+      // A rename is followed by the original and destination paths.
+      path = records[i + 2]
+      i += 2
+    }
+    if (!path) continue
+    counts.set(path, {
       additions: Number.isFinite(additions) ? additions : 0,
       deletions: Number.isFinite(deletions) ? deletions : 0
     })
@@ -194,39 +153,23 @@ function kindFromCode(code: string): GitChangeKind {
   return 'modified'
 }
 
-/** Count lines of an untracked file so its row can still show a size. */
-async function countUntracked(cwd: string, path: string, backend: GitBackend): Promise<number> {
-  try {
-    const text = await backend.readWorkingFile(cwd, path)
-    if (!text) return 0
-    const lines = toLf(text).split('\n')
-    return lines.length - (lines[lines.length - 1] === '' ? 1 : 0)
-  } catch {
-    return 0
-  }
-}
-
-async function parseStatus(cwd: string, porcelain: string, numstat: string, backend: GitBackend): Promise<GitFileChange[]> {
-  const counts = parseNumstat(numstat)
+function parseStatus(porcelain: string, counts?: Map<string, { additions: number; deletions: number }>): GitFileChange[] {
   const files: GitFileChange[] = []
-
-  for (const raw of toLf(porcelain).split('\n')) {
+  const records = porcelain.split('\0')
+  for (let i = 0; i < records.length; i += 1) {
+    const raw = records[i]
     if (raw.length < 3) continue
     const code = raw.slice(0, 2)
-    let path = raw.slice(3)
+    const path = raw.slice(3)
     let oldPath: string | undefined
-    const arrow = path.indexOf(' -> ')
-    if (arrow >= 0) {
-      oldPath = path.slice(0, arrow).split('"').join('')
-      path = path.slice(arrow + 4).split('"').join('')
-    }
+    if (code.includes('R') || code.includes('C')) oldPath = records[++i]
 
     const kind = kindFromCode(code)
-    const count = counts.get(path)
-    const additions = count ? count.additions : kind === 'untracked' ? await countUntracked(cwd, path, backend) : 0
+    const count = counts?.get(path)
+    const additions = count ? count.additions : 0
     const deletions = count ? count.deletions : 0
 
-    files.push({ path, oldPath, kind, code: code.trim(), additions, deletions })
+    files.push({ path, oldPath, kind, code: code.trim(), additions, deletions, statsLoaded: counts !== undefined && kind !== 'untracked' })
   }
 
   files.sort((a, b) => a.path.localeCompare(b.path))
@@ -318,79 +261,68 @@ function languageOf(path: string): string {
   return ''
 }
 
-/** Read a file from the working tree, returning an empty string when missing. */
-async function readWorkingFile(cwd: string, path: string, backend: GitBackend): Promise<string> {
-  try {
-    return await backend.readWorkingFile(cwd, path)
-  } catch {
-    return ''
-  }
-}
-
-/** Read the history, index and changed files of the repository containing `cwd`. */
-export async function readGitLog(cwd: string, backend: GitBackend = LOCAL_GIT_BACKEND): Promise<GitLogResult> {
-  const empty: GitLogResult = {
+/** Independent queries share SSH latency; the file overview never waits for history or file contents. */
+export async function readGitLog(cwd: string, backend: GitBackend = LOCAL_GIT_BACKEND, mode: GitReadMode = 'all'): Promise<GitLogResult> {
+  const result: GitLogResult = {
     isRepo: false,
     currentBranch: '',
     entries: [],
     indexStatus: { ...EMPTY_INDEX },
-    files: []
+    files: [],
+    statusLoaded: false
   }
-  if (!cwd) return empty
-
+  if (!cwd) return { ...result, error: '未设置 Git 工作目录。' }
+  const trace = traceGitRequest(cwd, backend, mode)
   try {
-    const inside = await backend.runGit(cwd, ['rev-parse', '--is-inside-work-tree'])
-    if (inside.trim() !== 'true') return empty
-  } catch {
-    return empty
-  }
-
-  let currentBranch = ''
-  try {
-    currentBranch = (await backend.runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
-  } catch {
-    /* unborn or detached HEAD */
-  }
-  if (currentBranch === 'HEAD') currentBranch = 'HEAD (detached)'
-
-  const result: GitLogResult = {
-    isRepo: true,
-    currentBranch,
-    entries: [],
-    indexStatus: { ...EMPTY_INDEX },
-    files: []
-  }
-
-  try {
-    const format = ['%H', '%P', '%an', '%ae', '%aI', '%cI', '%s', '%D'].join(FIELD) + RECORD
-    const out = await backend.runGit(cwd, [
-      'log',
-      '--all',
-      '--date=iso-strict',
-      '-n',
-      String(MAX_COMMITS),
-      '--pretty=format:' + format
-    ])
-    result.entries = parseLog(out, currentBranch)
-  } catch (error) {
-    result.error = error instanceof Error ? error.message : String(error)
-  }
-
-  try {
-    const porcelain = await backend.runGit(cwd, ['status', '--porcelain'])
-    let numstat = ''
-    try {
-      numstat = await backend.runGit(cwd, ['diff', 'HEAD', '--numstat'])
-    } catch {
-      /* an unborn HEAD has nothing to diff against */
+    if (mode === 'stats') {
+      const counts = parseNumstat(await trace.runGit('numstat', ['diff', 'HEAD', '--numstat', '-z']))
+      result.isRepo = true
+      result.fileStats = Array.from(counts, ([path, count]): GitFileStat => ({ path, ...count }))
+      return result
     }
-    result.files = await parseStatus(cwd, porcelain, numstat, backend)
-    result.indexStatus = summarise(result.files)
-  } catch {
-    /* status is best-effort */
+    const withFiles = mode === 'all' || mode === 'files'
+    const withHistory = mode === 'all' || mode === 'history'
+    const format = ['%H', '%P', '%an', '%ae', '%aI', '%cI', '%s', '%D'].join(FIELD) + RECORD
+    const [inside, branch, status, history, stats] = await Promise.allSettled([
+      trace.runGit('repo', ['rev-parse', '--is-inside-work-tree']),
+      trace.runGit('branch', ['branch', '--show-current']),
+      withFiles ? trace.runGit('status', ['status', '--porcelain=v1', '-z']) : Promise.resolve(null),
+      withHistory ? trace.runGit('history', ['log', '--all', '--date=iso-strict', '-n', String(MAX_COMMITS), '--pretty=format:' + format]) : Promise.resolve(null),
+      mode === 'all' ? trace.runGit('numstat', ['diff', 'HEAD', '--numstat', '-z']) : Promise.resolve(null)
+    ])
+    if (inside.status === 'rejected') {
+      const message = inside.reason instanceof Error ? inside.reason.message : String(inside.reason)
+      if (!/not a git repository/i.test(message)) result.error = '无法读取 Git 仓库：' + message
+      return result
+    }
+    if (inside.value?.trim() !== 'true') return result
+    result.isRepo = true
+    if (branch.status === 'fulfilled') result.currentBranch = branch.value?.trim() || 'HEAD (detached)'
+    if (history.status === 'fulfilled' && history.value !== null) result.entries = parseLog(history.value, result.currentBranch)
+    if (stats.status === 'fulfilled' && stats.value !== null) {
+      result.fileStats = Array.from(parseNumstat(stats.value), ([path, count]) => ({ path, ...count }))
+    }
+    if (status.status === 'fulfilled' && status.value !== null) {
+      const counts = result.fileStats ? new Map(result.fileStats.map(({ path, ...count }) => [path, count])) : undefined
+      result.files = parseStatus(status.value, counts)
+      result.indexStatus = summarise(result.files)
+      result.statusLoaded = true
+    }
+    const errors: string[] = []
+    if (withFiles && status.status === 'rejected') errors.push('文件改动读取失败：' + errorMessage(status.reason))
+    if (withHistory && history.status === 'rejected') errors.push('提交记录读取失败：' + errorMessage(history.reason))
+    if (errors.length > 0) result.error = errors.join('\n')
+    return result
+  } catch (error) {
+    result.error = errorMessage(error)
+    return result
+  } finally {
+    trace.finish(result.error ? 'error' : 'ok', result.statusLoaded ? result.files.length : undefined, mode === 'history' || mode === 'all' ? result.entries.length : undefined)
   }
+}
 
-  return result
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /**
@@ -400,6 +332,18 @@ export async function readGitLog(cwd: string, backend: GitBackend = LOCAL_GIT_BA
  * files; the hunks then say which parts actually changed.
  */
 export async function readGitDiff(cwd: string, path: string, backend: GitBackend = LOCAL_GIT_BACKEND): Promise<GitFileDiff> {
+  const trace = traceGitRequest(cwd, backend, 'diff')
+  try {
+    const result = await readGitDiffContents(cwd, path, trace)
+    trace.finish('ok')
+    return result
+  } catch (error) {
+    trace.finish('error')
+    throw error
+  }
+}
+
+async function readGitDiffContents(cwd: string, path: string, trace: ReturnType<typeof traceGitRequest>): Promise<GitFileDiff> {
   const empty: GitFileDiff = {
     path,
     binary: false,
@@ -414,14 +358,14 @@ export async function readGitDiff(cwd: string, path: string, backend: GitBackend
   if (!cwd || !path) return empty
 
   const lang = languageOf(path)
-  const newContent = await readWorkingFile(cwd, path, backend)
-
-  let output = ''
-  try {
-    output = await backend.runGit(cwd, ['diff', 'HEAD', '--', path])
-  } catch {
-    return { ...empty, lang, newContent }
-  }
+  const [working, changes, previous] = await Promise.allSettled([
+    trace.readWorkingFile(path),
+    trace.runGit('diff', ['diff', 'HEAD', '--', path]),
+    trace.runGit('old-file', ['show', 'HEAD:' + path])
+  ])
+  const newContent = working.status === 'fulfilled' ? working.value : ''
+  if (changes.status === 'rejected') throw changes.reason
+  let output = changes.value
 
   // An untracked file has nothing to diff against, so the whole file is new.
   if (!output.trim()) {
@@ -457,12 +401,7 @@ export async function readGitDiff(cwd: string, path: string, backend: GitBackend
   }
 
   // Recover the previous revision so the left pane can be tokenised too.
-  let oldContent = ''
-  try {
-    oldContent = await backend.runGit(cwd, ['show', 'HEAD:' + path])
-  } catch {
-    /* the file did not exist at HEAD */
-  }
+  const oldContent = previous.status === 'fulfilled' ? previous.value : ''
 
   return {
     path,

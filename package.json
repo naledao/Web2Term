@@ -47,6 +47,11 @@
     "ws": "^8.22.0"
   },
   "devDependencies": {
+    "@embedpdf/fonts-latin": "1.0.0",
+    "@embedpdf/fonts-sc": "1.0.0",
+    "@embedpdf/fonts-tc": "1.0.0",
+    "@embedpdf/pdfium": "2.15.1",
+    "@embedpdf/react-pdf-viewer": "2.15.1",
     "@types/node": "^26.6.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

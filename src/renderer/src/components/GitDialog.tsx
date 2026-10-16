@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useToolApi, useToolSurface, ToolMinimizeButton } from './ToolSurfaceContext'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { AppTheme, GitLogEntry, GitLogResult } from '../../../shared/types'
 import GitFilesView from './GitFilesView'
@@ -18,7 +19,8 @@ const EMPTY: GitLogResult = {
   currentBranch: '',
   entries: [],
   indexStatus: { modified: 0, added: 0, deleted: 0 },
-  files: []
+  files: [],
+  statusLoaded: false
 }
 
 /** Width of one graph column; a commit sits at the centre of its own column. */
@@ -116,31 +118,94 @@ function CommitIcon({ message }: { message: string }): ReactElement {
 }
 
 export default function GitDialog({ open, cwd, theme, onClose }: GitDialogProps): ReactElement | null {
+  const api = useToolApi()
+  const { visible } = useToolSurface()
   const [log, setLog] = useState<GitLogResult>(EMPTY)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [copied, setCopied] = useState(false)
   const [view, setView] = useState<GitView>('files')
+  const [historyPhase, setHistoryPhase] = useState<'idle' | 'loading' | 'ready'>('idle')
+  const [historyError, setHistoryError] = useState('')
+  const [statsLoading, setStatsLoading] = useState(false)
+  const [statsError, setStatsError] = useState('')
+  const activeRequest = useRef<{ cancelled: boolean; overviewReady: boolean; historyStarted: boolean } | null>(null)
 
   useEffect(() => {
     if (!open) return
-    let cancelled = false
+    const request = { cancelled: false, overviewReady: false, historyStarted: false }
+    activeRequest.current = request
     setLoading(true)
+    setLog(EMPTY)
+    setView('files')
     setCopied(false)
-    void window.api
-      .getGitLog(cwd)
-      .then((result) => {
-        if (!cancelled) setLog(result)
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setLog({ ...EMPTY, error: error instanceof Error ? error.message : '读取 Git 仓库失败' })
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
+    setHistoryPhase('idle')
+    setHistoryError('')
+    setStatsLoading(false)
+    setStatsError('')
+    void (async () => {
+      try {
+        const result = await api.getGitLog(cwd, 'files')
+        if (request.cancelled) return
+        request.overviewReady = result.isRepo
+        setLog(result)
+        setLoading(false)
+        // Publish the overview before starting optional, potentially expensive line counts.
+        if (!result.statusLoaded || !result.files.some((file) => file.kind !== 'untracked')) return
+        setStatsLoading(true)
+        try {
+          const stats = await api.getGitLog(cwd, 'stats')
+          if (request.cancelled) return
+          if (!stats.fileStats) {
+            setStatsError(stats.error || '改动行数统计失败。')
+            return
+          }
+          const counts = new Map(stats.fileStats.map(({ path, ...count }) => [path, count]))
+          setLog((previous) => ({
+            ...previous,
+            files: previous.files.map((file) => file.kind === 'untracked' ? file : {
+              ...file, ...(counts.get(file.path) ?? { additions: 0, deletions: 0 }), statsLoaded: true
+            })
+          }))
+        } catch (error) {
+          if (!request.cancelled) setStatsError(error instanceof Error ? error.message : '改动行数统计失败。')
+        } finally {
+          if (!request.cancelled) setStatsLoading(false)
+        }
+      } catch (error) {
+        if (request.cancelled) return
+        setLog({ ...EMPTY, error: error instanceof Error ? error.message : '读取 Git 仓库失败。' })
+        setLoading(false)
+      }
+    })()
     return () => {
-      cancelled = true
+      request.cancelled = true
     }
   }, [open, cwd])
+
+  useEffect(() => {
+    const request = activeRequest.current
+    if (!open || view !== 'log' || loading || !request?.overviewReady || request.historyStarted) return
+    request.historyStarted = true
+    setHistoryPhase('loading')
+    void api.getGitLog(cwd, 'history').then((result) => {
+      if (request.cancelled) return
+      setLog((previous) => ({ ...previous, entries: result.entries }))
+      setHistoryError(result.error || (!result.isRepo ? '当前目录不是 Git 仓库。' : ''))
+    }).catch((error: unknown) => {
+      if (!request.cancelled) setHistoryError(error instanceof Error ? error.message : '提交记录读取失败。')
+    }).finally(() => {
+      if (!request.cancelled) setHistoryPhase('ready')
+    })
+  }, [open, cwd, view, loading])
+
+  useEffect(() => {
+    if (!visible) return
+    const keydown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && !event.defaultPrevented) onClose()
+    }
+    window.addEventListener('keydown', keydown)
+    return () => window.removeEventListener('keydown', keydown)
+  }, [visible, onClose])
 
   const rows = useMemo(() => computeRows(log.entries), [log.entries])
   const laneCount = useMemo(
@@ -235,7 +300,7 @@ export default function GitDialog({ open, cwd, theme, onClose }: GitDialogProps)
                 <circle cx="11.6" cy="6.4" r="1.6" />
                 <path d="M4.4 5.4v5.2M6 6.4h3.4" />
               </svg>
-              {log.currentBranch || 'HEAD'}
+              {loading ? '读取分支…' : log.currentBranch || '分支未知'}
               <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M4 6.4 8 10.4l4-4" />
               </svg>
@@ -245,10 +310,11 @@ export default function GitDialog({ open, cwd, theme, onClose }: GitDialogProps)
                 <path d="M8 1.8 14 4.9 8 8 2 4.9z" />
                 <path d="M2 8.1 8 11.2l6-3.1M2 11.2 8 14.3l6-3.1" />
               </svg>
-              {dirty > 0 ? dirty + ' 处改动' : '工作区干净'}
+              {loading ? '读取改动…' : !log.statusLoaded ? '改动状态未知' : dirty > 0 ? dirty + ' 处改动' : '工作区干净'}
             </span>
           </div>
 
+          <ToolMinimizeButton />
           <button type="button" className="git-dialog__close" aria-label="关闭" onClick={onClose}>
             <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
               <path d="M4 4l8 8M12 4l-8 8" />
@@ -256,10 +322,15 @@ export default function GitDialog({ open, cwd, theme, onClose }: GitDialogProps)
           </button>
         </header>
 
-        {loading ? <p className="git-dialog__hint">正在读取仓库…</p> : null}
-        {!loading && !log.isRepo ? <p className="git-dialog__hint">当前目录不是 Git 仓库。</p> : null}
+        {loading ? <p className="git-dialog__hint" role="status">正在读取文件改动…</p> : null}
+        {!loading && log.error ? <p className="git-dialog__notice git-dialog__notice--error" role="alert">{log.error}</p> : null}
+        {!loading && !log.isRepo && !log.error ? <p className="git-dialog__hint">当前目录不是 Git 仓库。</p> : null}
+        {!loading && log.isRepo && view === 'log' && historyPhase !== 'ready' ? <p className="git-dialog__hint" role="status">正在读取提交记录…</p> : null}
+        {!loading && view === 'log' && historyError ? <p className="git-dialog__notice git-dialog__notice--error" role="alert">{historyError}</p> : null}
+        {!loading && view === 'files' && statsLoading ? <p className="git-dialog__notice" role="status">文件列表已加载，正在统计改动行数…</p> : null}
+        {!loading && view === 'files' && statsError ? <p className="git-dialog__notice" title={statsError}>改动行数统计失败，可继续查看文件差异。</p> : null}
 
-        {!loading && log.isRepo && view === 'log' ? (
+        {!loading && log.isRepo && view === 'log' && historyPhase === 'ready' ? (
           <div className="gitlog">
             <div className="gitlog__columns">
               <span>分支 / 标签</span>
@@ -271,6 +342,7 @@ export default function GitDialog({ open, cwd, theme, onClose }: GitDialogProps)
             </div>
 
             <div className="gitlog__body">
+              {rows.length === 0 && !historyError ? <p className="git-dialog__hint">暂无提交记录。</p> : null}
               {dirty > 0 ? (
                 <div className="gitlog__row gitlog__row--index">
                   <div className="gitlog__labels">
@@ -361,9 +433,12 @@ export default function GitDialog({ open, cwd, theme, onClose }: GitDialogProps)
           </div>
         ) : null}
 
-        {!loading && log.isRepo && view === 'files' ? (
-          <GitFilesView cwd={cwd} files={log.files} theme={theme === 'dark' ? 'dark' : 'light'} />
-        ) : null}      </div>
+        {!loading && log.isRepo && log.statusLoaded ? (
+          <div className="git-dialog__files" hidden={view !== 'files'}>
+            <GitFilesView cwd={cwd} files={log.files} theme={theme === 'dark' ? 'dark' : 'light'} />
+          </div>
+        ) : null}
+      </div>
     </div>
   )
 }

@@ -1,3 +1,4 @@
+import type { ToolboxInvocation } from '../shared/toolbox'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { IpcChannels } from '../shared/types'
@@ -32,6 +33,7 @@ import type {
   InterceptorStatus,
   GitFileDiff,
   GitLogResult,
+  GitReadMode,
   ManagedSessionSummary,
 
   MysqlConnectionDraft,
@@ -61,6 +63,8 @@ import type {
   SshTransferDirection,
   SshTransferTask,
   SshState,
+  SshPdfPreviewRequest,
+  SshPdfPreviewData,
   TerminalNotes,
   TerminalState,
   UpdateStatus,
@@ -77,7 +81,9 @@ import type {
 const api: AppApi = {
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke(IpcChannels.getAppInfo),
 
-  getGitLog: (cwd: string): Promise<GitLogResult> => ipcRenderer.invoke(IpcChannels.gitLog, cwd),
+  invokeToolbox: (request: ToolboxInvocation): Promise<unknown> => ipcRenderer.invoke(IpcChannels.toolboxInvoke, request),
+
+  getGitLog: (cwd: string, mode?: GitReadMode): Promise<GitLogResult> => ipcRenderer.invoke(IpcChannels.gitLog, cwd, mode),
   getGitDiff: (cwd: string, path: string): Promise<GitFileDiff> => ipcRenderer.invoke(IpcChannels.gitDiff, cwd, path),
 
   listManagedSessions: (): Promise<ManagedSessionSummary[]> =>
@@ -306,8 +312,13 @@ removeConversation: (id: string): Promise<Conversation[]> =>
     ipcRenderer.send(IpcChannels.sshCwdDebugLog, message)
   },
 
-  downloadSshFile: (path: string): Promise<boolean> =>
-    ipcRenderer.invoke(IpcChannels.sshDownloadFile, path),
+  previewSshPdf: (request: SshPdfPreviewRequest): Promise<SshPdfPreviewData> =>
+    ipcRenderer.invoke(IpcChannels.sshPdfPreview, request),
+  cancelSshPdfPreview: (requestId: string): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.sshPdfPreviewCancel, requestId),
+
+  downloadSshFile: (path: string, expectedHostId?: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.sshDownloadFile, path, expectedHostId),
 
   getSshDownloads: (): Promise<SshDownloadTask[]> =>
     ipcRenderer.invoke(IpcChannels.sshDownloadsGet),
@@ -440,8 +451,10 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   removeMysqlConnection: (id: string): Promise<MysqlConnectionsState> =>
     ipcRenderer.invoke(IpcChannels.mysqlConnRemove, id),
 
-  onMysqlConnectionChanged: (listener: (state: MysqlConnectionsState) => void): (() => void) => {
-    const handler = (_event: IpcRendererEvent, state: MysqlConnectionsState): void => listener(state)
+  onMysqlConnectionChanged: (listener: (state: MysqlConnectionsState) => void, sessionId?: string): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: MysqlConnectionsState, sourceSessionId?: string): void => {
+      if (!sessionId || sessionId === sourceSessionId) listener(state)
+    }
     ipcRenderer.on(IpcChannels.mysqlConnChanged, handler)
     return () => {
       ipcRenderer.removeListener(IpcChannels.mysqlConnChanged, handler)
@@ -456,8 +469,10 @@ removeConversation: (id: string): Promise<Conversation[]> =>
     ipcRenderer.invoke(IpcChannels.redisScanKeys, draft, cursor, search),
   readRedisKey: (draft: RedisConnectionDraft, keyId: string, cursor: string): Promise<RedisKeyData> =>
     ipcRenderer.invoke(IpcChannels.redisReadKey, draft, keyId, cursor),
-  onRedisConnectionChanged: (listener: (state: RedisConnectionsState) => void): (() => void) => {
-    const handler = (_event: IpcRendererEvent, state: RedisConnectionsState): void => listener(state)
+  onRedisConnectionChanged: (listener: (state: RedisConnectionsState) => void, sessionId?: string): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: RedisConnectionsState, sourceSessionId?: string): void => {
+      if (!sessionId || sessionId === sourceSessionId) listener(state)
+    }
     ipcRenderer.on(IpcChannels.redisConnChanged, handler)
     return () => { ipcRenderer.removeListener(IpcChannels.redisConnChanged, handler) }
   },
@@ -470,8 +485,10 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   removeNacosConnection: (id: string): Promise<NacosConnectionsState> =>
     ipcRenderer.invoke(IpcChannels.nacosConnRemove, id),
 
-  onNacosConnectionChanged: (listener: (state: NacosConnectionsState) => void): (() => void) => {
-    const handler = (_event: IpcRendererEvent, state: NacosConnectionsState): void => listener(state)
+  onNacosConnectionChanged: (listener: (state: NacosConnectionsState) => void, sessionId?: string): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: NacosConnectionsState, sourceSessionId?: string): void => {
+      if (!sessionId || sessionId === sourceSessionId) listener(state)
+    }
     ipcRenderer.on(IpcChannels.nacosConnChanged, handler)
     return () => {
       ipcRenderer.removeListener(IpcChannels.nacosConnChanged, handler)
@@ -484,25 +501,27 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   navigateNacos: (url: string): Promise<NacosViewState> =>
     ipcRenderer.invoke(IpcChannels.nacosNavigate, url),
 
-  sendNacosCommand: (command: EmbedCommand): void => {
-    ipcRenderer.send(IpcChannels.nacosCommand, command)
+  sendNacosCommand: (command: EmbedCommand, sessionId?: string): void => {
+    ipcRenderer.send(IpcChannels.nacosCommand, command, sessionId)
   },
 
   closeNacosView: (): Promise<NacosViewState> =>
     ipcRenderer.invoke(IpcChannels.nacosClose),
 
-  setNacosBounds: (bounds: EmbedBounds): void => {
-    ipcRenderer.send(IpcChannels.nacosSetBounds, bounds)
+  setNacosBounds: (bounds: EmbedBounds, sessionId?: string): void => {
+    ipcRenderer.send(IpcChannels.nacosSetBounds, bounds, sessionId)
   },
 
-  setNacosVisible: (visible: boolean): void => {
-    ipcRenderer.send(IpcChannels.nacosSetVisible, visible)
+  setNacosVisible: (visible: boolean, sessionId?: string): void => {
+    ipcRenderer.send(IpcChannels.nacosSetVisible, visible, sessionId)
   },
 
   getNacosState: (): Promise<NacosViewState> => ipcRenderer.invoke(IpcChannels.nacosGetState),
 
-  onNacosState: (listener: (state: NacosViewState) => void): (() => void) => {
-    const handler = (_event: IpcRendererEvent, state: NacosViewState): void => listener(state)
+  onNacosState: (listener: (state: NacosViewState) => void, sessionId?: string): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: NacosViewState, sourceSessionId?: string): void => {
+      if (!sessionId || sessionId === sourceSessionId) listener(state)
+    }
     ipcRenderer.on(IpcChannels.nacosState, handler)
     return () => {
       ipcRenderer.removeListener(IpcChannels.nacosState, handler)

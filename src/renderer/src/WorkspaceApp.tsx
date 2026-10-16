@@ -8,6 +8,7 @@ import claudeIcon from './assets/Claude.svg'
 import geminiIcon from './assets/Gemini.svg'
 import { platformById } from '../../shared/platforms'
 import App from './App'
+import { ToolWindowsProvider, ToolWindowsHost } from './components/ToolWindows'
 import Web2termDeviceDialog from './components/Web2termDeviceDialog'
 import ConfirmDialog from './components/ConfirmDialog'
 
@@ -254,6 +255,7 @@ export default function WorkspaceApp(): ReactElement {
   }
 
   return (
+    <ToolWindowsProvider sessionIds={sessions.map((item) => item.id)}>
     <div className={'workspace' + (navCollapsed ? ' workspace--nav-collapsed' : '')} data-theme={theme} style={{ '--nav-width': `${navWidth}px` } as CSSProperties}>
       <nav className="workspace__nav">
         <div className="workspace__brand">
@@ -541,6 +543,9 @@ export default function WorkspaceApp(): ReactElement {
         ]}
         onCancel={() => setPendingDelete(null)}
         onConfirm={() => { if (pendingDelete) void deleteSession(pendingDelete) }}
-      />    </div>
+      />
+      <ToolWindowsHost sessionId={workspace.sessionId} theme={theme} blocked={transfersOpen || pendingDelete !== null || newSessionOpen || web2termDeviceDialogOpen || updateNotice !== null} />
+    </div>
+    </ToolWindowsProvider>
   )
 }

@@ -75,8 +75,8 @@ export function buildEnvelope(token: string, seq: number, command: string, separ
  * types into. A PTY echoes every byte back and prints a prompt between commands,
  * which would have to be untangled from the real output by guessing at prompt
  * shapes; a plain exec channel has no echo and no prompt, so what comes back is
- * what the command produced. The cost is that the two sessions do not share a
- * working directory, which the UI states outright rather than hiding.
+ * what the command produced. Each session keeps its own directory; directory
+ * changes on this channel are reported so the workbench follows the executor.
  */
 export class RemoteShell implements ExecutionShell {
   readonly kind: EnvironmentKind = 'posix'
@@ -98,6 +98,8 @@ export class RemoteShell implements ExecutionShell {
       onOutput?: (chunk: string) => void
       /** Called when the channel goes away; the manager decides whether to reopen. */
       onClosed?: (interrupted: boolean) => void
+      /** Confirmed by the completion marker, even for commands with no output. */
+      onCwdChanged?: (cwd: string) => void
     } = {}
   ) {
     stream.on('data', (chunk: Buffer) => this.handleData(chunk))
@@ -325,6 +327,7 @@ export class RemoteShell implements ExecutionShell {
         const pending = this.pending
         this.clearPending()
         const cwd = match[3].trim()
+        const previousCwd = this.currentCwd
         if (cwd !== '') this.currentCwd = cwd
         pending.resolve({
           output: pending.output.trimEnd(),
@@ -335,6 +338,7 @@ export class RemoteShell implements ExecutionShell {
           sessionLost: false,
           cwd: this.currentCwd
         })
+        if (this.currentCwd !== previousCwd) this.options.onCwdChanged?.(this.currentCwd)
         return
       }
     }

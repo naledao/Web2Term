@@ -11,6 +11,21 @@
   max-width: min(420px, 100%);
 }
 
+.mysql-page__table-name-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mysql-page__btn.mysql-page__table-header-ddl {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .mysql-page__table-caption {
   line-height: 1.5;
   white-space: pre-wrap;

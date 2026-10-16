@@ -3144,6 +3144,8 @@ body {
 /* Remote files reference table */
 .ssh-files__browser--table .wx-content.wx-RJbNonjJ { visibility: hidden !important; }
 .ssh-files__reference-table {
+  --ssh-files-table-columns: 42px minmax(260px, 1fr) 96px 170px 76px 42px;
+  --ssh-files-table-min-width: 760px;
   position: absolute;
   z-index: 35;
   left: 370px;
@@ -3152,8 +3154,15 @@ body {
   bottom: 28px;
   display: flex;
   flex-direction: column;
+  /* Override the browser's direct-child height: top/bottom must bound the list. */
+  height: auto;
+  min-height: 0;
   min-width: 0;
-  overflow: hidden;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #b6becb transparent;
+  overscroll-behavior: contain;
   background: #fff;
   color: #34445f;
   pointer-events: auto;
@@ -3161,12 +3170,17 @@ body {
 .ssh-files__table-head,
 .ssh-files__table-row {
   display: grid;
-  grid-template-columns: 58px minmax(230px, 1fr) 130px 220px 130px 58px;
+  grid-template-columns: var(--ssh-files-table-columns);
+  column-gap: 12px;
   align-items: center;
   box-sizing: border-box;
 }
 .ssh-files__table-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   flex: none;
+  min-width: var(--ssh-files-table-min-width);
   min-height: 50px;
   padding: 0 4px;
   border: 1px solid #edf0f5;
@@ -3226,18 +3240,18 @@ body {
   to { transform: rotate(360deg); }
 }
 .ssh-files__table-body {
-  flex: 1;
+  flex: none;
   min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: #b6becb transparent;
+  min-width: var(--ssh-files-table-min-width);
+  overflow: visible;
 }
-.ssh-files__table-body::-webkit-scrollbar { width: 7px; }
-.ssh-files__table-body::-webkit-scrollbar-thumb { border-radius: 6px; background: #b6becb; }
+.ssh-files__reference-table::-webkit-scrollbar { width: 7px; height: 7px; }
+.ssh-files__reference-table::-webkit-scrollbar-thumb { border-radius: 6px; background: #b6becb; }
 .ssh-files__table-row {
   min-height: 58px;
-  padding: 0 4px;
+  padding: 12px 4px;
+  border-right: 1px solid transparent;
+  border-left: 1px solid transparent;
   border-bottom: 1px solid #e7ebf1;
   background: #fff;
   color: #52627d;
@@ -3264,9 +3278,10 @@ body {
   font-weight: 500;
 }
 .ssh-files__table-file-name > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.5;
 }
 .ssh-files__table-file-name svg {
   width: 28px;
@@ -3292,9 +3307,13 @@ body {
 }
 .ssh-files__table-more:hover { background: #f2f5fa; }
 @media (max-width: 980px) {
-  .ssh-files__reference-table { left: 286px; }
+  .ssh-files__reference-table {
+    left: 286px;
+    --ssh-files-table-columns: 36px minmax(220px, 1fr) 88px 156px 64px 36px;
+    --ssh-files-table-min-width: 660px;
+  }
   .ssh-files__table-head,
-  .ssh-files__table-row { grid-template-columns: 48px minmax(180px, 1fr) 100px 160px 90px 48px; }
+  .ssh-files__table-row { column-gap: 10px; }
 }
 /* ---------------- global SSH transfers ---------------- */
 .workspace__transferbar {
@@ -9490,6 +9509,37 @@ body {
   text-align: center;
   color: #7b8798;
   font-size: 13px;
+}
+
+.git-dialog__notice {
+  flex: none;
+  margin: 0;
+  padding: 10px 22px;
+  color: #7b8798;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.git-dialog__notice--error {
+  color: #c04d55;
+}
+
+.git-dialog--dark .git-dialog__notice--error {
+  color: #ff9ba4;
+}
+
+.git-dialog__files {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.git-dialog__files[hidden] {
+  display: none;
 }
 
 /* ---------------- log ---------------- */

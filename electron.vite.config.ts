@@ -1,6 +1,11 @@
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
+import { PDF_ASSETS } from './src/shared/pdf-assets'
+
+const resolvePackage = createRequire(import.meta.url)
 
 export default defineConfig({
   main: {
@@ -16,7 +21,15 @@ export default defineConfig({
         '@shared': resolve(__dirname, 'src/shared')
       }
     },
-    plugins: [react()],
+    plugins: [react(), {
+      name: 'bundled-pdf-assets',
+      async generateBundle() {
+        for (const [name, asset] of Object.entries(PDF_ASSETS)) {
+          const root = dirname(dirname(resolvePackage.resolve(asset.package)))
+          this.emitFile({ type: 'asset', fileName: `pdf-assets/${name}`, source: await readFile(resolve(root, asset.file)) })
+        }
+      }
+    }],
     build: {
       // electron-vite leaves minification off by default for all three targets.
       // The renderer ships to users, so minify it; main/preload stay readable

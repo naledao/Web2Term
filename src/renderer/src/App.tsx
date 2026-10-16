@@ -6,11 +6,10 @@ import * as mdCommands from '@uiw/react-md-editor/commands'
 import { Menu } from '@base-ui/react/menu'
 import AvatarEditor from 'react-avatar-editor'
 import type { AvatarEditorRef } from 'react-avatar-editor'
-import GitDialog from './components/GitDialog'
 import SshDirectoryPicker from './components/SshDirectoryPicker'
-import MysqlDialog from './components/MysqlDialog'
-import RedisDialog from './components/RedisDialog'
-import NacosDialog from './components/NacosDialog'
+import PdfPreviewDialog from './components/PdfPreviewDialog'
+import { useToolWindows, ToolWindowDock } from './components/ToolWindows'
+import type { PdfPreviewTarget } from './components/PdfPreviewDialog'
 import BackendLoginForm from './components/BackendLoginForm'
 import MysqlIcon from './components/MysqlIcon'
 import RedisIcon from './components/RedisIcon'
@@ -23,6 +22,8 @@ import type { IApi as FilemanagerApi, IEntity as FilemanagerEntity } from '@svar
 import type { CSSProperties, DragEvent as ReactDragEvent, FormEvent, JSX, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { SESSION_COOKIE_NAME, terminalNotesOwnerKey } from '@shared/types'
 import { normalizeBackendUrl } from '@shared/backend-url'
+import { sshWorkingDirectory } from '@shared/ssh-directory'
+import { isPdfPath } from '@shared/pdf-preview'
 import './assets/terminal-notes.css'
 import './components/CommandViewer.css'
 import { CHAT_PLATFORMS } from '@shared/platforms'
@@ -479,13 +480,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [notesSaving, setNotesSaving] = useState(false)
   const [notesError, setNotesError] = useState('')
   const [notesPreview, setNotesPreview] = useState(false)
-  /** The Git 管理 dialog opened from the toolbox. */
-  const [gitDialogOpen, setGitDialogOpen] = useState(false)
-  /** The MySQL connection dialog opened from the toolbox. */
-  const [mysqlDialogOpen, setMysqlDialogOpen] = useState(false)
-  const [redisDialogOpen, setRedisDialogOpen] = useState(false)
-  /** The Nacos connection dialog opened from the toolbox. */
-  const [nacosDialogOpen, setNacosDialogOpen] = useState(false)
+  const tools = useToolWindows()
+  const toolWindowOpen = tools.windows.some((item) => item.sessionId === sessionId && !item.minimized)
   /** One viewer with separate base-prompt and tool-prompt content. */
   const [promptView, setPromptView] = useState<'base' | 'tools' | null>(null)
   const promptOpen = promptView !== null
@@ -504,6 +500,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [sshBusy, setSshBusy] = useState(false)
   const [sshUploading, setSshUploading] = useState(false)
   const [sshFilesOpen, setSshFilesOpen] = useState(false)
+  const [pdfPreview, setPdfPreview] = useState<PdfPreviewTarget | null>(null)
+  const sshFilesModalRef = useRef<HTMLDivElement>(null)
+  const sshHostIdRef = useRef('')
+  sshHostIdRef.current = ssh?.hostId ?? ''
   const [sshFileData, setSshFileData] = useState<FilemanagerEntity[]>([])
   const [sshCurrentFiles, setSshCurrentFiles] = useState<SshFileEntry[]>([])
   const [sshFilesLoading, setSshFilesLoading] = useState(false)
@@ -515,9 +515,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [sshFilePathDraft, setSshFilePathDraft] = useState<string | null>(null)
   const sshFileBreadcrumbs = useMemo(() => sshDirectoryBreadcrumbs(sshFilePath), [sshFilePath])
   const [sshFilesLocation, setSshFilesLocation] = useState({ hostId: '', path: '/' })
+  const sshCwd = sshWorkingDirectory(ssh)
   const sshFilesStartPath = sshFilesLocation.hostId === ssh?.hostId
     ? sshFilesLocation.path
-    : (ssh?.ptyCwd || ssh?.modelCwd || '/').replace(/\/+$/, '') || '/'
+    : (sshCwd || '/').replace(/\/+$/, '') || '/'
   const sshFilePanels = useMemo(() => [{ path: sshFilesStartPath }, { path: sshFilesStartPath }], [sshFilesStartPath])
   const [sshFileSearch, setSshFileSearch] = useState('')
   const [sshFileMode, setSshFileMode] = useState<'table' | 'cards' | 'panels'>('table')
@@ -1315,12 +1316,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       return
     }
     if (ssh?.status !== 'connected') return
-    const path = (ssh.ptyCwd || ssh.modelCwd || '/').replace(/\/+$/, '') || '/'
+    const path = (sshCwd || '/').replace(/\/+$/, '') || '/'
     setSshFilesLocation({ hostId: ssh.hostId, path })
     setSshFilePath(path)
     setSshFilesLoading(true)
     setSshFilesOpen(true)
-  }, [sshFilesOpen, ssh?.status, ssh?.hostId, ssh?.ptyCwd, ssh?.modelCwd])
+  }, [sshFilesOpen, ssh?.status, ssh?.hostId, sshCwd])
 
   const refreshSshFiles = useCallback((): void => {
     if (ssh?.status !== 'connected') return
@@ -1358,6 +1359,25 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     event.preventDefault()
     if (sshFilePathDraft !== null) navigateSshFiles(sshFilePathDraft)
   }, [sshFilePathDraft, navigateSshFiles])
+
+  const downloadSshFile = useCallback((path: string): void => {
+    setSshFilesError('')
+    void window.api.downloadSshFile(path, sshHostIdRef.current).catch((error: unknown) => {
+      setSshFilesError(error instanceof Error ? error.message : '下载远程文件失败')
+    })
+  }, [])
+
+  const openSshFile = useCallback((path: string, name?: string): void => {
+    if (!path) return
+    if (isPdfPath(path)) {
+      const hostId = sshHostIdRef.current
+      if (hostId) setPdfPreview({ hostId, path, name: name || path.slice(path.lastIndexOf('/') + 1) })
+    } else downloadSshFile(path)
+  }, [downloadSshFile])
+
+  useEffect(() => {
+    if (pdfPreview && (!sshFilesOpen || !ssh?.attached || ssh.hostId !== pdfPreview.hostId)) setPdfPreview(null)
+  }, [pdfPreview, sshFilesOpen, ssh?.attached, ssh?.hostId])
 
   const initSshFilemanager = useCallback((api: FilemanagerApi): void => {
     sshFilemanagerApiRef.current = api
@@ -1403,15 +1423,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     const downloadFile = (event: { id?: string } | null): void => {
       const id = String(event?.id ?? '')
       if (id === '') return
-      setSshFilesError('')
-      void window.api.downloadSshFile(id).catch((error: unknown) => {
-        setSshFilesError(error instanceof Error ? error.message : '下载远程文件失败')
-      })
+      downloadSshFile(id)
     }
     api.on('download-file', downloadFile)
-    api.on('open-file', downloadFile)
+    api.on('open-file', (event) => openSshFile(String(event?.id ?? '')))
     void api.exec('set-mode', { mode: sshFileModeRef.current })
-  }, [])
+  }, [downloadSshFile, openSshFile])
 
   useEffect(() => {
     let cancelled = false
@@ -1666,9 +1683,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * lives in the terminal column and must leave the chat page usable underneath.
    */
   useEffect(() => {
-    window.api.setEmbedVisible(!placeholderToggle && !settingsOpen && !sshDialogOpen && !notesOpen && !sshFilesOpen && !globalModalOpen && !promptOpen && !gitDialogOpen && !mysqlDialogOpen && !redisDialogOpen && !nacosDialogOpen && !commandPreviewOpen)
+    window.api.setEmbedVisible(!placeholderToggle && !settingsOpen && !sshDialogOpen && !notesOpen && !sshFilesOpen && !pdfPreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen)
     window.api.setWorkspaceSshDialogOpen(sshDialogOpen)
-  }, [placeholderToggle, settingsOpen, sshDialogOpen, notesOpen, sshFilesOpen, globalModalOpen, promptOpen, gitDialogOpen, mysqlDialogOpen, redisDialogOpen, nacosDialogOpen, commandPreviewOpen])
+  }, [placeholderToggle, settingsOpen, sshDialogOpen, notesOpen, sshFilesOpen, pdfPreview, globalModalOpen, promptOpen, toolWindowOpen, commandPreviewOpen])
 
   // SSH state and saved hosts.
   useEffect(() => {
@@ -1864,14 +1881,19 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   useEffect(() => {
     if (!sshPickerOpen && !notesOpen && !sshFilesOpen) return
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      if (pdfPreview) {
+        event.preventDefault()
+        setPdfPreview(null)
+        return
+      }
       setSshPickerOpen(false)
       setNotesOpen(false)
       setSshFilesOpen(false)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [sshPickerOpen, notesOpen, sshFilesOpen])
+  }, [sshPickerOpen, notesOpen, sshFilesOpen, pdfPreview])
 
   const saveSettings = useCallback(async (): Promise<void> => {
     if (savingSettings || backendLoginBusy || settingsLoading || settingsLoadFailed || settings === null) return
@@ -2588,7 +2610,7 @@ ${conversation.url}`}
               <Menu.Portal container={toolboxPaneRef}>
                 <Menu.Positioner side="bottom" align="end" sideOffset={6} collisionPadding={8} collisionBoundary={toolboxPaneRef.current ?? undefined} className="toolbox-menu__positioner">
                   <Menu.Popup className="toolbox-menu">
-                    <Menu.Item className="toolbox-menu__item" disabled={web2termActive} title={web2termActive ? 'web2term 尚未接入 Git 文件操作，可在终端运行 git 命令' : undefined} onClick={() => { setSshPickerOpen(false); setGitDialogOpen(true) }}>
+                    <Menu.Item className="toolbox-menu__item" disabled={web2termActive} title={web2termActive ? 'web2term 尚未接入 Git 文件操作，可在终端运行 git 命令' : undefined} onClick={() => { setSshPickerOpen(false); tools.open(sessionId, 'git', ssh?.attached ? sshCwd : (terminal?.cwd ?? '')) }}>
                       <span className="toolbox-menu__icon">
                         <svg width="15" height="15" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
                           <rect x="18" y="18" width="84" height="84" rx="8" fill="#F05032" transform="rotate(45 60 60)" />
@@ -2602,17 +2624,17 @@ ${conversation.url}`}
                       </span>
                       <span>Git 管理</span>
                     </Menu.Item>
-                    <Menu.Item className="toolbox-menu__item" onClick={() => { setSshPickerOpen(false); setMysqlDialogOpen(true) }}>
+                    <Menu.Item className="toolbox-menu__item" onClick={() => { setSshPickerOpen(false); tools.open(sessionId, 'mysql') }}>
                       <span className="toolbox-menu__icon">
                         <MysqlIcon size={15} />
                       </span>
                       <span>MySQL 连接</span>
                     </Menu.Item>
-                    <Menu.Item className="toolbox-menu__item" onClick={() => { setSshPickerOpen(false); setRedisDialogOpen(true) }}>
+                    <Menu.Item className="toolbox-menu__item" onClick={() => { setSshPickerOpen(false); tools.open(sessionId, 'redis') }}>
                       <span className="toolbox-menu__icon"><RedisIcon size={15} /></span>
                       <span>Redis 连接</span>
                     </Menu.Item>
-                    <Menu.Item className="toolbox-menu__item" onClick={() => { setSshPickerOpen(false); setNacosDialogOpen(true) }}>
+                    <Menu.Item className="toolbox-menu__item" onClick={() => { setSshPickerOpen(false); tools.open(sessionId, 'nacos') }}>
                       <span className="toolbox-menu__icon">
                         <NacosIcon size={15} />
                       </span>
@@ -2651,7 +2673,7 @@ ${conversation.url}`}
             {ssh?.status === 'connected' ? (
               sshCwdEditing ? (
                 <SshDirectoryPicker
-                  basePath={ssh.ptyCwd || ssh.modelCwd || '/'}
+                  basePath={sshCwd || '/'}
                   onPick={(path) => {
                     setSshCwdEditing(false)
                     void applyCwd(path)
@@ -2662,11 +2684,11 @@ ${conversation.url}`}
                 <button
                   type="button"
                   className="terminal-pane__cwd"
-                  title={`${ssh.ptyCwd || ssh.modelCwd || '目录尚未确定'}
+                  title={`执行目录：${sshCwd || '目录尚未确定'}${ssh.ptyCwd && ssh.ptyCwd !== sshCwd ? `\n手动输入的交互终端目录：${ssh.ptyCwd}` : ''}
 点击浏览或输入远程目录`}
                   onClick={() => setSshCwdEditing(true)}
                 >
-                  {ssh.ptyCwd || ssh.modelCwd || '设置目录…'}
+                  {sshCwd || '设置目录…'}
                 </button>
               )
             ) : (
@@ -2676,7 +2698,7 @@ ${conversation.url}`}
               type="button"
               className="panel__sync"
               disabled={ssh?.status !== 'connected' || sshUploading}
-              title={`上传本地文件到当前远程目录：${ssh?.modelCwd || '.'}`}
+              title={`上传本地文件到当前远程目录：${sshCwd || '.'}`}
               onClick={() => void uploadSshFiles()}
             >
               {sshUploading ? '上传中…' : '上传'}
@@ -2685,7 +2707,7 @@ ${conversation.url}`}
               type="button"
               className={sshFilesOpen ? 'panel__sync panel__sync--on' : 'panel__sync'}
               disabled={ssh?.status !== 'connected'}
-              title={`浏览当前远程目录：${ssh?.ptyCwd || ssh?.modelCwd || '/'}`}
+              title={`浏览当前远程目录：${sshCwd || '/'}`}
               onClick={toggleSshFiles}
             >
               文件
@@ -2840,10 +2862,12 @@ ${conversation.url}`}
         )}
         {sshActive && sshFilesOpen ? (
           <div
+            ref={sshFilesModalRef}
             className="modal modal--ssh-files"
             role="dialog"
             aria-modal="true"
             aria-label="远程文件"
+            inert={pdfPreview !== null}
           >
             <div className="ssh-files-modal">
               <div className="ssh-files-modal__head">
@@ -2982,18 +3006,34 @@ ${conversation.url}`}
                                     key={file.id}
                                     onDoubleClick={() => {
                                       if (file.type === 'folder') void sshFilemanagerApiRef.current?.exec('set-path', { id: file.id })
-                                      else void sshFilemanagerApiRef.current?.exec('open-file', { id: file.id })
+                                      else openSshFile(file.id, file.name)
                                     }}
                                   >
                                     <span className="ssh-files__table-check" aria-hidden="true" />
-                                    <span className="ssh-files__table-file-name">
+                                    <span className="ssh-files__table-file-name" title={file.name}>
                                       {file.type === 'folder' ? <svg viewBox="0 0 24 20" aria-hidden="true"><path d="M2.5 2.5A2.5 2.5 0 0 1 5 0h5l2 2h7A2.5 2.5 0 0 1 21.5 4.5v11A2.5 2.5 0 0 1 19 18H5a2.5 2.5 0 0 1-2.5-2.5z" /><path d="M2.5 5h19v10.5A2.5 2.5 0 0 1 19 18H5a2.5 2.5 0 0 1-2.5-2.5z" /></svg> : null}
                                       <span>{file.name}</span>
                                     </span>
                                     <span>{size}</span>
                                     <span>{modifiedText}</span>
                                     <span>{file.type === 'folder' ? '文件夹' : '文件'}</span>
-                                    <button type="button" className="ssh-files__table-more" aria-label={`${file.name} 更多操作`}>•••</button>
+                                    <Menu.Root>
+                                      <Menu.Trigger className="ssh-files__table-more" aria-label={`${file.name} 更多操作`} onDoubleClick={(event) => event.stopPropagation()}>•••</Menu.Trigger>
+                                      <Menu.Portal container={sshFilesModalRef}>
+                                        <Menu.Positioner side="bottom" align="end" sideOffset={5} collisionPadding={12} className="ssh-file-menu__positioner">
+                                          <Menu.Popup className="ssh-file-menu">
+                                            {file.type === 'folder' ? (
+                                              <Menu.Item className="ssh-file-menu__item" onClick={() => void sshFilemanagerApiRef.current?.exec('set-path', { id: file.id })}>打开文件夹</Menu.Item>
+                                            ) : (
+                                              <>
+                                                {isPdfPath(file.name) ? <Menu.Item className="ssh-file-menu__item" onClick={() => openSshFile(file.id, file.name)}>预览 PDF</Menu.Item> : null}
+                                                <Menu.Item className="ssh-file-menu__item" onClick={() => downloadSshFile(file.id)}>下载</Menu.Item>
+                                              </>
+                                            )}
+                                          </Menu.Popup>
+                                        </Menu.Positioner>
+                                      </Menu.Portal>
+                                    </Menu.Root>
                                   </div>
                                 )
                               })}
@@ -3233,6 +3273,7 @@ ${record.command}`
           </span>
         ) : null}
         <span className="statusbar__spacer" />
+        <ToolWindowDock sessionId={sessionId} />
         {showQuestionShortcut ? (
           <button
             type="button"
@@ -3981,10 +4022,7 @@ ${record.command}`
           />
         </Suspense>
       ) : null}
-      <MysqlDialog open={mysqlDialogOpen} theme={settings?.theme ?? 'light'} onClose={() => setMysqlDialogOpen(false)} />
-      <RedisDialog open={redisDialogOpen} theme={settings?.theme ?? 'light'} onClose={() => setRedisDialogOpen(false)} />
-      <NacosDialog open={nacosDialogOpen} theme={settings?.theme ?? 'light'} onClose={() => setNacosDialogOpen(false)} />
-      <GitDialog open={gitDialogOpen} cwd={ssh?.attached ? (ssh.ptyCwd || ssh.modelCwd) : (terminal?.cwd ?? "")} theme={settings?.theme ?? "light"} onClose={() => setGitDialogOpen(false)} />
+      {pdfPreview ? <PdfPreviewDialog key={`${pdfPreview.hostId}:${pdfPreview.path}`} target={pdfPreview} theme={settings?.theme ?? 'light'} onClose={() => setPdfPreview(null)} /> : null}
     </div>
   )
 }
