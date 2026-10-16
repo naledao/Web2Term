@@ -3,6 +3,19 @@
   flex-wrap: wrap;
 }
 
+.mysql-page__table-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  max-width: min(420px, 100%);
+}
+
+.mysql-page__table-caption {
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
 .mysql-page__table-head .mysql-page__card-title,
 .mysql-page__table-head .mysql-page__card-note {
   min-width: 0;

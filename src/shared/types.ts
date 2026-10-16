@@ -311,6 +311,16 @@ export function isConversationId(value: string): boolean {
   return CONVERSATION_ID_RE.test(value)
 }
 
+/** ChatGPT uses /c/<id> for ordinary chats and /g/<project-or-gpt>/c/<id> for nested chats. */
+export function chatgptConversationIdFromPath(pathname: string): string | null {
+  const match = /^\/(?:g\/[^/?#]+\/)?c\/([^/?#]+)/.exec(pathname)
+  if (!match) return null
+  try {
+    const id = decodeURIComponent(match[1])
+    return isConversationId(id) ? id : null
+  } catch { return null }
+}
+
 /** Extract the conversation id from an absolute URL, or null if it is not one. */
 export function conversationIdFromUrl(url: string): string | null {
   let parsed: URL
@@ -323,11 +333,7 @@ export function conversationIdFromUrl(url: string): string | null {
   const host = parsed.hostname.toLowerCase()
   if (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com')) return null
 
-  const match = /^\/c\/([^/?#]+)/.exec(parsed.pathname)
-  if (!match) return null
-
-  const id = decodeURIComponent(match[1])
-  return isConversationId(id) ? id : null
+  return chatgptConversationIdFromPath(parsed.pathname)
 }
 
 /** Payload returned by the `app:get-info` IPC handler. */

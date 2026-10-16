@@ -1,4 +1,4 @@
-import { isConversationId } from './types'
+import { chatgptConversationIdFromPath, isConversationId } from './types'
 import type { EnvironmentKind } from './types'
 
 /**
@@ -550,12 +550,7 @@ export const CHATGPT_PLATFORM: ChatPlatform = {
   allowedOriginPattern:
     /^https:\/\/([a-z0-9-]+\.)*(chatgpt\.com|openai\.com|oaistatic\.com|oaiusercontent\.com)(\/|$)/i,
   cookieDomainSuffixes: ['chatgpt.com', 'openai.com'],
-  conversationIdFromPath: (pathname) => {
-    const match = /^\/c\/([^/?#]+)/.exec(pathname)
-    if (!match) return null
-    const id = decodeURIComponent(match[1])
-    return isConversationId(id) ? id : null
-  },
+  conversationIdFromPath: chatgptConversationIdFromPath,
   conversationUrl: (id) => `https://chatgpt.com/c/${id}`,
   sidebarScript: SIDEBAR_SCRIPT_BY_DEFAULT(
     'a[data-sidebar-item][href^="/c/"], a[href^="/c/"]',

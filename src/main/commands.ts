@@ -16,6 +16,7 @@ import { parseReadFilesRequest } from '../shared/file-requests'
 import type { FileReadContext, FileSendOutcome, StoredFileReadRequest } from '../shared/file-requests'
 import type { PreparedFileResult } from './file-access'
 import type { ParsedAction, ParsedReadFiles } from '../shared/types'
+import type { CommandDiagnostic } from './command-log'
 
 /**
  * Commands that get a loud warning line. They still RUN in auto mode — this is an
@@ -128,6 +129,8 @@ export interface CommandRunnerDeps {
   store: ConversationStore
   /** Current conversation id, or null when the page is not on a conversation. */
   currentConversationId: () => string | null
+  /** Content-free, always-on command lifecycle diagnostics. */
+  onCommandDiagnostic?: (details: CommandDiagnostic) => void
   /** Push text into the composer and submit it without the system prompt. */
   sendRawToPage: (
     text: string
@@ -380,6 +383,15 @@ export class CommandRunner {
     this.localCwd = initialLocalCwd.trim()
   }
 
+  private diagnostic(details: CommandDiagnostic): void {
+    try {
+      this.deps.onCommandDiagnostic?.({
+        ...details, mode: this.automation.mode, paused: this.automation.paused,
+        enabled: this.terminalModeOn()
+      })
+    } catch { /* Diagnostics must never change execution behavior. */ }
+  }
+
   /* ---------------- automation state ---------------- */
 
   getAutomation(): AutomationState {
@@ -475,6 +487,7 @@ export class CommandRunner {
     // Terminal mode off: leave replies alone. Returning true marks the command handled so nothing is deferred.
     if (!this.terminalModeOn()) {
       console.info('[cmd] terminal mode off, detected command ignored')
+      this.diagnostic({ event: 'skipped', reason: 'terminal-mode-off', messageId: parsed.messageId })
       return true
     }
     const conversationId = conversationIdOverride ?? this.deps.currentConversationId()
@@ -509,6 +522,7 @@ export class CommandRunner {
     // reload (which re-renders every old message) harmless.
     if (!created) {
       console.info(`[cmd] duplicate, already stored — not run again ${key}`)
+      this.diagnostic({ event: 'skipped', reason: 'duplicate', messageId: key, ownerConversationId: conversationId })
       return true
     }
 
@@ -516,6 +530,7 @@ export class CommandRunner {
     // before the generic notice so the log does not say "检测到命令" and then
     // immediately "任务完成".
     if (parsed.command.trim() === '') {
+      this.diagnostic({ event: 'skipped', reason: 'empty-command', messageId: key, ownerConversationId: conversationId })
       console.info(`[cmd] model reported completion (empty command) ${JSON.stringify({ key })}`)
       this.deps.store.setExecutionStatus(key, 'skipped')
       this.appendLine({ kind: 'notice', text: '模型报告任务完成（command 为空）' })
@@ -533,6 +548,7 @@ export class CommandRunner {
      * trip. The user still needs to see it, hence the loud line.
      */
     if (isPlaceholderCommand(parsed.command)) {
+      this.diagnostic({ event: 'skipped', reason: 'placeholder', messageId: key, ownerConversationId: conversationId })
       this.deps.store.setExecutionStatus(key, 'skipped')
       this.appendLine({
         kind: 'error',
@@ -545,6 +561,11 @@ export class CommandRunner {
     }
 
     const autoRun = this.automation.mode === 'auto' && !this.automation.paused
+    this.diagnostic({
+      event: 'stored', messageId: key, ownerConversationId: conversationId, autoRun, live: parsed.live,
+      status: danger ? 'blocked' : 'pending',
+      reason: autoRun ? undefined : this.automation.paused ? 'paused' : 'manual-mode'
+    })
     /*
      * The single gate that decides whether the loop advances by itself. It is a plain boolean
      * computed from two settings that can be changed from the UI at any moment, so "the command
@@ -631,6 +652,7 @@ export class CommandRunner {
     // Two fast clicks on 运行 would otherwise both pass the status check below
     // and run the command twice.
     if (this.inFlight.has(messageId)) {
+      this.diagnostic({ event: 'skipped', reason: 'already-in-flight', messageId })
       console.info(`[cmd] not run: already in flight ${messageId}`)
       return
     }
@@ -638,6 +660,7 @@ export class CommandRunner {
     const record = this.deps.store.getExecution(messageId)
     if (!record) {
       console.warn(`[cmd] not run: no execution record for ${messageId}`)
+      this.diagnostic({ event: 'skipped', reason: 'missing-record', messageId })
       return
     }
     if (record.status !== 'pending' && record.status !== 'blocked' && !(record.kind === 'read_files' && ['pending', 'failed'].includes(record.deliveryStatus ?? '') && (record.status === 'done' || record.status === 'failed'))) {
@@ -646,6 +669,7 @@ export class CommandRunner {
        * it has already had its turn. Without this the command looks like it was swallowed.
        */
       console.info(`[cmd] not run: status=${record.status} ${messageId}`)
+      this.diagnostic({ event: 'skipped', reason: 'execution-status', messageId, ownerConversationId: record.conversationId, status: record.status })
       return
     }
 
@@ -656,6 +680,12 @@ export class CommandRunner {
     try {
       if (record.kind === 'read_files') await this.runFileRecord(record, request)
       else await this.runRecord(record, request)
+    } catch (error) {
+      this.diagnostic({
+        event: 'error', reason: 'exception', messageId, ownerConversationId: record.conversationId,
+        errorType: error instanceof Error ? error.name : 'Other'
+      })
+      throw error
     } finally {
       this.inFlight.delete(messageId)
     }
@@ -765,27 +795,42 @@ export class CommandRunner {
   private async runRecord(record: ExecutionRecord, request: number): Promise<void> {
     const conversationId = record.conversationId
     const messageId = record.messageId
+    this.diagnostic({ event: 'preparing', messageId, ownerConversationId: conversationId, requestId: request })
     const shell = await this.prepareExecutionShell()
-    if (this.disposed) return
+    if (this.disposed) {
+      this.diagnostic({ event: 'skipped', reason: 'disposed', messageId, ownerConversationId: conversationId })
+      return
+    }
     if (!shell) {
       /*
        * No backend could be prepared — an SSH attach that failed, a shell that would not start.
        * The record stays `pending` forever and nothing else says so.
        */
       console.warn(`[cmd] not run: no shell could be prepared ${messageId}`)
+      this.diagnostic({ event: 'skipped', reason: 'no-shell', messageId, ownerConversationId: conversationId })
       return
     }
     if (request !== this.executionRequest) {
+      this.diagnostic({ event: 'skipped', reason: 'superseded', messageId, ownerConversationId: conversationId, requestId: request })
       this.deps.store.setExecutionStatus(messageId, 'skipped')
       this.broadcastExecutions(conversationId)
       return
     }
 
     this.deps.store.setExecutionStatus(messageId, 'running')
+    this.diagnostic({
+      event: 'started', messageId, ownerConversationId: conversationId, requestId: request,
+      shellKind: shell.kind, shellAlive: shell.alive, shellRunning: shell.running
+    })
     this.appendLine({ kind: 'command', text: record.command })
     this.broadcastExecutions(conversationId)
 
     const result = await this.runOnShell(shell, record.command, record.timeoutSeconds)
+    this.diagnostic({
+      event: 'finished', messageId, ownerConversationId: conversationId, exitCode: result.exitCode,
+      rejected: result.rejected === true, interrupted: result.interrupted === true,
+      timedOut: Boolean(result.timedOut), sessionLost: result.sessionLost === true
+    })
     if (this.disposed) return
 
     this.deps.store.finishExecution(messageId, {
@@ -808,7 +853,10 @@ export class CommandRunner {
     this.broadcastExecutions(conversationId)
 
     // A command that never ran has no result to hand back.
-    if (result.rejected || result.interrupted) return
+    if (result.rejected || result.interrupted) {
+      this.diagnostic({ event: 'delivery', reason: result.rejected ? 'rejected' : 'interrupted', messageId, ownerConversationId: conversationId })
+      return
+    }
 
     // Hand the output back whenever the loop is not explicitly stopped.
     //
@@ -817,7 +865,10 @@ export class CommandRunner {
     // wants the answer handed back too, so manual mode behaves as a
     // step-through — the next command arrives, is stored as pending, and waits
     // for a click instead of running on its own.
-    if (this.automation.paused) return
+    if (this.automation.paused) {
+      this.diagnostic({ event: 'delivery', reason: 'paused', messageId, ownerConversationId: conversationId })
+      return
+    }
 
     /*
      * The reply has to go back to the conversation it came from.
@@ -834,6 +885,7 @@ export class CommandRunner {
      */
     const owner = this.deps.currentConversationId()
     if (owner !== conversationId) {
+      this.diagnostic({ event: 'delivery', reason: 'conversation-changed', messageId, ownerConversationId: conversationId })
       this.appendLine({
         kind: 'error',
         text:
@@ -863,11 +915,13 @@ export class CommandRunner {
       await new Promise<void>((resolve) => setTimeout(resolve, this.sendDelaySeconds * 1000))
       if (this.disposed) return
       if (request !== this.executionRequest) {
+        this.diagnostic({ event: 'delivery', reason: 'superseded', messageId, ownerConversationId: conversationId })
         this.deps.store.setExecutionStatus(messageId, 'skipped')
         this.broadcastExecutions(conversationId)
         return
       }
       if (this.deps.currentConversationId() !== conversationId) {
+        this.diagnostic({ event: 'delivery', reason: 'conversation-changed', messageId, ownerConversationId: conversationId })
         this.appendLine({
           kind: 'error',
           text: '等待期间对话已切走，结果未回传。'
@@ -880,12 +934,14 @@ export class CommandRunner {
     // Terminal mode off: keep the output in the execution record but do not send it back to the model.
     if (!this.terminalModeOn()) {
       this.appendLine({ kind: 'notice', text: '终端模式已关闭，结果未回传给模型' })
+      this.diagnostic({ event: 'delivery', reason: 'terminal-mode-off', messageId, ownerConversationId: conversationId })
       this.flushTerminal()
       return
     }
     const message = buildResultMessage(result)
     this.appendLine({ kind: 'notice', text: '正在发送...' })
     const outcome = await this.deps.sendRawToPage(message)
+    this.diagnostic({ event: 'delivery', messageId, ownerConversationId: conversationId, deliveryOutcome: outcome })
     if (this.disposed) return
     if (outcome === 'ok') {
       this.appendLine({ kind: 'notice', text: '已把执行结果发回给模型' })

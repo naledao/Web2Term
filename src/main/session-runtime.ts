@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { createConnection } from 'mysql2/promise'
 import { formatMysqlCell } from './mysql-field-value'
 import type { Connection } from 'mysql2/promise'
-import { BrowserWindow, Notification, safeStorage } from 'electron'
+import { app, BrowserWindow, Notification, safeStorage } from 'electron'
+import { writeCommandDiagnostic } from './command-log'
+import type { CommandDiagnostic } from './command-log'
 import {
   FALLBACK_ENVIRONMENT,
   IpcChannels,
@@ -304,6 +306,8 @@ export class SessionRuntime {
    */
   private lastBounds: EmbedBounds | null = null
   private readonly deferredCommands = new Map<string, ParsedAction>()
+  /** Keep async execution diagnostics with their source platform after the user switches views. */
+  private readonly commandDiagnosticPlatforms = new Map<string, ChatPlatform>()
   /**
    * The last thing the user asked for, held until the conversation has an id.
    *
@@ -361,6 +365,17 @@ export class SessionRuntime {
     this.runner = new CommandRunner({
       store: options.store,
       currentConversationId: () => this.disposed ? null : this.embed.getState().conversationId,
+      onCommandDiagnostic: (details) => {
+        const owner = details.ownerConversationId
+        const platform = (owner && this.commandDiagnosticPlatforms.get(owner)) || this.activePlatform
+        if (owner && !this.commandDiagnosticPlatforms.has(owner)) {
+          if (this.commandDiagnosticPlatforms.size >= 256) {
+            this.commandDiagnosticPlatforms.delete(this.commandDiagnosticPlatforms.keys().next().value!)
+          }
+          this.commandDiagnosticPlatforms.set(owner, platform)
+        }
+        this.traceCommand(platform, details)
+      },
       sendRawToPage: (text) => this.embed.sendRaw(text),
       fileContext: () => this.fileReadContext(),
       filePlatform: () => this.web2term ? null : fileReadingPlatform(this.activePlatform.id),
@@ -573,6 +588,10 @@ export class SessionRuntime {
        * answer to "which conversation is this session driving".
        */
       onCommand: (command) => {
+        this.traceCommand(platform, {
+          event: 'received', messageId: command.messageId, active: isActive(), live: command.live,
+          commandLength: 'command' in command ? command.command.length : undefined
+        })
         /*
          * Logged on BOTH sides of the gate.
          *
@@ -583,6 +602,7 @@ export class SessionRuntime {
          * diagnose from a log, which is exactly how this was found.
          */
         if (!isActive()) {
+          this.traceCommand(platform, { event: 'skipped', reason: 'inactive-platform', messageId: command.messageId })
           console.warn(
             `[session] command DROPPED, this session is not the visible one ${JSON.stringify({
               messageId: command.messageId,
@@ -898,13 +918,25 @@ export class SessionRuntime {
   }
 
   private handleDetectedCommand(command: ParsedAction): void {
-    if (this.runner.handleDetected(command)) return
+    try {
+      if (this.runner.handleDetected(command)) return
+    } catch (error) {
+      this.traceCommand(this.activePlatform, {
+        event: 'error', reason: 'exception', messageId: command.messageId,
+        errorType: error instanceof Error ? error.name : 'Other'
+      })
+      throw error
+    }
 
     // New chats navigate from '/' to /c/<id> asynchronously. A fast assistant
     // reply can therefore be detected before getState() exposes its conversation
     // id. Keep the command by message id and associate it when onConversation has
     // persisted the new chat, rather than losing it permanently.
     this.deferredCommands.set(command.messageId, command)
+    this.traceCommand(this.activePlatform, {
+      event: 'deferred', reason: 'missing-conversation', messageId: command.messageId,
+      waiting: this.deferredCommands.size
+    })
     /*
      * A deferred command is in limbo, and until now it was in limbo silently â€” if the
      * conversation id never arrives, it is simply never heard from again.
@@ -913,6 +945,17 @@ export class SessionRuntime {
       `[session] command DEFERRED until a conversation id exists ` +
         `${JSON.stringify({ messageId: command.messageId, waiting: this.deferredCommands.size })}`
     )
+  }
+
+  private traceCommand(platform: ChatPlatform, details: CommandDiagnostic): void {
+    try {
+      const entry = this.embeds.get(platform.id)
+      const state = entry?.embed?.getState()
+      writeCommandDiagnostic(platform.id, details, {
+        sessionId: this.id, conversationId: state?.conversationId ?? null,
+        appVersion: app.getVersion(), pageUrl: state?.url ?? entry?.url ?? ''
+      })
+    } catch { /* Diagnostics must never interrupt the command loop. */ }
   }
 
   private fileReadContext(): FileReadContext {
@@ -933,6 +976,10 @@ export class SessionRuntime {
     for (const [messageId, command] of this.deferredCommands) {
       if (this.runner.handleDetected(command, conversationId)) {
         this.deferredCommands.delete(messageId)
+        this.traceCommand(this.activePlatform, {
+          event: 'deferred-flush', messageId, ownerConversationId: conversationId,
+          waiting: this.deferredCommands.size
+        })
       }
     }
     console.info(

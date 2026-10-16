@@ -75,6 +75,8 @@ interface TableTab {
   connectionId: string
   database: string
   table: string
+  /** Keep the comment available even after its connection page is closed. */
+  tableComment: string
   /** The connection it was opened with. Carries the password, so it stays in memory. */
   draft: MysqlConnectionDraft
   loading: boolean
@@ -158,6 +160,13 @@ function tabCaption(form: ConnectionForm): string {
 /** What a tab is called, whichever kind it is. */
 function tabTitle(tab: MysqlTab): string {
   return tab.kind === 'connection' ? tabCaption(tab.form) : `${tab.database}.${tab.table}${tab.kind === 'ddl' ? ' · DDL' : ''}`
+}
+
+function tabTooltip(tab: MysqlTab): string {
+  const title = tabTitle(tab)
+  if (tab.kind === 'connection') return title
+  const comment = tab.tableComment?.trim() ?? ''
+  return comment === '' ? title : `${title}\n${comment}`
 }
 
 /**
@@ -504,11 +513,16 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
       result = { ok: false, tables: [], message: '连接失败，请检查连接信息。' }
     }
     setTabs((current) =>
-      current.map((tab) =>
-        tab.kind === 'connection' && tab.key === key
-          ? { ...tab, tablesLoading: false, tables: result }
-          : tab
-      )
+      current.map((tab) => {
+        if (tab.kind === 'connection') {
+          return tab.key === key ? { ...tab, tablesLoading: false, tables: result } : tab
+        }
+        if (result.ok && tab.connectionId === key && tab.database === form.database.trim()) {
+          const table = result.tables.find((item) => item.name === tab.table)
+          if (table) return { ...tab, tableComment: table.comment.trim() }
+        }
+        return tab
+      })
     )
   }, [])
 
@@ -643,7 +657,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
    * clicking it again just brings its tab forward.
    */
   const openTableTab = useCallback(
-    async (connectionId: string, form: ConnectionForm, table: string): Promise<void> => {
+    async (connectionId: string, form: ConnectionForm, table: string, comment: string): Promise<void> => {
       const database = form.database.trim()
       const existing = tabs.find((tab) => tab.kind === 'table' && tab.connectionId === connectionId && tab.database === database && tab.table === table)
       const key = existing?.key ?? `table:${connectionId}:${database}:${table}`
@@ -651,8 +665,11 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
       if (!existing) {
         setTabs((current) => [
           ...current,
-          { kind: 'table', key, connectionId, database, table, draft, loading: true, requestId: 0, data: null, error: '', sqlOpen: false, sqlText: `SELECT * FROM \`${table.replace(/`/g, '``')}\` LIMIT 100;`, sqlRunning: false, sqlRequestId: 0, sqlResult: null }
+          { kind: 'table', key, connectionId, database, table, tableComment: comment.trim(), draft, loading: true, requestId: 0, data: null, error: '', sqlOpen: false, sqlText: `SELECT * FROM \`${table.replace(/`/g, '``')}\` LIMIT 100;`, sqlRunning: false, sqlRequestId: 0, sqlResult: null }
         ])
+      } else {
+        setTabs((current) => current.map((tab) => tab.key === key && tab.kind === 'table'
+          ? { ...tab, tableComment: comment.trim() } : tab))
       }
       setActiveKey(key)
       await loadTable(key, draft, database, table)
@@ -689,18 +706,18 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
   )
 
   const openDdlTab = useCallback(
-    async (connectionId: string, form: ConnectionForm, table: string): Promise<void> => {
+    async (connectionId: string, form: ConnectionForm, table: string, comment: string): Promise<void> => {
       const database = form.database.trim()
       const draft = draftFromForm(form)
       const existing = tabs.find((tab) => tab.kind === 'ddl' && tab.connectionId === connectionId && tab.database === database && tab.table === table)
       const key = existing?.key ?? `ddl:${JSON.stringify([connectionId, database, table])}`
       setTabs((current) =>
         current.some((tab) => tab.key === key)
-          ? current
+          ? current.map((tab) => tab.key === key && tab.kind === 'ddl' ? { ...tab, tableComment: comment.trim() } : tab)
           : [
               ...current,
               {
-                kind: 'ddl', key, connectionId, database, table, draft, loading: true,
+                kind: 'ddl', key, connectionId, database, table, tableComment: comment.trim(), draft, loading: true,
                 data: null, error: '', requestId: 0, copied: false, copyError: ''
               }
             ]
@@ -895,7 +912,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
                     role="tab"
                     aria-selected={tab.key === activeKey}
                     className="mysql-page__tab-label"
-                    title={tabTitle(tab)}
+                    title={tabTooltip(tab)}
                     onClick={() => {
                       setActiveKey(tab.key)
                       setReveal(false)
@@ -1064,7 +1081,12 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
             ) : activeTab.kind === 'table' ? (
               <div className="mysql-page__table">
                 <div className="mysql-page__card-head mysql-page__table-head">
-                  <span className="mysql-page__card-title">{activeTab.table}</span>
+                  <div className="mysql-page__table-heading">
+                    <span className="mysql-page__card-title">{activeTab.table}</span>
+                    {activeTab.tableComment?.trim() ? (
+                      <span className="mysql-page__card-note mysql-page__table-caption">{activeTab.tableComment.trim()}</span>
+                    ) : null}
+                  </div>
                   <span className="mysql-page__card-note">{activeTab.database}</span>
                   <div className="mysql-page__query">
                     {activeTab.data?.sql ? (
@@ -1528,7 +1550,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
                             className="mysql-page__table-item"
                             title={table.comment === '' ? table.name : table.name + ' · ' + table.comment}
                             onClick={() => {
-                              if (activeForm !== null && activeConnection !== null) void openTableTab(activeConnection.key, activeForm, table.name)
+                              if (activeForm !== null && activeConnection !== null) void openTableTab(activeConnection.key, activeForm, table.name, table.comment)
                             }}
                           >
                             <span className="mysql-page__table-name" title={table.name}>{table.name}</span>
@@ -1540,7 +1562,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
                             className="mysql-page__btn mysql-page__table-ddl"
                             aria-label={`查看 ${table.name} 的 DDL`}
                             onClick={() => {
-                              if (activeForm !== null && activeConnection !== null) void openDdlTab(activeConnection.key, activeForm, table.name)
+                              if (activeForm !== null && activeConnection !== null) void openDdlTab(activeConnection.key, activeForm, table.name, table.comment)
                             }}
                           >
                             查看 DDL

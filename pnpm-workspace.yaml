@@ -1,0 +1,5 @@
+allowBuilds:
+  cpu-features: true
+  electron-winstaller: true
+  esbuild: true
+  ssh2: true
