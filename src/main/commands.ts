@@ -125,6 +125,9 @@ const OUTPUT_TAIL = 2000
 const MAX_TERMINAL_LINES = 400
 const TERMINAL_PUSH_INTERVAL_MS = 150
 
+/** How long an interrupt may wait for its backend before the pane says it is still waiting. */
+const INTERRUPT_NOTICE_MS = 5000
+
 export interface CommandRunnerDeps {
   store: ConversationStore
   /** Current conversation id, or null when the page is not on a conversation. */
@@ -625,7 +628,24 @@ export class CommandRunner {
   async runExecution(messageId: string): Promise<void> {
     const record = this.deps.store.getExecution(messageId)
     if (!record) return
-    if (record.status !== 'pending' && record.status !== 'blocked' && !(record.kind === 'read_files' && ['pending', 'failed'].includes(record.deliveryStatus ?? '') && (record.status === 'done' || record.status === 'failed'))) return
+    /*
+     * This is the manual 运行 click, so every way it can decline says so on the pane. The common
+     * one: auto mode already picked this command up and is waiting for the previous one to stop,
+     * which over SSH can take a long time — and until now a click then did nothing visible.
+     */
+    if (this.inFlight.has(messageId)) {
+      this.appendLine({
+        kind: 'notice',
+        text: record.status === 'running'
+          ? '这条命令正在执行中，无需重复点击。'
+          : '这条命令已在运行队列中：正在等待当前命令停止，停止后会自动开始，无需重复点击。'
+      })
+      return
+    }
+    if (record.status !== 'pending' && record.status !== 'blocked' && !(record.kind === 'read_files' && ['pending', 'failed'].includes(record.deliveryStatus ?? '') && (record.status === 'done' || record.status === 'failed'))) {
+      this.appendLine({ kind: 'notice', text: '这条命令已经不是待执行状态，不会重复运行。' })
+      return
+    }
     await this.execute(messageId)
   }
 
@@ -738,7 +758,7 @@ export class CommandRunner {
         this.appendLine({ kind: 'error', text: '文件读取未执行：原会话／主机已切换，或任务已暂停。' })
         return
       }
-      if (this.activeShell?.running) await this.activeShell.interrupt()
+      if (this.activeShell?.running) await this.interruptWithNotice(this.activeShell, '正在中断当前命令，停止后读取文件…')
       if (!current()) return
       this.deps.store.setExecutionStatus(record.messageId, 'running')
       this.appendLine({ kind: 'notice', text: result ? '正在重试文件结果回传…' : record.command })
@@ -1095,7 +1115,7 @@ export class CommandRunner {
     }
 
     const shell = this.activeShell
-    if (shell && shell.running) await shell.interrupt()
+    if (shell && shell.running) await this.interruptWithNotice(shell, '正在结束任务，等待当前命令停止…')
     this.appendLine({ kind: 'notice', text: '任务已手动结束' })
     this.flushTerminal()
   }
@@ -1122,7 +1142,7 @@ export class CommandRunner {
     }
 
     console.info(`[cmd] interrupt: asking the ${shell.kind} backend to stop`)
-    const stopped = await shell.interrupt()
+    const stopped = await this.interruptWithNotice(shell, '正在中断当前命令…')
     console.info(`[cmd] interrupt: backend reported ${String(stopped)}`)
     return true
   }
@@ -1197,6 +1217,33 @@ export class CommandRunner {
     }
   }
 
+  /**
+   * Interrupt the command in flight, saying so on the pane while it happens.
+   *
+   * `interrupt()` waits for the backend to confirm the command stopped, with no timeout, and every
+   * caller awaits it. Locally that is near-instant; over SSH it waits for the server to close the
+   * channel, which can take a long time or never come. Without these lines a click on 运行 or 中断
+   * during that wait looks like it did nothing at all.
+   */
+  private async interruptWithNotice(shell: ExecutionShell, text: string): Promise<boolean> {
+    this.appendLine({ kind: 'notice', text })
+    const remote = shell !== this.localShell
+    const reminder = setTimeout(() => {
+      console.info(`[cmd] interrupt: still waiting after ${INTERRUPT_NOTICE_MS}ms (remote=${String(remote)})`)
+      this.appendLine({
+        kind: 'notice',
+        text: remote
+          ? `当前命令已等待 ${INTERRUPT_NOTICE_MS / 1000} 秒仍未停止，正在等待远端确认关闭；长时间没有结束时，可断开并重新连接这台主机。`
+          : `当前命令已等待 ${INTERRUPT_NOTICE_MS / 1000} 秒仍未停止，正在等待它退出。`
+      })
+    }, INTERRUPT_NOTICE_MS)
+    try {
+      return await shell.interrupt()
+    } finally {
+      clearTimeout(reminder)
+    }
+  }
+
   /** Give a newly requested stored command priority over the command in flight. */
   private async prepareExecutionShell(): Promise<ExecutionShell | null> {
     if (this.disposed) return null
@@ -1218,7 +1265,7 @@ export class CommandRunner {
     }
 
     const wasRemote = active !== this.localShell
-    const interrupted = await active.interrupt()
+    const interrupted = await this.interruptWithNotice(active, '检测到新指令，正在中断当前命令…')
     if (!interrupted) return this.ensureShell()
     // interrupt() waits for the backend to close; it is safe to release the old
     // identity now even if its awaiting caller has not reached finally yet.
