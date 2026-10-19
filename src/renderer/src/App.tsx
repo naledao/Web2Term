@@ -92,11 +92,17 @@ function SettingsSectionIcon({ section }: { section: SettingsSection }): JSX.Ele
 }
 
 /* Layout sizes live in localStorage so they survive the App remount that happens
- * when the workspace switches to another session (WorkspaceApp keys App by session id). */
+ * when the workspace switches to another session (WorkspaceApp keys App by session id).
+ * Each session keeps its own copy under `<key>.<sessionId>`; the bare key is the value
+ * written before layouts were per session and only seeds sessions that have none yet. */
 const STORAGE_TERMINAL_WIDTH = 'layout.terminalWidth'
 const STORAGE_TERMINAL_COLLAPSED = 'layout.terminalCollapsed'
 const STORAGE_PANEL_WIDTH = 'layout.panelWidth'
 const STORAGE_PANEL_COLLAPSED = 'layout.panelCollapsed'
+
+function sessionLayoutKey(key: string, sessionId: string): string {
+  return `${key}.${sessionId}`
+}
 
 function readStoredNumber(key: string, fallback: number): number {
   try {
@@ -397,10 +403,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [durationNow, setDurationNow] = useState(() => Date.now())
   const [address, setAddress] = useState('')
   const [editing, setEditing] = useState(false)
-  const [terminalWidth, setTerminalWidth] = useState(() => readStoredNumber(`${STORAGE_TERMINAL_WIDTH}.${sessionId}`, readStoredNumber(STORAGE_TERMINAL_WIDTH, TERMINAL_DEFAULT_WIDTH)))
-  const [terminalCollapsed, setTerminalCollapsed] = useState(() => readStoredBool(STORAGE_TERMINAL_COLLAPSED, false))
-  const [panelWidth, setPanelWidth] = useState(() => readStoredNumber(STORAGE_PANEL_WIDTH, PANEL_DEFAULT_WIDTH))
-  const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(STORAGE_PANEL_COLLAPSED, false))
+  const [terminalWidth, setTerminalWidth] = useState(() => readStoredNumber(sessionLayoutKey(STORAGE_TERMINAL_WIDTH, sessionId), readStoredNumber(STORAGE_TERMINAL_WIDTH, TERMINAL_DEFAULT_WIDTH)))
+  const [terminalCollapsed, setTerminalCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_TERMINAL_COLLAPSED, sessionId), readStoredBool(STORAGE_TERMINAL_COLLAPSED, false)))
+  const [panelWidth, setPanelWidth] = useState(() => readStoredNumber(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), readStoredNumber(STORAGE_PANEL_WIDTH, PANEL_DEFAULT_WIDTH)))
+  const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), readStoredBool(STORAGE_PANEL_COLLAPSED, false)))
   const [switchingPlatform, setSwitchingPlatform] = useState(false)
   const [placeholderToggle, setPlaceholderToggle] = useState(false)
   const [placeholderClosing, setPlaceholderClosing] = useState(false)
@@ -566,14 +572,15 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const promptCopyGenerationRef = useRef(0)
   const notesSnapshotRef = useRef<TerminalNotes | null>(null)
 
-  // Persist the layout sizes: switching sessions remounts App (WorkspaceApp keys it
-  // by session id), so without this the terminal width would snap back to default.
+  // Persist the layout per session: switching sessions remounts App (WorkspaceApp keys it
+  // by session id), so without this the terminal and 侧栏 would snap back to default, and
+  // with a shared key one session's collapse or resize would leak into every other one.
   useEffect(() => {
     try {
-      window.localStorage.setItem(`${STORAGE_TERMINAL_WIDTH}.${sessionId}`, String(terminalWidth))
-      window.localStorage.setItem(STORAGE_TERMINAL_COLLAPSED, terminalCollapsed ? '1' : '0')
-      window.localStorage.setItem(STORAGE_PANEL_WIDTH, String(panelWidth))
-      window.localStorage.setItem(STORAGE_PANEL_COLLAPSED, panelCollapsed ? '1' : '0')
+      window.localStorage.setItem(sessionLayoutKey(STORAGE_TERMINAL_WIDTH, sessionId), String(terminalWidth))
+      window.localStorage.setItem(sessionLayoutKey(STORAGE_TERMINAL_COLLAPSED, sessionId), terminalCollapsed ? '1' : '0')
+      window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), String(panelWidth))
+      window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), panelCollapsed ? '1' : '0')
     } catch {
       /* storage unavailable; the sizes just will not persist */
     }
