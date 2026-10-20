@@ -1789,7 +1789,9 @@ export interface MysqlTableData {
   columns: string[]
   /** Database comments aligned with columns; an empty string means no comment. */
   columnComments: string[]
-  /** A non-fatal failure reading comments; row data remains available. */
+  /** Full MySQL types aligned with columns (e.g. varchar(255)); empty means unavailable. */
+  columnTypes: string[]
+  /** A non-fatal failure reading field metadata; row data remains available. */
   columnCommentsMessage: string
   /** Each row cells, already rendered as text. A SQL NULL stays null. */
   rows: Array<Array<string | null>>

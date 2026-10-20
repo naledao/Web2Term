@@ -185,7 +185,6 @@
   // ChatGPT clears its file input as soon as the upload is accepted. Keep a short-lived
   // copy of the bytes from the selection/paste/drop event so the later send event does
   // not depend on that input or on a thumbnail still being present in the DOM.
-  let lastDraftImageAttachments = []
   let lastDraftImageCapturedAt = 0
   let lastDraftImagePromise = Promise.resolve([])
   const replyDiagnosticEvents = new Set([
@@ -610,18 +609,17 @@
     const baselineImages = new Map(
       [...document.querySelectorAll('img')].map((image) => [image, imageSourceOf(image)])
     )
+    // Snapshot the upload cache before submission. A paste for the NEXT message
+    // must not be merged into this message while its image reads are pending.
+    const filesPromise = lastDraftImagePromise
+    const rememberedFiles = Date.now() - lastDraftImageCapturedAt <= 120_000
+      ? filesPromise : Promise.resolve([])
     pendingUserImageCaptures.set(token, {
       baselineTurn: turns.length > 0 ? turns[turns.length - 1] : null,
       baselineImages,
-      draftPromise: Promise.all([captureDraftImageAttachments(), lastDraftImagePromise]).then((batches) => {
-        const seen = new Set()
-        return batches.flat().filter((attachment) => {
-          const contentKey = attachment?.contentKey || attachment?.dataBase64
-          if (!contentKey || seen.has(contentKey)) return false
-          seen.add(contentKey)
-          return true
-        })
-      })
+      filesPromise,
+      draftPromise: Promise.all([captureDraftImageAttachments(), rememberedFiles])
+        .then((batches) => mergeImageAttachments(...batches))
     })
     return token
   }
@@ -640,6 +638,17 @@
     }
     reader.readAsDataURL(blob)
   })
+
+  const imageDataKey = async (base64) => {
+    try {
+      if (!globalThis.crypto?.subtle) return base64
+      const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0))
+      const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+      return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('')
+    } catch (_) {
+      return base64
+    }
+  }
 
   // Different capture paths can encode identical pixels as different PNG bytes.
   // Normalize only for de-duplication; the original bytes remain the persisted data.
@@ -660,11 +669,7 @@
       const dataUrl = canvas.toDataURL('image/png')
       const comma = dataUrl.indexOf(',')
       if (comma < 0) return ''
-      const base64 = dataUrl.slice(comma + 1)
-      if (!globalThis.crypto?.subtle) return base64
-      const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0))
-      const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
-      return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('')
+      return imageDataKey(dataUrl.slice(comma + 1))
     } catch (_) {
       return ''
     }
@@ -714,7 +719,7 @@
     }[extension] || ''
   }
 
-  const fileNameForImage = (image, index, mimeType) => {
+  const sourceFileNameForImage = (image) => {
     const alt = String(image.getAttribute('alt') || '').trim()
     if (alt && /\.[a-z0-9]{2,8}$/i.test(alt)) return alt
     try {
@@ -724,6 +729,12 @@
     } catch (_) {
       /* fall through */
     }
+    return ''
+  }
+
+  const fileNameForImage = (image, index, mimeType) => {
+    const sourceName = sourceFileNameForImage(image)
+    if (sourceName) return sourceName
     const ext = {
       'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
       'image/avif': 'avif', 'image/bmp': 'bmp', 'image/svg+xml': 'svg'
@@ -748,6 +759,7 @@
       const dataBase64 = await blobToBase64(file)
       if (!dataBase64) return null
       return {
+        sourceKind: 'file',
         fileName: fileNameForFile(file, index, mimeType),
         mimeType,
         dataBase64,
@@ -773,6 +785,8 @@
       const dataBase64 = await blobToBase64(blob)
       if (!dataBase64) return null
       return {
+        sourceKind: 'preview',
+        sourceFileName: sourceFileNameForImage(image),
         fileName: fileNameForImage(image, index, mimeType),
         mimeType,
         dataBase64,
@@ -802,18 +816,55 @@
         const dataBase64 = dataUrl.slice(comma + 1)
         if (!dataBase64) return null
         return {
+          sourceKind: 'preview',
+          sourceFileName: sourceFileNameForImage(image),
           fileName: fileNameForImage(image, index, 'image/png'),
           mimeType: 'image/png',
           dataBase64,
           width,
           height,
           sizeBytes: Math.floor(dataBase64.length * 0.75),
-          contentKey: dataBase64
+          contentKey: await imageDataKey(dataBase64)
         }
       } catch (_) {
         return null
       }
     }
+  }
+
+  const mergeImageAttachments = (...batches) => {
+    const candidates = batches.flat().filter((attachment) => attachment?.dataBase64)
+    const originals = []
+    const previews = []
+    const seen = new Set()
+    // Prefer the uploaded bytes even when the DOM preview was read first.
+    for (const attachment of [
+      ...candidates.filter((item) => item.sourceKind === 'file'),
+      ...candidates.filter((item) => item.sourceKind !== 'file')
+    ]) {
+      const key = attachment.contentKey || attachment.dataBase64
+      if (seen.has(key)) continue
+      seen.add(key)
+      if (attachment.sourceKind === 'file') originals.push(attachment)
+      else previews.push(attachment)
+    }
+
+    // ChatGPT can resize/re-encode an upload and rename its preview to name(1).jpg.
+    // Pixel hashes then differ. Use the existing per-platform filename evidence
+    // only for an unambiguous one-preview/one-original pair in this capture.
+    // Never collapse two originals or guess from visual similarity: screenshots
+    // with a small but meaningful difference must remain separate attachments.
+    const matches = previews.map((preview) => preview.sourceFileName
+      ? attachmentNameEvidence([preview.sourceFileName], originals)
+        .filter((evidence) => evidence.method !== 'missing').map((evidence) => evidence.index)
+      : [])
+    const claims = new Map()
+    for (const indices of matches) {
+      for (const index of indices) claims.set(index, (claims.get(index) || 0) + 1)
+    }
+    return [...originals, ...previews.filter((_, index) =>
+      matches[index].length !== 1 || claims.get(matches[index][0]) !== 1
+    )]
   }
 
   const readImageCandidates = async (images, files = []) => {
@@ -837,7 +888,7 @@
       seenData.add(contentKey)
       attachments.push(attachment)
     }
-    return attachments
+    return mergeImageAttachments(attachments)
   }
 
   const captureDraftImageAttachments = async () => {
@@ -846,8 +897,9 @@
       .filter((file) => String(file.type || '').startsWith('image/'))
     const images = []
     const seen = new Set()
-    let root = getComposer()
-    for (let depth = 0; depth < 8 && root; depth += 1, root = root.parentElement) {
+    let root = attachmentRoot() || getComposer()
+    for (let depth = 0; depth < 8 && root && root !== document.body; depth += 1, root = root.parentElement) {
+      if (attachmentHasMessages(root)) break
       for (const image of collectImages(root)) {
         if (seen.has(image)) continue
         seen.add(image)
@@ -860,6 +912,9 @@
     if (images.length === 0) {
       for (const image of document.querySelectorAll('img')) {
         if (seen.has(image)) continue
+        if ([...PAGE.messageSelectors, ...PAGE.assistantReplySelectors,
+          ...(PAGE.fileUserTurnSelector ? [PAGE.fileUserTurnSelector] : [])]
+          .some((selector) => image.closest(selector))) continue
         if (/^blob:/i.test(imageSourceOf(image))) {
           seen.add(image)
           images.push(image)
@@ -878,13 +933,8 @@
     if (files.length === 0) return
     // Do not await inside the DOM event handler. FileReader continues after the
     // page has finished dispatching the event, and the next send can use the cache.
-    lastDraftImagePromise = readImageCandidates([], files).then((attachments) => {
-      if (attachments.length > 0) {
-        lastDraftImageAttachments = attachments
-        lastDraftImageCapturedAt = Date.now()
-      }
-      return attachments
-    }).catch(() => [])
+    lastDraftImageCapturedAt = Date.now()
+    lastDraftImagePromise = readImageCandidates([], files).catch(() => [])
   }
 
   // Cover the three browser paths used by ChatGPT's attachment picker. Capture phase
@@ -913,11 +963,6 @@
     if (fileSend && event.isTrusted && composer && (event.target === composer || composer.contains(event.target))) fileSend.edited = true
   }, true)
 
-  const cachedDraftAttachments = () => {
-    if (Date.now() - lastDraftImageCapturedAt > 120_000) return []
-    return lastDraftImageAttachments
-  }
-
   const takeUserImageAttachments = async (token) => {
     const capture = pendingUserImageCaptures.get(token)
     if (!capture) return []
@@ -931,17 +976,11 @@
         capture.draftPromise || Promise.resolve([]),
         new Promise((resolve) => setTimeout(() => resolve([]), 2200))
       ])
-      const mergedDraftAttachments = [
-        ...(Array.isArray(draftAttachments) ? draftAttachments : []),
-        ...cachedDraftAttachments()
-      ].filter((attachment, index, all) =>
-        attachment && attachment.dataBase64 && all.findIndex((item) =>
-          (item?.contentKey || item?.dataBase64) === (attachment.contentKey || attachment.dataBase64)
-        ) === index
-      )
-      lastDraftImageAttachments = []
-      lastDraftImageCapturedAt = 0
-      lastDraftImagePromise = Promise.resolve([])
+      const mergedDraftAttachments = mergeImageAttachments(Array.isArray(draftAttachments) ? draftAttachments : [])
+      if (lastDraftImagePromise === capture.filesPromise) {
+        lastDraftImageCapturedAt = 0
+        lastDraftImagePromise = Promise.resolve([])
+      }
       if (mergedDraftAttachments.length > 0) {
         report({ event: 'user-image-capture', phase: 'draft', count: mergedDraftAttachments.length })
         return mergedDraftAttachments
@@ -2938,7 +2977,6 @@
         confirmedFileSends.add(token)
         if (confirmedFileSends.size > 8) confirmedFileSends.delete(confirmedFileSends.values().next().value)
         state.programmatic = false
-        lastDraftImageAttachments = []
         lastDraftImageCapturedAt = 0
         lastDraftImagePromise = Promise.resolve([])
         fileSend = null

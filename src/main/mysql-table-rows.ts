@@ -8,6 +8,8 @@ export interface MysqlColumnMetadata {
   columnKey: string
   tableType: string
   dataType: string
+  /** Full server definition, including length, precision, unsigned and enum values. */
+  columnType: string
   numericPrecision: number
   numericScale: number
   /** INFORMATION_SCHEMA EXTRA, e.g. 'auto_increment' or 'VIRTUAL GENERATED'. */
@@ -24,7 +26,8 @@ export async function readMysqlColumnMetadata(
 ): Promise<MysqlColumnMetadata[]> {
   const [rows] = await connection.query({
     sql: `SELECT c.COLUMN_NAME AS name, c.COLUMN_COMMENT AS comment, c.COLUMN_KEY AS columnKey,
-      c.DATA_TYPE AS dataType, c.NUMERIC_PRECISION AS numericPrecision, c.NUMERIC_SCALE AS numericScale,
+      c.DATA_TYPE AS dataType, c.COLUMN_TYPE AS columnType,
+      c.NUMERIC_PRECISION AS numericPrecision, c.NUMERIC_SCALE AS numericScale,
       c.EXTRA AS extra, t.TABLE_TYPE AS tableType
       FROM INFORMATION_SCHEMA.COLUMNS c JOIN INFORMATION_SCHEMA.TABLES t
       ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
@@ -34,9 +37,21 @@ export async function readMysqlColumnMetadata(
   return (Array.isArray(rows) ? rows as Array<Record<string, unknown>> : []).map((row) => ({
     name: String(row.name ?? ''), comment: String(row.comment ?? ''), columnKey: String(row.columnKey ?? ''),
     tableType: String(row.tableType ?? ''), dataType: String(row.dataType ?? '').toLowerCase(),
+    columnType: String(row.columnType || row.dataType || ''),
     numericPrecision: Number(row.numericPrecision), numericScale: Number(row.numericScale),
     extra: String(row.extra ?? '')
   }))
+}
+
+/** Align field details by name rather than relying on the metadata query's order. */
+export function mysqlColumnDescriptions(
+  columns: readonly string[], metadata: readonly MysqlColumnMetadata[]
+): { columnComments: string[]; columnTypes: string[] } {
+  const byName = new Map(metadata.map((column) => [column.name, column]))
+  return {
+    columnComments: columns.map((name) => byName.get(name)?.comment ?? ''),
+    columnTypes: columns.map((name) => byName.get(name)?.columnType ?? '')
+  }
 }
 
 export function mysqlRowDeleteUnavailable(metadata: readonly MysqlColumnMetadata[]): string {

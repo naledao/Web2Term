@@ -692,7 +692,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
       try {
         result = await api.queryMysqlTable(draft, database, table)
       } catch {
-        result = { ok: false, sql: '', columns: [], columnComments: [], columnCommentsMessage: '', rows: [], rowKeys: [], rowDeleteMessage: '', columnEditable: [], truncated: false, message: '读取失败，请重试。' }
+        result = { ok: false, sql: '', columns: [], columnComments: [], columnTypes: [], columnCommentsMessage: '', rows: [], rowKeys: [], rowDeleteMessage: '', columnEditable: [], truncated: false, message: '读取失败，请重试。' }
       }
       // A refresh after deletion must not be overwritten by an older data query.
       setTabs((current) => current.map((tab) =>
@@ -722,6 +722,9 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
       sql,
       columns: result.columns,
       columnComments: result.columns.map(() => ''),
+      // A custom query can contain joins/expressions; the open table's types
+      // cannot safely describe its result columns just because names match.
+      columnTypes: result.columns.map(() => ''),
       columnCommentsMessage: '',
       rows: result.rows,
       rowKeys: result.rows.map(() => null),
@@ -1436,6 +1439,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
                                       <Tooltip.Positioner side="bottom" align="start" sideOffset={8} className="mysql-page__column-positioner">
                                         <Tooltip.Popup className="mysql-page__column-tooltip" data-theme={theme}>
                                           <strong>{column}</strong>
+                                          <p className="mysql-page__column-type">数据类型：<code>{activeTab.data?.columnTypes?.[columnIndex] || '未获取'}</code></p>
                                           <p>{activeTab.data?.columnCommentsMessage || activeTab.data?.columnComments[columnIndex] || '暂无字段注释'}</p>
                                         </Tooltip.Popup>
                                       </Tooltip.Positioner>

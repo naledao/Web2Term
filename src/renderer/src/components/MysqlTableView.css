@@ -106,6 +106,10 @@
   white-space: pre-wrap;
 }
 
+.mysql-page__column-type code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .mysql-page__column-tooltip[data-theme='dark'] {
   background: #243147;
   color: #e6ecf6;

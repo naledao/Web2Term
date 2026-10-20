@@ -60,7 +60,7 @@ import type {
 import { CommandRunner } from './commands'
 import { ConversationStore } from './db'
 import { normalizeNacosUrl } from './nacos-view'
-import { readMysqlColumnMetadata, mysqlRowKey, mysqlRowDeleteUnavailable, mysqlColumnsEditable, deleteMysqlRowWithConnection, updateMysqlCellWithConnection } from './mysql-table-rows'
+import { readMysqlColumnMetadata, mysqlColumnDescriptions, mysqlRowKey, mysqlRowDeleteUnavailable, mysqlColumnsEditable, deleteMysqlRowWithConnection, updateMysqlCellWithConnection } from './mysql-table-rows'
 import { RedisReader, normalizeRedisDraft } from './redis-reader'
 import { ChatGptEmbed } from './embed'
 import type { EmbedHandlers } from './embed'
@@ -1366,7 +1366,7 @@ export class SessionRuntime {
     const host = String(draft?.host ?? '').trim()
     const db = String(database ?? '').trim()
     const target = String(table ?? '')
-    const empty = { sql: '', columns: [], columnComments: [], columnCommentsMessage: '', rows: [], rowKeys: [], rowDeleteMessage: '', columnEditable: [], truncated: false }
+    const empty = { sql: '', columns: [], columnComments: [], columnTypes: [], columnCommentsMessage: '', rows: [], rowKeys: [], rowDeleteMessage: '', columnEditable: [], truncated: false }
     if (host === '') return { ...empty, ok: false, message: '请先填写主机地址。' }
     if (db === '') return { ...empty, ok: false, message: '请先选择默认数据库。' }
     if (target.trim() === '') return { ...empty, ok: false, message: '请先选择要查看的表。' }
@@ -1395,14 +1395,17 @@ export class SessionRuntime {
       const truncated = raw.length > limit
       const page = truncated ? raw.slice(0, limit) : raw
       const columns = (fields ?? []).map((field) => field.name)
-      const comments = new Map<string, string>()
+      let columnComments = columns.map(() => '')
+      let columnTypes = columns.map(() => '')
       let columnCommentsMessage = ''
       let rowDeleteMessage = ''
       let rowKeys: Array<MysqlRowKey | null> = page.map(() => null)
       let columnEditable = columns.map(() => false)
       try {
         const metadata = await readMysqlColumnMetadata(connection, db, target)
-        for (const record of metadata) comments.set(record.name, record.comment)
+        const descriptions = mysqlColumnDescriptions(columns, metadata)
+        columnComments = descriptions.columnComments
+        columnTypes = descriptions.columnTypes
         rowDeleteMessage = mysqlRowDeleteUnavailable(metadata)
         columnEditable = mysqlColumnsEditable(columns, metadata)
         if (!rowDeleteMessage) rowKeys = page.map((row) => mysqlRowKey(row, metadata))
@@ -1410,11 +1413,10 @@ export class SessionRuntime {
         columnCommentsMessage = `字段信息读取失败：${mysqlErrorMessage(error)}`
         rowDeleteMessage = '主键读取失败，暂不支持删除记录。'
       }
-      const columnComments = columns.map((column) => comments.get(column) ?? '')
       const cells = page.map((row) =>
         columns.map((column, columnIndex) => formatMysqlCell(row[column], fields?.[columnIndex]))
       )
-      return { ok: true, sql: executedSql, columns, columnComments, columnCommentsMessage, rows: cells, rowKeys, rowDeleteMessage, columnEditable, truncated, message: '' }
+      return { ok: true, sql: executedSql, columns, columnComments, columnTypes, columnCommentsMessage, rows: cells, rowKeys, rowDeleteMessage, columnEditable, truncated, message: '' }
     } catch (error) {
       return { ...empty, ok: false, sql: executedSql, message: mysqlErrorMessage(error) }
     } finally {

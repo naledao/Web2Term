@@ -108,6 +108,10 @@
 
 .sql-viewer .cm-content {
   padding: 12px 0;
+  /* The app chrome disables selection on body. This read-only content is a
+     document: keep native mouse selection and CodeMirror's copy shortcuts. */
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .sql-viewer .cm-line {
