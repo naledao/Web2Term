@@ -404,7 +404,11 @@ export class SessionRuntime {
 
     if (this.web2term) {
       this.web2term.onOutput = chunk => this.runner.pushRemoteOutput(chunk)
-      this.web2term.onChanged = message => { if (!this.disposed) this.runner.refreshTerminal(message) }
+      this.web2term.onChanged = message => {
+        if (this.disposed) return
+        this.runner.refreshTerminal(message)
+        this.options.onSummaryChanged()
+      }
       this.web2term.onReady = () => { void this.probeEnvironment() }
     }
 
@@ -1803,10 +1807,13 @@ export class SessionRuntime {
 
   async probeEnvironment(): Promise<EnvironmentInfo> {
     if (this.web2term && !this.web2term.alive) return { ...this.environment }
-    const backend = this.remoteShell
+    // Match CommandRunner's execution target: a web2term probe is remote even
+    // though there is no SSH exec channel. Never parse it with the desktop OS fallback.
+    const backend = this.web2term ?? this.remoteShell
     try {
       const { kind, result } = await this.runner.runEnvironmentProbe()
-      if (this.disposed || backend !== this.remoteShell || result.rejected || result.interrupted || result.timedOut || result.sessionLost) {
+      if (this.disposed || backend !== (this.web2term ?? this.remoteShell) || (backend && !backend.alive)
+        || result.rejected || result.interrupted || result.timedOut || result.sessionLost) {
         return { ...this.environment }
       }
 

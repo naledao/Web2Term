@@ -24,7 +24,7 @@ import brandIcon from './assets/brand-icon.png'
 import type { IApi as FilemanagerApi, IEntity as FilemanagerEntity } from '@svar-ui/react-filemanager'
 import type { CSSProperties, DragEvent as ReactDragEvent, FormEvent, JSX, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { SESSION_COOKIE_NAME, terminalNotesOwnerKey } from '@shared/types'
-import { normalizeBackendUrl } from '@shared/backend-url'
+import { DEFAULT_BACKEND_URL, normalizeBackendUrl } from '@shared/backend-url'
 import { sshWorkingDirectory } from '@shared/ssh-directory'
 import { isPdfPath } from '@shared/pdf-preview'
 import './assets/terminal-notes.css'
@@ -3693,7 +3693,7 @@ ${record.command}`
                       inputMode="url"
                       autoComplete="off"
                       spellCheck={false}
-                      placeholder="http://192.168.108.33:8080"
+                      placeholder={DEFAULT_BACKEND_URL}
                       value={backendUrlDraft}
                       disabled={settingsLoading || savingSettings || backendLoginBusy || settingsLoadFailed}
                       aria-invalid={Boolean(backendUrlError)}

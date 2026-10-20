@@ -92,7 +92,7 @@ export default function Web2termDeviceDialog({ onClose, onConnected }: Props): R
   }, [loading, signedIn, refreshDevices])
 
   const connectDevice = async (device: Web2termDevice): Promise<void> => {
-    if (locked || !device.enabled) return
+    if (locked || !device.enabled || !device.onlineStatus) return
     setPending(true)
     setError('')
     try {
@@ -154,7 +154,7 @@ export default function Web2termDeviceDialog({ onClose, onConnected }: Props): R
                 <li className="web2term-connect__device" key={device.deviceId}>
                   <div className="web2term-connect__device-info"><strong>{device.deviceName}</strong><code>{device.deviceId}</code></div>
                   <span className={`web2term-connect__device-status${!device.enabled ? ' web2term-connect__device-status--disabled' : device.onlineStatus ? ' web2term-connect__device-status--online' : ''}`}><i aria-hidden="true" />{!device.enabled ? '已禁用' : device.onlineStatus ? '在线' : '离线'}</span>
-                  <button type="button" className="web2term-connect__button web2term-connect__button--primary" disabled={locked || !device.enabled} aria-label={`连接 ${device.deviceName}`} onClick={() => void connectDevice(device)}>{!device.enabled ? '已禁用' : pending ? '请稍候…' : '连接'}</button>
+                  <button type="button" className="web2term-connect__button web2term-connect__button--primary" disabled={locked || !device.enabled || !device.onlineStatus} title={!device.enabled ? '设备已禁用' : !device.onlineStatus ? '设备离线，暂时无法连接' : undefined} aria-label={`连接 ${device.deviceName}`} onClick={() => void connectDevice(device)}>{!device.enabled ? '已禁用' : pending ? '请稍候…' : '连接'}</button>
                 </li>
               ))}
             </ul>

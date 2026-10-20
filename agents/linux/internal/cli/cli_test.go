@@ -15,7 +15,7 @@ import (
 func TestInteractiveRetriesThenSaves(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "web2term", "config.json")
 	var output bytes.Buffer
-	input := strings.NewReader("\nnot-a-url\n  http://127.0.0.1:8080/backend/  \r\n")
+	input := strings.NewReader("not-a-url\n  http://127.0.0.1:8080/backend/  \r\n")
 	if err := Run([]string{"set", "server"}, input, &output, path); err != nil {
 		t.Fatal(err)
 	}
@@ -23,8 +23,23 @@ func TestInteractiveRetriesThenSaves(t *testing.T) {
 	if err != nil || server != "http://127.0.0.1:8080/backend/" {
 		t.Fatalf("saved server = %q, %v", server, err)
 	}
-	if strings.Count(output.String(), "请输入后端请求地址") != 3 || !strings.Contains(output.String(), "已保存") {
+	if strings.Count(output.String(), "请输入后端请求地址") != 2 || !strings.Contains(output.String(), "已保存") {
 		t.Fatalf("unexpected interaction: %s", &output)
+	}
+}
+
+func TestFirstUseBlankInputKeepsDefaultServer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	var output bytes.Buffer
+	if err := Run([]string{"set", "server"}, strings.NewReader("\n"), &output, path); err != nil {
+		t.Fatal(err)
+	}
+	server, err := config.Server(path)
+	if err != nil || server != config.DefaultServerURL {
+		t.Fatalf("default server = %q, %v", server, err)
+	}
+	if !strings.Contains(output.String(), config.DefaultServerURL) || !strings.Contains(output.String(), "已保留") {
+		t.Fatalf("default was not displayed or accepted: %s", &output)
 	}
 }
 

@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { normalizeBackendUrl } from '../shared/backend-url'
+import { normalizeBackendUrl, readBackendUrl } from '../shared/backend-url'
 import type { BackendAuthResult, BackendAuthState, BackendLoginCodeDraft, BackendLoginDraft, BackendUser, Web2termDevice, Web2termDeviceRenameDraft } from '../shared/types'
 import type { ConversationStore } from './db'
 
@@ -169,7 +169,7 @@ export class BackendAuthService {
   }
 
   getState(): BackendAuthState {
-    const backendUrl = this.store.getSetting(URL_KEY) ?? ''
+    const backendUrl = readBackendUrl(this.store.getSetting(URL_KEY))
     const signedOut: BackendAuthState = { backendUrl, status: 'signed-out', user: null, expiresAt: null }
     const secret = this.store.getSetting(AUTH_KEY)
     if (!secret) return signedOut
@@ -294,7 +294,7 @@ export class BackendAuthService {
 
   /** A login for one server must never be reused after changing servers. */
   setBackendUrl(backendUrl: string): void {
-    if (backendUrl === (this.store.getSetting(URL_KEY) ?? '')) return
+    if (backendUrl === readBackendUrl(this.store.getSetting(URL_KEY))) return
     this.store.setSettings({ [URL_KEY]: backendUrl, [AUTH_KEY]: '' })
     this.generation++
     this.dependencies.onLoginChanged?.()

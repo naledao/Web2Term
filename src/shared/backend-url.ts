@@ -1,3 +1,5 @@
+export const DEFAULT_BACKEND_URL = 'http://frp.kangnasi.xyz:8082'
+
 /** Validate an API base address without contacting the server. Empty clears it. */
 export function normalizeBackendUrl(value: unknown): string {
   if (typeof value !== 'string') throw new Error('后端地址必须是文本。')
@@ -28,10 +30,10 @@ export function normalizeBackendUrl(value: unknown): string {
   return address.origin + (address.pathname === '/' ? '' : address.pathname)
 }
 
-/** An absent or corrupt stored value must not prevent the desktop app opening. */
+/** Use the default for first use; preserve an explicit clear and reject corrupt settings. */
 export function readBackendUrl(value: unknown): string {
   try {
-    return normalizeBackendUrl(value ?? '')
+    return normalizeBackendUrl(value ?? DEFAULT_BACKEND_URL)
   } catch {
     return ''
   }

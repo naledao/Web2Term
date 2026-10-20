@@ -45,6 +45,28 @@ function service(request) {
   return { auth, settings, logs }
 }
 
+test('desktop first use has the default backend while custom and explicitly cleared settings remain distinct', () => {
+  const { auth, settings } = service(async () => { throw new Error('no request expected') })
+  settings.delete('backendUrl')
+  assert.equal(auth.getState().backendUrl, 'http://frp.kangnasi.xyz:8082')
+  assert.equal(auth.getState().status, 'signed-out') // Saved credentials belong to another backend.
+  assert.equal(auth.getConnectionCredentials(), null)
+  settings.set('backendUrl', 'https://example.invalid/deployment')
+  assert.equal(auth.getState().status, 'signed-in')
+  settings.set('backendUrl', '')
+  assert.equal(auth.getState().backendUrl, '')
+  assert.equal(auth.getConnectionCredentials(), null)
+})
+
+test('clearing a first-use default persists an explicit empty backend', () => {
+  const { auth, settings } = service(async () => { throw new Error('no request expected') })
+  settings.delete('backendUrl')
+  auth.setBackendUrl('')
+  assert.equal(settings.get('backendUrl'), '')
+  assert.equal(settings.get('backendAuth'), '')
+  assert.equal(auth.getState().backendUrl, '')
+})
+
 test('rename uses authenticated PATCH, preserves deployment path and returns normalized name', async () => {
   let calls = 0
   const { auth, logs } = service(async (address, options) => {

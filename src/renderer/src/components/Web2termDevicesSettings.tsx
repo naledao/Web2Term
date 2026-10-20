@@ -113,7 +113,6 @@ export default function Web2termDevicesSettings({ onOpenBackend, onBusyChange }:
   return (
     <div className="settings-devices">
       <div className="settings-devices__toolbar">
-        <p className="settings-devices__hint">当前账号的设备，每 10 秒更新状态。设备名称单独保存，立即生效。</p>
         <button type="button" className="settings-outline-btn" disabled={refreshing || saving} onClick={() => void refresh()}>{refreshing ? '刷新中…' : '刷新设备'}</button>
       </div>
       {error ? <p className="settings-feedback" role="alert">{error}</p> : null}

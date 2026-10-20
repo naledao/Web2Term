@@ -11,6 +11,9 @@ export interface Web2termSessionBinding {
   deviceName: string
   backendUrl: string
   userId: string
+  /** Absent in older saves; those sessions resume by default. Explicit close stores false. */
+  reconnect?: boolean
+  cwd?: string
 }
 
 export function parseWeb2termBinding(value: string | null): Web2termSessionBinding | null {
@@ -18,9 +21,30 @@ export function parseWeb2termBinding(value: string | null): Web2termSessionBindi
     const item = JSON.parse(value ?? 'null')
     if (item && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(item.agentId)
       && typeof item.deviceName === 'string' && typeof item.backendUrl === 'string'
-      && typeof item.userId === 'string' && item.userId) return item
+      && typeof item.userId === 'string' && item.userId) {
+      return { agentId: item.agentId, deviceName: item.deviceName, backendUrl: item.backendUrl, userId: item.userId,
+        reconnect: item.reconnect !== false,
+        cwd: typeof item.cwd === 'string' && item.cwd.startsWith('/') && item.cwd.length <= 32768 && !item.cwd.includes('\0') ? item.cwd : '' }
+    }
   } catch { /* Ignore invalid settings rather than treating them as local sessions. */ }
   return null
+}
+
+/** Restore one device route, prioritizing the visible session and respecting the three-PTY limit. */
+export function restoreWeb2termSessions(
+  connection: Web2termConnection,
+  shells: Iterable<Web2termShell>,
+  preferred?: Web2termShell | null
+): number {
+  const state = connection.getState()
+  if (state.auth.status !== 'signed-in' || !state.auth.user || ['connecting', 'connected'].includes(state.status)) return 0
+  const eligible = [...shells].filter(shell => shell.reconnectOnStartup
+    && shell.binding.backendUrl === state.auth.backendUrl && shell.binding.userId === state.auth.user!.publicId)
+  const target = preferred && eligible.includes(preferred) ? preferred : eligible.find(shell => shell.binding.agentId === state.agentId) ?? eligible[0]
+  if (!target) return 0
+  const selected = [target, ...eligible.filter(shell => shell !== target && shell.binding.agentId === target.binding.agentId)].slice(0, 3)
+  for (const shell of selected) shell.reconnect()
+  return selected.length
 }
 
 /** Release the shared desktop route only after all of its workspace owners stop using it. */
@@ -75,6 +99,7 @@ export class Web2termShell implements ExecutionShell {
   private bootBuffer = Buffer.alloc(0)
   private bootTimer: ReturnType<typeof setTimeout> | null = null
   private lastCwd = ''
+  private resumeAfterRestart: boolean
   private state: NonNullable<TerminalState['transport']>['status'] = 'disconnected'
   private message = '尚未连接设备，请点击重新连接。'
   private readonly unsubscribe: () => void
@@ -84,6 +109,8 @@ export class Web2termShell implements ExecutionShell {
   onClosed: (unconfirmed: boolean) => void = () => {}
 
   constructor(readonly binding: Web2termSessionBinding, private readonly connection: Web2termConnection) {
+    this.resumeAfterRestart = binding.reconnect !== false
+    this.lastCwd = binding.cwd ?? ''
     this.hostId = 'web2term:' + createHash('sha256').update(JSON.stringify([binding.backendUrl, binding.userId, binding.agentId])).digest('hex')
     this.unsubscribe = connection.terminals.subscribe(() => queueMicrotask(() => this.sync()), output => this.receive(output))
   }
@@ -91,6 +118,8 @@ export class Web2termShell implements ExecutionShell {
   get alive(): boolean { return this.enabled && !this.disposed && this.state === 'ready' && this.matches() && this.connection.getState().status === 'connected' && Boolean(this.shell?.alive) }
   get running(): boolean { return this.shell?.running ?? false }
   get needsConnection(): boolean { return !this.disposed && this.enabled && (this.wantOpen || Boolean(this.sessionId)) }
+  get reconnectOnStartup(): boolean { return !this.disposed && this.resumeAfterRestart }
+  persistentBinding(): Web2termSessionBinding { return { ...this.binding, reconnect: this.resumeAfterRestart, cwd: this.cwd } }
   get cwd(): string { return this.shell?.cwd || this.lastCwd }
   get transport(): NonNullable<TerminalState['transport']> {
     return { kind: 'web2term', deviceId: this.binding.agentId, deviceName: this.binding.deviceName,
@@ -98,11 +127,12 @@ export class Web2termShell implements ExecutionShell {
       message: this.message, logPath: this.connection.getState().logPath }
   }
 
-  activate(): void { if (!this.disposed) { this.enabled = true; this.closeRequested = false; this.wantOpen = true; this.sync() } }
+  activate(): void { if (!this.disposed) { this.resumeAfterRestart = true; this.enabled = true; this.closeRequested = false; this.wantOpen = true; this.sync() } }
 
   reconnect(): void {
     if (this.disposed) return
     if (!this.matchesAccount()) { this.update('error', '请在设置中登录创建此会话时的后端和账号。'); return }
+    this.resumeAfterRestart = true
     this.enabled = true
     this.closeRequested = false
     this.wantOpen = true
@@ -120,6 +150,7 @@ export class Web2termShell implements ExecutionShell {
   /** Close this PTY without deleting its managed workspace, transcript or device binding. */
   close(): void {
     if (this.disposed || (this.closeRequested && this.state === 'closing')) return
+    this.resumeAfterRestart = false
     this.enabled = false; this.wantOpen = false
     this.closeRequested = true; this.closeReported = false; this.closeUnconfirmed = false
     this.lastCwd = this.cwd

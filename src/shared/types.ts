@@ -366,7 +366,7 @@ export type AppTheme = 'light' | 'dark'
 export interface AppSettings {
   /** Overall appearance of the application chrome. */
   theme: AppTheme
-  /** web2term API base address. Empty string means not configured. */
+  /** web2term API base address. First use has a default; an explicit empty string clears it. */
   backendUrl: string
   /**
    * HTTP proxy for the EMBEDDED chat views, PER PLATFORM, keyed by `ChatPlatform['id']`.

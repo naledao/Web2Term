@@ -34,6 +34,24 @@ func TestServerURLValidation(t *testing.T) {
 	}
 }
 
+func TestDefaultServerDoesNotOverwriteConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	server, err := Server(path)
+	if err != nil || server != DefaultServerURL {
+		t.Fatalf("first-use backend = %q, %v", server, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("reading the default created a configuration file")
+	}
+	if err := SaveServer(path, "https://custom.example.com/backend"); err != nil {
+		t.Fatal(err)
+	}
+	server, err = Server(path)
+	if err != nil || server != "https://custom.example.com/backend" {
+		t.Fatal("custom backend was replaced with the default")
+	}
+}
+
 func TestSavePreservesOtherSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	initial := `{"server_url":"http://localhost:8080","device_id":"fixture-device","future":{"enabled":true}}`

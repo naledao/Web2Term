@@ -17,10 +17,10 @@ import { readGitDiff, readGitLog } from './git'
 import { registerPdfAssetHandler, registerPdfAssetScheme } from './pdf-assets'
 import { sshWorkingDirectory } from '../shared/ssh-directory'
 import { nodeFallback } from './environment'
-import { normalizeBackendUrl, readBackendUrl } from '../shared/backend-url'
+import { DEFAULT_BACKEND_URL, normalizeBackendUrl, readBackendUrl } from '../shared/backend-url'
 import { BackendAuthService } from './backend-auth'
 import { Web2termConnection } from './web2term-connection'
-import { disconnectUnusedWeb2term, parseWeb2termBinding } from './web2term-shell'
+import { disconnectUnusedWeb2term, parseWeb2termBinding, restoreWeb2termSessions } from './web2term-shell'
 import type { Web2termSessionBinding } from './web2term-shell'
 import { EMPTY_WEB2TERM_CONNECTION, EMPTY_WEB2TERM_TERMINALS } from '../shared/types'
 import { CHAT_PLATFORMS, CHATGPT_PLATFORM, DEFAULT_PLATFORM_ID, platformById } from '../shared/platforms'
@@ -141,7 +141,7 @@ let store: ConversationStore | null = null
 let backendAuth: BackendAuthService | null = null
 let web2termConnection: Web2termConnection | null = null
 let localMachineId = ''
-let settings: AppSettings = { theme: 'light', backendUrl: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1 }
+let settings: AppSettings = { theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1 }
 const runtimes = new Map<string, SessionRuntime>()
 let currentSessionId: string | null = null
 const unseenCompletedTasks = new Map<string, number>()
@@ -710,6 +710,7 @@ function persistManagedSession(runtime: SessionRuntime): void {
   // embeds and throw, so drop the write instead.
   if (runtime.isDisposed()) return
   store.upsertManagedSession(runtime.persistentState())
+  if (runtime.web2term) store.setSetting(`web2termSession:${runtime.id}`, JSON.stringify(runtime.web2term.persistentBinding()))
 }
 function createSession(
   kind: 'local' | 'ssh' | 'web2term' = 'local',
@@ -768,7 +769,6 @@ function createSession(
     shell.onClosed = unconfirmed => disconnectUnusedWeb2term(connection,
       [...runtimes.values()].flatMap(item => item.web2term ? [item.web2term] : []), shell.binding, unconfirmed)
   }
-  if (binding) store.setSetting(`web2termSession:${runtime.id}`, JSON.stringify(binding))
   persistManagedSession(runtime)
   if (web2termBinding) runtime.web2term?.activate()
   // One line per session, naming the site and the URL: when two platforms are embedded at
@@ -1550,7 +1550,7 @@ function registerIpcHandlers(): void {
         if (!binding || binding.agentId !== result.value.deviceId || binding.backendUrl !== auth.backendUrl || binding.userId !== auth.user?.publicId) continue
         binding.deviceName = result.value.deviceName
         runtime.runner.refreshTerminal()
-        try { store?.setSetting(`web2termSession:${runtime.id}`, JSON.stringify(binding)) }
+        try { persistManagedSession(runtime) }
         catch { console.warn('web2term: updated device name could not be cached for a workspace') }
       }
       try { web2termConnection?.updateDeviceName(result.value.deviceId, result.value.deviceName) }
@@ -1724,6 +1724,13 @@ if (!app.requestSingleInstanceLock()) {
       if (firstId) selectSession(firstId)
     }
 
+    if (web2termConnection) {
+      const count = restoreWeb2termSessions(web2termConnection,
+        [...runtimes.values()].flatMap(runtime => runtime.web2term ? [runtime.web2term] : []),
+        currentSessionId ? runtimes.get(currentSessionId)?.web2term : null)
+      if (count) console.info(`[web2term] restoring ${count} terminal workspace(s) after startup`)
+    }
+
     app.on('activate', () => {
       createManagerWindow()
       if (runtimes.size === 0) createSession('local', true)
@@ -1733,6 +1740,7 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', () => {
   quitting = true
+  for (const runtime of runtimes.values()) persistManagedSession(runtime)
   web2termConnection?.dispose()
 })
 

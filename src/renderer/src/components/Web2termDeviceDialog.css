@@ -15,6 +15,8 @@
 .web2term-connect__button--primary { background: #3d5bd0; color: #fff; border-color: transparent; }
 .web2term-connect__button--primary:hover:not(:disabled) { background: #304bb8; border-color: transparent; }
 .web2term-connect__button:disabled { opacity: .55; cursor: default; }
+.web2term-connect__button--primary:disabled { background: #eef0f4; color: #929bab; border-color: #e0e4eb; opacity: 1; cursor: not-allowed; }
+.workspace[data-theme='dark'] .web2term-connect__button--primary:disabled { background: #2a303b; color: #8892a3; border-color: #3d4554; }
 .web2term-connect__feedback { margin: 20px 0 0; line-height: 1.65; overflow-wrap: anywhere; }
 .web2term-connect__retry { padding: 2px 6px; border: 0; background: transparent; color: inherit; text-decoration: underline; text-underline-offset: 3px; font: inherit; cursor: pointer; }
 .workspace[data-theme='dark'] .web2term-connect__device-status--online { color: #67d6a7; }

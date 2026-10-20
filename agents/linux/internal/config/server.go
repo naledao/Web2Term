@@ -14,6 +14,7 @@ import (
 )
 
 const serverKey = "server_url"
+const DefaultServerURL = "http://frp.kangnasi.xyz:8082"
 
 // DefaultPath is independent of the directory from which web2term is invoked.
 // On Linux, UserConfigDir honors XDG_CONFIG_HOME and otherwise uses ~/.config.
@@ -100,7 +101,7 @@ func Server(path string) (string, error) {
 func serverFromFields(fields map[string]json.RawMessage) (string, error) {
 	raw, exists := fields[serverKey]
 	if !exists {
-		return "", nil
+		return DefaultServerURL, nil
 	}
 	var server string
 	if err := json.Unmarshal(raw, &server); err != nil {

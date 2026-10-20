@@ -4,23 +4,25 @@
 
 ## 配置后端请求地址
 
+默认后端地址为 `http://frp.kangnasi.xyz:8082`，首次使用可以直接执行 `web2term login`。需要使用其他后端时，通过 `web2term set server` 修改；已有自定义地址优先于默认地址。
+
 ```text
 $ web2term set server
-按 Ctrl+C 取消。
-请输入后端请求地址（例如 https://example.com:8443）：http://127.0.0.1:8080
-后端请求地址已保存：http://127.0.0.1:8080
-配置文件：/home/user/.config/web2term/config.json
+当前后端请求地址：http://frp.kangnasi.xyz:8082
+直接回车保留当前地址；按 Ctrl+C 取消。
+请输入后端请求地址（默认 http://frp.kangnasi.xyz:8082）：
+已保留当前后端请求地址。
 ```
 
 地址在提示出现后输入，不作为命令参数传入。支持 `http://`、`https://`、端口、IPv6 和后端路径，如 `https://example.com:8443/backend/`。地址需要显式填写协议，不接受内嵌用户名/密码、查询参数、片段或无效端口。
 
-再次执行会显示当前地址；直接回车保留它。首次设置时空输入会提示重新输入。Ctrl+C 或输入结束可取消。地址校验只检查格式，保存时不发起网络请求。
+执行时会显示当前地址；直接回车保留当前地址，首次使用时采用默认地址。Ctrl+C 或输入结束可取消。地址校验只检查格式，保存时不发起网络请求。
 
 配置示例：
 
 ```json
 {
-  "server_url": "http://127.0.0.1:8080"
+  "server_url": "http://frp.kangnasi.xyz:8082"
 }
 ```
 
@@ -30,12 +32,12 @@ Linux 配置路径为 `$XDG_CONFIG_HOME/web2term/config.json`，没有设置 `XD
 
 ## 邮箱验证码登录
 
-先通过 `web2term set server` 配置后端基础地址，再执行：
+使用默认后端时直接执行以下命令；如需自定义后端，先通过 `web2term set server` 修改地址：
 
 ```text
 $ web2term login
 诊断日志：/tmp/web2term-login-<时间>-<随机编号>.log
-登录后端：https://example.com:8443
+登录后端：http://frp.kangnasi.xyz:8082
 按 Ctrl+C 取消。
 请输入登录邮箱：user@example.com
 正在发送登录验证码……

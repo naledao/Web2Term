@@ -17,6 +17,26 @@ func loginFixture() auth.LoginResponse {
 	}
 }
 
+func TestFirstLoginPinsDefaultServerForAgentStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	now := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	if err := SaveLogin(path, DefaultServerURL, loginFixture(), now); err != nil {
+		t.Fatal(err)
+	}
+	fields, err := readFields(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var savedServer string
+	if err := json.Unmarshal(fields[serverKey], &savedServer); err != nil || savedServer != DefaultServerURL {
+		t.Fatal("login did not pin the effective backend with its credentials")
+	}
+	settings, err := AgentConfig(path, now, "fixture-host")
+	if err != nil || settings.ServerURL != DefaultServerURL || settings.Login.ServerURL != DefaultServerURL {
+		t.Fatalf("first-use agent configuration failed: %v", err)
+	}
+}
+
 func TestSaveLoginPreservesConfigAndExpiry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	initial := `{"server_url":"https://example.com/backend","device_id":"fixture-device","future":{"enabled":true}}`

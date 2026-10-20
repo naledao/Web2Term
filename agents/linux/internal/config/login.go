@@ -52,5 +52,10 @@ func SaveLogin(path, server string, response auth.LoginResponse, receivedAt time
 	if err != nil {
 		return fmt.Errorf("无法编码登录信息：%w", err)
 	}
+	// Pin the effective default with the credentials so future defaults cannot retarget them.
+	fields[serverKey], err = json.Marshal(server)
+	if err != nil {
+		return fmt.Errorf("无法编码后端请求地址：%w", err)
+	}
 	return writeFields(path, fields)
 }

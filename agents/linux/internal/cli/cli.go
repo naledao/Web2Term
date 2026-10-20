@@ -81,7 +81,7 @@ func setServer(input io.Reader, output io.Writer, path string) error {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 1024), 8192)
 	for {
-		fmt.Fprint(output, "请输入后端请求地址（例如 https://example.com:8443）：")
+		fmt.Fprintf(output, "请输入后端请求地址（默认 %s）：", config.DefaultServerURL)
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
 				return fmt.Errorf("读取输入失败，配置未修改：%w", err)
