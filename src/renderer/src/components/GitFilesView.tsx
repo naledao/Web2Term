@@ -1,9 +1,10 @@
-import { useToolApi } from './ToolSurfaceContext'
-﻿import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
+import { useToolApi, useToolSurface } from './ToolSurfaceContext'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { DiffModeEnum, DiffView } from '@git-diff-view/react'
 import '@git-diff-view/react/styles/diff-view.css'
 import type { GitFileChange, GitFileDiff } from '../../../shared/types'
+import { clampGitPaneWidth, gitPaneBounds, GIT_DIVIDER_WIDTH } from '../git-pane-layout'
 
 interface GitFilesViewProps {
   /** Active app theme, so the diff viewer matches the rest of the panel. */
@@ -14,9 +15,6 @@ interface GitFilesViewProps {
 
 type Filter = 'all' | 'modified' | 'added' | 'deleted' | 'renamed'
 
-/** Narrow enough to still read file names, wide enough to keep the diff usable. */
-const PANE_MIN_WIDTH = 260
-const PANE_MAX_WIDTH = 620
 const STORAGE_PANE_WIDTH = 'gitfiles.paneWidth'
 
 interface FolderNode {
@@ -169,6 +167,13 @@ function DiffViewer({ diff, theme, mode }: ViewerProps & { mode: DiffMode }): Re
 
 export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): ReactElement {
   const api = useToolApi()
+  const paneId = useId()
+  const { visible: toolVisible } = useToolSurface()
+  const containerRef = useRef<HTMLDivElement>(null)
+  const dividerRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null)
+  const [containerWidth, setContainerWidth] = useState(() => window.innerWidth)
+  const [resizing, setResizing] = useState(false)
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState('')
@@ -188,6 +193,32 @@ export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): 
       return 360
     }
   })
+  const displayedPaneWidth = clampGitPaneWidth(paneWidth, containerWidth)
+  const paneBounds = gitPaneBounds(containerWidth)
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const measure = (): void => {
+      const width = container.getBoundingClientRect().width
+      // Hidden tool windows and the history tab have no measurable layout.
+      if (width > 0) setContainerWidth(width)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (toolVisible) return
+    const pointerId = dragRef.current?.pointerId
+    dragRef.current = null
+    setResizing(false)
+    if (pointerId !== undefined && dividerRef.current?.hasPointerCapture(pointerId)) {
+      dividerRef.current.releasePointerCapture(pointerId)
+    }
+  }, [toolVisible])
 
   useEffect(() => {
     try {
@@ -272,27 +303,36 @@ export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): 
   }
 
   /** Drag the divider to trade width between the file list and the diff. */
-  const startPaneResize = useCallback(
-    (event: ReactPointerEvent<HTMLDivElement>): void => {
-      event.preventDefault()
-      const startX = event.clientX
-      const startWidth = paneWidth
-
-      const onMove = (moveEvent: PointerEvent): void => {
-        const next = startWidth + (moveEvent.clientX - startX)
-        const max = Math.min(PANE_MAX_WIDTH, window.innerWidth - 420)
-        setPaneWidth(Math.min(Math.max(next, PANE_MIN_WIDTH), Math.max(max, PANE_MIN_WIDTH)))
-      }
-      const onUp = (): void => {
-        window.removeEventListener('pointermove', onMove)
-        window.removeEventListener('pointerup', onUp)
-      }
-
-      window.addEventListener('pointermove', onMove)
-      window.addEventListener('pointerup', onUp)
-    },
-    [paneWidth]
-  )
+  const startPaneResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: displayedPaneWidth }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setResizing(true)
+  }
+  const movePaneResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    const width = containerRef.current?.getBoundingClientRect().width ?? containerWidth
+    setPaneWidth(clampGitPaneWidth(drag.startWidth + event.clientX - drag.startX, width))
+  }
+  const finishPaneResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (dragRef.current?.pointerId !== event.pointerId) return
+    dragRef.current = null
+    setResizing(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }
+  const resizePaneWithKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    let next: number
+    if (event.key === 'ArrowLeft') next = displayedPaneWidth - (event.shiftKey ? 50 : 20)
+    else if (event.key === 'ArrowRight') next = displayedPaneWidth + (event.shiftKey ? 50 : 20)
+    else if (event.key === 'Home') next = paneBounds.min
+    else if (event.key === 'End') next = paneBounds.max
+    else return
+    event.preventDefault()
+    event.stopPropagation()
+    setPaneWidth(clampGitPaneWidth(next, containerWidth))
+  }
 
   const copyPath = (): void => {
     if (!selected) return
@@ -362,8 +402,8 @@ export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): 
   for (const file of tree.files) rows.push(renderFile(file, 0))
 
   return (
-    <div className="gitfiles" style={{ gridTemplateColumns: paneWidth + 'px minmax(0, 1fr)' }}>
-      <div className="gitfiles__pane">
+    <div ref={containerRef} className={resizing ? 'gitfiles gitfiles--resizing' : 'gitfiles'} style={{ gridTemplateColumns: `${displayedPaneWidth}px ${GIT_DIVIDER_WIDTH}px minmax(0, 1fr)` }}>
+      <div id={paneId} className="gitfiles__pane">
         <div className="gitfiles__head">
           <span className="gitfiles__title">未提交的改动</span>
           <span className="gitfiles__count">{counts.all}</span>
@@ -404,23 +444,39 @@ export default function GitFilesView({ cwd, files, theme }: GitFilesViewProps): 
         </div>
 
         <div className="gitfiles__tree">
-          {rows.length === 0 ? <p className="gitfiles__none">没有匹配的文件。</p> : rows}
+          {rows.length === 0 ? <p className="gitfiles__none">没有匹配的文件。</p> : <div className="gitfiles__tree-content">{rows}</div>}
         </div>
-        <div
-          className="gitfiles__resizer"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="调整文件列表宽度"
-          onPointerDown={startPaneResize}
-        />
       </div>
+
+      <div
+        ref={dividerRef}
+        className="gitfiles__resizer"
+        role="separator"
+        tabIndex={0}
+        aria-orientation="vertical"
+        aria-label="调整文件列表宽度"
+        aria-controls={paneId}
+        aria-valuemin={Math.round(paneBounds.min)}
+        aria-valuemax={Math.round(paneBounds.max)}
+        aria-valuenow={Math.round(displayedPaneWidth)}
+        title="左右拖动调整宽度，也可使用左右方向键"
+        onPointerDown={startPaneResize}
+        onPointerMove={movePaneResize}
+        onPointerUp={finishPaneResize}
+        onPointerCancel={finishPaneResize}
+        onLostPointerCapture={finishPaneResize}
+        onKeyDown={resizePaneWithKeyboard}
+      />
 
       <div className="gitdiff">
         {selected ? (
           <>
             <div className="gitdiff__head">
               <span className={'gitfiles__ext gitfiles__ext--' + extTone(selected)}>{extLabel(selected)}</span>
-              <span className="gitdiff__path" title={selected}>{selected}</span>
+              <div className="gitdiff__heading">
+                <span className="gitdiff__filename">{fileName(selected)}</span>
+                <span className="gitdiff__path" title={selected}>{selected}</span>
+              </div>
               <button type="button" className="gitdiff__copy" onClick={copyPath} title={copied ? '已复制' : '复制路径'}>
                 <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
                   <rect x="5.4" y="5.4" width="8.2" height="8.2" rx="1.6" />

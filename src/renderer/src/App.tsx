@@ -11,12 +11,15 @@ import PdfPreviewDialog from './components/PdfPreviewDialog'
 import { useToolWindows, ToolWindowDock } from './components/ToolWindows'
 import type { PdfPreviewTarget } from './components/PdfPreviewDialog'
 import BackendLoginForm from './components/BackendLoginForm'
+import Web2termDevicesSettings from './components/Web2termDevicesSettings'
 import MysqlIcon from './components/MysqlIcon'
 import RedisIcon from './components/RedisIcon'
 import NacosIcon from './components/NacosIcon'
 import ConversationTranscript from './components/ConversationTranscript'
 import type { CommandLanguage } from './components/CommandViewer'
 import { conversationScrollKey } from './conversation-scroll'
+import { canNavigateCommandHistory, navigateCommandHistory, terminalCommandHistory } from './terminal-command-history'
+import type { CommandHistoryCursor } from './terminal-command-history'
 import brandIcon from './assets/brand-icon.png'
 import type { IApi as FilemanagerApi, IEntity as FilemanagerEntity } from '@svar-ui/react-filemanager'
 import type { CSSProperties, DragEvent as ReactDragEvent, FormEvent, JSX, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
@@ -72,6 +75,7 @@ const PANEL_MAX_RESERVE = 520
 const SETTINGS_SECTIONS = [
   { id: 'appearance', label: '外观' },
   { id: 'backend', label: '后端服务' },
+  { id: 'devices', label: 'web2term 设备' },
   { id: 'proxy', label: '网络代理' },
   { id: 'updates', label: '应用更新' },
   { id: 'session', label: '浏览器登录态' }
@@ -84,6 +88,7 @@ function SettingsSectionIcon({ section }: { section: SettingsSection }): JSX.Ele
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       {section === 'appearance' ? <><circle cx="12" cy="12" r="8" /><path d="M12 4v16" /><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none" /></> : null}
       {section === 'backend' ? <><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M12 10v4" /></> : null}
+      {section === 'devices' ? <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8m-4-4v4M7 9l2 2-2 2m5 0h4" /></> : null}
       {section === 'proxy' ? <><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></> : null}
       {section === 'updates' ? <><path d="M12 3v12m-5-5 5 5 5-5" /><path d="M4 16v4h16v-4" /></> : null}
       {section === 'session' ? <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 8h18" /><circle cx="12" cy="12" r="2" /><path d="M8 18c0-2 1.8-3.5 4-3.5s4 1.5 4 3.5" /></> : null}
@@ -423,6 +428,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const backendLoginTriggerRef = useRef<HTMLButtonElement>(null)
   const [backendLoginOpen, setBackendLoginOpen] = useState(false)
   const [backendLoginBusy, setBackendLoginBusy] = useState(false)
+  const [deviceSettingsBusy, setDeviceSettingsBusy] = useState(false)
   const [userAvatarDraft, setUserAvatarDraft] = useState('')
   const [userAvatarSourceDraft, setUserAvatarSourceDraft] = useState('')
   const [userAvatarPositionXDraft, setUserAvatarPositionXDraft] = useState(50)
@@ -457,6 +463,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [cookieSetResult, setCookieSetResult] = useState<SessionImportResult | null>(null)
   const [importingCookieSet, setImportingCookieSet] = useState(false)
   const [commandDraft, setCommandDraft] = useState('')
+  const commandHistoryCursor = useRef<CommandHistoryCursor | null>(null)
   // Keep the opened instruction stable while the runner moves on to another command.
   const [commandPreview, setCommandPreview] = useState<{ command: string; description: string; language: CommandLanguage } | null>(null)
   const commandPreviewOpen = commandPreview !== null
@@ -549,6 +556,16 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const sshActive = ssh !== null && ssh.attached
   const web2termActive = sessionKind === 'web2term' || terminal?.transport?.kind === 'web2term'
   const remoteTerminal = sshActive || web2termActive
+  const commandHistoryTarget = sshActive
+    ? `ssh:${ssh.hostId || ssh.target}`
+    : web2termActive ? `web2term:${terminal?.transport?.deviceId ?? ''}` : 'local'
+  const commandHistory = useMemo(() => terminalCommandHistory(sessionId, commandHistoryTarget), [sessionId, commandHistoryTarget])
+  const commandHistoryLines = sshActive ? ssh.lines : terminal?.lines
+  useEffect(() => {
+    if (commandHistoryCursor.current) setCommandDraft(commandHistoryCursor.current.draft)
+    commandHistoryCursor.current = null
+  }, [commandHistory])
+  useEffect(() => { commandHistory.observe(commandHistoryLines ?? []) }, [commandHistory, commandHistoryLines])
   const posixTerminal = remoteTerminal || terminal?.shellKind === 'posix'
   /**
    * True while a host is actually in charge — as opposed to the pane merely still
@@ -1224,6 +1241,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     async (event: FormEvent<HTMLFormElement>): Promise<void> => {
       event.preventDefault()
       const text = commandDraft
+      commandHistory.observe(commandHistoryLines ?? [])
+      commandHistory.remember(text)
+      commandHistoryCursor.current = null
       setCommandDraft('')
       try {
         // One input box, two destinations: whatever the pane is currently showing.
@@ -1236,7 +1256,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         /* ignore */
       }
     },
-    [commandDraft, sshActive]
+    [commandDraft, sshActive, commandHistory, commandHistoryLines]
   )
 
   const connectSsh = useCallback(async (draft: SshHostDraft): Promise<void> => {
@@ -1776,11 +1796,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   useEffect(() => {
     if (!settingsOpen) return
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !savingSettings && !backendLoginBusy) setSettingsOpen(false)
+      if (event.key === 'Escape' && !event.defaultPrevented && !savingSettings && !backendLoginBusy && !deviceSettingsBusy) setSettingsOpen(false)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [settingsOpen, savingSettings, backendLoginBusy])
+  }, [settingsOpen, savingSettings, backendLoginBusy, deviceSettingsBusy])
 
   const clearPromptHighlights = useCallback((): void => {
     const registry = (CSS as unknown as { highlights?: { delete(name: string): boolean } }).highlights
@@ -1903,7 +1923,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [sshPickerOpen, notesOpen, sshFilesOpen, pdfPreview])
 
   const saveSettings = useCallback(async (): Promise<void> => {
-    if (savingSettings || backendLoginBusy || settingsLoading || settingsLoadFailed || settings === null) return
+    if (savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null) return
     let backendUrl: string
     try {
       backendUrl = normalizeBackendUrl(backendUrlDraft)
@@ -1953,7 +1973,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     } finally {
       setSavingSettings(false)
     }
-  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
+  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
 
   /** Drag the terminal's right edge to resize the column. */
   const startResize = useCallback(
@@ -3201,8 +3221,12 @@ ${record.command}`
                     : '输入或粘贴命令，回车执行，Shift+回车换行'
                 }
                 aria-label={web2termActive ? 'web2term 命令' : sshActive ? 'SSH 命令' : '终端命令'}
+                title="↑/↓ 选择历史命令；多行输入时在第一行/最后一行切换历史"
                 disabled={web2termActive ? !terminal?.alive : sshActive ? ssh?.status !== 'connected' : false}
-                onChange={(event) => setCommandDraft(event.target.value)}
+                onChange={(event) => {
+                  commandHistoryCursor.current = null
+                  setCommandDraft(event.target.value)
+                }}
                 onPaste={(event) => {
                   const editor = event.currentTarget
                   const pasted = event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n')
@@ -3213,11 +3237,29 @@ ${record.command}`
                   if (!text.trim() || text.endsWith('\n')) return
                   event.preventDefault()
                   const next = editor.value.slice(0, editor.selectionStart) + text
+                  commandHistoryCursor.current = null
                   setCommandDraft(next)
                   requestAnimationFrame(() => editor.setSelectionRange(next.length, next.length))
                 }}
                 onKeyDown={(event) => {
                   if (event.nativeEvent.isComposing) return
+                  if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+                    const direction = event.key === 'ArrowUp' ? 'up' : 'down'
+                    const editor = event.currentTarget
+                    if (canNavigateCommandHistory(editor.value, editor.selectionStart, editor.selectionEnd, direction)) {
+                      commandHistory.observe(commandHistoryLines ?? [])
+                      const recalled = navigateCommandHistory(commandHistoryCursor.current, commandHistory.snapshot(), editor.value, direction)
+                      if (recalled) {
+                        event.preventDefault()
+                        commandHistoryCursor.current = recalled.cursor
+                        setCommandDraft(recalled.value)
+                        requestAnimationFrame(() => {
+                          if (editor.isConnected && editor.value === recalled.value) editor.setSelectionRange(recalled.value.length, recalled.value.length)
+                        })
+                        return
+                      }
+                    }
+                  }
                   if (event.ctrlKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === 'c'
                     && event.currentTarget.selectionStart === event.currentTarget.selectionEnd) {
                     event.preventDefault()
@@ -3480,17 +3522,17 @@ ${record.command}`
           aria-modal="true"
           aria-label="设置"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !savingSettings && !backendLoginBusy) setSettingsOpen(false)
+            if (event.target === event.currentTarget && !savingSettings && !backendLoginBusy && !deviceSettingsBusy) setSettingsOpen(false)
           }}
         >
           <div className="modal__box settings-modal">
             <div className="settings-modal__head">
               <div>
                 <div className="settings-modal__title">设置</div>
-                <div className="settings-modal__subtitle">外观、后端服务、代理和应用设置</div>
+                <div className="settings-modal__subtitle">外观、后端服务、设备、代理和应用设置</div>
               </div>
               <span className="panel__spacer" />
-              <button type="button" className="settings-modal__close" aria-label="关闭" disabled={savingSettings || backendLoginBusy} onClick={() => setSettingsOpen(false)}>×</button>
+              <button type="button" className="settings-modal__close" aria-label="关闭" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy} onClick={() => setSettingsOpen(false)}>×</button>
             </div>
 
             <div className="settings-modal__layout">
@@ -3500,6 +3542,7 @@ ${record.command}`
                 aria-label="设置项"
                 aria-orientation="vertical"
                 onKeyDown={(event) => {
+                  if (deviceSettingsBusy) return
                   const direction = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
                   if (!direction && event.key !== 'Home' && event.key !== 'End') return
                   event.preventDefault()
@@ -3515,6 +3558,7 @@ ${record.command}`
                     id={`settings-tab-${section.id}`}
                     type="button"
                     role="tab"
+                    disabled={deviceSettingsBusy}
                     className="settings-nav__item"
                     aria-selected={settingsSection === section.id}
                     aria-controls={`settings-panel-${section.id}`}
@@ -3704,6 +3748,20 @@ ${record.command}`
                   </div>
                 </section>
                 <section
+                  id="settings-panel-devices"
+                  role="tabpanel"
+                  aria-labelledby="settings-tab-devices"
+                  tabIndex={0}
+                  hidden={settingsSection !== 'devices'}
+                  className="settings-card"
+                >
+                  <div className="settings-card__heading">
+                    <span className="settings-card__icon"><SettingsSectionIcon section="devices" /></span>
+                    <h2>web2term 设备</h2>
+                  </div>
+                  {settingsSection === 'devices' ? <Web2termDevicesSettings onOpenBackend={() => setSettingsSection('backend')} onBusyChange={setDeviceSettingsBusy} /> : null}
+                </section>
+                <section
                   id="settings-panel-proxy"
                   role="tabpanel"
                   aria-labelledby="settings-tab-proxy"
@@ -3872,8 +3930,8 @@ ${record.command}`
             <div className="modal__foot settings-modal__foot">
               {settingsError ? <p className="settings-feedback settings-feedback--save" role="alert">{settingsError}</p> : null}
               <span className="panel__spacer" />
-              <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>取消</button>
-              <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' ? '保存' : '保存并重新加载'}</button>
+              <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' ? '关闭' : '取消'}</button>
+              {settingsSection !== 'devices' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' ? '保存' : '保存并重新加载'}</button> : null}
             </div>
           </div>
         </div>

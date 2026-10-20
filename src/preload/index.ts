@@ -14,6 +14,7 @@ import type {
   Web2termConnectionState,
   Web2termConnectDraft,
   Web2termDevice,
+  Web2termDeviceRenameDraft,
   Web2termTerminalsState,
   Web2termTerminalBuffer,
   Web2termTerminalSize,
@@ -42,6 +43,7 @@ import type {
   MysqlTableData,
   MysqlRowKey,
   MysqlRowDeleteResult,
+  MysqlCellUpdateResult,
   MysqlSqlExecutionResult,
   MysqlTableDdl,
   MysqlTableList,
@@ -241,6 +243,7 @@ removeConversation: (id: string): Promise<Conversation[]> =>
     ipcRenderer.invoke(IpcChannels.backendLogin, draft),
   getWeb2termConnection: (): Promise<Web2termConnectionState> => ipcRenderer.invoke(IpcChannels.web2termGetState),
   listWeb2termDevices: (): Promise<BackendAuthResult<Web2termDevice[]>> => ipcRenderer.invoke(IpcChannels.web2termListDevices),
+  renameWeb2termDevice: (draft: Web2termDeviceRenameDraft): Promise<BackendAuthResult<Web2termDeviceRenameDraft>> => ipcRenderer.invoke(IpcChannels.web2termRenameDevice, draft),
   connectWeb2term: (draft: Web2termConnectDraft): Promise<Web2termConnectionState> => ipcRenderer.invoke(IpcChannels.web2termConnect, draft),
   disconnectWeb2term: (): Promise<Web2termConnectionState> => ipcRenderer.invoke(IpcChannels.web2termDisconnect),
   closeWeb2termConnection: (): Promise<Web2termConnectionState> => ipcRenderer.invoke(IpcChannels.web2termClose),
@@ -436,11 +439,17 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   deleteMysqlTableRow: (draft: MysqlConnectionDraft, database: string, table: string, key: MysqlRowKey): Promise<MysqlRowDeleteResult> =>
     ipcRenderer.invoke(IpcChannels.mysqlConnDeleteRow, draft, database, table, key),
 
+  updateMysqlTableCell: (draft: MysqlConnectionDraft, database: string, table: string, key: MysqlRowKey, column: string, value: string | null): Promise<MysqlCellUpdateResult> =>
+    ipcRenderer.invoke(IpcChannels.mysqlConnUpdateCell, draft, database, table, key, column, value),
+
   executeMysqlSql: (draft: MysqlConnectionDraft, database: string, sql: string): Promise<MysqlSqlExecutionResult> =>
     ipcRenderer.invoke(IpcChannels.mysqlConnExecuteSql, draft, database, sql),
 
   createMysqlTable: (draft: MysqlConnectionDraft, database: string, sql: string): Promise<{ ok: boolean; message: string }> =>
     ipcRenderer.invoke(IpcChannels.mysqlConnCreateTable, draft, database, sql),
+
+  dropMysqlTable: (draft: MysqlConnectionDraft, database: string, table: string, type: string): Promise<{ ok: boolean; message: string }> =>
+    ipcRenderer.invoke(IpcChannels.mysqlConnDropTable, draft, database, table, type),
 
   getMysqlTableDdl: (draft: MysqlConnectionDraft, database: string, table: string): Promise<MysqlTableDdl> =>
     ipcRenderer.invoke(IpcChannels.mysqlConnTableDdl, draft, database, table),

@@ -7476,6 +7476,29 @@ body {
   box-shadow: 0 0 0 3px rgba(36, 182, 122, .12);
 }
 
+/* Keep the title and status halo inside the 46px collapsed rail. */
+.workspace:not(.workspace--manager) .terminal-pane--collapsed .terminal-pane__head {
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 4px;
+}
+
+.workspace:not(.workspace--manager) .terminal-pane--collapsed .terminal-pane__identity {
+  flex-direction: column;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.workspace:not(.workspace--manager) .terminal-pane--collapsed .terminal__dot {
+  flex: none;
+  margin-left: 0;
+}
+
+.workspace:not(.workspace--manager) .terminal-pane--collapsed .panel__spacer {
+  display: none;
+}
+
 .workspace:not(.workspace--manager) .terminal-pane .panel__delay {
   border-color: #dce4ee;
   background: #f0f3f7;
@@ -9948,9 +9971,10 @@ body {
 
 .gitfiles {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(320px, 26%) minmax(0, 1fr);
+  grid-template-columns: 360px 8px minmax(0, 1fr);
 }
 
 .gitfiles__pane {
@@ -9958,7 +9982,6 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  border-right: 1px solid #eef1f6;
 }
 
 .gitfiles__head {
@@ -10073,9 +10096,15 @@ body {
 
 .gitfiles__tree {
   flex: 1;
+  min-width: 0;
   min-height: 0;
-  overflow-y: auto;
+  overflow: auto;
   padding: 0 10px 16px;
+}
+
+.gitfiles__tree-content {
+  width: max-content;
+  min-width: 100%;
 }
 
 .gitfiles__none {
@@ -10248,20 +10277,36 @@ body {
 .gitdiff__head {
   flex: none;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 16px 20px 12px;
   border-bottom: 1px solid #eef1f6;
 }
 
+.gitdiff__heading {
+  display: flex;
+  flex: 1 1 220px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.gitdiff__filename,
 .gitdiff__path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  user-select: text;
   color: #26313f;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 13.5px;
   font-weight: 700;
+}
+
+.gitdiff__path {
+  color: #7b879b;
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .gitdiff__copy {
@@ -10503,8 +10548,8 @@ body {
 }
 
 .gitfiles__name {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: none;
+  overflow: visible;
   white-space: nowrap;
   color: #26313f;
   font-size: 13px;
@@ -10572,18 +10617,30 @@ body {
 }
 /* Drag the divider to trade width between the file list and the diff. */
 .gitfiles__resizer {
-  position: absolute;
-  top: 0;
-  right: -3px;
-  bottom: 0;
-  width: 6px;
+  position: relative;
+  align-self: stretch;
+  width: 8px;
   z-index: 3;
-  cursor: ew-resize;
-  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  background: #f5f7fb;
+  border-inline: 1px solid #eef1f6;
 }
 
-.gitfiles__resizer:hover {
+.gitfiles__resizer:hover,
+.gitfiles--resizing .gitfiles__resizer {
   background: rgba(76, 108, 247, 0.18);
+}
+
+.gitfiles__resizer:focus-visible {
+  outline: 2px solid #5d72e2;
+  outline-offset: -2px;
+}
+
+.gitfiles--resizing,
+.gitfiles--resizing * {
+  cursor: col-resize !important;
 }
 
 .gitfiles__pane {
@@ -10591,7 +10648,7 @@ body {
 }
 
 .gitfiles {
-  grid-template-columns: 360px minmax(0, 1fr);
+  grid-template-columns: 360px 8px minmax(0, 1fr);
 }
 /* Per-host connect action, sitting next to the remove button. */
 .ssh-connect__host-connect {
@@ -11786,7 +11843,18 @@ body {
   border-color: #2d3a4d;
 }
 
+.git-dialog--dark .gitfiles__resizer {
+  background: #151e2a;
+  border-color: #2d3a4d;
+}
+
+.git-dialog--dark .gitfiles__resizer:hover,
+.git-dialog--dark .gitfiles--resizing .gitfiles__resizer {
+  background: #334b78;
+}
+
 .git-dialog--dark .gitfiles__title,
+.git-dialog--dark .gitdiff__filename,
 .git-dialog--dark .gitdiff__path,
 .git-dialog--dark .gitfiles__name,
 .git-dialog--dark .gitfiles__row--folder .gitfiles__name,
@@ -14911,22 +14979,20 @@ body {
 }
 .mysql-page__create-target strong { color: #00758f; }
 .mysql-page__create-label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 600; }
+/* Frame around the SQL editor; CodeMirror inside is transparent and draws its own gutter. */
 .mysql-page__create-sql {
   box-sizing: border-box;
-  display: block;
   width: 100%;
   min-height: 230px;
-  padding: 14px 16px;
-  resize: vertical;
+  overflow: hidden;
   border: 1px solid #d7dee9;
   border-radius: 10px;
-  outline: none;
   background: #fbfcfe;
   color: #243246;
-  font: 13px/1.7 Consolas, 'Courier New', monospace;
-  tab-size: 2;
 }
-.mysql-page__create-sql:focus { border-color: #0095ac; box-shadow: 0 0 0 3px rgba(0, 149, 172, .13); }
+.mysql-page__create-sql:focus-within { border-color: #0095ac; box-shadow: 0 0 0 3px rgba(0, 149, 172, .13); }
+.mysql-page__create-sql--disabled { opacity: .7; }
+.mysql-page__create-sql > .mysql-page__hint { margin: 0; padding: 14px 16px; }
 .mysql-page__create-tip { margin: 10px 0 0; color: #7c8799; font-size: 12px; }
 .mysql-page__create-error { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: #fff0f0; color: #c53333; font-size: 12px; overflow-wrap: anywhere; }
 .mysql-page__create-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px 20px; border-top: 1px solid #edf0f4; }

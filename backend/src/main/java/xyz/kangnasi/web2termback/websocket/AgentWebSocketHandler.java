@@ -51,7 +51,7 @@ public class AgentWebSocketHandler extends TextWebSocketHandler {
 
         // 首次连接自动创建设备；已存在设备不会被重新绑定到其他用户。
         userDeviceMapper.insertIfAbsent(userId, deviceId, deviceName);
-        if (userDeviceMapper.markConnected(userId, deviceId, deviceName) != 1) {
+        if (userDeviceMapper.markConnected(userId, deviceId) != 1) {
             session.close(DEVICE_NOT_ALLOWED);
             return;
         }

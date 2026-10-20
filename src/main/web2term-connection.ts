@@ -143,6 +143,18 @@ export class Web2termConnection {
     }
   }
 
+  /** Refresh display metadata without reconnecting or interrupting any terminal. */
+  updateDeviceName(agentId: string, deviceName: string): void {
+    const auth = this.auth.getState()
+    const target = this.savedTarget(auth)
+    if (target.agentId === agentId) {
+      this.store.setSettings({ [TARGET_KEY]: JSON.stringify({ backendUrl: auth.backendUrl,
+        publicId: auth.user?.publicId, agentId, deviceName }) })
+    }
+    if (this.agentId === agentId) this.deviceName = deviceName
+    if (target.agentId === agentId || this.agentId === agentId) this.setState(this.status, this.message)
+  }
+
   connect(draft: Web2termConnectDraft): Web2termConnectionState {
     if (this.disposed) return this.getState()
     const auth = this.auth.getState()

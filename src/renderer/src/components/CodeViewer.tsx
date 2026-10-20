@@ -2,12 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import CodeMirror, { EditorState, EditorView, oneDarkTheme } from '@uiw/react-codemirror'
 import type { BasicSetupOptions, ReactCodeMirrorRef } from '@uiw/react-codemirror'
-import { MySQL, sql } from '@codemirror/lang-sql'
 import { json } from '@codemirror/lang-json'
 import { foldAll, HighlightStyle, syntaxHighlighting, unfoldAll } from '@codemirror/language'
 import { openSearchPanel } from '@codemirror/search'
 import { tags } from '@lezer/highlight'
 import type { AppTheme } from '../../../shared/types'
+import { CHINESE_PHRASES, MYSQL_LANGUAGE, SQL_HIGHLIGHTING } from './sql-codemirror'
 import './SqlViewer.css'
 
 interface CodeViewerProps {
@@ -18,20 +18,7 @@ interface CodeViewerProps {
   language: 'sql' | 'json'
 }
 
-const MYSQL_LANGUAGE = sql({ dialect: MySQL })
 const JSON_LANGUAGE = json()
-function sqlHighlighting(dark: boolean) {
-  return syntaxHighlighting(HighlightStyle.define([
-    { tag: [tags.keyword, tags.bool, tags.null], color: dark ? '#c7a4ff' : '#6b3aad', fontWeight: '600' },
-    { tag: [tags.name, tags.special(tags.string)], color: dark ? '#80c9ff' : '#075c94' },
-    { tag: tags.typeName, color: dark ? '#f0bd81' : '#994b00' },
-    { tag: tags.number, color: dark ? '#f0bd81' : '#9c451b' },
-    { tag: tags.string, color: dark ? '#add990' : '#32691a' },
-    { tag: tags.comment, color: dark ? '#9cadc2' : '#5c6778', fontStyle: 'italic' },
-    { tag: tags.operator, color: dark ? '#b5c7d7' : '#42516a' }
-  ]))
-}
-const SQL_HIGHLIGHTING = { light: sqlHighlighting(false), dark: sqlHighlighting(true) }
 
 function jsonHighlighting(dark: boolean) {
   return syntaxHighlighting(HighlightStyle.define([
@@ -69,28 +56,6 @@ const COMPACT_SETUP: BasicSetupOptions = {
   searchKeymap: false,
   highlightSelectionMatches: false
 }
-
-const CHINESE_PHRASES = EditorState.phrases.of({
-  Find: '查找',
-  next: '下一个',
-  previous: '上一个',
-  all: '全部',
-  'match case': '区分大小写',
-  regexp: '正则表达式',
-  'by word': '全词匹配',
-  close: '关闭',
-  'Go to line': '跳转到行',
-  go: '跳转',
-  'current match': '当前匹配',
-  'on line': '所在行',
-  'Fold line': '折叠行',
-  'Unfold line': '展开行',
-  'folded code': '已折叠的代码',
-  unfold: '展开',
-  'Folded lines': '已折叠行',
-  'Unfolded lines': '已展开行',
-  to: '至'
-})
 
 export default function CodeViewer({ value, theme, label, compact = false, language }: CodeViewerProps): ReactElement {
   const editorRef = useRef<ReactCodeMirrorRef>(null)

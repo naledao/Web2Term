@@ -4,6 +4,9 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -17,7 +20,7 @@ import xyz.kangnasi.web2termback.websocket.AgentWebSocketHandler;
 import java.util.List;
 
 /**
- * 当前用户设备查询接口。
+ * 当前用户设备查询与名称管理接口。
  */
 @RestController
 @RequestMapping("/api/user/devices")
@@ -65,6 +68,30 @@ public class UserDeviceController {
                                 device.updatedAt());
                 })
                 .toList();
+    }
+
+    @PatchMapping("/{deviceId}")
+    public ResponseEntity<Void> renameDevice(
+            @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
+            @PathVariable("deviceId") String deviceId,
+            @RequestBody RenameDeviceRequest request) {
+        ResponseEntity<String> authResponse = userServiceClient.introspect(authorization);
+        long userId = extractUserId(authResponse.getBody());
+        if (deviceId == null || !deviceId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "invalid device id");
+        }
+        String deviceName = request == null || request.deviceName() == null ? "" : request.deviceName().strip();
+        if (deviceName.isEmpty() || deviceName.length() > 100 || deviceName.codePoints().anyMatch(Character::isISOControl)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "invalid device name");
+        }
+        // The authenticated account is part of the UPDATE predicate, including offline/disabled devices.
+        if (userDeviceMapper.renameForUser(userId, deviceId.toLowerCase(java.util.Locale.ROOT), deviceName) == 0) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "device not found");
+        }
+        return ResponseEntity.noContent().build();
+    }
+
+    public record RenameDeviceRequest(String deviceName) {
     }
 
     /**

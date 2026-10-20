@@ -35,6 +35,7 @@ import type {
   MysqlTableData,
   MysqlRowKey,
   MysqlRowDeleteResult,
+  MysqlCellUpdateResult,
   MysqlSqlExecutionResult,
   MysqlTableDdl,
   MysqlTableList,
@@ -59,7 +60,7 @@ import type {
 import { CommandRunner } from './commands'
 import { ConversationStore } from './db'
 import { normalizeNacosUrl } from './nacos-view'
-import { readMysqlColumnMetadata, mysqlRowKey, mysqlRowDeleteUnavailable, deleteMysqlRowWithConnection } from './mysql-table-rows'
+import { readMysqlColumnMetadata, mysqlRowKey, mysqlRowDeleteUnavailable, mysqlColumnsEditable, deleteMysqlRowWithConnection, updateMysqlCellWithConnection } from './mysql-table-rows'
 import { RedisReader, normalizeRedisDraft } from './redis-reader'
 import { ChatGptEmbed } from './embed'
 import type { EmbedHandlers } from './embed'
@@ -1361,7 +1362,7 @@ export class SessionRuntime {
     const host = String(draft?.host ?? '').trim()
     const db = String(database ?? '').trim()
     const target = String(table ?? '')
-    const empty = { sql: '', columns: [], columnComments: [], columnCommentsMessage: '', rows: [], rowKeys: [], rowDeleteMessage: '', truncated: false }
+    const empty = { sql: '', columns: [], columnComments: [], columnCommentsMessage: '', rows: [], rowKeys: [], rowDeleteMessage: '', columnEditable: [], truncated: false }
     if (host === '') return { ...empty, ok: false, message: '请先填写主机地址。' }
     if (db === '') return { ...empty, ok: false, message: '请先选择默认数据库。' }
     if (target.trim() === '') return { ...empty, ok: false, message: '请先选择要查看的表。' }
@@ -1394,10 +1395,12 @@ export class SessionRuntime {
       let columnCommentsMessage = ''
       let rowDeleteMessage = ''
       let rowKeys: Array<MysqlRowKey | null> = page.map(() => null)
+      let columnEditable = columns.map(() => false)
       try {
         const metadata = await readMysqlColumnMetadata(connection, db, target)
         for (const record of metadata) comments.set(record.name, record.comment)
         rowDeleteMessage = mysqlRowDeleteUnavailable(metadata)
+        columnEditable = mysqlColumnsEditable(columns, metadata)
         if (!rowDeleteMessage) rowKeys = page.map((row) => mysqlRowKey(row, metadata))
       } catch (error) {
         columnCommentsMessage = `字段信息读取失败：${mysqlErrorMessage(error)}`
@@ -1407,7 +1410,7 @@ export class SessionRuntime {
       const cells = page.map((row) =>
         columns.map((column, columnIndex) => formatMysqlCell(row[column], fields?.[columnIndex]))
       )
-      return { ok: true, sql: executedSql, columns, columnComments, columnCommentsMessage, rows: cells, rowKeys, rowDeleteMessage, truncated, message: '' }
+      return { ok: true, sql: executedSql, columns, columnComments, columnCommentsMessage, rows: cells, rowKeys, rowDeleteMessage, columnEditable, truncated, message: '' }
     } catch (error) {
       return { ...empty, ok: false, sql: executedSql, message: mysqlErrorMessage(error) }
     } finally {
@@ -1431,6 +1434,32 @@ export class SessionRuntime {
       return await deleteMysqlRowWithConnection(connection, db, target, key)
     } catch (error) {
       return { ok: false, affectedRows: 0, message: `删除操作失败，请刷新表数据确认当前状态：${mysqlErrorMessage(error)}` }
+    } finally {
+      if (connection) await connection.end().catch(() => undefined)
+    }
+  }
+
+  /** Edit one cell of the record identified by its complete primary key. */
+  async updateMysqlTableCell(draft: MysqlConnectionDraft, database: string, table: string, key: MysqlRowKey, column: string, value: string | null): Promise<MysqlCellUpdateResult> {
+    const failed = (message: string): MysqlCellUpdateResult => ({ ok: false, message, columns: [], row: null, rowKey: null })
+    const host = String(draft?.host ?? '').trim()
+    const db = String(database ?? '').trim()
+    const target = String(table ?? '')
+    if (!host || !db || target.trim() === '') return failed('请先填写连接信息并选择数据表。')
+    if (typeof column !== 'string' || column === '') return failed('请选择要编辑的字段。')
+    const rawPort = Number(draft?.port)
+    let connection: Connection | null = null
+    try {
+      connection = await createConnection({
+        host, port: Number.isFinite(rawPort) && rawPort > 0 ? Math.trunc(rawPort) : 3306,
+        user: String(draft?.username ?? '').trim(), password: this.mysqlPasswordFor(draft),
+        database: db, connectTimeout: 8000,
+        // Same rendering as the table query, so the row read back matches the grid.
+        dateStrings: true, supportBigNumbers: true, bigNumberStrings: true
+      })
+      return await updateMysqlCellWithConnection(connection, db, target, key, column, value)
+    } catch (error) {
+      return failed(`更新失败：${mysqlErrorMessage(error)}`)
     } finally {
       if (connection) await connection.end().catch(() => undefined)
     }
@@ -1504,6 +1533,39 @@ export class SessionRuntime {
         multipleStatements: false
       })
       await connection.query({ sql: statement, timeout: 15000 })
+      return { ok: true, message: '' }
+    } catch (error) {
+      return { ok: false, message: mysqlErrorMessage(error) }
+    } finally {
+      if (connection) await connection.end().catch(() => undefined)
+    }
+  }
+
+  /** Drop one table or view from the selected MySQL database. */
+  async dropMysqlTable(draft: MysqlConnectionDraft, database: string, table: string, type: string): Promise<{ ok: boolean; message: string }> {
+    const host = String(draft?.host ?? '').trim()
+    const db = String(database ?? '').trim()
+    const target = String(table ?? '')
+    if (host === '') return { ok: false, message: '请先填写主机地址。' }
+    if (db === '') return { ok: false, message: '请先选择默认数据库。' }
+    if (target.trim() === '') return { ok: false, message: '请先选择要删除的表。' }
+    const quote = (name: string): string => '`' + name.replace(/`/g, '``') + '`'
+    // A view has to be dropped with DROP VIEW; DROP TABLE on it fails rather than guessing.
+    const keyword = String(type ?? '').toUpperCase() === 'VIEW' ? 'VIEW' : 'TABLE'
+    const rawPort = Number(draft?.port)
+    const port = Number.isFinite(rawPort) && rawPort > 0 ? Math.trunc(rawPort) : 3306
+    let connection: Connection | null = null
+    try {
+      connection = await createConnection({
+        host,
+        port,
+        user: String(draft?.username ?? '').trim(),
+        password: this.mysqlPasswordFor(draft),
+        database: db,
+        connectTimeout: 8000,
+        multipleStatements: false
+      })
+      await connection.query({ sql: `DROP ${keyword} ${quote(db)}.${quote(target)}`, timeout: 15000 })
       return { ok: true, message: '' }
     } catch (error) {
       return { ok: false, message: mysqlErrorMessage(error) }

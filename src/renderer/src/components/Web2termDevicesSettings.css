@@ -1,0 +1,32 @@
+.settings-devices { min-width:0; }
+.settings-devices__toolbar { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-bottom:22px; }
+.settings-devices__hint { flex:1; margin:0; color:#667085; font-size:14px; line-height:1.7; }
+.settings-devices__toolbar button { flex:none; }
+.settings-devices__count { margin:0 0 12px; color:#667085; font-size:14px; }
+.settings-devices__list { display:grid; gap:12px; margin:0; padding:0; list-style:none; }
+.settings-devices__device { display:flex; align-items:center; flex-wrap:wrap; gap:18px; padding:20px; border:1px solid #e1e6f0; border-radius:14px; background:#fff; }
+.settings-devices__info { display:grid; flex:1 1 260px; min-width:0; gap:6px; overflow-wrap:anywhere; user-select:text; }
+.settings-devices__info strong { color:#25314a; font-size:16px; }
+.settings-devices__info code { color:#78839a; font-size:12px; }
+.settings-devices__state { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.settings-devices__status { display:inline-flex; align-items:center; gap:7px; color:#758198; font-size:13px; white-space:nowrap; }
+.settings-devices__status i { width:8px; height:8px; border-radius:50%; background:currentColor; }
+.settings-devices__status--online { color:#21835c; }
+.settings-devices__disabled { padding:3px 8px; border-radius:6px; background:#fff3d6; color:#936500; font-size:12px; }
+.settings-devices__rename { display:flex; align-items:center; flex-wrap:wrap; gap:10px; flex-basis:100%; min-width:0; }
+.settings-devices__rename .settings-input { flex:1 1 220px; min-width:0; }
+.settings-devices__actions { display:flex; gap:8px; flex-wrap:wrap; }
+.settings-devices__empty { margin:0; padding:24px 0; color:#667085; font-size:14px; line-height:1.8; }
+.settings-devices__notice { color:#21835c; font-size:14px; }
+.settings-devices__log { color:#78839a; overflow-wrap:anywhere; user-select:text; font-size:12px; }
+.workspace[data-theme='dark'] .settings-devices__device { border-color:#3a4254; background:#252a36; }
+.workspace[data-theme='dark'] .settings-devices__info strong { color:#e7edf7; }
+.workspace[data-theme='dark'] .settings-devices__hint,
+.workspace[data-theme='dark'] .settings-devices__count,
+.workspace[data-theme='dark'] .settings-devices__info code,
+.workspace[data-theme='dark'] .settings-devices__empty,
+.workspace[data-theme='dark'] .settings-devices__log { color:#aab6cd; }
+.workspace[data-theme='dark'] .settings-devices__status { color:#aab6cd; }
+.workspace[data-theme='dark'] .settings-devices__status--online,
+.workspace[data-theme='dark'] .settings-devices__notice { color:#7bd6a8; }
+.workspace[data-theme='dark'] .settings-devices__disabled { background:#4b3c1c; color:#f0cc78; }

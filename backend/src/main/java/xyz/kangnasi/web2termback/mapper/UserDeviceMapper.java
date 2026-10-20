@@ -33,8 +33,7 @@ public interface UserDeviceMapper {
 
     @Update("""
             UPDATE user_device
-            SET device_name = #{deviceName},
-                online_status = 1,
+            SET online_status = 1,
                 last_connected_at = NOW(3),
                 last_heartbeat_at = NOW(3)
             WHERE device_id = #{deviceId}
@@ -42,6 +41,16 @@ public interface UserDeviceMapper {
               AND enabled = 1
             """)
     int markConnected(@Param("userId") long userId,
+                      @Param("deviceId") String deviceId);
+
+    /** A display name belongs to the account; reconnecting the agent must preserve it. */
+    @Update("""
+            UPDATE user_device
+            SET device_name = #{deviceName}
+            WHERE device_id = #{deviceId}
+              AND user_id = #{userId}
+            """)
+    int renameForUser(@Param("userId") long userId,
                       @Param("deviceId") String deviceId,
                       @Param("deviceName") String deviceName);
 

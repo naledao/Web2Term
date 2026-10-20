@@ -62,6 +62,7 @@ export const IpcChannels = {
   backendLogin: 'backend-auth:login',
   web2termGetState: 'web2term:get-state',
   web2termListDevices: 'web2term:list-devices',
+  web2termRenameDevice: 'web2term:rename-device',
   web2termConnect: 'web2term:connect',
   web2termDisconnect: 'web2term:disconnect',
   web2termClose: 'web2term:close',
@@ -149,8 +150,10 @@ export const IpcChannels = {
   mysqlConnListTables: 'mysql-conn:list-tables',
   mysqlConnQueryTable: 'mysql-conn:query-table',
   mysqlConnDeleteRow: 'mysql-conn:delete-row',
+  mysqlConnUpdateCell: 'mysql-conn:update-cell',
   mysqlConnExecuteSql: 'mysql-conn:execute-sql',
   mysqlConnCreateTable: 'mysql-conn:create-table',
+  mysqlConnDropTable: 'mysql-conn:drop-table',
   mysqlConnTableDdl: 'mysql-conn:table-ddl',
   mysqlConnChanged: 'mysql-conn:changed',
   redisConnList: 'redis-conn:list',
@@ -447,6 +450,11 @@ export interface Web2termDevice {
   deviceName: string
   enabled: 0 | 1
   onlineStatus: 0 | 1
+}
+
+export interface Web2termDeviceRenameDraft {
+  deviceId: string
+  deviceName: string
 }
 
 /** Authenticated desktop-to-backend transport for a target device. */
@@ -1761,6 +1769,17 @@ export interface MysqlRowDeleteResult {
   message: string
 }
 
+/** Result of editing one cell; the row as the server now stores it, when it could be read back. */
+export interface MysqlCellUpdateResult {
+  ok: boolean
+  message: string
+  /** Column names of `row`; empty when the row was not read back. */
+  columns: string[]
+  row: Array<string | null> | null
+  /** The row's key after the update (it changes when a primary-key column was edited). */
+  rowKey: MysqlRowKey | null
+}
+
 /** One page of rows from a table, for the table viewer. */
 export interface MysqlTableData {
   ok: boolean
@@ -1778,6 +1797,8 @@ export interface MysqlTableData {
   rowKeys: Array<MysqlRowKey | null>
   /** Why deletion is unavailable for this table, empty when primary keys are readable. */
   rowDeleteMessage: string
+  /** Aligned with columns: whether a cell can be edited in place (needs a primary key, not binary). */
+  columnEditable: boolean[]
   /** True when the table held more rows than the viewer asked for. */
   truncated: boolean
   message: string
@@ -2088,6 +2109,7 @@ export interface AppApi {
   loginBackend(draft: BackendLoginDraft): Promise<BackendAuthResult<BackendAuthState>>
   getWeb2termConnection(): Promise<Web2termConnectionState>
   listWeb2termDevices(): Promise<BackendAuthResult<Web2termDevice[]>>
+  renameWeb2termDevice(draft: Web2termDeviceRenameDraft): Promise<BackendAuthResult<Web2termDeviceRenameDraft>>
   connectWeb2term(draft: Web2termConnectDraft): Promise<Web2termConnectionState>
   disconnectWeb2term(): Promise<Web2termConnectionState>
   closeWeb2termConnection(): Promise<Web2termConnectionState>
@@ -2185,10 +2207,14 @@ export interface AppApi {
   queryMysqlTable(draft: MysqlConnectionDraft, database: string, table: string): Promise<MysqlTableData>
   /** Delete exactly one record by its complete primary key. */
   deleteMysqlTableRow(draft: MysqlConnectionDraft, database: string, table: string, key: MysqlRowKey): Promise<MysqlRowDeleteResult>
+  /** Set one column of the record with this complete primary key; null writes SQL NULL. */
+  updateMysqlTableCell(draft: MysqlConnectionDraft, database: string, table: string, key: MysqlRowKey, column: string, value: string | null): Promise<MysqlCellUpdateResult>
   /** Execute SQL from a table tab. */
   executeMysqlSql(draft: MysqlConnectionDraft, database: string, sql: string): Promise<MysqlSqlExecutionResult>
   /** Execute one CREATE TABLE statement. */
   createMysqlTable(draft: MysqlConnectionDraft, database: string, sql: string): Promise<{ ok: boolean; message: string }>
+  /** Drop one table, or one view when type is VIEW. Irreversible. */
+  dropMysqlTable(draft: MysqlConnectionDraft, database: string, table: string, type: string): Promise<{ ok: boolean; message: string }>
   /** Read the CREATE statement without changing the database. */
   getMysqlTableDdl(draft: MysqlConnectionDraft, database: string, table: string): Promise<MysqlTableDdl>
   onMysqlConnectionChanged(listener: (state: MysqlConnectionsState) => void, sessionId?: string): () => void

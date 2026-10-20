@@ -1340,8 +1340,10 @@ function registerIpcHandlers(): void {
   tool('listMysqlTables', (runtime, draft, database) => runtime.listMysqlTables(draft, database))
   tool('queryMysqlTable', (runtime, draft, database, table) => runtime.queryMysqlTable(draft, database, table))
   tool('deleteMysqlTableRow', (runtime, draft, database, table, key) => runtime.deleteMysqlTableRow(draft, database, table, key))
+  tool('updateMysqlTableCell', (runtime, draft, database, table, key, column, value) => runtime.updateMysqlTableCell(draft, database, table, key, column, value))
   tool('executeMysqlSql', (runtime, draft, database, sql) => runtime.executeMysqlSql(draft, database, sql))
   tool('createMysqlTable', (runtime, draft, database, sql) => runtime.createMysqlTable(draft, database, sql))
+  tool('dropMysqlTable', (runtime, draft, database, table, type) => runtime.dropMysqlTable(draft, database, table, type))
   tool('getMysqlTableDdl', (runtime, draft, database, table) => runtime.getMysqlTableDdl(draft, database, table))
   tool('removeMysqlConnection', (runtime, id) => runtime.removeMysqlConnection(id))
   tool('listRedisConnections', (runtime) => runtime.listRedisConnections())
@@ -1537,6 +1539,26 @@ function registerIpcHandlers(): void {
     canUseBackendAuth(event) ? web2termConnection?.getState() ?? EMPTY_WEB2TERM_CONNECTION : EMPTY_WEB2TERM_CONNECTION)
   ipcMain.handle(IpcChannels.web2termListDevices, (event) =>
     canUseBackendAuth(event) && backendAuth ? backendAuth.listDevices() : { ok: false, message: '当前窗口无法查询设备。', logPath: null })
+  ipcMain.handle(IpcChannels.web2termRenameDevice, async (event, draft) => {
+    if (!canUseBackendAuth(event) || !backendAuth) return { ok: false, message: '当前窗口无法修改设备名称。', logPath: null }
+    const result = await backendAuth.renameDevice(draft)
+    if (result.ok) {
+      const auth = backendAuth.getState()
+      // Only display metadata changes. Device PTYs and tasks keep running.
+      for (const runtime of runtimes.values()) {
+        const binding = runtime.web2term?.binding
+        if (!binding || binding.agentId !== result.value.deviceId || binding.backendUrl !== auth.backendUrl || binding.userId !== auth.user?.publicId) continue
+        binding.deviceName = result.value.deviceName
+        runtime.runner.refreshTerminal()
+        try { store?.setSetting(`web2termSession:${runtime.id}`, JSON.stringify(binding)) }
+        catch { console.warn('web2term: updated device name could not be cached for a workspace') }
+      }
+      try { web2termConnection?.updateDeviceName(result.value.deviceId, result.value.deviceName) }
+      catch { console.warn('web2term: updated device name could not be cached for the connection') }
+      broadcastManagedSessions()
+    }
+    return result
+  })
   ipcMain.handle(IpcChannels.web2termConnect, (event, draft) =>
     canUseBackendAuth(event) ? web2termConnection?.connect(draft) ?? EMPTY_WEB2TERM_CONNECTION : EMPTY_WEB2TERM_CONNECTION)
   ipcMain.handle(IpcChannels.web2termDisconnect, (event) =>

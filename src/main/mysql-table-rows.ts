@@ -1,5 +1,6 @@
 import type { Connection, ResultSetHeader } from 'mysql2/promise'
-import type { MysqlRowKey, MysqlRowDeleteResult } from '../shared/types'
+import type { MysqlCellUpdateResult, MysqlRowKey, MysqlRowDeleteResult } from '../shared/types'
+import { formatMysqlCell } from './mysql-field-value'
 
 export interface MysqlColumnMetadata {
   name: string
@@ -9,11 +10,14 @@ export interface MysqlColumnMetadata {
   dataType: string
   numericPrecision: number
   numericScale: number
+  /** INFORMATION_SCHEMA EXTRA, e.g. 'auto_increment' or 'VIRTUAL GENERATED'. */
+  extra: string
 }
 
 type MysqlRowConnection = Pick<Connection, 'query' | 'execute'>
 const INTEGER_TYPES = new Set(['tinyint', 'smallint', 'mediumint', 'int', 'bigint', 'year'])
 const BINARY_TYPES = new Set(['binary', 'varbinary', 'tinyblob', 'blob', 'mediumblob', 'longblob', 'bit'])
+const SPATIAL_TYPES = new Set(['geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection', 'geomcollection'])
 
 export async function readMysqlColumnMetadata(
   connection: Pick<Connection, 'query'>, database: string, table: string
@@ -21,7 +25,7 @@ export async function readMysqlColumnMetadata(
   const [rows] = await connection.query({
     sql: `SELECT c.COLUMN_NAME AS name, c.COLUMN_COMMENT AS comment, c.COLUMN_KEY AS columnKey,
       c.DATA_TYPE AS dataType, c.NUMERIC_PRECISION AS numericPrecision, c.NUMERIC_SCALE AS numericScale,
-      t.TABLE_TYPE AS tableType
+      c.EXTRA AS extra, t.TABLE_TYPE AS tableType
       FROM INFORMATION_SCHEMA.COLUMNS c JOIN INFORMATION_SCHEMA.TABLES t
       ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
       WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ? ORDER BY c.ORDINAL_POSITION`,
@@ -30,7 +34,8 @@ export async function readMysqlColumnMetadata(
   return (Array.isArray(rows) ? rows as Array<Record<string, unknown>> : []).map((row) => ({
     name: String(row.name ?? ''), comment: String(row.comment ?? ''), columnKey: String(row.columnKey ?? ''),
     tableType: String(row.tableType ?? ''), dataType: String(row.dataType ?? '').toLowerCase(),
-    numericPrecision: Number(row.numericPrecision), numericScale: Number(row.numericScale)
+    numericPrecision: Number(row.numericPrecision), numericScale: Number(row.numericScale),
+    extra: String(row.extra ?? '')
   }))
 }
 
@@ -42,6 +47,26 @@ export function mysqlRowDeleteUnavailable(metadata: readonly MysqlColumnMetadata
     return '浮点主键无法可靠定位记录，暂不支持删除。'
   }
   return ''
+}
+
+/**
+ * Why one column cannot be edited in place, or '' when it can.
+ *
+ * Binary and spatial values are shown as placeholders (`<n bytes>`), so writing the shown
+ * text back would destroy them; generated columns are computed by the server.
+ */
+export function mysqlColumnEditUnavailable(column: MysqlColumnMetadata | undefined): string {
+  if (!column) return '字段已不存在，请刷新表数据。'
+  if (BINARY_TYPES.has(column.dataType)) return '二进制字段不支持直接编辑。'
+  if (SPATIAL_TYPES.has(column.dataType)) return '空间字段不支持直接编辑。'
+  if (/\bGENERATED\b/i.test(column.extra)) return '生成列由数据库计算，不能直接编辑。'
+  return ''
+}
+
+/** Per column: can a cell be edited in place? All false when rows have no usable key. */
+export function mysqlColumnsEditable(columns: readonly string[], metadata: readonly MysqlColumnMetadata[]): boolean[] {
+  if (mysqlRowDeleteUnavailable(metadata) !== '') return columns.map(() => false)
+  return columns.map((name) => mysqlColumnEditUnavailable(metadata.find((entry) => entry.name === name)) === '')
 }
 
 export function mysqlRowKey(row: Record<string, unknown>, metadata: readonly MysqlColumnMetadata[]): MysqlRowKey | null {
@@ -64,13 +89,14 @@ function quoteIdentifier(name: string): string {
   return '`' + name.replace(/`/g, '``') + '`'
 }
 
-export function buildMysqlRowDeleteQuery(
-  database: string, table: string, key: unknown, metadata: readonly MysqlColumnMetadata[]
-): { sql: string; values: Array<string | Buffer> } {
+/** Build `pk1 = ? AND pk2 = ?` for one complete primary key, checked against server metadata. */
+function buildMysqlRowKeyCondition(
+  key: unknown, metadata: readonly MysqlColumnMetadata[], action: string
+): { condition: string; values: Array<string | Buffer> } {
   const unavailable = mysqlRowDeleteUnavailable(metadata)
-  if (unavailable) throw new Error(unavailable)
+  if (unavailable) throw new Error(unavailable.replace('删除', action))
   const primary = metadata.filter((column) => column.columnKey === 'PRI')
-  if (!Array.isArray(key) || key.length !== primary.length) throw new Error('删除需要完整的主键，请刷新表数据后重试。')
+  if (!Array.isArray(key) || key.length !== primary.length) throw new Error(`${action}需要完整的主键，请刷新表数据后重试。`)
   const parts = new Map<string, { value: string; encoding: 'text' | 'hex' }>()
   for (const part of key) {
     if (!part || typeof part.column !== 'string' || typeof part.value !== 'string'
@@ -111,9 +137,30 @@ export function buildMysqlRowDeleteQuery(
     }
     return `${identifier} = ?`
   })
+  return { condition: conditions.join(' AND '), values }
+}
+
+export function buildMysqlRowDeleteQuery(
+  database: string, table: string, key: unknown, metadata: readonly MysqlColumnMetadata[]
+): { sql: string; values: Array<string | Buffer> } {
+  const { condition, values } = buildMysqlRowKeyCondition(key, metadata, '删除')
   return {
-    sql: `DELETE FROM ${quoteIdentifier(database)}.${quoteIdentifier(table)} WHERE ${conditions.join(' AND ')} LIMIT 1`,
+    sql: `DELETE FROM ${quoteIdentifier(database)}.${quoteIdentifier(table)} WHERE ${condition} LIMIT 1`,
     values
+  }
+}
+
+/** One `UPDATE ... SET column = ? WHERE <primary key> LIMIT 1`; null writes SQL NULL. */
+export function buildMysqlRowUpdateQuery(
+  database: string, table: string, key: unknown, column: string, value: unknown, metadata: readonly MysqlColumnMetadata[]
+): { sql: string; values: Array<string | Buffer | null> } {
+  if (value !== null && typeof value !== 'string') throw new Error('字段值无效。')
+  const unavailable = mysqlColumnEditUnavailable(metadata.find((entry) => entry.name === column))
+  if (unavailable) throw new Error(unavailable)
+  const { condition, values } = buildMysqlRowKeyCondition(key, metadata, '更新')
+  return {
+    sql: `UPDATE ${quoteIdentifier(database)}.${quoteIdentifier(table)} SET ${quoteIdentifier(column)} = ? WHERE ${condition} LIMIT 1`,
+    values: [value, ...values]
   }
 }
 
@@ -127,4 +174,46 @@ export async function deleteMysqlRowWithConnection(
   return result.affectedRows === 1
     ? { ok: true, affectedRows: 1, message: '已删除 1 条记录。' }
     : { ok: false, affectedRows: result.affectedRows, message: '记录已不存在或主键已变化，请刷新表数据。' }
+}
+
+/**
+ * Update one cell, then read the row back so the grid shows what the server stored
+ * (type coercion, truncation, ON UPDATE timestamps) rather than what was typed.
+ *
+ * mysql2 connects with FOUND_ROWS, so affectedRows counts the matched row even when the
+ * value did not change; 0 really means the row is gone or its key changed.
+ */
+export async function updateMysqlCellWithConnection(
+  connection: MysqlRowConnection, database: string, table: string, key: unknown, column: string, value: unknown
+): Promise<MysqlCellUpdateResult> {
+  const metadata = await readMysqlColumnMetadata(connection, database, table)
+  const query = buildMysqlRowUpdateQuery(database, table, key, column, value, metadata)
+  const [result] = await connection.execute<ResultSetHeader>({ ...query, timeout: 8000 })
+  if (result.affectedRows !== 1) {
+    return { ok: false, message: '记录已不存在或主键已变化，请刷新表数据。', columns: [], row: null, rowKey: null }
+  }
+  // Editing a primary-key column moves the row; look it up again by its new key.
+  const nextKey = (key as MysqlRowKey).map((part) =>
+    part.column === column && typeof value === 'string' ? { ...part, value } : part
+  )
+  try {
+    const { condition, values } = buildMysqlRowKeyCondition(nextKey, metadata, '读取')
+    const [rows, fields] = await connection.query({
+      sql: `SELECT * FROM ${quoteIdentifier(database)}.${quoteIdentifier(table)} WHERE ${condition} LIMIT 1`,
+      values, timeout: 8000
+    })
+    const record = Array.isArray(rows) ? rows[0] as Record<string, unknown> | undefined : undefined
+    if (!record) return { ok: true, message: '', columns: [], row: null, rowKey: null }
+    const columns = (fields ?? []).map((field) => field.name)
+    return {
+      ok: true,
+      message: '',
+      columns,
+      row: columns.map((name, index) => formatMysqlCell(record[name], fields?.[index])),
+      rowKey: mysqlRowKey(record, metadata)
+    }
+  } catch {
+    // The update itself went through; with no row to show, the caller reloads the page.
+    return { ok: true, message: '', columns: [], row: null, rowKey: null }
+  }
 }

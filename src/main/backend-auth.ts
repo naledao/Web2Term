@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { normalizeBackendUrl } from '../shared/backend-url'
-import type { BackendAuthResult, BackendAuthState, BackendLoginCodeDraft, BackendLoginDraft, BackendUser, Web2termDevice } from '../shared/types'
+import type { BackendAuthResult, BackendAuthState, BackendLoginCodeDraft, BackendLoginDraft, BackendUser, Web2termDevice, Web2termDeviceRenameDraft } from '../shared/types'
 import type { ConversationStore } from './db'
 
 const URL_KEY = 'backendUrl'
@@ -242,6 +242,52 @@ export class BackendAuthService {
     } catch (error) {
       const failure = networkFailure(error)
       this.log.write({ event: 'devices_failed', category: failure.category, elapsedMs: this.now() - started })
+      return { ok: false, message: failure.message, logPath: this.log.path }
+    }
+  }
+
+  async renameDevice(draft: Web2termDeviceRenameDraft): Promise<BackendAuthResult<Web2termDeviceRenameDraft>> {
+    const started = this.now()
+    try {
+      const deviceId = typeof draft?.deviceId === 'string' ? draft.deviceId.toLowerCase() : ''
+      const deviceName = typeof draft?.deviceName === 'string' ? draft.deviceName.trim() : ''
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(deviceId)) {
+        throw new AuthError('设备 ID 无效，请刷新设备后重试。', 'device_invalid_id')
+      }
+      if (!deviceName || deviceName.length > 100 || /\p{Cc}/u.test(deviceName)) {
+        throw new AuthError('设备名称需为 1–100 个字符，不能包含换行或控制字符。', 'device_invalid_name')
+      }
+      const credentials = this.getConnectionCredentials()
+      const auth = this.getState()
+      if (!credentials) throw new AuthError('请先在“后端服务”中登录，再修改设备名称。', 'login_required')
+      const endpoint = `/api/user/devices/${deviceId}`
+      this.log.write({ event: 'device_rename_request_start', endpoint })
+      const response = await this.request(credentials.backendUrl.replace(/\/$/u, '') + endpoint, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${credentials.accessToken}` },
+        body: JSON.stringify({ deviceName }), redirect: 'manual', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      })
+      this.log.write({ event: 'device_rename_response', status: response.status, elapsedMs: this.now() - started })
+      await response.body?.cancel()
+      if (response.status !== 204) {
+        const message = response.status === 401 ? '登录已失效，请重新登录后修改设备名称。' :
+          response.status === 403 ? '当前账号没有修改此设备的权限。' :
+          response.status === 404 ? '设备不存在或后端尚未提供改名接口，请刷新列表并确认后端已更新。' :
+          response.status === 405 ? '后端尚未支持设备改名，请更新后端服务。' :
+          response.status === 400 ? '设备名称不符合要求，请修改后重试。' :
+          response.status === 429 ? '操作过于频繁，请稍后重试。' :
+          response.status >= 300 && response.status < 400 ? '后端返回了重定向，请检查后端服务地址。' :
+          response.status >= 500 ? '后端设备服务暂时异常，请稍后重试。' : '设备名称未保存，请重试。'
+        throw new AuthError(message, `device_rename_http_${response.status}`)
+      }
+      const current = this.getConnectionCredentials()
+      if (!current || current.backendUrl !== credentials.backendUrl || current.accessToken !== credentials.accessToken || this.getState().user?.publicId !== auth.user?.publicId) {
+        throw new AuthError('后端地址或登录状态已变化，请刷新当前账号的设备列表。', 'devices_identity_changed')
+      }
+      this.log.write({ event: 'device_rename_success', elapsedMs: this.now() - started })
+      return { ok: true, value: { deviceId, deviceName }, logPath: this.log.path }
+    } catch (error) {
+      const failure = networkFailure(error)
+      this.log.write({ event: 'device_rename_failed', category: failure.category, elapsedMs: this.now() - started })
       return { ok: false, message: failure.message, logPath: this.log.path }
     }
   }
