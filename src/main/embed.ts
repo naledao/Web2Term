@@ -4,8 +4,8 @@ import themeSource from './injected/theme.js?raw'
 import selectionQuestionSource from './injected/selection-question.js?raw'
 import selectionQuestionCss from './injected/selection-question.css?raw'
 import { DeepSeekQuestion } from './deepseek-question'
-import { observeDeepSeekHeaders } from './deepseek-share'
 import type { QuestionChatAction, QuestionChatState } from '../shared/deepseek-question'
+import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
 import { sendPageFiles } from './page-files'
 import { writeRawSendDiagnostic } from './raw-send-log'
 import { writePromptDiagnostic } from './prompt-log'
@@ -268,7 +268,6 @@ function installChromeIdentity(partition: string): void {
   session.fromPartition(partition).webRequest.onBeforeSendHeaders(
     { urls: ['*://*/*'] },
     (details, callback) => {
-      if (partition === 'persist:deepseek') observeDeepSeekHeaders(details)
       const headers = { ...details.requestHeaders }
       let touched = false
       const googleAuth = isGoogleAuthUrl(details.url)
@@ -402,6 +401,7 @@ interface ScrapeResult {
 export interface EmbedHandlers {
   onState(state: EmbedState): void
   onQuestionChat?(state: QuestionChatState | null): void
+  readQuestionContext?: SavedQuestionContextReader
   /** A conversation the page just navigated to (auto-saved). */
   onConversation(conversation: ScrapedConversation): void
   /** Results of a background sidebar scrape. */
@@ -598,7 +598,8 @@ export class ChatGptEmbed {
     const baseUserAgent = process.env.EMBED_USER_AGENT ?? chromeLikeUserAgent()
     contents.setUserAgent(baseUserAgent)
     if (this.platform.id === 'deepseek') {
-      this.selectionQuestion = new DeepSeekQuestion(contents, parent, this.platform, () => this.theme, state => this.handlers.onQuestionChat?.(state))
+      this.selectionQuestion = new DeepSeekQuestion(contents, parent, this.platform, () => this.theme,
+        state => this.handlers.onQuestionChat?.(state), id => this.handlers.readQuestionContext?.(id) ?? null)
       this.selectionQuestion.setVisible(this.visible)
     }
 

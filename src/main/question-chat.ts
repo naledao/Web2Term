@@ -5,7 +5,7 @@ import { questionChatBounds } from '../shared/deepseek-question'
 import type { QuestionChatAction, QuestionChatState } from '../shared/deepseek-question'
 import senderSource from './injected/question-chat-sender.js?raw'
 import themeSource from './injected/theme.js?raw'
-import { questionPageCall, releaseDeepSeekHeaders, writeQuestionLog } from './deepseek-share'
+import { questionPageCall, writeQuestionLog } from './question-chat-page'
 import { sendQuestionChatAttachment } from './question-chat-send'
 import type { AppTheme } from '../shared/types'
 import type { ChatPlatform } from '../shared/platforms'
@@ -33,11 +33,10 @@ export class QuestionChat {
     private readonly platform: ChatPlatform,
     private theme: AppTheme,
     userAgent: string,
-    private readonly shareUrl: string,
     private readonly prompt: string,
     private readonly selectedText: string,
     private readonly onState: (state: QuestionChatState | null) => void,
-    private readonly htmlPath: string
+    private readonly contextPath: string
   ) {
     this.view = new WebContentsView({ webPreferences: {
       partition: platform.partition, nodeIntegration: false, contextIsolation: true, sandbox: true,
@@ -73,7 +72,7 @@ export class QuestionChat {
 
   private background(): string { return this.theme === 'dark' ? '#141a25' : '#ffffff' }
   getState(): QuestionChatState | null {
-    return this.closed ? null : { id: this.id, selectedText: this.selectedText, htmlPath: this.htmlPath, status: this.statusText, error: this.statusError }
+    return this.closed ? null : { id: this.id, selectedText: this.selectedText, contextPath: this.contextPath, status: this.statusText, error: this.statusError }
   }
   setViewport(raw: unknown, visible: boolean): void {
     if (this.closed || this.parent.isDestroyed()) return
@@ -95,14 +94,13 @@ export class QuestionChat {
   action(action: QuestionChatAction): void {
     if (this.closed) return
     if (action === 'close') this.close()
-    if (action === 'copy-link') { clipboard.writeText(this.shareUrl); this.status('来源分享链接已复制。', false) }
-    if (action === 'copy-prompt') { clipboard.writeText(this.prompt); this.status('提问已复制。手动发送时，请同时附上本地 HTML。', false) }
-    if (action === 'open-html' && this.htmlPath) {
-      void shell.openPath(this.htmlPath).then(error => {
-        if (error && !this.closed) this.status('无法打开本地 HTML，请用“定位文件”查看保存位置。', true)
-      }).catch(() => { if (!this.closed) this.status('无法打开本地 HTML，请用“定位文件”查看保存位置。', true) })
+    if (action === 'copy-prompt') { clipboard.writeText(this.prompt); this.status('提问已复制。手动发送时，请同时附上本地 Markdown。', false) }
+    if (action === 'open-context' && this.contextPath) {
+      void shell.openPath(this.contextPath).then(error => {
+        if (error && !this.closed) this.status('无法打开 Markdown，请用“定位文件”查看保存位置。', true)
+      }).catch(() => { if (!this.closed) this.status('无法打开 Markdown，请用“定位文件”查看保存位置。', true) })
     }
-    if (action === 'reveal-html' && this.htmlPath) shell.showItemInFolder(this.htmlPath)
+    if (action === 'reveal-context' && this.contextPath) shell.showItemInFolder(this.contextPath)
   }
   private stopPolling(): void { if (this.timer) clearInterval(this.timer); this.timer = null }
   private status(text: string, error: boolean): void {
@@ -134,7 +132,7 @@ export class QuestionChat {
   private async checkReady(): Promise<void> {
     if (this.closed || this.attempted || this.checking || !this.ownerVisible || !this.viewportVisible) return
     if (Date.now() - this.startedAt > 90000) {
-      this.fail('ready-timeout', '尚未准备好发送。请完成 DeepSeek 登录，再手动上传本地 HTML 并粘贴提问。'); return
+      this.fail('ready-timeout', '尚未准备好发送。请完成 DeepSeek 登录，再手动上传本地 Markdown 并粘贴提问。'); return
     }
     const contents = this.view.webContents
     if (contents.isDestroyed()) return
@@ -155,22 +153,22 @@ export class QuestionChat {
       if (!ready.composer) { this.status('等待 DeepSeek 输入框就绪；如需登录，请在下方完成。', false); return }
       this.attempted = true
       this.stopPolling()
-      this.status('正在上传离线 HTML 并发送问题…', false)
-      writeQuestionLog('CHAT-SEND-START', { context: 'html-attachment', promptLength: this.prompt.length })
+      this.status('正在上传本地对话 Markdown 并发送问题…', false)
+      writeQuestionLog('CHAT-SEND-START', { context: 'local-markdown', promptLength: this.prompt.length })
       const timeout = setTimeout(() => this.uploadAbort.abort(), 150000)
       let result: Awaited<ReturnType<typeof sendQuestionChatAttachment>>
       try {
-        result = await sendQuestionChatAttachment(contents, this.platform, this.htmlPath, this.prompt, this.uploadAbort.signal,
+        result = await sendQuestionChatAttachment(contents, this.platform, this.contextPath, this.prompt, this.uploadAbort.signal,
           () => !this.closed && !contents.isDestroyed())
       } finally { clearTimeout(timeout) }
       if (this.closed) return
       writeQuestionLog('CHAT-SEND-RESULT', { outcome: result })
-      if (result === 'ok') this.status('已发送 HTML 附件和问题。可以在这个聊天中继续追问。', false)
+      if (result === 'ok') this.status('已发送 Markdown 附件和问题。可以在这个聊天中继续追问。', false)
       else this.fail('send-' + result, result === 'unknown' || result === 'stuck'
         ? '已尝试发送，尚未确认附件和问题均已收到。请检查下方聊天，系统不会重复提交。'
         : result === 'unsupported-file-type'
-          ? 'DeepSeek 当前上传入口不接受 HTML 文件。文件已保留，可打开检查；本次未自动发送问题。'
-          : '附件和问题未能自动发送。请检查下方聊天；可用“定位文件”手动上传 HTML，并用“复制提问”补充问题。')
+          ? 'DeepSeek 当前上传入口不接受 Markdown 文件。文件已保留，可打开检查；本次未自动发送问题。'
+          : '附件和问题未能自动发送。请检查下方聊天；可用“定位文件”手动上传 Markdown，并用“复制提问”补充问题。')
     } catch {
       if (!this.closed && this.attempted) this.fail('send-interrupted', '发送时页面发生变化，请检查聊天是否已收到问题；系统不会重复发送。')
       else if (!this.closed && ++this.readinessErrors >= 3) this.fail('ready-check', '暂时无法读取 DeepSeek 输入框，可用“复制提问”粘贴到下方聊天中发送。')
@@ -183,7 +181,6 @@ export class QuestionChat {
     this.stopPolling()
     this.parent.removeListener('closed', this.parentClosed)
     const contents = this.view.webContents
-    releaseDeepSeekHeaders(contents.id)
     if (!this.parent.isDestroyed()) this.parent.contentView.removeChildView(this.view)
     if (!contents.isDestroyed()) contents.close()
     this.onState(null)

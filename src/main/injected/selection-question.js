@@ -244,7 +244,7 @@
           if (input.value.length > 20000 || context.text.length > 20000) {
             setStatus('问题或选中文字过长，请缩短后重试。'); return
           }
-          setStatus('正在获取分享链接…', true)
+          setStatus('正在整理本地对话…', true)
           console.log(config.reportTag + JSON.stringify({ event: 'question-submit' }))
         }
       }
@@ -289,9 +289,10 @@
       if (!context.answer.contains(context.range.startContainer) || !context.answer.contains(context.range.endContainer) ||
           context.range.toString().trim() !== context.text || (context.answer.innerText || '') !== context.answerText) return null
       return { selectedText: context.text, question: input.value.trim(), sourcePath: context.path,
-        answerText: context.answerText }
+        answerText: context.answerText,
+        sourceMessageId: window.__cmdTerminalInterceptor?.questionSourceMessageId?.(context.answer) || undefined }
     },
-    // Read-only handoff for the later share-link/new-conversation increment.
+    // Read-only draft for diagnostics.
     // Neither the selection nor the question is logged or sent anywhere here.
     getDraft() {
       return context ? { selectedText: context.text, question: input.value, sourcePath: context.path } : null

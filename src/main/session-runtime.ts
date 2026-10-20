@@ -14,6 +14,7 @@ import {
   terminalNotesOwnerKey
 } from '../shared/types'
 import { CHAT_PLATFORMS, DEEPSEEK_PLATFORM } from '../shared/platforms'
+import { deepSeekConversation } from '../shared/deepseek-question'
 import type { FileReadContext } from '../shared/file-requests'
 import { prepareFiles } from './file-access'
 import { homedir } from 'node:os'
@@ -495,6 +496,12 @@ export class SessionRuntime {
     return {
       onQuestionChat: state => {
         if (isActive()) this.send(IpcChannels.questionChatState, state)
+      },
+      readQuestionContext: conversationId => {
+        if (record().conversationId !== conversationId) return null
+        const conversation = this.options.store.list().find(item => item.id === conversationId)
+        if (!conversation || deepSeekConversation(conversation.url)?.id !== conversationId) return null
+        return { conversationId, title: conversation.title, messages: this.options.store.listConversationMessages(conversationId) }
       },
       onState: (state) => {
         const entry = record()

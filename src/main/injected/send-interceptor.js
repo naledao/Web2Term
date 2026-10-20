@@ -3027,6 +3027,10 @@
   }
 
   window[STATE_KEY] = {
+    questionSourceMessageId(answer) {
+      const node = queryAllAssistant().find(candidate => replyRootOf(candidate) === answer)
+      return node ? turnKeyOf(node) : null
+    },
     beginFileSend(token, files) {
       if (!files.length) return 'no-files'
       const composer = getComposer()

@@ -167,10 +167,10 @@ function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div'
   }
 }
 
-test('HTML and its question are acknowledged only when both appear in the same user turn', () => {
+test('Markdown and its question are acknowledged only when both appear in the same user turn', () => {
   for (const includeCaption of [true, false]) {
-    const app = fixture([{ fileName: 'deepseek-context.html', mimeType: 'text/html', sizeBytes: 100 }])
-    app.render(['deepseek-context.html'])
+    const app = fixture([{ fileName: 'deepseek-context.md', mimeType: 'text/markdown', sizeBytes: 100 }])
+    app.render(['deepseek-context.md'])
     const caption = '请读取附件。\n我的问题：Compose 是什么？'
     assert.equal(app.controller.prepareFileSendCaption(token, caption), true)
     assert.equal(app.composer.textContent, caption)
@@ -199,11 +199,11 @@ test('a user-edited caption stops automatic submission without replacing the edi
   assert.equal(app.send.clicks, 0)
 })
 
-test('DeepSeek textarea uploads HTML before inserting its caption and acknowledges both in the new virtual row', () => {
-  const app = fixture([{ fileName: 'deepseek-context.html', mimeType: 'text/html', sizeBytes: 100 }], {
+test('DeepSeek textarea uploads Markdown before inserting its caption and acknowledges both in the new virtual row', () => {
+  const app = fixture([{ fileName: 'deepseek-context.md', mimeType: 'text/markdown', sizeBytes: 100 }], {
     ...platformExports.DEEPSEEK_PAGE, sendButtonSelectors: ['button[aria-label="发送"]']
   }, 'textarea')
-  app.render(['deepseek-context.html'])
+  app.render(['deepseek-context.md'])
   assert.equal(app.composer.value, '')
   assert.equal(app.controller.prepareFileSendCaption(token, '附件上下文\r\n问题：Compose 是什么？'), true)
   assert.equal(app.composer.value, '附件上下文\n问题：Compose 是什么？')

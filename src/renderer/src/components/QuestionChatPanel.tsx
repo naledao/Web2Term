@@ -40,11 +40,10 @@ export default function QuestionChatPanel({ sessionId, state, visible }: {
       </div>
       <blockquote className="question-chat-sidebar__quote" title={state.selectedText}>{state.selectedText}</blockquote>
       <div className="question-chat-sidebar__actions">
-        <button type="button" disabled={!state.htmlPath} title={state.htmlPath}
-          onClick={() => window.api.questionChatAction(sessionId, state.id, 'open-html')}>打开 HTML</button>
-        <button type="button" disabled={!state.htmlPath}
-          onClick={() => window.api.questionChatAction(sessionId, state.id, 'reveal-html')}>定位文件</button>
-        <button type="button" onClick={() => window.api.questionChatAction(sessionId, state.id, 'copy-link')}>复制来源链接</button>
+        <button type="button" disabled={!state.contextPath} title={state.contextPath}
+          onClick={() => window.api.questionChatAction(sessionId, state.id, 'open-context')}>打开 Markdown</button>
+        <button type="button" disabled={!state.contextPath}
+          onClick={() => window.api.questionChatAction(sessionId, state.id, 'reveal-context')}>定位文件</button>
         <button type="button" onClick={() => window.api.questionChatAction(sessionId, state.id, 'copy-prompt')}>复制提问</button>
       </div>
       <p className={'question-chat-sidebar__status' + (state.error ? ' question-chat-sidebar__status--error' : '')}

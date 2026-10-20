@@ -1084,7 +1084,7 @@ function registerIpcHandlers(): void {
     questionRuntime(event, sessionId)?.embed.setQuestionChatViewport(chatId, bounds, visible === true)
   })
   ipcMain.on(IpcChannels.questionChatAction, (event, sessionId: string, chatId: string, action: string) => {
-    if (action !== 'close' && action !== 'copy-link' && action !== 'copy-prompt' && action !== 'open-html' && action !== 'reveal-html') return
+    if (action !== 'close' && action !== 'copy-prompt' && action !== 'open-context' && action !== 'reveal-context') return
     questionRuntime(event, sessionId)?.embed.questionChatAction(chatId, action)
   })
   ipcMain.on(IpcChannels.embedLoginWithEmail, (event) => runtimeForEvent(event)?.embed.navigate(EMBED_LOGIN_URL))

@@ -1,5 +1,5 @@
 // User-run only: node --test tests/deepseek-question.test.mjs
-// Synthetic data and fake session.fetch; no Electron, credentials, disk writes or network.
+// Synthetic saved transcripts; no Electron, credentials, disk writes or network.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
@@ -18,212 +18,139 @@ function load(relative, dependencies = {}, globals = {}) {
   return exports
 }
 const shared = load('../src/shared/deepseek-question.ts')
-const html = load('../src/shared/deepseek-context-html.ts', { './deepseek-question': shared })
+const markdown = load('../src/shared/deepseek-context-markdown.ts', { './deepseek-question': shared })
 const sourceId = 'test-conversation'
 const answer = '原计划 Kotlin + Compose，但无法访问 Maven，因此实际采用 Java 和原生 Android View。'
 const selection = { sourcePath: `/a/chat/s/${sourceId}`, selectedText: 'Compose', question: '这是什么？', answerText: answer }
-const wrap = data => ({ code: 0, data: { biz_code: 0, biz_data: data } })
-const message = (id, parent_id, role, content) => ({ id, parent_id, role, content })
-const history = messages => wrap({ chat_session: { id: sourceId }, chat_messages: messages })
-const validHistory = () => history([
-  message(1, null, 'USER', '介绍项目'), message(2, 1, 'ASSISTANT', '第一条回答'),
-  message(3, 2, 'USER', '技术栈呢'), message(4, 3, 'ASSISTANT', answer),
-  message(5, 4, 'USER', '稍后的问题'), message(6, 5, 'ASSISTANT', '稍后的回答'),
-  message(20, 1, 'ASSISTANT', '另一个分支')
-])
+const savedMessage = (id, role, content, sourceMessageId = null) => ({
+  id, conversationId: sourceId, role, content, sourceMessageId, attachments: [], createdAt: 1
+})
+const savedContext = () => ({ conversationId: sourceId, title: '项目介绍', messages: [
+  savedMessage('user-1', 'user', '介绍项目'), savedMessage('assistant-1', 'assistant', '第一条回答'),
+  savedMessage('user-2', 'user', '技术栈呢'), savedMessage('assistant-2', 'assistant', answer, 'capture-answer'),
+  savedMessage('user-later', 'user', '稍后的问题'), savedMessage('assistant-later', 'assistant', '稍后的回答')
+] })
 const category = expected => error => error instanceof shared.DeepSeekQuestionError && error.category === expected
 
-test('shares ancestors through the selected answer, excluding later turns and sibling branches', () => {
-  const ids = shared.deepSeekMessageRange(validHistory(), sourceId, selection)
-  assert.deepEqual(Array.from(ids), [4, 3, 2, 1])
+test('exports only saved messages through the selected answer, preserving database reading order', () => {
+  const snapshot = markdown.savedQuestionSnapshot(savedContext(), sourceId, selection)
+  assert.deepEqual(Array.from(snapshot.messages, item => item.id), ['user-1', 'assistant-1', 'user-2', 'assistant-2'])
+  assert.equal(snapshot.messages.at(-1).content, answer)
+  assert.equal(snapshot.title, '项目介绍')
   assert.equal(shared.deepSeekConversation('https://chat.deepseek.com.evil.test/a/chat/s/x'), null)
-  assert.equal(shared.deepSeekConversation(`https://chat.deepseek.com/a/chat/s/${sourceId}`).id, sourceId)
 })
 
-test('uses response fragments, excluding reasoning, and matches rendered Markdown', () => {
-  const payload = history([message(1, null, 'USER', '技术栈'), {
-    id: 2, parent_id: 1, role: 'ASSISTANT', fragments: [
-      { type: 'THINK', content: '这里不是回答正文' }, { type: 'RESPONSE', content: answer.replace('Compose', '**Compose**') }
-    ]
-  }])
-  assert.deepEqual(Array.from(shared.deepSeekMessageRange(payload, sourceId, selection)), [2, 1])
+test('matches a captured source key across Markdown differences, and handles old Markdown-only captures', () => {
+  const context = savedContext()
+  context.messages[3].content = answer.replace('Compose', '**Compose**')
+  const snapshot = markdown.savedQuestionSnapshot(context, sourceId, { ...selection, sourceMessageId: 'capture-answer' })
+  assert.equal(snapshot.messages.at(-1).content, context.messages[3].content)
+  assert.equal(markdown.savedQuestionSnapshot(context, sourceId, selection).messages.length, 4)
+  const code = { ...selection, selectedText: 'hello', answerText: 'console.log("hello")' }
+  context.messages[3].content = '```javascript\nconsole.log("hello")\n```'
+  assert.equal(markdown.savedQuestionSnapshot(context, sourceId, code).messages.length, 4)
 })
 
-test('refuses empty cached history, unknown schema, another conversation and duplicate answer bodies', () => {
-  assert.throws(() => shared.deepSeekMessageRange(history([]), sourceId, selection), category('empty-history'))
-  assert.throws(() => shared.deepSeekMessageRange(validHistory(), 'other', selection), category('history-source'))
-  assert.throws(() => shared.deepSeekMessageRange(history([{ id: 4, role: 'ASSISTANT', content: answer }]), sourceId, selection), category('history-schema'))
-  assert.throws(() => shared.deepSeekMessageRange(history([
-    message(1, null, 'USER', '问题'), message(2, 1, 'ASSISTANT', answer), message(4, 1, 'ASSISTANT', answer)
-  ]), sourceId, selection), category('answer-match'))
+test('missing, mixed or ambiguous local records fail instead of requesting a share or fetching history', () => {
+  assert.throws(() => markdown.savedQuestionSnapshot(null, sourceId, selection), category('local-source'))
+  assert.throws(() => markdown.savedQuestionSnapshot({ ...savedContext(), conversationId: 'another' }, sourceId, selection), category('local-source'))
+  const mixed = savedContext(); mixed.messages[0].conversationId = 'another'
+  assert.throws(() => markdown.savedQuestionSnapshot(mixed, sourceId, selection), category('local-source'))
+  assert.throws(() => markdown.savedQuestionSnapshot({ ...savedContext(), messages: [] }, sourceId, selection), category('local-empty'))
+  const absent = savedContext(); absent.messages.splice(3, 1)
+  assert.throws(() => markdown.savedQuestionSnapshot(absent, sourceId, selection), category('local-answer'))
+  const duplicate = savedContext(); duplicate.messages.push(savedMessage('duplicate', 'assistant', answer))
+  assert.throws(() => markdown.savedQuestionSnapshot(duplicate, sourceId, selection), category('local-answer'))
+  assert.equal(markdown.savedQuestionSnapshot(duplicate, sourceId, { ...selection, sourceMessageId: 'capture-answer' }).messages.length, 4)
 })
 
-test('refuses incomplete parent chains, cycles, duplicate IDs and a selected word in a different answer', () => {
-  assert.throws(() => shared.deepSeekMessageRange(history([message(4, 3, 'ASSISTANT', answer)]), sourceId, selection), category('partial-history'))
-  assert.throws(() => shared.deepSeekMessageRange(history([
-    message(3, 4, 'USER', '问题'), message(4, 3, 'ASSISTANT', answer)
-  ]), sourceId, selection), category('history-cycle'))
-  assert.throws(() => shared.deepSeekMessageRange(history([
-    message(4, null, 'USER', '问题'), message(4, null, 'ASSISTANT', answer)
-  ]), sourceId, selection), category('duplicate-id'))
-  assert.throws(() => shared.deepSeekMessageRange(history([message(4, null, 'ASSISTANT', 'Compose 的另一条回答')]), sourceId, selection), category('answer-match'))
-})
-
-test('validates share business status and asks about the attached context, quote and question without a URL', () => {
-  const url = shared.deepSeekShareUrl(wrap({ share_id: 'synthetic-share-id' }))
-  assert.equal(url, 'https://chat.deepseek.com/share/synthetic-share-id')
-  assert.throws(() => shared.deepSeekShareUrl(wrap({ share_id: '../invalid' })), category('share-response'))
-  assert.throws(() => shared.deepSeekShareUrl({ code: 0, data: { biz_code: 1 } }), category('provider-rejected'))
+test('Markdown is a clean transcript with preserved code and tables, without HTML layout or share metadata', () => {
+  const context = savedContext()
+  context.title = '项目\n介绍'
+  context.messages[0].content = '## 原始标题\n\n```java\nnew LruCache<>(10);\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |'
+  const document = markdown.questionContextMarkdown(markdown.savedQuestionSnapshot(context, sourceId, selection))
+  for (const expected of ['# 项目 介绍', '## 1. 用户', '## 4. AI', context.messages[0].content, answer]) assert.ok(document.includes(expected))
+  for (const absent of ['稍后的问题', '<!doctype', '<style', 'chat.deepseek.com/share', 'sourceMessageId', 'capture-answer', selection.question]) assert.equal(document.includes(absent), false)
   const prompt = shared.deepSeekAttachmentPrompt(selection)
-  for (const expected of ['deepseek-context.html', selection.question, selection.selectedText, '如果附件无法读取', '引用资料']) assert.ok(prompt.includes(expected))
-  assert.equal(prompt.includes(url), false)
+  for (const expected of ['deepseek-context.md', selection.selectedText, selection.question, '引用资料']) assert.ok(prompt.includes(expected))
   assert.equal(prompt.includes('https://'), false)
 })
 
-test('offline HTML contains the same ancestors in reading order and escapes all conversation markup', () => {
-  const payload = validHistory()
-  payload.data.biz_data.chat_session.title = '<script>title</script>'
-  payload.data.biz_data.chat_messages[0].content = '前文 <script>alert(1)</script> & "引号"\n```代码```'
-  const snapshot = shared.deepSeekContextSnapshot(payload, shared.deepSeekMessageRange(payload, sourceId, selection),
-    'https://chat.deepseek.com/share/synthetic-result', selection)
-  assert.deepEqual(Array.from(snapshot.messages, item => item.id), [1, 2, 3, 4])
-  assert.equal(snapshot.messages[0].role, 'user')
-  const document = html.deepSeekContextHtml(snapshot)
-  for (const expected of ['charset="UTF-8"', 'default-src \'none\'', '&lt;script&gt;alert(1)&lt;/script&gt;', '&amp;', '```代码```', answer, selection.question]) assert.ok(document.includes(expected))
-  for (const excluded of ['<script>', '稍后的问题', '另一个分支', '<iframe', '<img', '<link']) assert.equal(document.includes(excluded), false)
-  assert.ok(document.indexOf('第一条回答') < document.indexOf(answer))
-  assert.throws(() => html.deepSeekContextHtml({ ...snapshot, shareUrl: 'https://evil.test/share/x' }), category('html-source'))
-})
-
-test('context fragments preserve all answer text and exclude reasoning', () => {
-  const payload = history([message(1, null, 'USER', '上下文'), {
-    id: 2, parent_id: 1, role: 'ASSISTANT', fragments: [
-      { type: 'THINK', content: 'private reasoning' }, { type: 'RESPONSE', content: '回答开头' }, { type: 'RESPONSE', content: '回答结尾' }
-    ]
-  }])
-  const snapshot = shared.deepSeekContextSnapshot(payload, [2, 1], 'https://chat.deepseek.com/share/synthetic', selection)
-  assert.equal(snapshot.messages[1].text, '回答开头\n回答结尾')
-  assert.equal(html.deepSeekContextHtml(snapshot).includes('private reasoning'), false)
-})
-
-test('HTML export writes an exclusive UTF-8 document in userData and rejects oversized attachments', async () => {
+test('Markdown export writes a unique UTF-8 file and rejects oversized or cancelled exports', async () => {
   const writes = []
-  const saved = load('../src/main/deepseek-context-html.ts', {
+  const api = load('../src/main/deepseek-context-markdown.ts', {
     electron: { app: { getPath: name => { assert.equal(name, 'userData'); return '/synthetic-data' } } },
     'node:fs/promises': { mkdir: async () => {}, writeFile: async (...args) => writes.push(args) },
-    'node:path': path, 'node:crypto': { randomUUID }, '../shared/deepseek-context-html': html, '../shared/deepseek-question': shared
+    'node:path': path, 'node:crypto': { randomUUID }, '../shared/deepseek-context-markdown': markdown, '../shared/deepseek-question': shared
   })
-  const snapshot = shared.deepSeekContextSnapshot(validHistory(), [4, 3, 2, 1], 'https://chat.deepseek.com/share/synthetic', selection)
-  const first = await saved.saveDeepSeekContextHtml(snapshot)
-  const second = await saved.saveDeepSeekContextHtml(snapshot)
-  assert.notEqual(first, second)
-  assert.equal(path.basename(first), 'deepseek-context.html')
-  assert.equal(writes[0][2].flag, 'wx')
-  assert.equal(writes[0][2].encoding, 'utf8')
+  const snapshot = markdown.savedQuestionSnapshot(savedContext(), sourceId, selection)
+  const signal = new AbortController().signal
+  const first = await api.saveQuestionContextMarkdown(snapshot, signal)
+  assert.notEqual(first, await api.saveQuestionContextMarkdown(snapshot, signal))
+  assert.equal(path.basename(first), 'deepseek-context.md')
+  assert.equal(writes[0][2].flag, 'wx'); assert.equal(writes[0][2].encoding, 'utf8')
   assert.ok(writes[0][1].includes(answer))
-  await assert.rejects(saved.saveDeepSeekContextHtml({ ...snapshot, messages: [{ id: 1, role: 'user', text: 'a'.repeat(21 * 1024 * 1024) }] }), category('html-size'))
+  await assert.rejects(api.saveQuestionContextMarkdown({ ...snapshot, messages: [{ id: 'large', role: 'user', content: 'a'.repeat(21 * 1024 * 1024) }] }, signal), category('context-size'))
+  const cancelled = new AbortController(); cancelled.abort()
+  await assert.rejects(api.saveQuestionContextMarkdown(snapshot, cancelled.signal), { name: 'AbortError' })
   assert.equal(writes.length, 2)
 })
-
-function service() {
-  const logs = []
-  const exports = load('../src/main/deepseek-share.ts', {
-    'node:fs': { appendFileSync(_file, line) { logs.push(line) }, mkdirSync() {} },
-    'node:os': { tmpdir: () => '/synthetic-temp' }, 'node:path': path,
-    '../shared/deepseek-question': shared
-  })
-  const observe = (token = 'synthetic-credential') => exports.observeDeepSeekHeaders({
-    url: 'https://chat.deepseek.com/api/v0/chat/history_messages', webContentsId: 42,
-    requestHeaders: { authorization: token, 'x-client-version': 'synthetic-version', Cookie: 'must-not-be-copied' }
-  })
-  observe()
-  return { ...exports, logs, observe }
-}
-const response = json => new Response(JSON.stringify(json), { headers: { 'content-type': 'application/json' } })
-const contents = fetch => ({ id: 42, getUserAgent: () => 'Synthetic Chrome', session: { fetch } })
-
-test('fresh history fetch drops incremental hints and creates the selected range without UI/clipboard access', async () => {
-  const api = service()
-  const requests = []
-  let snapshot
-  const wc = contents(async (url, options) => {
-    requests.push({ url, options })
-    return response(requests.length === 1 ? validHistory() : wrap({ share_id: 'synthetic-result' }))
-  })
-  const result = await api.createDeepSeekSelectionShare(wc, sourceId, selection, new AbortController().signal, () => true, async context => { snapshot = context })
-  assert.equal(result, 'https://chat.deepseek.com/share/synthetic-result')
-  assert.equal(requests.length, 2)
-  assert.equal(requests[0].options.method, 'GET')
-  assert.deepEqual([...new URL(requests[0].url).searchParams.keys()], ['chat_session_id'])
-  assert.equal(requests[0].options.headers['Cache-Control'], 'no-cache')
-  assert.equal(requests[0].options.headers.Cookie, undefined)
-  assert.deepEqual(JSON.parse(requests[1].options.body).message_ids, [4, 3, 2, 1])
-  assert.deepEqual(Array.from(snapshot.messages, message => message.id), [1, 2, 3, 4])
-  assert.equal(snapshot.shareUrl, result)
-  const log = api.logs.join('')
-  assert.ok(log.includes('SHARE-LINK'))
-  for (const privateText of ['synthetic-credential', selection.question, answer, 'must-not-be-copied']) assert.equal(log.includes(privateText), false)
-})
-
-test('empty history or a changed account stops before the share POST', async () => {
-  for (const variant of ['empty', 'account-change', 'source-change']) {
-    const api = service()
-    let calls = 0
-    let current = true
-    const wc = contents(async () => {
-      calls++
-      if (variant === 'account-change') api.observe('different-synthetic-credential')
-      if (variant === 'source-change') current = false
-      return response(variant === 'empty' ? history([]) : validHistory())
-    })
-    await assert.rejects(api.createDeepSeekSelectionShare(wc, sourceId, selection, new AbortController().signal, () => current),
-      category(variant === 'empty' ? 'empty-history' : 'cancelled'))
-    assert.equal(calls, 1)
-  }
-})
-
-function controllerFixture() {
+function controllerFixture(local = savedContext()) {
   const wc = new EventEmitter()
   wc.id = 42; wc.mainFrame = {}; wc.url = `https://chat.deepseek.com${selection.sourcePath}`
   wc.isDestroyed = () => false; wc.getURL = () => wc.url; wc.getUserAgent = () => 'Synthetic Chrome'
-  wc.executeJavaScript = async source => source.includes('getSubmission()') ? selection : true
-  let resolveShare
-  let shareCalls = 0
-  const chats = []
+  const statuses = []
+  wc.executeJavaScript = async source => {
+    if (source.includes('getSubmission()')) return selection
+    statuses.push(source); return true
+  }
+  wc.session = { fetch() { throw new Error('No provider history or share requests are allowed') } }
+  let resolveContext
+  let readCalls = 0
+  const chats = [], snapshots = []
   const dependencies = {
     'node:crypto': { randomUUID }, '../shared/deepseek-question': shared,
-    './deepseek-share': {
+    './question-chat-page': {
       questionPageCall: (webContents, source) => webContents.executeJavaScript(source),
-      createDeepSeekSelectionShare: (...args) => { shareCalls++; return new Promise(resolve => { resolveShare = async url => {
-        await args[5](shared.deepSeekContextSnapshot(validHistory(), [4, 3, 2, 1], url, selection)); resolve(url)
-      } }) },
-      releaseDeepSeekHeaders() {}, writeQuestionLog() { return '' }
+      writeQuestionLog() { return '' }
     },
-    './deepseek-context-html': { saveDeepSeekContextHtml: async () => '/synthetic-export/deepseek-context.html' },
+    '../shared/deepseek-context-markdown': markdown,
+    './deepseek-context-markdown': { saveQuestionContextMarkdown: async snapshot => { snapshots.push(snapshot); return '/synthetic-export/deepseek-context.md' } },
     './question-chat': { QuestionChat: class { constructor(...args) { chats.push(args) } close() {} setOwnerVisible() {} } }
   }
   const { DeepSeekQuestion } = load('../src/main/deepseek-question.ts', dependencies)
-  const controller = new DeepSeekQuestion(wc, { isDestroyed: () => false }, { id: 'deepseek' }, () => 'light')
+  const controller = new DeepSeekQuestion(wc, { isDestroyed: () => false }, { id: 'deepseek' }, () => 'light', () => {},
+    id => { assert.equal(id, sourceId); readCalls++; return new Promise(resolve => { resolveContext = resolve }) })
   const enter = () => {
     wc.emit('before-input-event', {}, { type: 'keyDown', key: 'Enter' })
     wc.emit('console-message', { frame: wc.mainFrame, message: controller.reportTag + JSON.stringify({ event: 'question-submit' }) })
   }
-  return { controller, wc, enter, chats, shareCalls: () => shareCalls, resolve: () => resolveShare('https://chat.deepseek.com/share/synthetic-result') }
+  return { controller, wc, enter, chats, snapshots, statuses, readCalls: () => readCalls, resolve: () => resolveContext(local) }
 }
 const flush = async () => { for (let index = 0; index < 12; index++) await Promise.resolve() }
 
-test('repeated Enter creates one share and one sidebar chat; page reports without a gesture are ignored', async () => {
+test('repeated Enter reads local data once and opens one sidebar; page reports without a gesture are ignored', async () => {
   const fixture = controllerFixture()
   fixture.wc.emit('console-message', { frame: fixture.wc.mainFrame, message: fixture.controller.reportTag + JSON.stringify({ event: 'question-submit' }) })
-  await flush(); assert.equal(fixture.shareCalls(), 0)
+  await flush(); assert.equal(fixture.readCalls(), 0)
   fixture.enter(); fixture.enter(); await flush()
-  assert.equal(fixture.shareCalls(), 1)
+  assert.equal(fixture.readCalls(), 1)
   await fixture.resolve(); await flush()
   assert.equal(fixture.chats.length, 1)
-  assert.ok(fixture.chats[0][5].includes(selection.question))
-  assert.ok(fixture.chats[0][5].includes('附件'))
-  assert.equal(fixture.chats[0][5].includes('https://'), false)
-  assert.equal(fixture.chats[0][8], '/synthetic-export/deepseek-context.html')
+  assert.ok(fixture.chats[0][4].includes(selection.question))
+  assert.ok(fixture.chats[0][4].includes('附件'))
+  assert.equal(fixture.chats[0][4].includes('https://'), false)
+  assert.equal(fixture.chats[0][7], '/synthetic-export/deepseek-context.md')
+  assert.equal(fixture.snapshots[0].messages.length, 4)
+  fixture.controller.destroy()
+})
+
+test('missing local history displays an actionable error without exporting or opening a new chat', async () => {
+  const fixture = controllerFixture(null)
+  fixture.enter(); await flush(); fixture.resolve(); await flush()
+  assert.equal(fixture.chats.length, 0)
+  assert.equal(fixture.snapshots.length, 0)
+  assert.ok(fixture.statuses.some(text => text.includes('未找到当前会话的本地对话数据')))
   fixture.controller.destroy()
 })
 
@@ -253,8 +180,8 @@ test('native sidebar bounds reject malformed rectangles and clamp to the owning 
   assert.equal(hidden.height, 0)
 })
 
-test('sidebar sends its HTML attachment once, preserves on folding and disposes once', async () => {
-  const views = [], added = [], removed = [], states = [], copied = [], released = []
+test('sidebar sends its Markdown attachment once, preserves on folding and disposes once', async () => {
+  const views = [], added = [], removed = [], states = [], copied = []
   const sent = [], opened = [], revealed = []
   class FakeView {
     constructor() {
@@ -280,12 +207,12 @@ test('sidebar sends its HTML attachment once, preserves on folding and disposes 
     } },
     'node:crypto': { randomUUID }, '../shared/deepseek-question': shared,
     './injected/question-chat-sender.js?raw': { default: '' }, './injected/theme.js?raw': { default: '' },
-    './deepseek-share': { questionPageCall: async () => ({ composer: true, hasHistory: false }), releaseDeepSeekHeaders: id => released.push(id), writeQuestionLog() {} },
+    './question-chat-page': { questionPageCall: async () => ({ composer: true, hasHistory: false }), writeQuestionLog() {} },
     './question-chat-send': { sendQuestionChatAttachment: async (...args) => { sent.push(args); return 'ok' } }
   }, { setInterval: () => 1, clearInterval() {} })
   const chat = new QuestionChat(parent, { homeUrl: 'https://chat.deepseek.com/', partition: 'synthetic', page: {
     composerSelectors: ['textarea'], sendButtonSelectors: ['.synthetic-send']
-  } }, 'light', 'Synthetic Chrome', 'https://chat.deepseek.com/share/synthetic', 'synthetic prompt', 'synthetic quote', state => states.push(state), '/synthetic-export/deepseek-context.html')
+  } }, 'light', 'Synthetic Chrome', 'synthetic prompt', 'synthetic quote', state => states.push(state), '/synthetic-export/deepseek-context.md')
   assert.equal(views.length, 1)
   assert.equal(added.length, 1)
   assert.equal(views[0].visible, false)
@@ -296,10 +223,10 @@ test('sidebar sends its HTML attachment once, preserves on folding and disposes 
   assert.equal(views[0].bounds.width, 400)
   await chat.checkReady(); await chat.checkReady()
   assert.equal(sent.length, 1)
-  assert.equal(sent[0][2], '/synthetic-export/deepseek-context.html')
+  assert.equal(sent[0][2], '/synthetic-export/deepseek-context.md')
   assert.equal(sent[0][3], 'synthetic prompt')
   assert.equal(chat.getState().error, false)
-  assert.ok(chat.getState().status.includes('HTML 附件和问题'))
+  assert.ok(chat.getState().status.includes('Markdown 附件和问题'))
   chat.setOwnerVisible(false); chat.setOwnerVisible(true)
   assert.equal(views[0].visible, false, 'old bounds cannot show a chat when its owner changes')
   chat.setViewport({ x: 1000, y: 200, width: 400, height: 700 }, true)
@@ -307,16 +234,15 @@ test('sidebar sends its HTML attachment once, preserves on folding and disposes 
   chat.setViewport({ x: 0, y: 0, width: 0, height: 0 }, false)
   assert.equal(views[0].visible, false)
   assert.equal(views[0].webContents.destroyed, false, 'folding preserves the chat')
-  chat.action('copy-link')
-  assert.equal(copied[0], 'https://chat.deepseek.com/share/synthetic')
-  chat.action('open-html'); chat.action('reveal-html')
-  assert.equal(opened[0], chat.getState().htmlPath)
-  assert.equal(revealed[0], chat.getState().htmlPath)
+  chat.action('copy-prompt')
+  assert.equal(copied[0], 'synthetic prompt')
+  chat.action('open-context'); chat.action('reveal-context')
+  assert.equal(opened[0], chat.getState().contextPath)
+  assert.equal(revealed[0], chat.getState().contextPath)
   chat.close(); chat.close()
   assert.equal(sent[0][4].aborted, true)
   assert.equal(removed.length, 1)
   assert.equal(views[0].webContents.destroyed, true)
-  assert.deepEqual(released, [99])
   assert.equal(states.at(-1), null)
 })
 
@@ -324,10 +250,10 @@ function attachmentFixture({ outcome = 'ok', navigate = false, invalid = false, 
   let cleanups = 0
   let url = initialUrl
   const sends = [], scripts = [], requests = []
-  const attachment = { path: '/synthetic-staging/deepseek-context.html', fileName: 'deepseek-context.html', mimeType: 'text/html', sizeBytes: 100 }
+  const attachment = { path: '/synthetic-staging/deepseek-context.md', fileName: 'deepseek-context.md', mimeType: 'text/markdown', sizeBytes: 100 }
   const helper = load('../src/main/question-chat-send.ts', {
     'node:path': path, 'node:crypto': { randomUUID }, './injected/send-interceptor.js?raw': { default: 'synthetic bridge' },
-    './deepseek-share': { questionPageCall: async (_contents, script) => { scripts.push(script) } },
+    './question-chat-page': { questionPageCall: async (_contents, script) => { scripts.push(script) } },
     './file-access': { prepareFiles: async (...args) => {
       requests.push(args)
       if (navigate) url = 'https://chat.deepseek.com/a/chat/s/existing'
@@ -338,7 +264,7 @@ function attachmentFixture({ outcome = 'ok', navigate = false, invalid = false, 
   const wc = { getURL: () => url, isDestroyed: () => false }
   const prompt = shared.deepSeekAttachmentPrompt(selection)
   return { sends, scripts, requests, cleanups: () => cleanups,
-    send: () => helper.sendQuestionChatAttachment(wc, { id: 'deepseek', page: {} }, '/synthetic-export/deepseek-context.html', prompt, new AbortController().signal, () => true), prompt }
+    send: () => helper.sendQuestionChatAttachment(wc, { id: 'deepseek', page: {} }, '/synthetic-export/deepseek-context.md', prompt, new AbortController().signal, () => true), prompt }
 }
 
 test('sidebar attachment reuses the uploader, adds the question as caption and cleans staging only', async () => {
@@ -347,16 +273,16 @@ test('sidebar attachment reuses the uploader, adds the question as caption and c
   assert.equal(fixture.sends.length, 1)
   const args = fixture.sends[0]
   assert.equal(args[1], 'deepseek')
-  assert.equal(args[2][0].mimeType, 'text/html')
+  assert.equal(args[2][0].mimeType, 'text/markdown')
   assert.equal(args[6].caption, fixture.prompt)
   assert.equal(args[6].allowNewConversation, true)
   assert.ok(fixture.scripts[0].includes('"enabled":false'))
   assert.ok(fixture.scripts[0].includes('"promptInjectionEnabled":false'))
-  assert.equal(fixture.requests[0][0].files[0].path, '/synthetic-export/deepseek-context.html')
+  assert.equal(fixture.requests[0][0].files[0].path, '/synthetic-export/deepseek-context.md')
   assert.equal(fixture.cleanups(), 1)
 })
 
-test('unsupported HTML, a changed chat and a failed snapshot never trigger a URL fallback', async () => {
+test('unsupported Markdown, a changed chat and a failed snapshot never trigger a URL fallback', async () => {
   for (const options of [{ outcome: 'unsupported-file-type' }, { navigate: true }, { invalid: true }, { initialUrl: 'https://chat.deepseek.com/a/chat/s/existing' }]) {
     const fixture = attachmentFixture(options)
     const result = await fixture.send()
@@ -400,7 +326,7 @@ function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synth
     if (delay <= 250) queueMicrotask(() => { if (handle.active) { now += delay; callback() } })
     return handle
   }, clearTimeout: handle => { handle.active = false } })
-  return { calls, logs, send: () => api.sendPageFiles(wc, 'deepseek', [{ path: '/staging/context.html', fileName: 'context.html', mimeType: 'text/html', sizeBytes: 100 }],
+  return { calls, logs, send: () => api.sendPageFiles(wc, 'deepseek', [{ path: '/staging/context.md', fileName: 'context.md', mimeType: 'text/markdown', sizeBytes: 100 }],
     'synthetic-upload', () => true, new AbortController().signal, { caption: 'synthetic question', allowNewConversation: allow }) }
 }
 
