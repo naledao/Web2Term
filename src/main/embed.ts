@@ -1,6 +1,11 @@
 import { BrowserWindow, WebContentsView, session, shell } from 'electron'
 import interceptorSource from './injected/send-interceptor.js?raw'
 import themeSource from './injected/theme.js?raw'
+import selectionQuestionSource from './injected/selection-question.js?raw'
+import selectionQuestionCss from './injected/selection-question.css?raw'
+import { DeepSeekQuestion } from './deepseek-question'
+import { observeDeepSeekHeaders } from './deepseek-share'
+import type { QuestionChatAction, QuestionChatState } from '../shared/deepseek-question'
 import { sendPageFiles } from './page-files'
 import { writeRawSendDiagnostic } from './raw-send-log'
 import { writePromptDiagnostic } from './prompt-log'
@@ -263,6 +268,7 @@ function installChromeIdentity(partition: string): void {
   session.fromPartition(partition).webRequest.onBeforeSendHeaders(
     { urls: ['*://*/*'] },
     (details, callback) => {
+      if (partition === 'persist:deepseek') observeDeepSeekHeaders(details)
       const headers = { ...details.requestHeaders }
       let touched = false
       const googleAuth = isGoogleAuthUrl(details.url)
@@ -395,6 +401,7 @@ interface ScrapeResult {
 /** Callbacks the embed raises towards the main process. */
 export interface EmbedHandlers {
   onState(state: EmbedState): void
+  onQuestionChat?(state: QuestionChatState | null): void
   /** A conversation the page just navigated to (auto-saved). */
   onConversation(conversation: ScrapedConversation): void
   /** Results of a background sidebar scrape. */
@@ -431,6 +438,7 @@ export interface EmbedHandlers {
 
 export class ChatGptEmbed {
   private view: WebContentsView | null = null
+  private selectionQuestion: DeepSeekQuestion | null = null
   private bounds: EmbedBounds = { x: 0, y: 0, width: 0, height: 0 }
   private visible = true
   /** Dedupe key of the last conversation handed to the store. */
@@ -516,9 +524,13 @@ export class ChatGptEmbed {
    */
   setTheme(theme: AppTheme): void {
     this.theme = theme
+    this.selectionQuestion?.setTheme(theme)
     const view = this.view
     if (view && !view.webContents.isDestroyed()) view.setBackgroundColor(this.backgroundColor())
-    if (this.liveContents()) void this.installTheme()
+    if (this.liveContents()) {
+      void this.installTheme()
+      void this.installSelectionQuestion()
+    }
   }
 
   /**
@@ -585,6 +597,10 @@ export class ChatGptEmbed {
     const contents = view.webContents
     const baseUserAgent = process.env.EMBED_USER_AGENT ?? chromeLikeUserAgent()
     contents.setUserAgent(baseUserAgent)
+    if (this.platform.id === 'deepseek') {
+      this.selectionQuestion = new DeepSeekQuestion(contents, parent, this.platform, () => this.theme, state => this.handlers.onQuestionChat?.(state))
+      this.selectionQuestion.setVisible(this.visible)
+    }
 
     /*
      * Keep `navigator.userAgent` in step with the header on the Google auth hosts.
@@ -680,6 +696,7 @@ export class ChatGptEmbed {
     contents.on('did-finish-load', () => {
       void this.installInterceptor()
       void this.installTheme()
+      void this.installSelectionQuestion()
     })
 
     /*
@@ -690,6 +707,7 @@ export class ChatGptEmbed {
      */
     contents.on('dom-ready', () => {
       void this.installTheme()
+      void this.installSelectionQuestion()
     })
 
     // NOTE: `did-navigate-in-page` is the one that fires for ChatGPT's
@@ -716,6 +734,7 @@ export class ChatGptEmbed {
     contents.on('did-navigate-in-page', () => {
       this.publishState()
       this.captureCurrentConversation()
+      this.dismissSelectionQuestion()
     })
     contents.on('page-title-updated', () => {
       this.publishState()
@@ -852,8 +871,15 @@ export class ChatGptEmbed {
 
   setVisible(visible: boolean): void {
     this.visible = visible
+    this.selectionQuestion?.setVisible(visible)
+    if (!visible) this.selectionQuestion?.cancel()
+    if (!visible) this.dismissSelectionQuestion()
     this.applyBounds()
   }
+
+  getQuestionChatState(): QuestionChatState | null { return this.selectionQuestion?.getState() ?? null }
+  setQuestionChatViewport(id: string, bounds: unknown, visible: boolean): void { this.selectionQuestion?.setViewport(id, bounds, visible) }
+  questionChatAction(id: string, action: QuestionChatAction): void { this.selectionQuestion?.action(id, action) }
 
   /**
    * Reload the page.
@@ -1136,18 +1162,39 @@ export class ChatGptEmbed {
     }
   }
 
+  /** Install the DeepSeek selection UI without exposing a page IPC bridge. */
+  private async installSelectionQuestion(): Promise<void> {
+    if (this.platform.id !== 'deepseek') return
+    const contents = this.liveContents()
+    if (!contents) return
+    try {
+      if (new URL(contents.getURL()).origin !== new URL(this.platform.homeUrl).origin) return
+      const config = JSON.stringify({
+        theme: this.theme,
+        reportTag: this.selectionQuestion?.reportTag ?? '',
+        answerSelectors: this.platform.page.assistantReplySelectors,
+        css: selectionQuestionCss
+      })
+      await contents.executeJavaScript(
+        `${selectionQuestionSource}\n;window.__cmdTerminalSelectionQuestion.configure(${config});true`
+      )
+    } catch (error) {
+      console.warn('[embed:deepseek] selection question injection failed:', (error as Error).message)
+    }
+  }
+
+  private dismissSelectionQuestion(): void {
+    if (this.platform.id !== 'deepseek') return
+    const contents = this.liveContents()
+    if (!contents) return
+    void contents.executeJavaScript('window.__cmdTerminalSelectionQuestion?.dismiss();true').catch(() => {
+      /* The view may be navigating or closing. Its old document no longer owns a popup. */
+    })
+  }
+
   /**
-   * Inject the theme script and tell it which theme the app is in.
-   *
-   * Separate from `installInterceptor` rather than folded into it: the two answer different
-   * questions (how a message is sent, how the page is painted), they install on different
-   * events, and this one is also re-pushed on every theme change — merging them would mean
-   * re-pushing the whole command protocol, including the arm-the-baseline flag, on a purely
-   * cosmetic switch.
-   *
-   * The platform's theme rules travel with the config because the script is injected as
-   * SOURCE and cannot import anything; they may legitimately be empty lists, which means
-   * "report only, touch nothing" for a platform whose page has not been measured.
+   * Inject the theme script independently of the command protocol and selection UI.
+   * These source-text rules can be empty on platforms whose theme is unmeasured.
    */
   async installTheme(): Promise<void> {
     const contents = this.liveContents()
@@ -1342,6 +1389,8 @@ export class ChatGptEmbed {
     // Stop watching for a bot check before the page goes away: the timer holds the contents, and
     // a tick after teardown would read a destroyed webContents.
     this.endBotCheckWait()
+    this.selectionQuestion?.destroy()
+    this.selectionQuestion = null
 
     const view = this.view
     if (!view) return

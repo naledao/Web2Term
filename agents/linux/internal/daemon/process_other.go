@@ -9,3 +9,4 @@ func Start(string) (Info, bool, error) { return Info{}, false, unsupported() }
 func Inspect(string) (Info, error)     { return Info{}, unsupported() }
 func Stop(string) (bool, error)        { return false, unsupported() }
 func Worker(string, string) error      { return unsupported() }
+func Foreground(string) error          { return unsupported() }

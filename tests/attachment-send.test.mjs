@@ -33,6 +33,8 @@ class ElementFixture {
   }
   get textContent() { return this.childNodes.map((child) => child.nodeType === 3 ? child.nodeValue : child.textContent).join('') }
   get innerText() { return this.textContent }
+  get value() { return this.textContent }
+  set value(value) { this.replaceChildren(value) }
   get type() { return this.getAttribute('type') || '' }
   get accept() { return this.getAttribute('accept') || '' }
   get multiple() { return this.getAttribute('multiple') !== null }
@@ -101,8 +103,8 @@ const requestedFiles = [
 const shortenedNames = ['api-user-auth-intro...', 'user_login_api.md', 'user_service_login_…']
 const token = 'files-offline-regression'
 
-function fixture(files = requestedFiles, pageOverrides = {}) {
-  const composer = element('div', { contenteditable: 'true', role: 'textbox' })
+function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div') {
+  const composer = element(composerTag, composerTag === 'textarea' ? { placeholder: '发送消息' } : { contenteditable: 'true', role: 'textbox' })
   const cards = element('div')
   const add = element('button', { 'aria-label': '添加文件等内容' })
   const send = element('button', { 'aria-label': '发送' })
@@ -112,6 +114,8 @@ function fixture(files = requestedFiles, pageOverrides = {}) {
   const listeners = new Map()
   const document = {
     body, activeElement: composer,
+    createRange: () => ({ selectNodeContents() {} }),
+    execCommand: (_command, _ui, text) => { composer.replaceChildren(text); return true },
     addEventListener(type, callback) {
       listeners.set(type, [...(listeners.get(type) || []), callback])
     },
@@ -119,12 +123,13 @@ function fixture(files = requestedFiles, pageOverrides = {}) {
     querySelector: (selector) => body.querySelector(selector),
     getElementById: (id) => body.descendants().find((node) => node.getAttribute('id') === id) || null
   }
-  const window = {}
+  const window = { getSelection: () => ({ removeAllRanges() {}, addRange() {} }) }
   new Script(interceptorSource).runInNewContext({
     window, document, location: { pathname: '/c/offline-fixture' },
-    Element: ElementFixture, HTMLInputElement: ElementFixture,
+    Element: ElementFixture, HTMLInputElement: ElementFixture, HTMLTextAreaElement: ElementFixture,
     Node: { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_PRECEDING: 2 },
     MouseEvent: class { constructor(type) { this.type = type } },
+    Event: class { constructor(type) { this.type = type } },
     MutationObserver: class { observe() {} },
     getComputedStyle: () => ({ visibility: 'visible' }),
     setTimeout: () => 1, clearTimeout() {}, console: { log() {} }
@@ -142,12 +147,17 @@ function fixture(files = requestedFiles, pageOverrides = {}) {
     },
     status: () => controller.fileSendStatus(token),
     submit: () => controller.submitFileSend(token),
-    confirmOnSend() {
+    confirmOnSend({ includeCaption = true } = {}) {
       send.onClick = () => {
+        const caption = composer.textContent
+        composer.replaceChildren()
         const selectedCards = [...cards.childNodes]
         cards.replaceChildren()
         const sentCards = element('div', {}, selectedCards)
-        const userTurn = element('div', { class: 'group/user-message', 'data-chatgpt-search-unit-key': 'new-user' }, [sentCards])
+        const turnAttributes = pageOverrides.fileTurnPositionAttr ? { [pageOverrides.fileTurnPositionAttr]: '0' }
+          : { class: 'group/user-message', 'data-chatgpt-search-unit-key': 'new-user' }
+        const userTurn = element('div', turnAttributes,
+          [sentCards, ...(includeCaption && caption ? [element('p', {}, caption)] : [])])
         body.replaceChildren(userTurn, root)
       }
     },
@@ -156,6 +166,53 @@ function fixture(files = requestedFiles, pageOverrides = {}) {
     }
   }
 }
+
+test('HTML and its question are acknowledged only when both appear in the same user turn', () => {
+  for (const includeCaption of [true, false]) {
+    const app = fixture([{ fileName: 'deepseek-context.html', mimeType: 'text/html', sizeBytes: 100 }])
+    app.render(['deepseek-context.html'])
+    const caption = '请读取附件。\n我的问题：Compose 是什么？'
+    assert.equal(app.controller.prepareFileSendCaption(token, caption), true)
+    assert.equal(app.composer.textContent, caption)
+    assert.equal(app.controller.prepareFileSendCaption(token, caption), false, 'never insert twice')
+    assert.equal(app.status().status, 'ready')
+    app.confirmOnSend({ includeCaption })
+    assert.equal(app.submit(), true)
+    assert.equal(app.status().status, includeCaption ? 'sent' : 'confirming')
+    if (!includeCaption) {
+      assert.equal(app.status().turnFilesSeen, true)
+      assert.equal(app.status().captionSeen, false)
+    }
+    assert.equal(app.submit(), false)
+    assert.equal(app.send.clicks, 1)
+  }
+})
+
+test('a user-edited caption stops automatic submission without replacing the edit', () => {
+  const app = fixture()
+  app.render(requestedFiles.map(file => file.fileName))
+  assert.equal(app.controller.prepareFileSendCaption(token, '原问题'), true)
+  app.composer.replaceChildren('用户修改后的问题')
+  assert.equal(app.status().status, 'busy')
+  assert.equal(app.submit(), false)
+  assert.equal(app.composer.textContent, '用户修改后的问题')
+  assert.equal(app.send.clicks, 0)
+})
+
+test('DeepSeek textarea uploads HTML before inserting its caption and acknowledges both in the new virtual row', () => {
+  const app = fixture([{ fileName: 'deepseek-context.html', mimeType: 'text/html', sizeBytes: 100 }], {
+    ...platformExports.DEEPSEEK_PAGE, sendButtonSelectors: ['button[aria-label="发送"]']
+  }, 'textarea')
+  app.render(['deepseek-context.html'])
+  assert.equal(app.composer.value, '')
+  assert.equal(app.controller.prepareFileSendCaption(token, '附件上下文\r\n问题：Compose 是什么？'), true)
+  assert.equal(app.composer.value, '附件上下文\n问题：Compose 是什么？')
+  assert.equal(app.status().status, 'ready')
+  app.confirmOnSend()
+  assert.equal(app.submit(), true)
+  assert.equal(app.status().status, 'sent')
+  assert.equal(app.send.clicks, 1)
+})
 
 test('the three docs can transition from full upload labels to shortened labels and be sent once', () => {
   const app = fixture()

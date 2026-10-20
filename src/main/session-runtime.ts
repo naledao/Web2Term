@@ -493,6 +493,9 @@ export class SessionRuntime {
     const isActive = (): boolean => platform.id === this.activePlatformId
 
     return {
+      onQuestionChat: state => {
+        if (isActive()) this.send(IpcChannels.questionChatState, state)
+      },
       onState: (state) => {
         const entry = record()
         /*
@@ -775,6 +778,7 @@ export class SessionRuntime {
      */
     this.send(IpcChannels.embedState, embed.getState())
     this.send(IpcChannels.interceptorEvent, embed.getInterceptorStatus())
+    this.send(IpcChannels.questionChatState, embed.getQuestionChatState())
     this.options.onSummaryChanged()
     return true
   }
@@ -1926,7 +1930,7 @@ export class SessionRuntime {
   private send(channel: string, payload: unknown): void {
     const window = this.window
     if (!this.active || !window || window.isDestroyed()) return
-    if (channel === IpcChannels.mysqlConnChanged || channel === IpcChannels.redisConnChanged || channel === IpcChannels.nacosConnChanged) {
+    if (channel === IpcChannels.mysqlConnChanged || channel === IpcChannels.redisConnChanged || channel === IpcChannels.nacosConnChanged || channel === IpcChannels.questionChatState) {
       window.webContents.send(channel, payload, this.id)
     } else {
       window.webContents.send(channel, payload)

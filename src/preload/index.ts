@@ -2,6 +2,7 @@ import type { ToolboxInvocation } from '../shared/toolbox'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { IpcChannels } from '../shared/types'
+import type { QuestionChatAction, QuestionChatState } from '../shared/deepseek-question'
 import type {
   AppApi,
   AppInfo,
@@ -159,6 +160,19 @@ const api: AppApi = {
   },
 
   getEmbedState: (): Promise<EmbedState> => ipcRenderer.invoke(IpcChannels.embedGetState),
+
+  getQuestionChatState: (sessionId: string): Promise<QuestionChatState | null> => ipcRenderer.invoke(IpcChannels.questionChatGetState, sessionId),
+  onQuestionChatState: (listener: (state: QuestionChatState | null, sessionId: string) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: QuestionChatState | null, sessionId: string): void => listener(state, sessionId)
+    ipcRenderer.on(IpcChannels.questionChatState, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.questionChatState, handler)
+  },
+  setQuestionChatViewport: (sessionId: string, chatId: string, bounds: EmbedBounds, visible: boolean): void => {
+    ipcRenderer.send(IpcChannels.questionChatViewport, sessionId, chatId, bounds, visible)
+  },
+  questionChatAction: (sessionId: string, chatId: string, action: QuestionChatAction): void => {
+    ipcRenderer.send(IpcChannels.questionChatAction, sessionId, chatId, action)
+  },
 
   loginWithEmail: (): void => {
     ipcRenderer.send(IpcChannels.embedLoginWithEmail)

@@ -119,3 +119,15 @@ func TestBackgroundStatusOutput(t *testing.T) {
 		t.Fatal("idle status suggests a running process")
 	}
 }
+
+func TestAutostartCommandsAppearInHelp(t *testing.T) {
+	var output bytes.Buffer
+	if err := Run([]string{"--help"}, strings.NewReader(""), &output, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"autostart enable", "autostart disable", "autostart status"} {
+		if !strings.Contains(output.String(), command) {
+			t.Fatalf("help omits %q", command)
+		}
+	}
+}

@@ -1,4 +1,5 @@
 import type { ToolboxInvocation } from './toolbox'
+import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 /**
  * Types shared between the Electron main process, the preload bridge and the
  * React renderer. Keep this module free of runtime dependencies on `electron`
@@ -16,6 +17,10 @@ export const IpcChannels = {
   embedNavigate: 'embed:navigate',
   embedGetState: 'embed:get-state',
   embedState: 'embed:state',
+  questionChatGetState: 'question-chat:get-state',
+  questionChatState: 'question-chat:state',
+  questionChatViewport: 'question-chat:viewport',
+  questionChatAction: 'question-chat:action',
   embedLoginWithEmail: 'embed:login-with-email',
   embedImportSession: 'embed:import-session',
   /**
@@ -1469,6 +1474,8 @@ export type TerminalLineKind = 'command' | 'output' | 'notice' | 'error'
 export interface TerminalLine {
   kind: TerminalLineKind
   text: string
+  /** Display-only PTY echo; history already records the original submitted input. */
+  inputEcho?: boolean
 }
 
 /**
@@ -2032,6 +2039,10 @@ export interface AppApi {
   getEmbedState(): Promise<EmbedState>
   /** Subscribe to embed state; returns an unsubscribe function. */
   onEmbedState(listener: (state: EmbedState) => void): () => void
+  getQuestionChatState(sessionId: string): Promise<QuestionChatState | null>
+  onQuestionChatState(listener: (state: QuestionChatState | null, sessionId: string) => void): () => void
+  setQuestionChatViewport(sessionId: string, chatId: string, bounds: EmbedBounds, visible: boolean): void
+  questionChatAction(sessionId: string, chatId: string, action: QuestionChatAction): void
   /**
    * Point the embedded view at the email/OTP sign-in page.
    *

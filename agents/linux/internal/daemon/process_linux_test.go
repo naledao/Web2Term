@@ -73,3 +73,40 @@ func TestIdleStatusAndStopDoNotCreateConfiguration(t *testing.T) {
 		t.Fatal("idle query created a configuration directory")
 	}
 }
+
+func TestServiceWorkerSharesTheManualWorkerLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	files, err := runtimePaths(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireLock(files.lock, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := Foreground(path); !errors.Is(err, errRunning) {
+		t.Fatalf("service worker failed to respect the singleton lock: %v", err)
+	}
+	if _, err := os.Stat(files.socket); !os.IsNotExist(err) {
+		t.Fatal("conflicting service worker created a control socket")
+	}
+}
+
+func TestServiceWorkerRequiresLoginAndReleasesLockOnFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Foreground(path); err == nil {
+		t.Fatal("service worker accepted missing credentials")
+	}
+	files, _ := runtimePaths(path)
+	lock, err := acquireLock(files.lock, false)
+	if err != nil {
+		t.Fatalf("failed service worker leaked its lock: %v", err)
+	}
+	_ = lock.Close()
+	for _, path := range []string{files.config, files.socket, files.state} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("failed service worker wrote configuration or running state")
+		}
+	}
+}

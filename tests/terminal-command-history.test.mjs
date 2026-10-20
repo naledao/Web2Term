@@ -41,6 +41,35 @@ test('output updates and transcript trimming do not duplicate or reorder command
   assert.equal(history.snapshot().at(-1), 'whoami')
 })
 
+test('SSH echoes never replace submitted input or become additional Up-arrow entries', () => {
+  const history = new TerminalCommandHistory()
+  const draft = 'web2term help'
+  history.remember(draft)
+  const echo = { kind: 'command', text: 'siyaoer@412:~$ web2term help', inputEcho: true }
+  history.observe([echo])
+  history.observe([echo, { kind: 'output', text: '用法：web2term run' }])
+  assert.deepEqual(Array.from(history.snapshot()), [draft])
+  assert.equal(navigateCommandHistory(null, history.snapshot(), '', 'up').value, draft)
+
+  history.observe([echo, ...commands('git status')])
+  assert.deepEqual(Array.from(history.snapshot()), [draft, 'git status'])
+  history.observe(commands('git status'))
+  assert.deepEqual(Array.from(history.snapshot()), [draft, 'git status'])
+})
+
+test('multiline input and literal prompt-like command text are preserved verbatim', () => {
+  const history = new TerminalCommandHistory()
+  const multiline = "cat <<'END'\nsiyaoer@412:~$ literal file content\nEND"
+  const literal = "printf '%s' 'siyaoer@412:~$ web2term help'"
+  history.remember(multiline)
+  history.observe([
+    { kind: 'command', text: "siyaoer@412:~$ cat <<'END'", inputEcho: true },
+    { kind: 'output', text: '> siyaoer@412:~$ literal file content\n> END' }
+  ])
+  history.observe(commands(literal))
+  assert.deepEqual(Array.from(history.snapshot()), [multiline, literal])
+})
+
 test('bounds retained input by count and characters', () => {
   const history = new TerminalCommandHistory()
   for (let index = 0; index < 205; index++) history.remember(`command ${index}`)

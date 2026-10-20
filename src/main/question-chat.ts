@@ -1,0 +1,192 @@
+import { WebContentsView, clipboard, shell } from 'electron'
+import type { BrowserWindow } from 'electron'
+import { randomUUID } from 'node:crypto'
+import { questionChatBounds } from '../shared/deepseek-question'
+import type { QuestionChatAction, QuestionChatState } from '../shared/deepseek-question'
+import senderSource from './injected/question-chat-sender.js?raw'
+import themeSource from './injected/theme.js?raw'
+import { questionPageCall, releaseDeepSeekHeaders, writeQuestionLog } from './deepseek-share'
+import { sendQuestionChatAttachment } from './question-chat-send'
+import type { AppTheme } from '../shared/types'
+import type { ChatPlatform } from '../shared/platforms'
+
+/** Native chat in the renderer's right-sidebar slot; no additional BrowserWindow. */
+export class QuestionChat {
+  readonly id = randomUUID()
+  private readonly view: WebContentsView
+  private readonly page: { composerSelectors: string[]; sendButtonSelectors: string[]; disabledControlSelectors: string[] }
+  private timer: NodeJS.Timeout | null = null
+  private checking = false
+  private readinessErrors = 0
+  private attempted = false
+  private closed = false
+  private readonly uploadAbort = new AbortController()
+  private readonly startedAt = Date.now()
+  private ownerVisible = false
+  private viewportVisible = false
+  private readonly parentClosed = (): void => this.close()
+  private statusText = '正在打开新的 DeepSeek 聊天…'
+  private statusError = false
+
+  constructor(
+    private readonly parent: BrowserWindow,
+    private readonly platform: ChatPlatform,
+    private theme: AppTheme,
+    userAgent: string,
+    private readonly shareUrl: string,
+    private readonly prompt: string,
+    private readonly selectedText: string,
+    private readonly onState: (state: QuestionChatState | null) => void,
+    private readonly htmlPath: string
+  ) {
+    this.view = new WebContentsView({ webPreferences: {
+      partition: platform.partition, nodeIntegration: false, contextIsolation: true, sandbox: true,
+      webSecurity: true, spellcheck: false, backgroundThrottling: false
+    } })
+    this.page = {
+      composerSelectors: platform.page.composerSelectors, sendButtonSelectors: platform.page.sendButtonSelectors,
+      disabledControlSelectors: platform.page.disabledControlSelectors ?? []
+    }
+    this.view.setBackgroundColor(this.background())
+    this.view.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+    this.view.setVisible(false)
+    this.parent.contentView.addChildView(this.view)
+    this.parent.once('closed', this.parentClosed)
+    const contents = this.view.webContents
+    contents.setUserAgent(userAgent)
+    contents.setWindowOpenHandler(({ url }) => {
+      try { if (['https:', 'http:'].includes(new URL(url).protocol)) void shell.openExternal(url).catch(() => {}) } catch { /* Invalid link. */ }
+      return { action: 'deny' }
+    })
+    contents.on('dom-ready', () => { void this.installTheme(); void this.checkReady() })
+    contents.on('did-fail-load', (_event, code, _description, _url, isMain) => {
+      if (isMain && code !== -3) this.fail('page-load', `DeepSeek 加载失败（${code}）。可复制提问，待页面恢复后手动发送。`)
+    })
+    contents.on('render-process-gone', () => this.fail('renderer-gone', 'DeepSeek 页面进程已退出，请关闭追问后重新提问。'))
+    void contents.loadURL(platform.homeUrl).catch(() => {
+      if (!this.closed) this.fail('page-load', 'DeepSeek 未能打开。请检查网络，或复制提问后手动发送。')
+    })
+    this.timer = setInterval(() => { void this.checkReady() }, 500)
+    writeQuestionLog('CHAT-OPEN', { presentation: 'sidebar', terminalInterceptor: false })
+    this.onState(this.getState())
+  }
+
+  private background(): string { return this.theme === 'dark' ? '#141a25' : '#ffffff' }
+  getState(): QuestionChatState | null {
+    return this.closed ? null : { id: this.id, selectedText: this.selectedText, htmlPath: this.htmlPath, status: this.statusText, error: this.statusError }
+  }
+  setViewport(raw: unknown, visible: boolean): void {
+    if (this.closed || this.parent.isDestroyed()) return
+    const [width, height] = this.parent.getContentSize()
+    const bounds = questionChatBounds(raw, width, height)
+    this.viewportVisible = !!bounds && visible && bounds.width > 0 && bounds.height > 0
+    if (bounds) this.view.setBounds(bounds)
+    this.applyVisibility()
+  }
+  setOwnerVisible(visible: boolean): void {
+    this.ownerVisible = visible
+    // A newly activated session must receive a fresh rectangle from its own UI.
+    if (!visible) this.viewportVisible = false
+    this.applyVisibility()
+  }
+  private applyVisibility(): void {
+    if (!this.closed) this.view.setVisible(this.ownerVisible && this.viewportVisible)
+  }
+  action(action: QuestionChatAction): void {
+    if (this.closed) return
+    if (action === 'close') this.close()
+    if (action === 'copy-link') { clipboard.writeText(this.shareUrl); this.status('来源分享链接已复制。', false) }
+    if (action === 'copy-prompt') { clipboard.writeText(this.prompt); this.status('提问已复制。手动发送时，请同时附上本地 HTML。', false) }
+    if (action === 'open-html' && this.htmlPath) {
+      void shell.openPath(this.htmlPath).then(error => {
+        if (error && !this.closed) this.status('无法打开本地 HTML，请用“定位文件”查看保存位置。', true)
+      }).catch(() => { if (!this.closed) this.status('无法打开本地 HTML，请用“定位文件”查看保存位置。', true) })
+    }
+    if (action === 'reveal-html' && this.htmlPath) shell.showItemInFolder(this.htmlPath)
+  }
+  private stopPolling(): void { if (this.timer) clearInterval(this.timer); this.timer = null }
+  private status(text: string, error: boolean): void {
+    if (text === this.statusText && error === this.statusError) return
+    this.statusText = text; this.statusError = error
+    if (!this.closed) this.onState(this.getState())
+  }
+  private fail(reason: string, text: string): void {
+    this.stopPolling()
+    if (this.attempted) this.uploadAbort.abort()
+    this.status(text, true)
+    writeQuestionLog('CHAT-ERROR', { reason })
+  }
+  private async installTheme(): Promise<void> {
+    if (this.closed) return
+    const contents = this.view.webContents
+    try { if (new URL(contents.getURL()).origin !== 'https://chat.deepseek.com') return } catch { return }
+    const rules = this.platform.page.theme
+    await questionPageCall(contents, `${themeSource};window.__cmdTerminalTheme.configure(${JSON.stringify({
+      theme: this.theme, dark: rules?.dark ?? [], light: rules?.light ?? [], storage: rules?.storage ?? []
+    })});true`).catch(() => {})
+  }
+  setTheme(theme: AppTheme): void {
+    this.theme = theme
+    if (this.closed) return
+    this.view.setBackgroundColor(this.background())
+    void this.installTheme()
+  }
+  private async checkReady(): Promise<void> {
+    if (this.closed || this.attempted || this.checking || !this.ownerVisible || !this.viewportVisible) return
+    if (Date.now() - this.startedAt > 90000) {
+      this.fail('ready-timeout', '尚未准备好发送。请完成 DeepSeek 登录，再手动上传本地 HTML 并粘贴提问。'); return
+    }
+    const contents = this.view.webContents
+    if (contents.isDestroyed()) return
+    let url: URL
+    try { url = new URL(contents.getURL()) } catch { return }
+    if (url.origin !== 'https://chat.deepseek.com') { this.status('请先在下方完成 DeepSeek 登录或验证。', false); return }
+    if (url.pathname !== '/') {
+      if (/^\/a\/chat\/s\//.test(url.pathname)) this.fail('not-new-chat', '当前页面不是空白新聊天，已停止自动发送。可复制提问后手动开启新聊天。')
+      else this.status('请先完成 DeepSeek 登录或验证，等待返回新聊天页面。', false)
+      return
+    }
+    this.checking = true
+    try {
+      const ready = await questionPageCall<{ composer: boolean; hasHistory: boolean }>(contents, `${senderSource}\n;window.__questionChatReady(${JSON.stringify(this.page)})`)
+      this.readinessErrors = 0
+      if (this.closed || !this.ownerVisible || !this.viewportVisible) return
+      if (ready.hasHistory) { this.fail('not-empty', '页面已有聊天内容，已停止自动发送。可复制提问后手动开启新聊天。'); return }
+      if (!ready.composer) { this.status('等待 DeepSeek 输入框就绪；如需登录，请在下方完成。', false); return }
+      this.attempted = true
+      this.stopPolling()
+      this.status('正在上传离线 HTML 并发送问题…', false)
+      writeQuestionLog('CHAT-SEND-START', { context: 'html-attachment', promptLength: this.prompt.length })
+      const timeout = setTimeout(() => this.uploadAbort.abort(), 150000)
+      let result: Awaited<ReturnType<typeof sendQuestionChatAttachment>>
+      try {
+        result = await sendQuestionChatAttachment(contents, this.platform, this.htmlPath, this.prompt, this.uploadAbort.signal,
+          () => !this.closed && !contents.isDestroyed())
+      } finally { clearTimeout(timeout) }
+      if (this.closed) return
+      writeQuestionLog('CHAT-SEND-RESULT', { outcome: result })
+      if (result === 'ok') this.status('已发送 HTML 附件和问题。可以在这个聊天中继续追问。', false)
+      else this.fail('send-' + result, result === 'unknown' || result === 'stuck'
+        ? '已尝试发送，尚未确认附件和问题均已收到。请检查下方聊天，系统不会重复提交。'
+        : result === 'unsupported-file-type'
+          ? 'DeepSeek 当前上传入口不接受 HTML 文件。文件已保留，可打开检查；本次未自动发送问题。'
+          : '附件和问题未能自动发送。请检查下方聊天；可用“定位文件”手动上传 HTML，并用“复制提问”补充问题。')
+    } catch {
+      if (!this.closed && this.attempted) this.fail('send-interrupted', '发送时页面发生变化，请检查聊天是否已收到问题；系统不会重复发送。')
+      else if (!this.closed && ++this.readinessErrors >= 3) this.fail('ready-check', '暂时无法读取 DeepSeek 输入框，可用“复制提问”粘贴到下方聊天中发送。')
+    } finally { this.checking = false }
+  }
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.uploadAbort.abort()
+    this.stopPolling()
+    this.parent.removeListener('closed', this.parentClosed)
+    const contents = this.view.webContents
+    releaseDeepSeekHeaders(contents.id)
+    if (!this.parent.isDestroyed()) this.parent.contentView.removeChildView(this.view)
+    if (!contents.isDestroyed()) contents.close()
+    this.onState(null)
+    writeQuestionLog('CHAT-CLOSED', { sendAttempted: this.attempted })
+  }
+}

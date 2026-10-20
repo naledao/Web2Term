@@ -1074,6 +1074,19 @@ function registerIpcHandlers(): void {
   ipcMain.on(IpcChannels.embedCommand, (event, command: EmbedCommand) => runtimeForEvent(event)?.sendEmbedCommand(command))
   ipcMain.on(IpcChannels.embedNavigate, (event, url: string) => runtimeForEvent(event)?.navigateEmbed(String(url)))
   ipcMain.handle(IpcChannels.embedGetState, (event): EmbedState => runtimeForEvent(event)?.embed.getState() ?? EMPTY_EMBED_STATE)
+  const questionRuntime = (event: IpcMainEvent | IpcMainInvokeEvent, sessionId: string): SessionRuntime | null => {
+    if (event.senderFrame !== event.sender.mainFrame) return null
+    const runtime = runtimeForEvent(event)
+    return runtime?.id === sessionId ? runtime : null
+  }
+  ipcMain.handle(IpcChannels.questionChatGetState, (event, sessionId: string) => questionRuntime(event, sessionId)?.embed.getQuestionChatState() ?? null)
+  ipcMain.on(IpcChannels.questionChatViewport, (event, sessionId: string, chatId: string, bounds: unknown, visible: boolean) => {
+    questionRuntime(event, sessionId)?.embed.setQuestionChatViewport(chatId, bounds, visible === true)
+  })
+  ipcMain.on(IpcChannels.questionChatAction, (event, sessionId: string, chatId: string, action: string) => {
+    if (action !== 'close' && action !== 'copy-link' && action !== 'copy-prompt' && action !== 'open-html' && action !== 'reveal-html') return
+    questionRuntime(event, sessionId)?.embed.questionChatAction(chatId, action)
+  })
   ipcMain.on(IpcChannels.embedLoginWithEmail, (event) => runtimeForEvent(event)?.embed.navigate(EMBED_LOGIN_URL))
   ipcMain.handle(IpcChannels.embedImportSession, async (event, platformId: string, draft: SessionImportDraft): Promise<SessionImportResult> => {
     const runtime = runtimeForEvent(event)

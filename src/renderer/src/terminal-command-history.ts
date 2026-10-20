@@ -21,7 +21,10 @@ export class TerminalCommandHistory {
 
   /** Only ingest appended commands; output updates and trimmed transcripts must not reorder history. */
   observe(lines: readonly TerminalLine[]): void {
-    const commands = lines.filter((line) => line.kind === 'command').map((line) => line.text.replace(/\r\n?/g, '\n'))
+    // SSH echoes include user@host:path$; manual input was remembered at submit.
+    // Ignore these display lines rather than stripping prompt-like text from commands.
+    const commands = lines.filter((line) => line.kind === 'command' && !line.inputEcho)
+      .map((line) => line.text.replace(/\r\n?/g, '\n'))
     let overlap = Math.min(this.observed.length, commands.length)
     while (overlap > 0 && !this.observed.slice(-overlap).every((text, index) => text === commands[index])) overlap--
     for (const command of commands.slice(overlap)) this.remember(command)

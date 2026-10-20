@@ -16,6 +16,8 @@ import MysqlIcon from './components/MysqlIcon'
 import RedisIcon from './components/RedisIcon'
 import NacosIcon from './components/NacosIcon'
 import ConversationTranscript from './components/ConversationTranscript'
+import QuestionChatPanel from './components/QuestionChatPanel'
+import type { QuestionChatState } from '@shared/deepseek-question'
 import type { CommandLanguage } from './components/CommandViewer'
 import { conversationScrollKey } from './conversation-scroll'
 import { canNavigateCommandHistory, navigateCommandHistory, terminalCommandHistory } from './terminal-command-history'
@@ -412,6 +414,35 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [terminalCollapsed, setTerminalCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_TERMINAL_COLLAPSED, sessionId), readStoredBool(STORAGE_TERMINAL_COLLAPSED, false)))
   const [panelWidth, setPanelWidth] = useState(() => readStoredNumber(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), readStoredNumber(STORAGE_PANEL_WIDTH, PANEL_DEFAULT_WIDTH)))
   const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), readStoredBool(STORAGE_PANEL_COLLAPSED, false)))
+  const [questionChat, setQuestionChat] = useState<QuestionChatState | null>(null)
+  const [questionChatSelected, setQuestionChatSelected] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    let revision = 0
+    let openedId = ''
+    setQuestionChat(null)
+    setQuestionChatSelected(false)
+    const accept = (state: QuestionChatState | null): void => {
+      if (!alive || platformId !== 'deepseek') return
+      setQuestionChat(state)
+      if (!state) { openedId = ''; setQuestionChatSelected(false); return }
+      if (state.id === openedId) return
+      openedId = state.id
+      setQuestionChatSelected(true)
+      setPanelCollapsed(false)
+      setPanelWidth(previous => Math.min(Math.max(previous, 480), Math.max(PANEL_MIN_WIDTH, window.innerWidth - PANEL_MAX_RESERVE)))
+    }
+    const unsubscribe = window.api.onQuestionChatState((state, ownerId) => {
+      if (ownerId !== sessionId) return
+      revision++
+      accept(state)
+    })
+    void window.api.getQuestionChatState(sessionId).then(state => {
+      if (revision === 0) accept(state)
+    }).catch(() => {})
+    return () => { alive = false; unsubscribe() }
+  }, [sessionId, platformId])
   const [switchingPlatform, setSwitchingPlatform] = useState(false)
   const [placeholderToggle, setPlaceholderToggle] = useState(false)
   const [placeholderClosing, setPlaceholderClosing] = useState(false)
@@ -1709,10 +1740,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * it while they are open; the pending-question widget is deliberately excluded because it
    * lives in the terminal column and must leave the chat page usable underneath.
    */
+  const nativeEmbedVisible = !placeholderToggle && !settingsOpen && !sshDialogOpen && !notesOpen && !sshFilesOpen && !pdfPreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
   useEffect(() => {
-    window.api.setEmbedVisible(!placeholderToggle && !settingsOpen && !sshDialogOpen && !notesOpen && !sshFilesOpen && !pdfPreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen)
+    window.api.setEmbedVisible(nativeEmbedVisible)
     window.api.setWorkspaceSshDialogOpen(sshDialogOpen)
-  }, [placeholderToggle, settingsOpen, sshDialogOpen, notesOpen, sshFilesOpen, pdfPreview, globalModalOpen, promptOpen, toolWindowOpen, commandPreviewOpen])
+  }, [nativeEmbedVisible, sshDialogOpen])
 
   // SSH state and saved hosts.
   useEffect(() => {
@@ -2230,7 +2262,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           />
         )}
         <div className="panel__collapse-head">
-          {panelCollapsed ? null : <span className="panel__title">侧栏</span>}
+          {panelCollapsed ? null : questionChat ? <>
+            <button type="button" className="panel__section-toggle" aria-pressed={!questionChatSelected} onClick={() => setQuestionChatSelected(false)}>控制</button>
+            <button type="button" className="panel__section-toggle" aria-pressed={questionChatSelected} onClick={() => setQuestionChatSelected(true)}>询问 AI</button>
+          </> : <span className="panel__title">控制</span>}
           <span className="panel__spacer" />
           <button
             type="button"
@@ -2242,6 +2277,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             {panelCollapsed ? '«' : '»'}
           </button>
         </div>
+        {questionChat && questionChatSelected ? <QuestionChatPanel sessionId={sessionId} state={questionChat} visible={!panelCollapsed && nativeEmbedVisible} /> : <>
         <div className="terminal-controls">
           <div className="terminal__row">
             <span className="terminal__label">终端模式</span>
@@ -2521,6 +2557,7 @@ ${conversation.url}`}
             ))}
           </div>
         )}
+        </>}
       </aside>
 
       <section ref={toolboxPaneRef} className={terminalCollapsed ? 'terminal-pane terminal-pane--collapsed' : 'terminal-pane'}>

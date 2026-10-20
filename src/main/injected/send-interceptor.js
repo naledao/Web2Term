@@ -2717,15 +2717,25 @@
       })) : []
     return [...new Set([...sources, ...references].filter(Boolean))]
   }
+  const attachmentDraftCards = (root) => {
+    const cardSelector = PAGE.fileDraftCardSelector || PAGE.fileAttachmentCardSelector
+    return cardSelector ? [...root.querySelectorAll(cardSelector)] : []
+  }
+  // The images counted as draft-attachment evidence. Shared with diagnostics so
+  // the log describes exactly the nodes that made a draft look non-empty.
+  const attachmentDraftImages = (root, cards) => {
+    const cardSelector = PAGE.fileDraftCardSelector || PAGE.fileAttachmentCardSelector
+    const previewImages = PAGE.fileDraftImageSelector ? cards.flatMap((card) => [...card.querySelectorAll(PAGE.fileDraftImageSelector)])
+      : cardSelector ? cards.flatMap(collectImages) : [...root.querySelectorAll('img')]
+    return previewImages.filter((img) => /^(blob:|data:)/.test(img.currentSrc || img.src || '') || (img.naturalWidth >= 40 && img.naturalHeight >= 40))
+  }
   const attachmentSnapshot = () => {
     const root = attachmentRoot()
     const inputFiles = [...document.querySelectorAll('input[type="file"]')].reduce((sum, input) => sum + (input.files?.length || 0), 0)
     if (!root) return { rootFound: false, text: '', nameSources: [], images: 0, cards: 0, uploading: false, error: false, inputFiles }
     const cardSelector = PAGE.fileDraftCardSelector || PAGE.fileAttachmentCardSelector
-    const cards = cardSelector ? [...root.querySelectorAll(cardSelector)] : []
-    const previewImages = PAGE.fileDraftImageSelector ? cards.flatMap((card) => [...card.querySelectorAll(PAGE.fileDraftImageSelector)])
-      : cardSelector ? cards.flatMap(collectImages) : [...root.querySelectorAll('img')]
-    const images = previewImages.filter((img) => /^(blob:|data:)/.test(img.currentSrc || img.src || '') || (img.naturalWidth >= 40 && img.naturalHeight >= 40))
+    const cards = attachmentDraftCards(root)
+    const images = attachmentDraftImages(root, cards)
     const nameSources = [...new Set((PAGE.fileDraftCardSelector ? cards : [root])
       .flatMap((node) => attachmentNameSources(node, PAGE.fileDraftNameReferenceAttribute)))]
     return {
@@ -2972,7 +2982,8 @@
       const draftCleared = composerMatches(composer, '') && !draftAttachmentEvidence()
       const newTurnSeen = isNewFileUserTurn(newest, turns, fileSend.baselineUser)
       const turnFilesSeen = turnShowsFiles(newest, fileSend.files)
-      const sent = !fileSend.edited && draftCleared && newTurnSeen && turnFilesSeen
+      const captionSeen = !fileSend.caption || (!!newest && fileTurnText(newest).replace(/\s+/g, '').includes(fileSend.caption.replace(/\s+/g, '')))
+      const sent = !fileSend.edited && draftCleared && newTurnSeen && turnFilesSeen && captionSeen
       if (sent) {
         confirmedFileSends.add(token)
         if (confirmedFileSends.size > 8) confirmedFileSends.delete(confirmedFileSends.values().next().value)
@@ -2986,14 +2997,14 @@
         return { status: 'sent' }
       }
       return {
-        status: 'confirming', draftCleared, newTurnSeen, turnFilesSeen, edited: fileSend.edited,
+        status: 'confirming', draftCleared, newTurnSeen, turnFilesSeen, captionSeen, edited: fileSend.edited,
         turnPosition: fileUserTurnPosition(newest), baselinePosition: fileSend.baselineUser.maxPosition,
         turnKeyPresent: !!fileUserTurnKey(newest), turnKeyKnown: fileSend.baselineUser.keys.has(fileUserTurnKey(newest)),
         baselineKeyCount: fileSend.baselineUser.keys.size, userTurnCount: turns.length,
         baselinePositionAvailable: fileSend.baselineUser.maxPosition !== null
       }
     }
-    if (fileSend.edited || !composerMatches(composer, '')) return { status: 'busy' }
+    if (fileSend.edited || !composerMatches(composer, fileSend.caption || '')) return { status: 'busy' }
     if (snapshot.error) return { status: 'upload-failed', ...snapshot }
     const imagesExpected = fileSend.files.filter((item) => item.mimeType.startsWith('image/')).length
     const nameEvidence = attachmentNameEvidence(snapshot.nameSources, fileSend.files)
@@ -3139,6 +3150,40 @@
           }
           return ancestors
         })(),
+        // Where each image counted in `images` sits, so a page icon mistaken for a
+        // draft preview can be told apart from a real one. Never the full src.
+        draftImages: (() => {
+          if (!root) return []
+          const anchor = composer?.getBoundingClientRect()
+          return attachmentDraftImages(root, attachmentDraftCards(root)).slice(0, 8).map((img) => {
+            let depth = null
+            for (let node = composer?.parentElement, level = 0; node && node !== document.body && level < 16; node = node.parentElement, level++) {
+              if (node.contains(img)) { depth = level; break }
+            }
+            const source = img.currentSrc || img.src || ''
+            let scheme = 'none'
+            let host = ''
+            if (source) {
+              try {
+                const url = new URL(source, location.href)
+                scheme = url.protocol.replace(/:$/, '')
+                if (scheme === 'https' || scheme === 'http') host = url.hostname
+              } catch { scheme = 'invalid' }
+            }
+            const rect = img.getBoundingClientRect()
+            const landmark = img.closest('nav, aside, header, footer, a, button, [role="button"]')
+            return {
+              depth, scheme, host,
+              naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight,
+              width: Math.round(rect.width), height: Math.round(rect.height),
+              offsetX: anchor ? Math.round(rect.left - anchor.left) : null,
+              offsetY: anchor ? Math.round(rect.top - anchor.top) : null,
+              visible: isVisibleElement(img), complete: img.complete,
+              altLength: String(img.getAttribute('alt') || '').length,
+              landmark: landmark ? (landmark.getAttribute('role') === 'button' ? 'role-button' : landmark.tagName.toLowerCase()) : ''
+            }
+          })
+        })(),
         userAttachmentAncestors: (() => {
           const unit = fileUserTurnRoot(fileSend?.lastCheckedTurn)
           if (!unit) return []
@@ -3156,6 +3201,16 @@
         })(),
         ...attachmentInputDiagnostics(files, composer, root)
       }
+    },
+    prepareFileSendCaption(token, caption) {
+      if (typeof caption !== 'string' || !caption.trim() || caption.length > 50000 || fileSendStatus(token).status !== 'ready') return false
+      // Uploads wait on an empty draft. Add the owned question only once the
+      // attachment is ready; subsequent user edits still invalidate this send.
+      const composer = getComposer()
+      if (!composer || !composerMatches(composer, '') || fileSend.caption) return false
+      fileSend.caption = normalizeLineEndings(caption)
+      if (!insertText(composer, fileSend.caption)) { fileSend.edited = true; return false }
+      return true
     },
     submitFileSend(token) {
       if (fileSendStatus(token).status !== 'ready') return false

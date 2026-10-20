@@ -27,7 +27,7 @@ function diagnosticSnapshot(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object') return { available: false }
   const snapshot = value as Record<string, unknown>
   const result: Record<string, unknown> = {}
-  for (const key of ['status', 'rootFound', 'rootIsForm', 'images', 'imagesExpected', 'cards', 'namesSeen', 'nameSourceCount', 'missingNameCount', 'uploading', 'error', 'inputFiles', 'composerFound', 'sendFound', 'sendDisabled', 'draftEmpty', 'stopFound', 'draftCleared', 'newTurnSeen', 'turnFilesSeen', 'edited', 'turnPosition', 'baselinePosition', 'turnKeyPresent', 'turnKeyKnown', 'baselineKeyCount', 'userTurnCount', 'baselinePositionAvailable', 'menuCount', 'localEntryCount', 'captionEntryCount', 'entryAmbiguous', 'entryClicked']) {
+  for (const key of ['status', 'rootFound', 'rootIsForm', 'images', 'imagesExpected', 'cards', 'namesSeen', 'nameSourceCount', 'missingNameCount', 'uploading', 'error', 'inputFiles', 'composerFound', 'sendFound', 'sendDisabled', 'draftEmpty', 'stopFound', 'draftCleared', 'newTurnSeen', 'turnFilesSeen', 'captionSeen', 'edited', 'turnPosition', 'baselinePosition', 'turnKeyPresent', 'turnKeyKnown', 'baselineKeyCount', 'userTurnCount', 'baselinePositionAvailable', 'menuCount', 'localEntryCount', 'captionEntryCount', 'entryAmbiguous', 'entryClicked']) {
     if (typeof snapshot[key] === 'boolean' || typeof snapshot[key] === 'number' || (key === 'status' && typeof snapshot[key] === 'string')) result[key] = snapshot[key]
   }
   if (['', 'files-not-selected', 'attachment-root-missing', 'attachment-names-missing', 'upload-in-progress', 'send-button-missing', 'send-button-disabled', 'still-generating'].includes(String(snapshot.readyBlockReason))) {
@@ -75,6 +75,18 @@ function diagnosticSnapshot(value: unknown): Record<string, unknown> {
     }
     return safe
   })
+  if (Array.isArray(snapshot.draftImages)) result.draftImages = snapshot.draftImages.slice(0, 8).map((raw) => {
+    const image = raw as Record<string, unknown>
+    const safe: Record<string, unknown> = {}
+    for (const key of ['depth', 'naturalWidth', 'naturalHeight', 'width', 'height', 'offsetX', 'offsetY', 'visible', 'complete', 'altLength']) {
+      if (typeof image[key] === 'boolean' || typeof image[key] === 'number') safe[key] = image[key]
+    }
+    // Scheme and hostname only: never a path or query, which can carry an account id.
+    if (typeof image.scheme === 'string' && /^[a-z][a-z0-9+.-]{0,20}$/.test(image.scheme)) safe.scheme = image.scheme
+    if (typeof image.host === 'string' && /^[a-z0-9.-]{1,253}$/i.test(image.host)) safe.host = image.host
+    if (['', 'nav', 'aside', 'header', 'footer', 'a', 'button', 'role-button'].includes(String(image.landmark))) safe.landmark = image.landmark
+    return safe
+  })
   if (Array.isArray(snapshot.userAttachmentAncestors)) result.userAttachmentAncestors = snapshot.userAttachmentAncestors.slice(0, 7).map((raw) => {
     const ancestor = raw as Record<string, unknown>
     const safe: Record<string, boolean | number> = {}
@@ -92,17 +104,39 @@ export async function sendPageFiles(
   platformId: FileReadingPlatform['id'],
   attachments: PreparedAttachment[],
   token: string,
-  current: () => boolean,
-  signal: AbortSignal
+  isCurrent: () => boolean,
+  signal: AbortSignal,
+  options: { caption?: string; allowNewConversation?: boolean } = {}
 ): Promise<FileSendOutcome> {
   const debuggerApi = contents.debugger
   let attached = false
   let submitted = false
+  let sendClicked = false
   let detached = false
   let uploadError = false
   let chooserIntercepted = false
   let chooser: { backendNodeId: number; mode: string } | null = null
   const ownerUrl = contents.getURL()
+  let acceptedConversationUrl: string | null = null
+  const urlMatches = (): boolean => {
+    if (contents.isDestroyed()) return false
+    const url = contents.getURL()
+    if (acceptedConversationUrl) return url === acceptedConversationUrl
+    if (url === ownerUrl) return true
+    // The initial attachment message creates a new DeepSeek conversation via
+    // SPA navigation. Accept that one route once, only after our submit starts.
+    if (sendClicked && options.allowNewConversation === true && platformId === 'deepseek') {
+      try {
+        const before = new URL(ownerUrl), after = new URL(url)
+        if (before.origin === 'https://chat.deepseek.com' && before.pathname === '/' && after.origin === before.origin && /^\/a\/chat\/s\/[\w-]+\/?$/.test(after.pathname)) {
+          acceptedConversationUrl = url
+          return true
+        }
+      } catch { /* Reject changed or invalid destinations. */ }
+    }
+    return false
+  }
+  const current = (): boolean => isCurrent() && urlMatches()
   const started = Date.now()
   let stage = 'begin'
   const log = (event: string, details: Record<string, unknown> = {}): void => writeDiagnostic(platformId, token, event, { platformId, stage, elapsedMs: Date.now() - started, ...details })
@@ -262,18 +296,33 @@ export async function sendPageFiles(
     }
     if (!readySince || Date.now() >= deadline) return finish('upload-failed', 'upload-ready-timeout')
     if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
+    if (options.caption) {
+      stage = 'caption'
+      if (await call('prepareFileSendCaption', token, options.caption) !== true) return finish('busy', 'caption-not-prepared')
+      const captionDeadline = Date.now() + 5000
+      let ready = false
+      while (Date.now() < captionDeadline) {
+        if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
+        const status = await call('fileSendStatus', token) as { status?: string }
+        if (status?.status === 'ready') { ready = true; break }
+        if (status?.status !== 'uploading') return finish('busy', 'caption-draft-changed')
+        await pause(100)
+      }
+      if (!ready) return finish('upload-failed', 'caption-ready-timeout')
+    }
     stage = 'submit'
     // From this point, a context loss is ambiguous; never automatically click again.
     submitted = true
     const clicked = await call('submitFileSend', token)
     log('submit-result', { clicked: clicked === true })
     if (clicked !== true) { submitted = false; return finish('upload-failed', 'submit-not-confirmed') }
+    sendClicked = true
     stage = 'confirm'
     const confirmDeadline = Date.now() + 10000
     let previousConfirmation = ''
     let lastConfirmDiagnosticsAt = 0
     while (Date.now() < confirmDeadline) {
-      if (contents.isDestroyed() || contents.getURL() !== ownerUrl || detached) return finish('unknown', 'page-changed-after-submit')
+      if (!urlMatches() || detached) return finish('unknown', 'page-changed-after-submit')
       // A fast next action can supersede this run; still read the acknowledgement.
       const snapshot = await contents.executeJavaScript(`window.__cmdTerminalInterceptor?.fileSendStatus(${JSON.stringify(token)})`) as { status?: string }
       const diagnostics = diagnosticSnapshot(snapshot)

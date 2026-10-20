@@ -1100,7 +1100,9 @@ export class SshManager {
   }
 
   private pushLine(kind: TerminalLine['kind'], text: string): void {
-    this.lines.push({ kind, text })
+    // Commands added here are PTY echoes, including their shell prompt. Model
+    // commands use pushModelLine and remain eligible for command history.
+    this.lines.push(kind === 'command' ? { kind, text, inputEcho: true } : { kind, text })
     if (this.lines.length > MAX_LINES) {
       const removed = this.lines.length - MAX_LINES
       this.lines.splice(0, removed)
@@ -1159,6 +1161,7 @@ export class SshManager {
       if (partial && partial.kind === 'output') {
         if (this.manualInputPending && SHELL_COMMAND_RE.test(cleaned)) {
           partial.kind = 'command'
+          partial.inputEcho = true
           this.manualInputPending = false
         }
         partial.text = cleaned

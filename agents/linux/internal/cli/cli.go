@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"web2term/agent/internal/autostart"
 	"web2term/agent/internal/config"
 	"web2term/agent/internal/daemon"
 )
@@ -19,11 +20,20 @@ const help = `web2term — 远程终端工具
   web2term run           后台连接服务端，保持设备在线
   web2term status        查看后台进程和连接状态
   web2term stop          停止后台进程
+  web2term autostart enable   开启开机自启并立即启动（按需请求 sudo）
+  web2term autostart disable  关闭开机自启并停止系统服务
+  web2term autostart status   查看开机自启与系统服务状态
   web2term --help        查看帮助
 `
 
 // An empty configPath selects the current user's standard configuration path.
 func Run(args []string, input io.Reader, output io.Writer, configPath string) error {
+	if len(args) == 2 && args[0] == "__service" {
+		return daemon.Foreground(args[1])
+	}
+	if len(args) == 4 && args[0] == "__autostart" {
+		return autostart.Privileged(args[1:], output)
+	}
 	if len(args) == 3 && args[0] == "__agent" {
 		return daemon.Worker(args[1], args[2])
 	}
@@ -36,7 +46,8 @@ func Run(args []string, input io.Reader, output io.Writer, configPath string) er
 	isRun := len(args) == 1 && args[0] == "run"
 	isStatus := len(args) == 1 && args[0] == "status"
 	isStop := len(args) == 1 && args[0] == "stop"
-	if !isSetServer && !isLogin && !isRun && !isStatus && !isStop {
+	isAutostart := (len(args) == 1 || len(args) == 2) && args[0] == "autostart"
+	if !isSetServer && !isLogin && !isRun && !isStatus && !isStop && !isAutostart {
 		return errors.New("命令格式不正确，请使用 web2term --help 查看帮助；地址和登录信息按交互提示输入")
 	}
 	if configPath == "" {
@@ -45,6 +56,13 @@ func Run(args []string, input io.Reader, output io.Writer, configPath string) er
 		if err != nil {
 			return err
 		}
+	}
+	if isAutostart {
+		action := "status"
+		if len(args) == 2 {
+			action = args[1]
+		}
+		return autostart.Run(action, configPath, input, output)
 	}
 	if isLogin {
 		return login(input, output, configPath)

@@ -144,3 +144,32 @@ test('SshManager publishes model cwd changes without moving the interactive PTY'
   await oldRequest
   assert.equal(states.length, 0, 'an old SSH channel must not update a replacement connection')
 })
+
+test('Up recalls submitted input while SSH prompt echoes remain visible', async (t) => {
+  const { TerminalCommandHistory, navigateCommandHistory } = load('../src/renderer/src/terminal-command-history.ts')
+  for (const splitPrompt of [false, true]) {
+    await t.test(splitPrompt ? 'prompt and echo arrive in separate packets' : 'complete prompt echo arrives together', async (t) => {
+      const manager = new SshManager(() => {}, () => {}, () => {})
+      t.after(() => manager.dispose())
+      manager.state = { status: 'connected', attached: true, hostId: 'history-fixture' }
+      manager.stream = new FakeChannel()
+      const history = new TerminalCommandHistory()
+      const draft = 'web2term help'
+      if (splitPrompt) manager.consume('\x1b[32msiyaoer@412:~$ \x1b[0m')
+      history.remember(draft) // same submit path as the input box
+      await manager.write(draft)
+      manager.consume(splitPrompt ? `${draft}\r\n` : `siyaoer@412:~$ ${draft}\r\n`)
+      const lines = manager.getState().lines
+      const echo = lines.find((line) => line.kind === 'command')
+      assert.equal(echo.text, 'siyaoer@412:~$ web2term help', 'display must retain the remote prompt')
+      assert.equal(echo.inputEcho, true)
+      history.observe(lines)
+      assert.deepEqual(Array.from(history.snapshot()), [draft])
+      assert.equal(navigateCommandHistory(null, history.snapshot(), '', 'up').value, draft)
+
+      manager.pushModelLine({ kind: 'command', text: 'pwd' })
+      history.observe(manager.getState().lines)
+      assert.deepEqual(Array.from(history.snapshot()), [draft, 'pwd'], 'real model commands remain available')
+    })
+  }
+})

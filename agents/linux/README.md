@@ -100,7 +100,50 @@ web2term stop      # 关闭终端会话、WebSocket 并停止后台进程
 
 `run` 只确认后台进程已启动；设备是否成功连接并收到心跳确认由 `status` 显示。状态包括正在连接、已在线、等待重连和未运行。重复执行 `run` 会显示现有实例的信息，不会再创建连接。后台进程异常退出后，状态查询会显示未运行并保留上次日志路径及已记录的错误，再次执行 `run` 可以重新启动。
 
-后台运行不自动安装开机启动，也不在进程崩溃或机器重启后自动拉起。网络断线重连由存活的后台进程处理。修改后端地址或更新登录凭据后，应执行 `web2term stop`，再执行 `web2term run` 读取新配置。
+单独执行 `run` 不会安装开机自启；需要重启机器后自动连接时，使用下方的 `web2term autostart enable`。网络断线重连由存活的后台进程处理。修改后端地址或更新登录凭据后，应执行 `web2term stop`，再执行 `web2term run` 读取新配置；已启用系统服务时，改用 `web2term autostart enable` 恢复服务托管。
+
+## 一条命令开启开机自启
+
+在运行 **systemd** 的 Linux 主机上，安装新版二进制并完成 `web2term login` 后，用同一个 Linux 用户执行一次：
+
+```bash
+web2term autostart enable
+```
+
+这条命令安装并启用系统服务，立即启动设备连接，以后机器开机即可启动，无需先登录终端。普通用户会由程序调用 `sudo` 请求系统权限，可能需要输入系统密码；请直接运行上述命令，不要在前面另加 `sudo`，避免切到 root 的另一份登录配置。直接登录 root 使用工具的主机也支持此命令。
+
+服务以原用户身份执行，并绑定启用时的配置文件绝对路径，包含自定义 `XDG_CONFIG_HOME` 的情况。登录信息和设备 ID 沿用原配置，Token 不会写进服务文件或命令参数。每个 Linux 用户对应一个 `web2term-<UID>.service`，文件位于 `/etc/systemd/system/`；二进制应放在 `/usr/local/bin` 等长期保留的位置，不要启用后移动或删除它。
+
+首次启用会把原先手动 `run` 启动的进程切换为系统服务，**当前远程终端会话会关闭**，之后在桌面端重新连接。重复启用内容相同且正在运行的服务不会重启它。未运行或失败的服务可以再次执行 `enable` 启动。
+
+```bash
+web2term autostart status   # 查看开机自启和 systemd 服务状态，无需 sudo
+web2term status             # 查看设备是否在线、心跳及运行日志
+web2term autostart disable  # 关闭开机自启并停止系统服务，保留登录和设备身份
+```
+
+`web2term autostart` 不带子命令时也会显示自启状态。自启状态与设备在线状态分别显示：服务启动成功不表示已连接后端，仍应通过 `web2term status` 确认心跳。
+
+systemd 直接管理实际设备进程。异常崩溃可触发重启，重启间隔 10 秒、5 分钟内最多启动 3 次；登录过期、配置错误、认证拒绝等已报告的终止错误不会自动重试。到期后用原用户重新 `web2term login`，再执行 `web2term autostart enable`。网络断线继续由原有重连逻辑处理。
+
+`web2term stop` 仅停止本次运行，保留开机自启设置；需要关闭后续开机启动，执行 `autostart disable`。服务模式的标准输出和错误由 journal 保存，运行诊断日志仍可通过 `web2term status` 查看。查看服务日志可用 `sudo journalctl -u "web2term-$(id -u).service" -n 100 --no-pager`。
+
+当前仅支持以 systemd 为初始化系统的 Linux 主机；OpenRC、未启用 systemd 的 WSL 和普通容器不能使用这组自启命令。服务不会继承当前终端临时设置的所有环境变量；需要代理等额外环境时，应由管理员在对应 systemd 服务中配置。
+
+该功能构建完成后仍需用户在目标 Linux 主机验收，不代表当前发布安装包已包含它。
+
+### 自启功能的用户验收
+
+离线回归由用户执行，不会调用真实 systemctl、sudo、后端或 PTY；服务命令均使用假执行器，服务文件仅写测试临时目录：
+
+```bash
+cd agents/linux
+go test ./internal/autostart ./internal/cli
+```
+
+在测试主机安装新二进制后，完成登录，先手动 `run`，再执行 `autostart enable`，确认原进程退出、服务以原用户运行、设备 ID 不变且重新在线。重复 `enable` 确认 PID 和已有终端会话不变；重启机器后，在未登录该用户的情况下从桌面端确认设备上线。再检查 `disable` 后立即离线，重启后不再上线；重新 `enable` 能恢复。也应检查无 sudo 权限、非 systemd 系统、已存在非本工具服务、登录过期和自定义配置目录的失败提示及原配置保留情况。
+
+## 连接输出与运行行为
 
 输出示例：
 
@@ -159,7 +202,7 @@ sudo install -m 0755 dist/linux-amd64/web2term /usr/local/bin/web2term
 web2term set server
 ```
 
-升级已经在后台运行的版本时，先用原来执行 `run` 的用户运行 `web2term stop`，安装新二进制后，再用同一用户运行 `web2term run`。仅替换磁盘上的文件不会让已有进程自动加载新功能。安装使用 sudo 不代表运行时也需要 sudo；切换运行用户会切换配置、设备身份和 Shell 权限。
+升级已经在后台运行的版本时，先用原来执行 `run` 的用户运行 `web2term stop`，安装新二进制后，再用同一用户运行 `web2term run`；已开启自启的用户改为执行 `web2term autostart enable`，恢复系统服务托管。仅替换磁盘上的文件不会让已有进程自动加载新功能。安装使用 sudo 不代表运行时也需要 sudo；切换运行用户会切换配置、设备身份和 Shell 权限。
 
 从 Windows PowerShell 编译 Linux AMD64 版本：
 

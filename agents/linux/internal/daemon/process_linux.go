@@ -277,6 +277,35 @@ func Worker(path, outputPath string) (result error) {
 			_ = json.NewEncoder(ready).Encode(startupReport{Error: detail})
 		}
 	}()
+	return serveWorker(files, outputPath, func(info Info) error {
+		if err := json.NewEncoder(ready).Encode(startupReport{Info: info}); err != nil {
+			return errors.New("无法向启动命令确认后台状态")
+		}
+		reported = true
+		_ = ready.Close()
+		return nil
+	})
+}
+
+// Foreground lets systemd supervise the actual worker instead of a detached launcher.
+// It shares the lock, control socket, state and connection loop used by run/status/stop.
+func Foreground(path string) error {
+	files, err := runtimePaths(path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(files.config), 0o700); err != nil {
+		return err
+	}
+	lock, err := acquireLock(files.lock, true)
+	if err != nil {
+		return fmt.Errorf("无法取得设备进程锁，请先停止已有实例：%w", err)
+	}
+	defer lock.Close()
+	return serveWorker(files, "", nil)
+}
+
+func serveWorker(files paths, outputPath string, ready func(Info) error) (result error) {
 	// Handle and discard HUP rather than setting SIG_IGN: PTY Shells must
 	// inherit the default hangup disposition after exec. Setsid already
 	// detaches this worker from the terminal that launched web2term run.
@@ -332,11 +361,11 @@ func Worker(path, outputPath string) (result error) {
 		defer stop()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	if err := json.NewEncoder(ready).Encode(startupReport{Info: info}); err != nil {
-		return errors.New("无法向启动命令确认后台状态")
+	if ready != nil {
+		if err := ready(info); err != nil {
+			return err
+		}
 	}
-	reported = true
-	_ = ready.Close()
 	log.Record(diagnostic.Entry{Event: "agent_run_started", Phase: "agent", URL: address, DeviceID: settings.DeviceID})
 	runner := agent.New(os.Stdout, log)
 	runner.OnState = control.update
