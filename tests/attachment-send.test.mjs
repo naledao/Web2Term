@@ -214,6 +214,52 @@ test('DeepSeek textarea uploads Markdown before inserting its caption and acknow
   assert.equal(app.send.clicks, 1)
 })
 
+test('DeepSeek hidden remote decorations do not block Markdown upload or sent confirmation', () => {
+  for (const mode of ['no-layout', 'zero-area', 'aria-hidden']) {
+    const files = [{ fileName: 'deepseek-context.md', mimeType: 'text/markdown', sizeBytes: 1582 }]
+    const app = fixture(files, {
+      ...platformExports.DEEPSEEK_PAGE, sendButtonSelectors: ['button[aria-label="发送"]']
+    }, 'textarea')
+    app.controller.releaseFileSend(token)
+    const image = element('img', mode === 'aria-hidden' ? { 'aria-hidden': 'true' } : {})
+    Object.assign(image, { src: 'https://static.deepseek.com/offline-decoration.png', naturalWidth: 132, naturalHeight: 132 })
+    if (mode === 'no-layout') image.getClientRects = () => []
+    image.getBoundingClientRect = () => ({ width: mode === 'aria-hidden' ? 132 : 0, height: mode === 'aria-hidden' ? 132 : 0 })
+    app.root.replaceChildren(...app.root.childNodes, image)
+
+    const nextToken = `${token}-${mode}`
+    assert.equal(app.controller.beginFileSend(nextToken, files), 'ok', mode)
+    app.controller.fileSelectionApplied(nextToken)
+    app.render(['deepseek-context.md'])
+    assert.equal(app.controller.prepareFileSendCaption(nextToken, '附件上下文\n问题：KVM 是什么？'), true)
+    app.confirmOnSend()
+    assert.equal(app.controller.submitFileSend(nextToken), true)
+    assert.equal(app.controller.fileSendStatus(nextToken).status, 'sent', mode)
+    assert.equal(app.send.clicks, 1)
+  }
+})
+
+test('visible remote images, hidden local previews and native draft cards still block a new file send', () => {
+  for (const mode of ['visible-remote', 'hidden-blob', 'hidden-data', 'hidden-card']) {
+    const app = fixture(requestedFiles, mode === 'hidden-card' ? { fileDraftCardSelector: '[data-fixture-card]' } : {})
+    app.controller.releaseFileSend(token)
+    const image = element('img')
+    Object.assign(image, {
+      src: mode === 'hidden-blob' ? 'blob:offline-preview' : mode === 'hidden-data' ? 'data:image/png;base64,AA==' : 'https://example.test/upload.png',
+      naturalWidth: mode === 'hidden-blob' || mode === 'hidden-data' ? 0 : 132,
+      naturalHeight: mode === 'hidden-blob' || mode === 'hidden-data' ? 0 : 132
+    })
+    image.getBoundingClientRect = () => ({ width: 132, height: 132 })
+    if (mode !== 'visible-remote') image.getClientRects = () => []
+    const draft = mode === 'hidden-card' ? element('div', { 'data-fixture-card': '' }, [image]) : image
+    app.root.replaceChildren(...app.root.childNodes, draft)
+
+    assert.equal(app.controller.beginFileSend(`${token}-${mode}`, requestedFiles), 'busy', mode)
+    assert.equal(app.send.clicks, 0)
+    assert.equal(app.root.contains(image), true)
+  }
+})
+
 test('the three docs can transition from full upload labels to shortened labels and be sent once', () => {
   const app = fixture()
   app.render(requestedFiles.map((file) => file.fileName))

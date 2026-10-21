@@ -13,7 +13,9 @@ import type {
   ExecutionRecord,
   ExecutionStatus,
   ScrapedConversation,
-  SshHost
+  SshHost,
+  WorkspaceProject,
+  WorkspaceProjectDraft
 } from '../shared/types'
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
@@ -187,14 +189,21 @@ CREATE TABLE IF NOT EXISTS recent_command_json (
 );
 CREATE INDEX IF NOT EXISTS idx_recent_command_json_conversation
   ON recent_command_json (conversation_id, created_at DESC);
--- Managed workspace sessions. Unlike ChatGPT conversations, these rows describe
--- the app-level session cards shown by the session manager and survive restarts.
+-- User-created sidebar projects. These never follow the terminal's current directory.
+CREATE TABLE IF NOT EXISTS workspace_projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  directory TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+-- App-level chats and their terminal/connection state, restored after restart.
 CREATE TABLE IF NOT EXISTS managed_sessions (
   id              TEXT PRIMARY KEY,
   title           TEXT NOT NULL DEFAULT '',
   url             TEXT NOT NULL DEFAULT '',
   conversation_id TEXT,
   platform_id     TEXT NOT NULL DEFAULT 'chatgpt',
+  workspace_project_id TEXT,
   paused          INTEGER NOT NULL DEFAULT 0,
   prompt_injection_enabled INTEGER NOT NULL DEFAULT 1,
   local_cwd       TEXT NOT NULL DEFAULT '',
@@ -313,6 +322,7 @@ interface ExecutionRow {
 }
 export interface ManagedSessionRecord {
   id: string
+  projectId?: string | null
   title: string
   url: string
   conversationId: string | null
@@ -434,6 +444,7 @@ export class ConversationStore {
       .prepare('PRAGMA table_info(managed_sessions)')
       .all() as unknown as Array<{ name: string }>
     const managedSessionMigrations: Array<[string, string]> = [
+      ['workspace_project_id', 'TEXT'],
       ['paused', 'INTEGER NOT NULL DEFAULT 0'],
       ['prompt_injection_enabled', 'INTEGER NOT NULL DEFAULT 1'],
       ['local_cwd', "TEXT NOT NULL DEFAULT ''"],
@@ -1346,10 +1357,43 @@ export class ConversationStore {
     this.db.prepare('DELETE FROM nacos_connections WHERE id = ?').run(id)
   }
 
+  listWorkspaceProjects(): WorkspaceProject[] {
+    return (this.db.prepare('SELECT id, name, directory, created_at FROM workspace_projects ORDER BY created_at ASC, rowid ASC').all() as unknown as Array<{
+      id: string; name: string; directory: string; created_at: number
+    }>).map(row => ({ id: row.id, name: row.name, directory: row.directory, createdAt: row.created_at }))
+  }
+
+  saveWorkspaceProject(draft: WorkspaceProjectDraft): WorkspaceProject {
+    const name = draft.name.trim()
+    if (!name || name.length > 120) throw new Error('请输入 1–120 个字符的项目名称。')
+    const previous = draft.id ? this.listWorkspaceProjects().find(item => item.id === draft.id) : null
+    if (draft.id && !previous) throw new Error('项目不存在，请重新选择。')
+    const project: WorkspaceProject = {
+      id: previous?.id ?? randomUUID(), name, directory: draft.directory.trim(), createdAt: previous?.createdAt ?? Date.now()
+    }
+    this.db.prepare(`INSERT INTO workspace_projects (id, name, directory, created_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET name = excluded.name, directory = excluded.directory`)
+      .run(project.id, project.name, project.directory, project.createdAt)
+    return project
+  }
+
+  removeWorkspaceProject(id: string): boolean {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('UPDATE managed_sessions SET workspace_project_id = NULL WHERE workspace_project_id = ?').run(id)
+      const result = this.db.prepare('DELETE FROM workspace_projects WHERE id = ?').run(id)
+      this.db.exec('COMMIT')
+      return Number(result.changes) > 0
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   listManagedSessions(): ManagedSessionRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT id, title, url, conversation_id, platform_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, created_at, updated_at
+        `SELECT id, title, url, conversation_id, platform_id, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, created_at, updated_at
            FROM managed_sessions ORDER BY created_at ASC`
       )
       .all() as unknown as Array<{
@@ -1358,6 +1402,7 @@ export class ConversationStore {
       url: string
       conversation_id: string | null
       platform_id: string
+      workspace_project_id: string | null
       paused: number
       prompt_injection_enabled: number
       local_cwd: string
@@ -1376,6 +1421,7 @@ export class ConversationStore {
       url: row.url,
       conversationId: row.conversation_id,
       platformId: row.platform_id,
+      projectId: row.workspace_project_id,
       paused: row.paused !== 0,
       promptInjectionEnabled: row.prompt_injection_enabled !== 0,
       localCwd: row.local_cwd,
@@ -1393,13 +1439,14 @@ export class ConversationStore {
     const now = Date.now()
     this.db
       .prepare(
-        `INSERT INTO managed_sessions (id, title, url, conversation_id, platform_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO managed_sessions (id, title, url, conversation_id, platform_id, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
            conversation_id = excluded.conversation_id,
            platform_id = excluded.platform_id,
+           workspace_project_id = excluded.workspace_project_id,
            paused = excluded.paused,
            prompt_injection_enabled = excluded.prompt_injection_enabled,
            local_cwd = excluded.local_cwd,
@@ -1416,6 +1463,7 @@ export class ConversationStore {
         record.url,
         record.conversationId,
         record.platformId,
+        record.projectId ?? null,
         record.paused ? 1 : 0,
         record.promptInjectionEnabled ? 1 : 0,
         record.localCwd,

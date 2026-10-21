@@ -29,16 +29,15 @@ export default function QuestionChatPanel({ sessionId, state, visible }: {
     }
   }, [sessionId, state.id, visible])
 
-  return <section className="question-chat-sidebar" aria-label="询问 AI 对话">
+  return <section className="question-chat-sidebar" aria-label="侧边聊天">
     <header className="question-chat-sidebar__head">
       <div className="question-chat-sidebar__heading">
-        <h2>询问 AI <span>DeepSeek</span></h2>
-        <button type="button" className="question-chat-sidebar__close" aria-label="关闭追问" title="关闭追问"
+        <blockquote className="question-chat-sidebar__quote" title={state.selectedText}>{state.selectedText}</blockquote>
+        <button type="button" className="question-chat-sidebar__close" aria-label="关闭侧边聊天" title="关闭侧边聊天"
           onClick={() => window.api.questionChatAction(sessionId, state.id, 'close')}>
           <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" /></svg>
         </button>
       </div>
-      <blockquote className="question-chat-sidebar__quote" title={state.selectedText}>{state.selectedText}</blockquote>
       <div className="question-chat-sidebar__actions">
         <button type="button" disabled={!state.contextPath} title={state.contextPath}
           onClick={() => window.api.questionChatAction(sessionId, state.id, 'open-context')}>打开 Markdown</button>
@@ -46,10 +45,10 @@ export default function QuestionChatPanel({ sessionId, state, visible }: {
           onClick={() => window.api.questionChatAction(sessionId, state.id, 'reveal-context')}>定位文件</button>
         <button type="button" onClick={() => window.api.questionChatAction(sessionId, state.id, 'copy-prompt')}>复制提问</button>
       </div>
-      <p className={'question-chat-sidebar__status' + (state.error ? ' question-chat-sidebar__status--error' : '')}
-        role="status" aria-live="polite">{state.status}</p>
+      {state.status ? <p className={'question-chat-sidebar__status' + (state.error ? ' question-chat-sidebar__status--error' : '')}
+        role="status" aria-live="polite">{state.status}</p> : null}
     </header>
-    <div className="question-chat-sidebar__slot" ref={slot} aria-label="DeepSeek 追问网页">
+    <div className="question-chat-sidebar__slot" ref={slot} aria-label="DeepSeek 侧边聊天网页">
       <p>正在加载 DeepSeek…</p>
     </div>
   </section>

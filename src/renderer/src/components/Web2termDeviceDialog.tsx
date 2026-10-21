@@ -101,9 +101,9 @@ export default function Web2termDeviceDialog({ onClose, onConnected }: Props): R
       accept(next)
       if (next.status === 'connecting' || next.status === 'connected') await onConnected()
       else setError(next.message || '连接未建立，请刷新设备后重试。')
-    } catch {
+    } catch (cause) {
       if (!alive.current) return
-      let message = '发起设备连接失败，请重试。'
+      let message = cause instanceof Error ? cause.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '') : '发起设备连接失败，请重试。'
       try {
         // The handshake may fail between starting the socket and activating its workspace.
         const next = await window.api.getWeb2termConnection()

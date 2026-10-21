@@ -44,6 +44,7 @@ import type {
   InterceptorStatus,
   ManagedSessionSummary,
   WorkspaceState,
+  Web2termWorkspaceOptions,
   SessionImportDraft,
   SessionImportResult,
   SshHost,
@@ -62,6 +63,7 @@ import type {
 } from '../shared/types'
 import { embedAuthState, importCookieSet, importSessionToken, previewSessionImport } from './session-import'
 import { ConversationStore } from './db'
+import { workspaceProjectDraft, workspaceSessionOptions } from './workspace-projects'
 import { EMPTY_SSH_STATE, SessionRuntime } from './session-runtime'
 import { installAppLog, installNetLog } from './app-log'
 import { EMPTY_NACOS_VIEW_STATE } from '../shared/types'
@@ -598,6 +600,11 @@ function broadcastManagedSessions(): void {
   managerWindow.webContents.send(IpcChannels.managerSessionsChanged, managedSessions())
 }
 
+function broadcastWorkspaceProjects(): void {
+  if (!managerWindow || managerWindow.isDestroyed() || !store) return
+  managerWindow.webContents.send(IpcChannels.workspaceProjectsChanged, store.listWorkspaceProjects())
+}
+
 function sshTransfers(): SshTransferTask[] {
   const items: SshTransferTask[] = []
   for (const runtime of runtimes.values()) {
@@ -635,10 +642,32 @@ function persistWorkspaceState(): void {
   store.setSetting(SETTING_WORKSPACE_OPEN_SSH_DIALOG, workspaceOpenSshDialog ? '1' : '0')
 }
 
+function showEmptyWorkspace(): boolean {
+  if (currentSessionId) runtimes.get(currentSessionId)?.setActive(false)
+  for (const view of nacosViews.values()) view.setVisible(false)
+  currentSessionId = null
+  workspaceOpenSshDialog = false
+  persistWorkspaceState()
+  broadcastWorkspaceState()
+  // No embedded page will load in an empty workspace, so it cannot close the splash.
+  closeSplashWindow()
+  if (splashWindow || splashClosing) showManagerWhenReady()
+  else if (managerWindow && !managerWindow.isDestroyed()) {
+    if (managerWindow.isMinimized()) managerWindow.restore()
+    managerWindow.show()
+    managerWindow.focus()
+  }
+  return true
+}
+
 function showWorkspaceManager(): boolean {
   const firstId = runtimes.keys().next().value as string | undefined
-  if (firstId) return selectSession(firstId)
-  return createSession('local', true) !== null
+  return firstId ? selectSession(firstId) : showEmptyWorkspace()
+}
+
+function restoreWorkspaceSelection(savedId: string, openSshDialog: boolean): void {
+  if (savedId && runtimes.has(savedId)) selectSession(savedId, openSshDialog)
+  else showWorkspaceManager()
 }
 
 function selectSession(id: string, openSshDialog = false): boolean {
@@ -717,7 +746,8 @@ function createSession(
   activate = true,
   restored?: ReturnType<ConversationStore['listManagedSessions']>[number],
   platform: ChatPlatform = CHATGPT_PLATFORM,
-  web2termBinding?: Web2termSessionBinding
+  web2termBinding?: Web2termSessionBinding,
+  creation?: { projectId: string | null; localCwd: string }
 ): SessionRuntime | null {
   if (!store) return null
   const binding = web2termBinding ?? (restored ? parseWeb2termBinding(store.getSetting(`web2termSession:${restored.id}`)) : null)
@@ -731,11 +761,12 @@ function createSession(
     id: restored?.id,
     createdAt: restored?.createdAt,
     customTitle: restored?.title,
+    projectId: restored?.projectId ?? creation?.projectId ?? null,
     initialUrl: restored?.url || undefined,
     initialConversationId: restored?.conversationId ?? null,
     initialPaused: restored?.paused ?? false,
     initialPromptInjectionEnabled: restored?.promptInjectionEnabled ?? true,
-    initialLocalCwd: restored?.localCwd ?? '',
+    initialLocalCwd: restored?.localCwd ?? creation?.localCwd ?? '',
     initialSshHostId: restored?.sshHostId ?? '',
     initialSshAttached: restored?.sshAttached ?? false,
     initialSshReconnect: restored?.sshReconnect ?? false,
@@ -782,6 +813,30 @@ function createSession(
   return runtime
 }
 
+function showWeb2termWorkspace(options: Web2termWorkspaceOptions = {}): boolean {
+  if (!options || typeof options !== 'object' || Array.isArray(options)
+    || (options.newChat !== undefined && typeof options.newChat !== 'boolean')
+    || (options.projectId !== undefined && options.projectId !== null && typeof options.projectId !== 'string')) {
+    throw new Error('新建对话选项无效。')
+  }
+  const state = web2termConnection?.getState()
+  if (!state?.auth.user || !state.agentId || !['connecting', 'connected'].includes(state.status)) return false
+  const creation = options.newChat ? workspaceSessionOptions('web2term', options.projectId, store?.listWorkspaceProjects() ?? []) : undefined
+  const binding: Web2termSessionBinding = { agentId: state.agentId, deviceName: state.deviceName,
+    backendUrl: state.auth.backendUrl, userId: state.auth.user.publicId }
+  // Reconnection and creating a new chat are separate user actions. A new chat
+  // must never silently reopen an older conversation on the same device.
+  const existing = !options.newChat && [...runtimes.values()].find(runtime => runtime.web2term
+    && runtime.web2term.binding.agentId === binding.agentId
+    && runtime.web2term.binding.backendUrl === binding.backendUrl
+    && runtime.web2term.binding.userId === binding.userId
+    && !runtime.web2term.alive && !runtime.web2term.running)
+  if (existing) { existing.web2term!.reconnect(); return selectSession(existing.id) }
+  const active = web2termConnection!.terminals.getState().sessions.filter(item => ['opening', 'ready', 'closing'].includes(item.status))
+  if (active.length >= 3) throw new Error('最多同时运行 3 个终端，请先关闭一个会话。')
+  return createSession('web2term', true, undefined, platformById(DEFAULT_PLATFORM_ID) ?? CHATGPT_PLATFORM, binding, creation) !== null
+}
+
 function destroySession(id: string): boolean {
   const runtime = runtimes.get(id)
   if (!runtime) return false
@@ -807,7 +862,7 @@ function destroySession(id: string): boolean {
   if (wasCurrent) {
     const nextId = runtimes.keys().next().value as string | undefined
     if (nextId) selectSession(nextId)
-    else createSession('local', true)
+    else showEmptyWorkspace()
   }
   return true
 }
@@ -993,8 +1048,9 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     IpcChannels.managerSessionCreate,
-    (event, kind: string): ManagedSessionSummary | null => {
+    (event, kind: string, projectId?: string | null): ManagedSessionSummary | null => {
       if (!fromManager(event)) return null
+      const creation = workspaceSessionOptions(kind === 'ssh' ? 'ssh' : 'local', projectId, store?.listWorkspaceProjects() ?? [])
       /*
        * No platform parameter: a session is created for a purpose (this machine, or a host over
        * SSH) and the model is switched inside the chat. `DEFAULT_PLATFORM_ID` is used rather
@@ -1004,7 +1060,9 @@ function registerIpcHandlers(): void {
         kind === 'ssh' ? 'ssh' : 'local',
         true,
         undefined,
-        platformById(DEFAULT_PLATFORM_ID) ?? CHATGPT_PLATFORM
+        platformById(DEFAULT_PLATFORM_ID) ?? CHATGPT_PLATFORM,
+        undefined,
+        creation
       )
       return runtime?.summary() ?? null
     }
@@ -1012,6 +1070,28 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.managerSessionOpen, (event, id: string): boolean => {
     if (!fromManager(event)) return false
     return selectSession(String(id))
+  })
+  ipcMain.handle(IpcChannels.workspaceProjectsList, event => fromManager(event) ? store?.listWorkspaceProjects() ?? [] : [])
+  ipcMain.handle(IpcChannels.workspaceProjectSave, (event, draft: unknown) => {
+    if (!fromManager(event) || !store) throw new Error('工作区不可用。')
+    const project = store.saveWorkspaceProject(workspaceProjectDraft(draft))
+    broadcastWorkspaceProjects()
+    return project
+  })
+  ipcMain.handle(IpcChannels.workspaceProjectRemove, (event, id: string): boolean => {
+    if (!fromManager(event) || !store || typeof id !== 'string') return false
+    const removed = store.removeWorkspaceProject(id)
+    for (const runtime of runtimes.values()) if (runtime.summary().projectId === id) runtime.setProjectId(null)
+    broadcastWorkspaceProjects()
+    return removed
+  })
+  ipcMain.handle(IpcChannels.managerSessionMove, (event, id: string, projectId: string | null): boolean => {
+    if (!fromManager(event) || !store) return false
+    const runtime = runtimes.get(id)
+    if (!runtime) return false
+    if (projectId !== null && !store.listWorkspaceProjects().some(project => project.id === projectId)) throw new Error('项目不存在。')
+    runtime.setProjectId(projectId)
+    return true
   })
   ipcMain.handle(IpcChannels.managerSessionRename, (event, id: string, title: string): boolean => {
     if (!fromManager(event)) return false
@@ -1326,7 +1406,7 @@ function registerIpcHandlers(): void {
   })
   ipcMain.handle(IpcChannels.terminalSetCwd, async (event, path: string): Promise<TerminalState> => runtimeForEvent(event)?.setTerminalCwd(String(path ?? '')) ?? FALLBACK_TERMINAL_STATE)
   ipcMain.handle(IpcChannels.dialogSelectDirectory, async (event): Promise<string | null> => {
-    const window = runtimeForEvent(event)?.window
+    const window = runtimeForEvent(event)?.window ?? (isManagerEvent(event) ? managerWindow : null)
     const result = window && !window.isDestroyed()
       ? await dialog.showOpenDialog(window, {
           properties: ['openDirectory'],
@@ -1594,22 +1674,8 @@ function registerIpcHandlers(): void {
     canUseBackendAuth(event) ? web2termConnection?.terminals.input(sessionId, data) ?? terminalDenied : terminalDenied)
   ipcMain.handle(IpcChannels.web2termTerminalResize, (event, sessionId, size) =>
     canUseBackendAuth(event) ? web2termConnection?.terminals.resize(sessionId, size) ?? terminalDenied : terminalDenied)
-  ipcMain.handle(IpcChannels.workspaceShowWeb2term, (event): boolean => {
-    if (!canUseBackendAuth(event)) return false
-    const state = web2termConnection?.getState()
-    if (!state?.auth.user || !state.agentId || !['connecting', 'connected'].includes(state.status)) return false
-    const binding: Web2termSessionBinding = { agentId: state.agentId, deviceName: state.deviceName,
-      backendUrl: state.auth.backendUrl, userId: state.auth.user.publicId }
-    const existing = [...runtimes.values()].find(runtime => runtime.web2term
-      && runtime.web2term.binding.agentId === binding.agentId
-      && runtime.web2term.binding.backendUrl === binding.backendUrl
-      && runtime.web2term.binding.userId === binding.userId
-      && !runtime.web2term.alive && !runtime.web2term.running)
-    if (existing) { existing.web2term!.reconnect(); return selectSession(existing.id) }
-    const active = web2termConnection!.terminals.getState().sessions.filter(item => ['opening', 'ready', 'closing'].includes(item.status))
-    if (active.length >= 3) throw new Error('最多同时运行 3 个终端，请先关闭一个会话。')
-    return createSession('web2term', true, undefined, CHATGPT_PLATFORM, binding) !== null
-  })
+  ipcMain.handle(IpcChannels.workspaceShowWeb2term, (event, options?: Web2termWorkspaceOptions): boolean =>
+    canUseBackendAuth(event) ? showWeb2termWorkspace(options) : false)
 
   ipcMain.handle(IpcChannels.updateGetState, (): UpdateStatus => getUpdateStatus())
   ipcMain.handle(IpcChannels.updateCheck, (): Promise<UpdateStatus> => checkForUpdates())
@@ -1719,23 +1785,15 @@ if (!app.requestSingleInstanceLock()) {
     const savedWorkspaceSessionId = conversationStore.getSetting(SETTING_WORKSPACE_SESSION_ID) ?? ''
     const savedWorkspaceOpenSshDialog = conversationStore.getSetting(SETTING_WORKSPACE_OPEN_SSH_DIALOG) === '1'
     const savedSessions = conversationStore.listManagedSessions()
-    if (savedSessions.length === 0) createSession('local', true)
-    else {
-      for (const savedSession of savedSessions) {
+    for (const savedSession of savedSessions) {
         // Restore each session onto the site it was created on. An id this build does not
         // know (a row from a newer version, or a removed platform) falls back to the
         // default rather than throwing — a bad id must not make the app unopenable.
         const platform = platformById(savedSession.platformId) ?? CHATGPT_PLATFORM
         createSession('local', false, savedSession, platform)
-      }
     }
 
-    if (savedWorkspaceSessionId !== '' && runtimes.has(savedWorkspaceSessionId)) {
-      selectSession(savedWorkspaceSessionId, savedWorkspaceOpenSshDialog)
-    } else {
-      const firstId = runtimes.keys().next().value as string | undefined
-      if (firstId) selectSession(firstId)
-    }
+    restoreWorkspaceSelection(savedWorkspaceSessionId, savedWorkspaceOpenSshDialog)
 
     if (web2termConnection) {
       const count = restoreWeb2termSessions(web2termConnection,
@@ -1746,7 +1804,6 @@ if (!app.requestSingleInstanceLock()) {
 
     app.on('activate', () => {
       createManagerWindow()
-      if (runtimes.size === 0) createSession('local', true)
     })
   })
 }

@@ -37,6 +37,9 @@ import type {
   GitLogResult,
   GitReadMode,
   ManagedSessionSummary,
+  WorkspaceProject,
+  WorkspaceProjectDraft,
+  Web2termWorkspaceOptions,
 
   MysqlConnectionDraft,
   MysqlConnectionsState,
@@ -92,8 +95,18 @@ const api: AppApi = {
   listManagedSessions: (): Promise<ManagedSessionSummary[]> =>
     ipcRenderer.invoke(IpcChannels.managerSessionsList),
 
-  createManagedSession: (kind: 'local' | 'ssh'): Promise<ManagedSessionSummary | null> =>
-    ipcRenderer.invoke(IpcChannels.managerSessionCreate, kind),
+  createManagedSession: (kind: 'local' | 'ssh', projectId?: string | null): Promise<ManagedSessionSummary | null> =>
+    ipcRenderer.invoke(IpcChannels.managerSessionCreate, kind, projectId),
+
+  listWorkspaceProjects: (): Promise<WorkspaceProject[]> => ipcRenderer.invoke(IpcChannels.workspaceProjectsList),
+  saveWorkspaceProject: (draft: WorkspaceProjectDraft): Promise<WorkspaceProject> => ipcRenderer.invoke(IpcChannels.workspaceProjectSave, draft),
+  removeWorkspaceProject: (id: string): Promise<boolean> => ipcRenderer.invoke(IpcChannels.workspaceProjectRemove, id),
+  moveManagedSession: (id: string, projectId: string | null): Promise<boolean> => ipcRenderer.invoke(IpcChannels.managerSessionMove, id, projectId),
+  onWorkspaceProjectsChanged: (listener: (items: WorkspaceProject[]) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, items: WorkspaceProject[]): void => listener(items)
+    ipcRenderer.on(IpcChannels.workspaceProjectsChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.workspaceProjectsChanged, handler)
+  },
 
   openManagedSession: (id: string): Promise<boolean> =>
     ipcRenderer.invoke(IpcChannels.managerSessionOpen, id),
@@ -117,7 +130,7 @@ const api: AppApi = {
   },
 
   getWorkspaceState: (): Promise<WorkspaceState> => ipcRenderer.invoke(IpcChannels.workspaceGetState),
-  showWeb2termConnection: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.workspaceShowWeb2term),
+  showWeb2termConnection: (options?: Web2termWorkspaceOptions): Promise<boolean> => ipcRenderer.invoke(IpcChannels.workspaceShowWeb2term, options),
 
   showWorkspaceManager: (): Promise<boolean> => ipcRenderer.invoke(IpcChannels.workspaceShowManager),
 

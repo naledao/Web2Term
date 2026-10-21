@@ -1,22 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
-import type { AppTheme, ManagedSessionSummary, SshTransferTask, UpdateStatus, WorkspaceState } from '../../shared/types'
+import type { AppTheme, ManagedSessionSummary, SshTransferTask, UpdateStatus, WorkspaceState, WorkspaceProject } from '../../shared/types'
 import brandIcon from './assets/brand-icon.png'
-import chatGptIcon from './assets/ChatGPT.svg'
-import deepseekIcon from './assets/DeepSeek.svg'
-import claudeIcon from './assets/Claude.svg'
-import geminiIcon from './assets/Gemini.svg'
-import { platformById } from '../../shared/platforms'
+import WorkspaceNavigation from './components/WorkspaceNavigation'
+import WorkspaceProjectDialog, { containWorkspaceDialogFocus } from './components/WorkspaceProjectDialog'
 import App from './App'
 import { ToolWindowsProvider, ToolWindowsHost } from './components/ToolWindows'
 import Web2termDeviceDialog from './components/Web2termDeviceDialog'
 import ConfirmDialog from './components/ConfirmDialog'
+import './assets/workspace-empty.css'
 
 const INITIAL_WORKSPACE: WorkspaceState = {
   view: 'manager',
   sessionId: null,
   openSshDialog: false
 }
+
+const NAV_MIN_WIDTH = 240
+const NAV_MAX_WIDTH = 420
 
 function formatBytes(bytes: number): string {
   const value = Math.max(0, bytes)
@@ -51,16 +52,25 @@ function formatTransferDuration(seconds: number): string {
 export default function WorkspaceApp(): ReactElement {
   const [workspace, setWorkspace] = useState<WorkspaceState>(INITIAL_WORKSPACE)
   const [sessions, setSessions] = useState<ManagedSessionSummary[]>([])
+  const [projects, setProjects] = useState<WorkspaceProject[]>([])
+  const [projectEditor, setProjectEditor] = useState<{ project: WorkspaceProject | null } | null>(null)
+  const [pendingProjectDelete, setPendingProjectDelete] = useState<WorkspaceProject | null>(null)
+  const [movingSession, setMovingSession] = useState<ManagedSessionSummary | null>(null)
+  const [moveTarget, setMoveTarget] = useState('')
+  const [projectBusy, setProjectBusy] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const creatingRef = useRef(false)
+  const [navigationError, setNavigationError] = useState('')
   const [transfers, setTransfers] = useState<SshTransferTask[]>([])
   const [transfersOpen, setTransfersOpen] = useState(false)
   const [newSessionOpen, setNewSessionOpen] = useState(false)
+  const [newSessionProjectId, setNewSessionProjectId] = useState<string | null>(null)
+  const newSessionTrigger = useRef<HTMLElement | null>(null)
   const [web2termDeviceDialogOpen, setWeb2termDeviceDialogOpen] = useState(false)
+  const [web2termChatCreation, setWeb2termChatCreation] = useState<{ projectId: string | null } | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<ManagedSessionSummary | null>(null)
   const [appVersion, setAppVersion] = useState('')
-  const [renamingId, setRenamingId] = useState<string | null>(null)
-  const [renameDraft, setRenameDraft] = useState('')
-  const [renameSaving, setRenameSaving] = useState(false)
   const [updateNotice, setUpdateNotice] = useState<{ version: string } | null>(null)
   const [updateDownloading, setUpdateDownloading] = useState(false)
   const [updateLive, setUpdateLive] = useState<{ phase: UpdateStatus['phase']; percent: number }>({ phase: 'idle', percent: 0 })
@@ -72,9 +82,9 @@ export default function WorkspaceApp(): ReactElement {
     try {
       const raw = window.localStorage.getItem('layout.navWidth')
       const value = raw === null ? NaN : Number(raw)
-      return Number.isFinite(value) ? value : 228
+      return Number.isFinite(value) ? Math.min(NAV_MAX_WIDTH, Math.max(NAV_MIN_WIDTH, value)) : NAV_MIN_WIDTH
     } catch {
-      return 228
+      return NAV_MIN_WIDTH
     }
   })
 
@@ -110,8 +120,8 @@ export default function WorkspaceApp(): ReactElement {
       const startWidth = navWidth
       const onMove = (moveEvent: PointerEvent): void => {
         const next = startWidth + (moveEvent.clientX - startX)
-        const max = Math.max(200, Math.min(420, window.innerWidth - 520))
-        setNavWidth(Math.min(Math.max(next, 176), max))
+        const max = Math.max(NAV_MIN_WIDTH, Math.min(NAV_MAX_WIDTH, window.innerWidth - 520))
+        setNavWidth(Math.min(Math.max(next, NAV_MIN_WIDTH), max))
       }
       const onUp = (): void => {
         window.removeEventListener('pointermove', onMove)
@@ -124,19 +134,28 @@ export default function WorkspaceApp(): ReactElement {
   )
 
   useEffect(() => {
+    let navigationCurrent = true
+    let sessionsPushed = false
+    let projectsPushed = false
+    const offSessions = window.api.onManagedSessionsChanged(items => { sessionsPushed = true; if (navigationCurrent) setSessions(items) })
+    const offProjects = window.api.onWorkspaceProjectsChanged(items => { projectsPushed = true; if (navigationCurrent) setProjects(items) })
     void window.api.getWorkspaceState().then(setWorkspace)
     void window.api.getSettings().then((value) => setTheme(value.theme)).catch(() => {
       /* Light is the safe fallback when settings are unavailable during startup. */
     })
-    void window.api.listManagedSessions().then(setSessions)
+    void window.api.listManagedSessions().then(items => { if (navigationCurrent && !sessionsPushed) setSessions(items) })
+      .catch(() => { if (navigationCurrent) setNavigationError('读取对话失败，请重新打开应用。') })
+    void window.api.listWorkspaceProjects().then(items => { if (navigationCurrent && !projectsPushed) setProjects(items) })
+      .catch(() => { if (navigationCurrent) setNavigationError('读取项目失败，请重新打开应用。') })
     void window.api.getSshTransfers().then(setTransfers)
     void window.api.getAppInfo().then((info) => setAppVersion(info.version))
     const offWorkspace = window.api.onWorkspaceChanged(setWorkspace)
-    const offSessions = window.api.onManagedSessionsChanged(setSessions)
     const offTransfers = window.api.onSshTransfersChanged(setTransfers)
     return () => {
+      navigationCurrent = false
       offWorkspace()
       offSessions()
+      offProjects()
       offTransfers()
     }
   }, [])
@@ -177,22 +196,49 @@ export default function WorkspaceApp(): ReactElement {
     }
   }
 
-  const createManagedSession = async (kind: 'local' | 'ssh'): Promise<void> => {
+  const requestNewChat = (projectId: string | null): void => {
+    if (creatingRef.current) return
+    newSessionTrigger.current = document.activeElement as HTMLElement | null
+    setNewSessionProjectId(projectId)
+    setNavigationError('')
+    window.api.setEmbedVisible(false)
+    setNewSessionOpen(true)
+  }
+
+  const closeNewSessionDialog = (): void => {
+    if (creatingRef.current) return
     setNewSessionOpen(false)
+    requestAnimationFrame(() => {
+      if (newSessionTrigger.current?.isConnected) newSessionTrigger.current.focus({ preventScroll: true })
+      else newSessionButton.current?.focus({ preventScroll: true })
+    })
+  }
+
+  const createManagedSession = async (kind: 'local' | 'ssh'): Promise<void> => {
+    if (creatingRef.current) return
+    creatingRef.current = true
+    setCreating(true)
+    setNavigationError('')
     // For SSH the main process opens the connect dialog for us (createSession passes
     // openSshDialog = kind === 'ssh'), so there is nothing else to do here.
-    await window.api.createManagedSession(kind)
+    try {
+      if (!await window.api.createManagedSession(kind, newSessionProjectId)) throw new Error('无法创建对话，请重试。')
+      setNewSessionOpen(false)
+    } catch (cause) {
+      setNavigationError(cause instanceof Error ? cause.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '') : '创建对话失败，请重试。')
+    } finally { creatingRef.current = false; setCreating(false) }
   }
 
   const openWeb2termConnection = async (): Promise<void> => {
-    setNewSessionOpen(false)
-    const opened = await window.api.showWeb2termConnection()
+    const opened = await window.api.showWeb2termConnection(web2termChatCreation ? { newChat: true, projectId: web2termChatCreation.projectId } : undefined)
     if (!opened) throw new Error('无法打开设备会话，请重新选择设备连接。')
     setWeb2termDeviceDialogOpen(false)
+    setWeb2termChatCreation(null)
   }
 
-  const openWeb2termDeviceDialog = (trigger?: HTMLButtonElement | null): void => {
+  const openWeb2termDeviceDialog = (trigger?: HTMLButtonElement | null, creation?: { projectId: string | null }): void => {
     web2termDeviceDialogTrigger.current = trigger ?? newSessionButton.current
+    setWeb2termChatCreation(creation ?? null)
     setNewSessionOpen(false)
     setWeb2termDeviceDialogOpen(true)
     // Native embedded pages paint above DOM dialogs; hide them before rendering.
@@ -202,8 +248,10 @@ export default function WorkspaceApp(): ReactElement {
   const closeWeb2termDeviceDialog = (): void => {
     const trigger = web2termDeviceDialogTrigger.current
     setWeb2termDeviceDialogOpen(false)
+    setWeb2termChatCreation(null)
     requestAnimationFrame(() => {
       if (trigger?.isConnected) trigger.focus()
+      else if (newSessionTrigger.current?.isConnected) newSessionTrigger.current.focus()
       else newSessionButton.current?.focus()
     })
   }
@@ -217,27 +265,30 @@ export default function WorkspaceApp(): ReactElement {
     ? Math.min(100, Math.round((activeTransferred / activeTotal) * 100))
     : 0
 
-  const beginRename = (item: ManagedSessionSummary): void => {
-    setRenamingId(item.id)
-    setRenameDraft(item.title || '')
+  const editProject = (project: WorkspaceProject | null): void => {
+    setNavigationError('')
+    window.api.setEmbedVisible(false)
+    setProjectEditor({ project })
   }
 
-  const cancelRename = (): void => {
-    if (renameSaving) return
-    setRenamingId(null)
-    setRenameDraft('')
-  }
-
-  const saveRename = async (): Promise<void> => {
-    if (renamingId === null || renameSaving) return
-    setRenameSaving(true)
+  const moveSession = async (): Promise<void> => {
+    if (!movingSession || projectBusy) return
+    setProjectBusy(true)
+    setNavigationError('')
     try {
-      await window.api.renameManagedSession(renamingId, renameDraft)
-      setRenamingId(null)
-      setRenameDraft('')
-    } finally {
-      setRenameSaving(false)
-    }
+      if (!await window.api.moveManagedSession(movingSession.id, moveTarget || null)) throw new Error('对话已关闭。')
+      setMovingSession(null)
+    } catch (cause) { setNavigationError(cause instanceof Error ? cause.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '') : '移动对话失败。') }
+    finally { setProjectBusy(false) }
+  }
+
+  const removeProject = async (): Promise<void> => {
+    if (!pendingProjectDelete || projectBusy) return
+    setProjectBusy(true)
+    setNavigationError('')
+    try { await window.api.removeWorkspaceProject(pendingProjectDelete.id); setPendingProjectDelete(null) }
+    catch { setNavigationError('移除项目失败，请重试。') }
+    finally { setProjectBusy(false) }
   }
 
   const downloadUpdate = async (): Promise<void> => {
@@ -253,6 +304,10 @@ export default function WorkspaceApp(): ReactElement {
   const installUpdate = (): void => {
     void window.api.installUpdate()
   }
+
+  const workspaceModalOpen = transfersOpen || pendingDelete !== null || newSessionOpen || web2termDeviceDialogOpen || updateNotice !== null
+    || projectEditor !== null || movingSession !== null || pendingProjectDelete !== null
+  const newSessionProject = projects.find(project => project.id === newSessionProjectId)
 
   return (
     <ToolWindowsProvider sessionIds={sessions.map((item) => item.id)}>
@@ -271,68 +326,12 @@ export default function WorkspaceApp(): ReactElement {
             {navCollapsed ? '»' : '«'}
           </button>
         </div>
-        <div className="workspace__nav-label-row">
-          <div className="workspace__nav-label">会话</div>
-          <button
-            type="button"
-            className="workspace__new-session"
-            ref={newSessionButton}
-            title="新建会话"
-            aria-label="新建会话"
-            onClick={() => setNewSessionOpen(true)}>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
-          </button>
-        </div>
-        <div className="workspace__sessions">
-          {sessions.map((item) => (
-            <div className="workspace__session-row" key={item.id} onContextMenu={(event) => { event.preventDefault(); beginRename(item) }}>
-              {renamingId === item.id ? (
-                <div className="workspace__session-rename">
-                  <input
-                    autoFocus
-                    value={renameDraft}
-                    disabled={renameSaving}
-                    onChange={(event) => setRenameDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') void saveRename()
-                      if (event.key === 'Escape') cancelRename()
-                    }}
-                    onBlur={() => void saveRename()}
-                  />
-                </div>
-              ) : (
-              <>
-              <button
-                type="button"
-                className={workspace.sessionId === item.id ? 'workspace__session workspace__session--active' : 'workspace__session'}
-                onClick={() => void window.api.openManagedSession(item.id)}
-                title={item.title || item.target}
-              >
-                <span className="workspace__session-head">
-                  <span className="workspace__session-title">{item.title || '会话'}</span>
-                  <span className={`workspace__session-platform workspace__session-platform--${item.platformId}`} title={platformById(item.platformId)?.label ?? item.platformId}>{item.platformId === 'chatgpt' ? <img src={chatGptIcon} alt="ChatGPT" className="workspace__session-platform-icon" /> : item.platformId === 'deepseek' ? <img src={deepseekIcon} alt="DeepSeek" className="workspace__session-platform-icon" /> : item.platformId === 'claude' ? <img src={claudeIcon} alt="Claude" className="workspace__session-platform-icon" /> : item.platformId === 'gemini' ? <img src={geminiIcon} alt="Gemini" className="workspace__session-platform-icon" /> : (platformById(item.platformId)?.label ?? item.platformId)}</span>
-                </span>
-                <span className="workspace__session-meta">
-                  {item.unseenCompletedCount ? <><span className="workspace__session-unseen" title={`${item.unseenCompletedCount} 个已完成任务尚未查看`}>已完成{item.unseenCompletedCount > 1 ? ` ${item.unseenCompletedCount}` : null}</span><span aria-hidden="true"> · </span></> : null}
-                  {item.taskRunning ? <span className="workspace__session-running"><svg viewBox="0 0 8 8" width="7" height="7" fill="currentColor"><circle cx="4" cy="4" r="3.2" /></svg> 执行中 · </span> : null}
-                  {item.kind === 'web2term' ? 'web2term' : item.kind === 'ssh' ? 'SSH' : '本地'} · {item.target}
-                </span>
-              </button>
-              <button
-                type="button"
-                className="workspace__session-delete"
-                disabled={deletingId !== null}
-                title={`删除 ${item.title || '会话'}`}
-                aria-label={`删除 ${item.title || '会话'}`}
-                onClick={() => setPendingDelete(item)}
-              >
-                {deletingId === item.id ? '…' : <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>}
-              </button>
-              </>
-              )}
-            </div>
-          ))}
-        </div>
+        <WorkspaceNavigation sessions={sessions} projects={projects} activeId={workspace.sessionId} theme={theme} creating={creating}
+          newChatButton={newSessionButton} status={navigationError}
+          onNewChat={requestNewChat} onNewProject={() => editProject(null)} onEditProject={editProject}
+          onRemoveProject={project => { setNavigationError(''); window.api.setEmbedVisible(false); setPendingProjectDelete(project) }}
+          onMoveSession={item => { setNavigationError(''); window.api.setEmbedVisible(false); setMoveTarget(item.projectId ?? ''); setMovingSession(item) }}
+          onDeleteSession={item => { window.api.setEmbedVisible(false); setPendingDelete(item) }} />
         <div
           className="workspace__nav-resizer"
           role="separator"
@@ -352,7 +351,7 @@ export default function WorkspaceApp(): ReactElement {
             onThemeChange={setTheme}
             onOpenWeb2termConnection={openWeb2termDeviceDialog}
             initialSshDialogOpen={workspace.openSshDialog}
-            globalModalOpen={transfersOpen || pendingDelete !== null || newSessionOpen || web2termDeviceDialogOpen || updateNotice !== null}
+            globalModalOpen={workspaceModalOpen}
             /*
              * Read from the session list rather than held as its own state: the main process
              * republishes the list whenever a session changes, including on a platform switch,
@@ -362,7 +361,15 @@ export default function WorkspaceApp(): ReactElement {
               sessions.find((item) => item.id === workspace.sessionId)?.platformId ?? ''
             }
           />
-        ) : null}
+        ) : <div className="workspace-empty-state" role="region" aria-label="空白工作区">
+          <img className="workspace-empty-state__mark" src={brandIcon} alt="" aria-hidden="true" />
+          <h1>暂无对话</h1>
+          <p>新建聊天，或在项目中开始一个对话。</p>
+          <div className="workspace-empty-state__actions">
+            <button type="button" disabled={creating} onClick={() => requestNewChat(null)}>新建聊天</button>
+            <button type="button" onClick={() => editProject(null)}>新建项目</button>
+          </div>
+        </div>}
       </section>
 
       <footer className="workspace__transferbar">
@@ -455,62 +462,88 @@ export default function WorkspaceApp(): ReactElement {
         </div>
       ) : null}
 
+      {projectEditor ? <WorkspaceProjectDialog project={projectEditor.project} onClose={() => setProjectEditor(null)}
+        onSaved={project => {
+          setProjects(current => current.some(item => item.id === project.id) ? current.map(item => item.id === project.id ? project : item) : [...current, project])
+          setProjectEditor(null)
+        }} /> : null}
+      {movingSession ? <div className="modal workspace-project-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-move-heading"
+        onMouseDown={event => { if (event.target === event.currentTarget && !projectBusy) setMovingSession(null) }}
+        onKeyDown={event => { containWorkspaceDialogFocus(event); if (event.key === 'Escape' && !projectBusy) setMovingSession(null) }}>
+        <form className="workspace-project-dialog__box" onSubmit={event => { event.preventDefault(); void moveSession() }}>
+          <div className="workspace-project-dialog__heading"><h2 id="workspace-move-heading">移动对话</h2>
+            <button type="button" disabled={projectBusy} aria-label="关闭" onClick={() => setMovingSession(null)}>×</button></div>
+          <label>归属项目<select autoFocus value={moveTarget} disabled={projectBusy} onChange={event => setMoveTarget(event.target.value)}>
+            <option value="">本电脑（无项目）</option>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select></label>
+          {navigationError ? <p className="workspace-project-dialog__error" role="alert">{navigationError}</p> : null}
+          <div className="workspace-project-dialog__footer"><button type="button" disabled={projectBusy} onClick={() => setMovingSession(null)}>取消</button>
+            <button type="submit" className="is-primary" disabled={projectBusy}>{projectBusy ? '移动中…' : '移动'}</button></div>
+        </form>
+      </div> : null}
+      <ConfirmDialog open={pendingProjectDelete !== null} title={`移除项目“${pendingProjectDelete?.name ?? ''}”？`}
+        description={navigationError || '项目中的对话会保留，并移到“本电脑”列表。'} icon="!" busy={projectBusy} confirmLabel="移除项目"
+        onCancel={() => setPendingProjectDelete(null)} onConfirm={() => void removeProject()} />
+
       {newSessionOpen ? (
         <div
           className="modal new-session-modal"
           role="dialog"
           aria-modal="true"
-          aria-label="新建会话"
+          aria-labelledby="new-session-heading"
+          onKeyDown={event => {
+            containWorkspaceDialogFocus(event)
+            if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeNewSessionDialog() }
+          }}
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setNewSessionOpen(false)
+            if (event.target === event.currentTarget) closeNewSessionDialog()
           }}
         >
           <div className="new-session-modal__box">
             <div className="new-session-modal__header">
               <div>
-                <h2>新建会话</h2>
-                <p>选择一种工作环境开始任务</p>
+                <h2 id="new-session-heading">新建对话</h2>
+                <p>{newSessionProject ? `在“${newSessionProject.name}”中创建对话，选择终端模式` : '选择终端模式'}</p>
               </div>
-              <button type="button" className="new-session-modal__close" aria-label="关闭" onClick={() => setNewSessionOpen(false)}>×</button>
+              <button type="button" className="new-session-modal__close" disabled={creating} aria-label="关闭" onClick={closeNewSessionDialog}>×</button>
             </div>
 
             <div className="new-session-modal__options">
-              <button type="button" className="new-session-modal__option" onClick={() => void createManagedSession('local')}>
+              <button type="button" autoFocus disabled={creating} className="new-session-modal__option new-session-modal__option--local" onClick={() => void createManagedSession('local')}>
                 <span className="new-session-modal__icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="4" width="14" height="11" rx="1.5"/><path d="M3.5 18h17M8 18h8"/></svg>
                 </span>
-                <span className="new-session-modal__content">
-                  <span className="new-session-modal__title-row"><strong>本地会话</strong></span>
-                  <small>使用当前电脑创建新的工作环境</small>
-                </span>
+                <span className="new-session-modal__content"><span className="new-session-modal__title-row"><strong>本地</strong></span>
+                  <small>使用当前电脑的终端</small></span>
                 <span className="new-session-modal__arrow" aria-hidden="true">›</span>
               </button>
-
-              <button type="button" className="new-session-modal__option new-session-modal__option--ssh" onClick={() => void createManagedSession('ssh')}>
+              <button type="button" disabled={creating} className="new-session-modal__option new-session-modal__option--ssh" onClick={() => void createManagedSession('ssh')}>
                 <span className="new-session-modal__icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="4" width="14" height="6" rx="1.5"/><rect x="5" y="14" width="14" height="6" rx="1.5"/><path d="M9 7h.01M9 17h.01M12 7h3M12 17h3"/></svg>
                 </span>
                 <span className="new-session-modal__content">
-                  <span className="new-session-modal__title-row"><strong>SSH 会话</strong><em className="new-session-modal__badge">远程</em></span>
+                  <span className="new-session-modal__title-row"><strong>SSH</strong><em className="new-session-modal__badge">远程</em></span>
                   <small>连接远程机器并创建 SSH 工作环境</small>
                 </span>
                 <span className="new-session-modal__arrow" aria-hidden="true">›</span>
               </button>
-              <button type="button" className="new-session-modal__option" onClick={() => openWeb2termDeviceDialog()}>
+              <button type="button" disabled={creating} className="new-session-modal__option" onClick={event => openWeb2termDeviceDialog(event.currentTarget, { projectId: newSessionProjectId })}>
                 <span className="new-session-modal__icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="3" width="16" height="6" rx="1.5" /><path d="M12 9v5M6 14h12M6 14v3M18 14v3" /><rect x="3" y="17" width="6" height="4" rx="1" /><rect x="15" y="17" width="6" height="4" rx="1" /></svg>
                 </span>
                 <span className="new-session-modal__content">
-                  <span className="new-session-modal__title-row"><strong>web2term 连接</strong></span>
+                  <span className="new-session-modal__title-row"><strong>web2term</strong></span>
                   <small>查看当前账号的设备，选择设备连接</small>
                 </span>
                 <span className="new-session-modal__arrow" aria-hidden="true">›</span>
               </button>
             </div>
 
+            {navigationError ? <p className="workspace-navigation__error" role="alert">{navigationError}</p> : null}
+
             <div className="new-session-modal__footer">
               <span className="new-session-modal__info" aria-hidden="true">i</span>
-              <span>本地和 SSH 会话创建后可在会话设置中调整</span>
+              <span>{newSessionProject?.directory ? '本地模式使用项目目录，远程模式使用远程设备的目录。' : '本地模式使用默认目录，远程模式使用远程设备的目录。'}</span>
             </div>
           </div>
         </div>
@@ -531,7 +564,7 @@ export default function WorkspaceApp(): ReactElement {
       />
       <ConfirmDialog
         open={pendingDelete !== null}
-        title={`删除“${pendingDelete?.title || '会话'}”？`}
+        title={`删除“${pendingDelete?.title || '对话'}”？`}
         description="此操作会立即结束该会话的运行环境，请确认是否继续。"
         icon="!"
         danger
@@ -539,12 +572,12 @@ export default function WorkspaceApp(): ReactElement {
         confirmLabel="确认删除"
         items={[
           { icon: '▣', label: '终端进程和 SSH 连接', value: '立即结束', tone: 'danger' },
-          { icon: '◉', label: 'ChatGPT 对话历史', value: '保留', tone: 'success' }
+          { icon: '◉', label: '网页对话历史', value: '保留', tone: 'success' }
         ]}
         onCancel={() => setPendingDelete(null)}
         onConfirm={() => { if (pendingDelete) void deleteSession(pendingDelete) }}
       />
-      <ToolWindowsHost sessionId={workspace.sessionId} theme={theme} blocked={transfersOpen || pendingDelete !== null || newSessionOpen || web2termDeviceDialogOpen || updateNotice !== null} />
+      <ToolWindowsHost sessionId={workspace.sessionId} theme={theme} blocked={workspaceModalOpen} />
     </div>
     </ToolWindowsProvider>
   )

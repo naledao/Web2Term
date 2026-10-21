@@ -1,0 +1,133 @@
+.terminal-actions__trigger {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.terminal-actions__trigger:hover,
+.terminal-actions__trigger[data-popup-open] {
+  border-color: var(--border);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.terminal-actions__trigger:focus-visible,
+.terminal-actions__item:focus-visible,
+.terminal-actions__delay input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The portal is mounted in a flex column; keep it out of the terminal's layout. */
+.terminal-actions__portal {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+.terminal-actions__positioner {
+  z-index: 60;
+  pointer-events: auto;
+}
+
+.terminal-actions__popup {
+  width: 244px;
+  max-width: var(--available-width);
+  max-height: var(--available-height);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  box-shadow: 0 10px 30px rgba(35, 57, 87, .16);
+}
+
+.terminal-actions__heading {
+  margin: 0;
+  padding: 7px 10px 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.terminal-actions__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.terminal-actions__item:hover:not(:disabled) { background: var(--accent-soft); }
+.terminal-actions__item:disabled { opacity: .45; cursor: default; }
+.terminal-actions__item--danger { color: var(--danger); }
+.terminal-actions__label { flex: 1; }
+.terminal-actions__icon,
+.terminal-actions__next { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; }
+.terminal-actions__next { color: var(--text-muted); }
+.terminal-actions__note-mark { color: var(--accent); font-size: 10px; }
+.terminal-actions__back { font-weight: 600; }
+.terminal-actions__separator { height: 1px; margin: 6px 7px; background: var(--border); }
+
+.terminal-actions__delay {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.terminal-actions__delay-field { display: flex; align-items: center; gap: 5px; }
+.terminal-actions__delay input {
+  width: 48px;
+  height: 30px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+}
+
+.terminal-actions__hint { margin: 8px 10px; color: var(--text-muted); font-size: 12px; }
+.terminal-actions__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.workspace[data-theme='dark'] .terminal-actions__popup { box-shadow: 0 10px 30px rgba(0, 0, 0, .55); }
+
+@media (pointer: coarse) {
+  .terminal-actions__trigger { width: 44px; height: 44px; }
+  .terminal-actions__item { min-height: 44px; }
+  .terminal-actions__delay input { height: 36px; font-size: 16px; }
+}

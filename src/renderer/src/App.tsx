@@ -12,9 +12,8 @@ import { useToolWindows, ToolWindowDock } from './components/ToolWindows'
 import type { PdfPreviewTarget } from './components/PdfPreviewDialog'
 import BackendLoginForm from './components/BackendLoginForm'
 import Web2termDevicesSettings from './components/Web2termDevicesSettings'
-import MysqlIcon from './components/MysqlIcon'
-import RedisIcon from './components/RedisIcon'
-import NacosIcon from './components/NacosIcon'
+import TerminalActionsMenu from './components/TerminalActionsMenu'
+import type { TerminalActionId } from './components/TerminalActionsMenu'
 import ConversationTranscript from './components/ConversationTranscript'
 import QuestionChatPanel from './components/QuestionChatPanel'
 import type { QuestionChatState } from '@shared/deepseek-question'
@@ -24,7 +23,7 @@ import { canNavigateCommandHistory, navigateCommandHistory, terminalCommandHisto
 import type { CommandHistoryCursor } from './terminal-command-history'
 import brandIcon from './assets/brand-icon.png'
 import type { IApi as FilemanagerApi, IEntity as FilemanagerEntity } from '@svar-ui/react-filemanager'
-import type { CSSProperties, DragEvent as ReactDragEvent, FormEvent, JSX, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import type { CSSProperties, FormEvent, JSX, PointerEvent as ReactPointerEvent } from 'react'
 import { SESSION_COOKIE_NAME, terminalNotesOwnerKey } from '@shared/types'
 import { DEFAULT_BACKEND_URL, normalizeBackendUrl } from '@shared/backend-url'
 import { sshWorkingDirectory } from '@shared/ssh-directory'
@@ -68,11 +67,11 @@ const INITIAL_EMBED_STATE: EmbedState = {
   botCheckSince: null
 }
 
-const TERMINAL_MIN_WIDTH = 220
-const TERMINAL_DEFAULT_WIDTH = 400
-const PANEL_MIN_WIDTH = 220
-const PANEL_DEFAULT_WIDTH = 320
+const PANEL_MIN_WIDTH = 380
+const PANEL_DEFAULT_WIDTH = 400
 const PANEL_MAX_RESERVE = 520
+
+type PanelTab = 'control' | 'terminal' | 'question'
 
 const SETTINGS_SECTIONS = [
   { id: 'appearance', label: '外观' },
@@ -102,10 +101,9 @@ function SettingsSectionIcon({ section }: { section: SettingsSection }): JSX.Ele
  * when the workspace switches to another session (WorkspaceApp keys App by session id).
  * Each session keeps its own copy under `<key>.<sessionId>`; the bare key is the value
  * written before layouts were per session and only seeds sessions that have none yet. */
-const STORAGE_TERMINAL_WIDTH = 'layout.terminalWidth'
-const STORAGE_TERMINAL_COLLAPSED = 'layout.terminalCollapsed'
 const STORAGE_PANEL_WIDTH = 'layout.panelWidth'
 const STORAGE_PANEL_COLLAPSED = 'layout.panelCollapsed'
+const STORAGE_PANEL_TAB = 'layout.panelTab'
 
 function sessionLayoutKey(key: string, sessionId: string): string {
   return `${key}.${sessionId}`
@@ -228,11 +226,6 @@ type TerminalTranscriptLine = TerminalState['lines'][number]
 interface TerminalTranscriptBlock {
   command: TerminalTranscriptLine | null
   lines: TerminalTranscriptLine[]
-}
-
-function displayTitle(conversation: Conversation): string {
-  if (conversation.title.trim() !== '') return conversation.title
-  return `未命名对话 · ${conversation.id.slice(0, 8)}`
 }
 
 function formatTime(epochMs: number): string {
@@ -410,26 +403,38 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [durationNow, setDurationNow] = useState(() => Date.now())
   const [address, setAddress] = useState('')
   const [editing, setEditing] = useState(false)
-  const [terminalWidth, setTerminalWidth] = useState(() => readStoredNumber(sessionLayoutKey(STORAGE_TERMINAL_WIDTH, sessionId), readStoredNumber(STORAGE_TERMINAL_WIDTH, TERMINAL_DEFAULT_WIDTH)))
-  const [terminalCollapsed, setTerminalCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_TERMINAL_COLLAPSED, sessionId), readStoredBool(STORAGE_TERMINAL_COLLAPSED, false)))
-  const [panelWidth, setPanelWidth] = useState(() => readStoredNumber(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), readStoredNumber(STORAGE_PANEL_WIDTH, PANEL_DEFAULT_WIDTH)))
+  const [panelWidth, setPanelWidth] = useState(() => Math.max(
+    PANEL_MIN_WIDTH,
+    readStoredNumber(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), readStoredNumber(STORAGE_PANEL_WIDTH, PANEL_DEFAULT_WIDTH))
+  ))
   const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), readStoredBool(STORAGE_PANEL_COLLAPSED, false)))
+  const [panelTab, setPanelTab] = useState<PanelTab>(() => {
+    try {
+      return window.localStorage.getItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId)) === 'terminal' ? 'terminal' : 'control'
+    } catch {
+      return 'control'
+    }
+  })
+  const terminalVisible = panelTab === 'terminal' && !panelCollapsed
   const [questionChat, setQuestionChat] = useState<QuestionChatState | null>(null)
-  const [questionChatSelected, setQuestionChatSelected] = useState(false)
 
   useEffect(() => {
     let alive = true
     let revision = 0
     let openedId = ''
     setQuestionChat(null)
-    setQuestionChatSelected(false)
+    setPanelTab(current => current === 'question' ? 'control' : current)
     const accept = (state: QuestionChatState | null): void => {
       if (!alive || platformId !== 'deepseek') return
       setQuestionChat(state)
-      if (!state) { openedId = ''; setQuestionChatSelected(false); return }
+      if (!state) {
+        openedId = ''
+        setPanelTab(current => current === 'question' ? 'control' : current)
+        return
+      }
       if (state.id === openedId) return
       openedId = state.id
-      setQuestionChatSelected(true)
+      setPanelTab('question')
       setPanelCollapsed(false)
       setPanelWidth(previous => Math.min(Math.max(previous, 480), Math.max(PANEL_MIN_WIDTH, window.innerWidth - PANEL_MAX_RESERVE)))
     }
@@ -507,14 +512,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [questionMinimized, setQuestionMinimized] = useState(false)
   /** Non-null while the working directory is being edited inline. */
   const [cwdDraft, setCwdDraft] = useState<string | null>(null)
-  /**
-   * Non-null while the send-delay field is being edited.
-   *
-   * The committed value lives in main and arrives back over terminal:changed, so
-   * without a local draft every push would rewrite the box while it is being
-   * typed into.
-   */
-  const [sendDelayDraft, setSendDelayDraft] = useState<string | null>(null)
   const [ssh, setSsh] = useState<SshState | null>(null)
   const [sshHosts, setSshHosts] = useState<SshHost[]>([])
   /** Notes for the current machine and working directory. */
@@ -610,7 +607,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const placeholderCloseTimerRef = useRef<number | null>(null)
   const userAvatarInputRef = useRef<HTMLInputElement>(null)
   const userAvatarEditorRef = useRef<AvatarEditorRef>(null)
-  /** The pane the toolbox menu mounts into, so it can never spill under the native web view. */
+  /** Keep terminal popovers inside the sidebar, away from the native chat view. */
   const toolboxPaneRef = useRef<HTMLElement>(null)
   const terminalSwitchRef = useRef<HTMLButtonElement>(null)
   const terminalOutputRef = useRef<HTMLDivElement>(null)
@@ -621,18 +618,17 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const notesSnapshotRef = useRef<TerminalNotes | null>(null)
 
   // Persist the layout per session: switching sessions remounts App (WorkspaceApp keys it
-  // by session id), so without this the terminal and 侧栏 would snap back to default, and
+  // by session id), so without this the sidebar would snap back to default, and
   // with a shared key one session's collapse or resize would leak into every other one.
   useEffect(() => {
     try {
-      window.localStorage.setItem(sessionLayoutKey(STORAGE_TERMINAL_WIDTH, sessionId), String(terminalWidth))
-      window.localStorage.setItem(sessionLayoutKey(STORAGE_TERMINAL_COLLAPSED, sessionId), terminalCollapsed ? '1' : '0')
       window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), String(panelWidth))
       window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), panelCollapsed ? '1' : '0')
+      window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId), panelTab)
     } catch {
       /* storage unavailable; the sizes just will not persist */
     }
-  }, [sessionId, terminalWidth, terminalCollapsed, panelWidth, panelCollapsed])
+  }, [sessionId, panelWidth, panelCollapsed, panelTab])
 
   const conversationId = embed.conversationId
   const transcriptScrollKey = conversationScrollKey(sessionId, platformId, conversationId)
@@ -653,7 +649,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     return option && text ? `${option}；补充：${text}` : option || text
   }
   const currentQuestionAnswered = resolveQuestionAnswer(questionPage) !== ''
-  const showQuestionShortcut = Boolean(pendingQuestion && currentQuestion && (questionMinimized || terminalCollapsed))
+  const showQuestionShortcut = Boolean(pendingQuestion && currentQuestion && (questionMinimized || !terminalVisible))
 
   const waiting = useMemo(
     () => executions.filter((record) => RUNNABLE.has(record.status) || canRetryFiles(record)),
@@ -865,8 +861,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   // commands are mirrored into it.
   useEffect(() => {
     const element = terminalOutputRef.current
-    if (element) element.scrollTop = element.scrollHeight
-  }, [terminal?.lines, ssh?.lines])
+    if (element && terminalVisible) element.scrollTop = element.scrollHeight
+  }, [terminal?.lines, ssh?.lines, terminalVisible])
 
   /**
    * The embedded page is a NATIVE view, not a DOM node, so it cannot be
@@ -1009,53 +1005,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     }
   }, [cookieSetDraft])
 
-  const conversationFolders = useMemo(() => {
-    const folders = new Map<
-      string,
-      { project: Conversation['project']; conversations: Conversation[] }
-    >()
-
-    for (const conversation of conversations) {
-      const key = conversation.project?.id ?? '__unbound__'
-      const folder = folders.get(key)
-      if (folder) {
-        folder.conversations.push(conversation)
-      } else {
-        folders.set(key, { project: conversation.project, conversations: [conversation] })
-      }
-    }
-
-    return Array.from(folders.values())
-  }, [conversations])
-
-  const openConversation = useCallback(async (conversation: Conversation): Promise<void> => {
-    if (conversation.id === conversationId || taskRunning) return
-    if (conversation.project?.path) {
-      try {
-        setTerminal(await window.api.setTerminalCwd(conversation.project.path))
-      } catch {
-        /* keep the current directory, but still open the conversation */
-      }
-    }
-    window.api.navigateEmbed(conversation.url)
-  }, [conversationId, taskRunning])
-
-  const moveConversationToProject = useCallback(
-    async (event: ReactDragEvent<HTMLElement>, projectId: string): Promise<void> => {
-      event.preventDefault()
-      const conversationId = event.dataTransfer.getData('text/plain')
-      if (conversationId === '') return
-      const source = conversations.find((conversation) => conversation.id === conversationId)
-      if (!source || source.project?.id === projectId) return
-
-      try {
-        setConversations(await window.api.moveConversation(conversationId, projectId))
-      } catch {
-        /* leave the previous grouping in place */
-      }
-    },
-    [conversations]
-  )
   const toggleInterceptor = useCallback(async (): Promise<void> => {
     if (!interceptor) return
     try {
@@ -1561,26 +1510,13 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     setTerminal(next)
   }, [])
 
-  /**
-   * Commit the send-delay field.
-   *
-   * The draft is read and dropped before the await so a push landing mid-flight
-   * cannot leave the box holding text the user already submitted. Reading it
-   * first is also what makes Escape work: it clears the draft, and by the time
-   * blur fires there is nothing left to commit.
-   */
-  const commitSendDelay = useCallback(async (): Promise<void> => {
-    const raw = sendDelayDraft
-    setSendDelayDraft(null)
-    if (raw === null) return
-    const seconds = raw.trim() === '' ? 0 : Number(raw)
-    if (!Number.isFinite(seconds)) return
+  const updateSendDelay = useCallback(async (seconds: number): Promise<void> => {
     try {
       setTerminal(await window.api.setTerminalSendDelay(seconds))
     } catch {
       /* main keeps the previous value */
     }
-  }, [sendDelayDraft])
+  }, [])
 
   const resetTerminal = useCallback(async (): Promise<void> => {
     try {
@@ -1740,7 +1676,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * it while they are open; the pending-question widget is deliberately excluded because it
    * lives in the terminal column and must leave the chat page usable underneath.
    */
-  const nativeEmbedVisible = !placeholderToggle && !settingsOpen && !sshDialogOpen && !notesOpen && !sshFilesOpen && !pdfPreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
+  const terminalModalOpen = terminalVisible && (notesOpen || sshFilesOpen)
+  const nativeEmbedVisible = !placeholderToggle && !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
   useEffect(() => {
     window.api.setEmbedVisible(nativeEmbedVisible)
     window.api.setWorkspaceSshDialogOpen(sshDialogOpen)
@@ -2007,32 +1944,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     }
   }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
 
-  /** Drag the terminal's right edge to resize the column. */
-  const startResize = useCallback(
-    (event: ReactPointerEvent<HTMLDivElement>): void => {
-      event.preventDefault()
-      const startX = event.clientX
-      const startWidth = terminalWidth
-
-      const onMove = (moveEvent: PointerEvent): void => {
-        // The terminal sits on the LEFT, so dragging right makes it wider.
-        const next = startWidth + (moveEvent.clientX - startX)
-        // Leave room for the chat view and the conversation panel.
-        const max = Math.max(TERMINAL_MIN_WIDTH, window.innerWidth - 520)
-        setTerminalWidth(Math.min(Math.max(next, TERMINAL_MIN_WIDTH), max))
-      }
-      const onUp = (): void => {
-        window.removeEventListener('pointermove', onMove)
-        window.removeEventListener('pointerup', onUp)
-      }
-
-      window.addEventListener('pointermove', onMove)
-      window.addEventListener('pointerup', onUp)
-    },
-    [terminalWidth]
-  )
-
-  /** Drag the conversation panel's left edge to resize that column. */
+  /** Drag the shared sidebar's left edge to resize it. */
   const startPanelResize = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>): void => {
       event.preventDefault()
@@ -2042,7 +1954,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       const onMove = (moveEvent: PointerEvent): void => {
         // The panel sits on the RIGHT, so dragging left makes it wider.
         const next = startWidth - (moveEvent.clientX - startX)
-        // Leave room for the terminal and the chat view.
+        // Leave room for the workspace navigation and the chat view.
         const max = Math.max(PANEL_MIN_WIDTH, window.innerWidth - PANEL_MAX_RESERVE)
         setPanelWidth(Math.min(Math.max(next, PANEL_MIN_WIDTH), max))
       }
@@ -2057,21 +1969,35 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     [panelWidth]
   )
 
-  const removeConversation = useCallback(
-    async (event: MouseEvent, id: string): Promise<void> => {
-      // The row itself navigates; the delete button must not trigger that.
-      event.stopPropagation()
-      try {
-        setConversations(await window.api.removeConversation(id))
-      } catch {
-        /* ignore */
-      }
-    },
-    []
-  )
+  const handleTerminalAction = (action: TerminalActionId): void => {
+    setSshPickerOpen(false)
+    switch (action) {
+      case 'interrupt': void interruptTerminal(); break
+      case 'reset': void resetTerminal(); break
+      case 'close':
+        if (web2termActive) void closeWeb2termTerminal()
+        else void dismissSsh()
+        break
+      case 'ssh': setSshDialogOpen(true); break
+      case 'web2term': onOpenWeb2termConnection(terminalSwitchRef.current); break
+      case 'directory':
+        if (sshActive) setSshCwdEditing(true)
+        else if (web2termActive) setCwdDraft(terminal?.cwd ?? '')
+        else void pickDirectory()
+        break
+      case 'edit-directory': setCwdDraft(terminal?.cwd ?? ''); break
+      case 'upload': void uploadSshFiles(); break
+      case 'files': toggleSshFiles(); break
+      case 'notes': setNotesOpen(true); break
+      case 'git': tools.open(sessionId, 'git', sshActive ? sshCwd : (terminal?.cwd ?? '')); break
+      case 'mysql': tools.open(sessionId, 'mysql'); break
+      case 'redis': tools.open(sessionId, 'redis'); break
+      case 'nacos': tools.open(sessionId, 'nacos'); break
+    }
+  }
 
   return (
-    <div className={panelCollapsed ? 'app app--panel-collapsed' : 'app'} style={{ '--terminal-width': `${terminalWidth}px`, '--panel-width': `${panelWidth}px` } as CSSProperties}>
+    <div className={panelCollapsed ? 'app app--panel-collapsed' : 'app'} style={{ '--panel-width': `${panelWidth}px` } as CSSProperties}>
       <header className="topbar">
         <div className="brand">
           <span className="brand__mark" aria-hidden="true">
@@ -2262,22 +2188,37 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           />
         )}
         <div className="panel__collapse-head">
-          {panelCollapsed ? null : questionChat ? <>
-            <button type="button" className="panel__section-toggle" aria-pressed={!questionChatSelected} onClick={() => setQuestionChatSelected(false)}>控制</button>
-            <button type="button" className="panel__section-toggle" aria-pressed={questionChatSelected} onClick={() => setQuestionChatSelected(true)}>询问 AI</button>
-          </> : <span className="panel__title">控制</span>}
+          {panelCollapsed ? null : (
+            <div className="panel__tabs" role="group" aria-label="右侧栏内容">
+              <button type="button" className="panel__tab" aria-pressed={panelTab === 'control'} onClick={() => {
+                setPanelTab('control')
+                setSshPickerOpen(false)
+                setNotesOpen(false)
+              }}>控制</button>
+              <button type="button" className="panel__tab" aria-pressed={panelTab === 'terminal'} onClick={() => setPanelTab('terminal')}>终端</button>
+              {questionChat ? <button type="button" className="panel__tab" aria-pressed={panelTab === 'question'} onClick={() => {
+                setPanelTab('question')
+                setSshPickerOpen(false)
+                setNotesOpen(false)
+              }}>侧边聊天</button> : null}
+            </div>
+          )}
           <span className="panel__spacer" />
           <button
             type="button"
             className="panel__sync panel__collapse-button"
             title={panelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
             aria-label={panelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
-            onClick={() => setPanelCollapsed((value) => !value)}
+            onClick={() => {
+              setPanelCollapsed((value) => !value)
+              setSshPickerOpen(false)
+              setNotesOpen(false)
+            }}
           >
             {panelCollapsed ? '«' : '»'}
           </button>
         </div>
-        {questionChat && questionChatSelected ? <QuestionChatPanel sessionId={sessionId} state={questionChat} visible={!panelCollapsed && nativeEmbedVisible} /> : <>
+        <div className="panel__view" hidden={panelTab !== 'control'}>
         <div className="terminal-controls">
           <div className="terminal__row">
             <span className="terminal__label">终端模式</span>
@@ -2473,269 +2414,26 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           </div>
         </div>
 
-        <div className="panel__head">
-          <span className="panel__title">对话记录</span>
-          <span className="panel__count">{conversations.length}</span>
-          <span className="panel__spacer" />
-          {/* 同步按钮已隐藏 */}
         </div>
 
-        {conversations.length === 0 ? (
-          <p className="panel__empty">还没有记录。打开一个对话，或点「同步」从侧边栏导入。</p>
-        ) : (
-          <div className="panel__list">
-            {conversationFolders.map((folder) => (
-              <details
-                key={folder.project?.id ?? '__unbound__'}
-                className="conversation-folder"
-                open
-                onDragOver={(event) => {
-                  if (!folder.project) return
-                  event.preventDefault()
-                  event.dataTransfer.dropEffect = 'move'
-                }}
-                onDrop={(event) => {
-                  if (folder.project) void moveConversationToProject(event, folder.project.id)
-                }}
-              >
-                <summary
-                  className="conversation-folder__head"
-                  title={folder.project?.path ?? '未绑定项目'}
-                >
-                  <span className="conversation-folder__icon">📁</span>
-                  <span className="conversation-folder__name">
-                    {folder.project?.name ?? '未绑定项目'}
-                  </span>
-                  <span className="conversation-folder__count">{folder.conversations.length}</span>
-                </summary>
-                <ul className="conversation-folder__list">
-                  {folder.conversations.map((conversation) => {
-                    const active = conversation.id === conversationId
-                    const locked = taskRunning && !active
-                    return (
-                      <li key={conversation.id}>
-                        <div
-                          className={active ? 'conversation conversation--active' : 'conversation'}
-                          role="button"
-                          tabIndex={locked ? -1 : 0}
-                          draggable={Boolean(conversation.project)}
-                          aria-disabled={locked}
-                          title={locked ? '任务进行中，结束任务后才能切换对话' : `${displayTitle(conversation)}
-${conversation.url}`}
-                          onDragStart={(event) => {
-                            event.dataTransfer.setData('text/plain', conversation.id)
-                            event.dataTransfer.effectAllowed = 'move'
-                          }}
-                          onClick={() => {
-                            if (!locked) void openConversation(conversation)
-                          }}
-                          onKeyDown={(event) => {
-                            if (!locked && (event.key === 'Enter' || event.key === ' ')) {
-                              event.preventDefault()
-                              void openConversation(conversation)
-                            }
-                          }}
-                        >
-                          <span className="conversation__body">
-                            <span className="conversation__title">{displayTitle(conversation)}</span>
-                            <span className="conversation__time">{formatTime(conversation.updatedAt)}</span>
-                          </span>
-                          <button
-                            type="button"
-                            className="conversation__remove"
-                            title="从数据库删除"
-                            onClick={(event) => void removeConversation(event, conversation.id)}
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      </li>
-                    )
-                  })}
-                </ul>
-              </details>
-            ))}
+        {questionChat ? (
+          <div className="panel__view" hidden={panelTab !== 'question'}>
+            <QuestionChatPanel sessionId={sessionId} state={questionChat} visible={panelTab === 'question' && !panelCollapsed && nativeEmbedVisible} />
           </div>
-        )}
-        </>}
-      </aside>
+        ) : null}
 
-      <section ref={toolboxPaneRef} className={terminalCollapsed ? 'terminal-pane terminal-pane--collapsed' : 'terminal-pane'}>
-        <div className={!terminalCollapsed && remoteTerminal ? `terminal-pane__head terminal-pane__head--${web2termActive ? 'web2term' : 'ssh'}` : 'terminal-pane__head'}>
-          <span className="terminal-pane__identity">
-          <span className="panel__title">终端</span>
-          <span
-            className={
-              sshActive
-                ? ssh?.status === 'connected'
-                  ? 'terminal__dot'
-                  : ssh?.status === 'error'
-                    ? 'terminal__dot terminal__dot--error'
-                    : 'terminal__dot terminal__dot--wait'
-                : terminal?.alive
-                  ? 'terminal__dot'
-                  : terminal?.transport?.status === 'error'
-                    ? 'terminal__dot terminal__dot--error'
-                    : terminal?.transport?.status === 'disconnected'
-                      ? 'terminal__dot terminal__dot--disconnected'
-                      : 'terminal__dot terminal__dot--wait'
-            }
-            title={terminal?.transport?.message}
-          />
-          {terminalCollapsed ? null : (
-            <span className="panel__delay">
-              <input
-                type="text"
-                className="panel__delay-input"
-                inputMode="numeric"
-                value={sendDelayDraft ?? String(terminal?.sendDelaySeconds ?? 0)}
-                title="命令执行完成后，等待这么多秒再把结果回传给模型（0 表示立即发送）"
-                aria-label="回传前的等待秒数"
-                onChange={(event) => setSendDelayDraft(event.target.value)}
-                onBlur={() => void commitSendDelay()}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault()
-                    void commitSendDelay()
-                  }
-                  if (event.key === 'Escape') setSendDelayDraft(null)
-                }}
-              />
-              <span className="panel__delay-unit">秒</span>
+      <section ref={toolboxPaneRef} className="terminal-pane panel__view" hidden={panelTab !== 'terminal'} aria-label="终端">
+        <div className="terminal-pane__meta">
+          <div className="terminal-pane__location">
+            <span className="terminal-pane__id" title={sshActive ? ssh?.target : web2termActive
+              ? [terminal?.transport?.deviceId, terminal?.transport?.message, terminal?.transport?.logPath && '日志：' + terminal.transport.logPath].filter(Boolean).join('\n')
+              : undefined}>
+              {sshActive ? ssh?.name || 'SSH' : web2termActive
+                ? 'web2term · ' + (terminal?.transport?.deviceName || '设备')
+                : '本机' + (terminal?.shellLabel ? ' · ' + terminal.shellLabel : '')}
             </span>
-          )}
-          </span>
-          {terminalCollapsed ? <span className="panel__spacer" /> : null}
-          {terminalCollapsed ? null : (
-            <button
-              type="button"
-              className="panel__sync"
-              title={sshActive ? '中断执行中的命令；手动 SSH 输入发送 Ctrl+C' : '中断当前正在执行的命令'}
-              onClick={() => void interruptTerminal()}
-            >
-              中断
-            </button>
-          )}
-          {terminalCollapsed ? null : web2termActive ? (
-            <>
-              <button type="button" className="panel__sync"
-                disabled={terminal?.transport?.status === 'connecting' || terminal?.transport?.status === 'closing'}
-                title="重新创建此设备的终端 Shell" onClick={() => void resetTerminal()}>
-                {terminal?.alive ? '重置' : '重新连接'}
-              </button>
-              <button type="button" className="panel__sync"
-                disabled={!terminal?.transport?.canClose || terminal.transport.status === 'closing'}
-                title="关闭当前设备终端；最后一个终端关闭后断开连接" onClick={() => void closeWeb2termTerminal()}>
-                {terminal?.transport?.status === 'closing' ? '关闭中…' : '关闭'}
-              </button>
-            </>
-          ) : (
-            <>
-              <Menu.Root onOpenChange={(open) => { if (open) setSshPickerOpen(false) }}>
-                <Menu.Trigger ref={terminalSwitchRef} className="panel__sync" title="选择 SSH 或 web2term 连接">
-                  切换
-                </Menu.Trigger>
-                <Menu.Portal container={toolboxPaneRef}>
-                  <Menu.Positioner side="bottom" align="end" sideOffset={6} collisionPadding={8} collisionBoundary={toolboxPaneRef.current ?? undefined} className="toolbox-menu__positioner">
-                    <Menu.Popup className="toolbox-menu" aria-label="终端连接方式">
-                      <Menu.Item className="toolbox-menu__item" onClick={() => setSshDialogOpen(true)}>
-                        SSH
-                      </Menu.Item>
-                      <Menu.Item className="toolbox-menu__item" onClick={() => onOpenWeb2termConnection(terminalSwitchRef.current)}>
-                        web2term
-                      </Menu.Item>
-                    </Menu.Popup>
-                  </Menu.Positioner>
-                </Menu.Portal>
-              </Menu.Root>
-              <button type="button" className="panel__sync"
-                disabled={sshActive && ssh?.status === 'connecting'}
-                title={sshActive ? '清空终端记录并重新建立当前 SSH 会话' : '重置本地终端'}
-                onClick={() => void resetTerminal()}>
-                重置
-              </button>
-              {sshActive ? (
-                <button
-                  type="button"
-                  className="panel__sync"
-                  title="关闭 SSH 面板，回到本地终端"
-                  onClick={() => void dismissSsh()}
-                >
-                  关闭
-                </button>
-              ) : null}
-            </>
-          )}
-          {terminalCollapsed ? null : (
-            <Menu.Root onOpenChange={(open) => { if (open) setSshPickerOpen(false) }}>
-              <Menu.Trigger className="panel__sync" title="打开工具箱">
-                工具箱
-              </Menu.Trigger>
-              <Menu.Portal container={toolboxPaneRef}>
-                <Menu.Positioner side="bottom" align="end" sideOffset={6} collisionPadding={8} collisionBoundary={toolboxPaneRef.current ?? undefined} className="toolbox-menu__positioner">
-                  <Menu.Popup className="toolbox-menu">
-                    <Menu.Item className="toolbox-menu__item" disabled={web2termActive} title={web2termActive ? 'web2term 尚未接入 Git 文件操作，可在终端运行 git 命令' : undefined} onClick={() => { setSshPickerOpen(false); tools.open(sessionId, 'git', ssh?.attached ? sshCwd : (terminal?.cwd ?? '')) }}>
-                      <span className="toolbox-menu__icon">
-                        <svg width="15" height="15" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
-                          <rect x="18" y="18" width="84" height="84" rx="8" fill="#F05032" transform="rotate(45 60 60)" />
-                          <path d="M45 38 L76 69" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round" />
-                          <path d="M59 52 L59 78" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round" />
-                          <circle cx="45" cy="38" r="7" fill="#FFFFFF" />
-                          <circle cx="59" cy="52" r="7" fill="#FFFFFF" />
-                          <circle cx="59" cy="80" r="7" fill="#FFFFFF" />
-                          <circle cx="78" cy="71" r="7" fill="#FFFFFF" />
-                        </svg>
-                      </span>
-                      <span>Git 管理</span>
-                    </Menu.Item>
-                    <Menu.Item className="toolbox-menu__item" onClick={() => { setSshPickerOpen(false); tools.open(sessionId, 'mysql') }}>
-                      <span className="toolbox-menu__icon">
-                        <MysqlIcon size={15} />
-                      </span>
-                      <span>MySQL 连接</span>
-                    </Menu.Item>
-                    <Menu.Item className="toolbox-menu__item" onClick={() => { setSshPickerOpen(false); tools.open(sessionId, 'redis') }}>
-                      <span className="toolbox-menu__icon"><RedisIcon size={15} /></span>
-                      <span>Redis 连接</span>
-                    </Menu.Item>
-                    <Menu.Item className="toolbox-menu__item" onClick={() => { setSshPickerOpen(false); tools.open(sessionId, 'nacos') }}>
-                      <span className="toolbox-menu__icon">
-                        <NacosIcon size={15} />
-                      </span>
-                      <span>Nacos 连接</span>
-                    </Menu.Item>
-                  </Menu.Popup>
-                </Menu.Positioner>
-              </Menu.Portal>
-            </Menu.Root>
-          )}
-          <button
-            type="button"
-            className="panel__sync"
-            title={terminalCollapsed ? '展开终端' : '折叠终端'}
-            onClick={() => {
-              setTerminalCollapsed((value) => !value)
-              // These live in the pane's flow, so they would simply vanish with it.
-              setSshPickerOpen(false)
-              setNotesOpen(false)
-            }}
-          >
-            {terminalCollapsed ? '»' : '«'}
-          </button>
-        </div>
-
-        {/*
-          The host switcher.
-          It sits in the pane's normal flow rather than floating over it: the pane
-          is to the LEFT of the embedded page, which is a native view that always
-          paints above the DOM, so anything spilling out of this column — a dropdown
-          anchored to the header, say — would be swallowed by it.
-        */}
-        {terminalCollapsed ? null : sshActive ? (
-          <div className="terminal-pane__meta">
-            <span className="terminal-pane__id">{ssh?.name || 'SSH'}</span>
-            {ssh?.status === 'connected' ? (
-              sshCwdEditing ? (
+            {sshActive ? (
+              ssh?.status === 'connected' && sshCwdEditing ? (
                 <SshDirectoryPicker
                   basePath={sshCwd || '/'}
                   onPick={(path) => {
@@ -2745,52 +2443,17 @@ ${conversation.url}`}
                   onClose={() => setSshCwdEditing(false)}
                 />
               ) : (
-                <button
-                  type="button"
-                  className="terminal-pane__cwd"
-                  title={`执行目录：${sshCwd || '目录尚未确定'}${ssh.ptyCwd && ssh.ptyCwd !== sshCwd ? `\n手动输入的交互终端目录：${ssh.ptyCwd}` : ''}
-点击浏览或输入远程目录`}
-                  onClick={() => setSshCwdEditing(true)}
-                >
-                  {sshCwd || '设置目录…'}
-                </button>
+                <span className={ssh?.status === 'connected' ? 'terminal-pane__directory terminal-pane__directory--editable' : 'terminal-pane__directory'}
+                  title={ssh?.status === 'connected'
+                    ? [sshCwd, ssh.ptyCwd && ssh.ptyCwd !== sshCwd ? '手动交互终端目录：' + ssh.ptyCwd : '', '双击编辑目录'].filter(Boolean).join('\n')
+                    : ssh?.message}
+                  onDoubleClick={() => {
+                    if (ssh?.status === 'connected') setSshCwdEditing(true)
+                  }}>
+                  {ssh?.status === 'connected' ? sshCwd || '等待确定工作目录…' : ssh?.message || '尚未连接'}
+                </span>
               )
-            ) : (
-              <span className="terminal-pane__cwd" title={ssh?.message}>{ssh?.message}</span>
-            )}
-            <button
-              type="button"
-              className="panel__sync"
-              disabled={ssh?.status !== 'connected' || sshUploading}
-              title={`上传本地文件到当前远程目录：${sshCwd || '.'}`}
-              onClick={() => void uploadSshFiles()}
-            >
-              {sshUploading ? '上传中…' : '上传'}
-            </button>
-            <button
-              type="button"
-              className={sshFilesOpen ? 'panel__sync panel__sync--on' : 'panel__sync'}
-              disabled={ssh?.status !== 'connected'}
-              title={`浏览当前远程目录：${sshCwd || '/'}`}
-              onClick={toggleSshFiles}
-            >
-              文件
-            </button>
-            <button
-              type="button"
-              className={notesSet || notesOpen ? 'panel__sync panel__sync--on' : 'panel__sync'}
-              title={`为这台机器的当前工作目录设置说明${notesSet ? '（已设置）' : ''}`}
-              onClick={() => setNotesOpen((value) => !value)}
-            >
-              说明{notesSet ? ' ●' : ''}
-            </button>
-          </div>
-        ) : (
-          <div className="terminal-pane__meta">
-            <span className="terminal-pane__id" title={web2termActive ? [terminal?.transport?.deviceId, terminal?.transport?.message, terminal?.transport?.logPath && `日志：${terminal.transport.logPath}`].filter(Boolean).join('\n') : undefined}>
-              {web2termActive ? `web2term · ${terminal?.transport?.deviceName || '设备'}` : `本机${terminal?.shellLabel ? ` · ${terminal.shellLabel}` : ''}`}
-            </span>
-            {cwdDraft !== null ? (
+            ) : cwdDraft !== null ? (
               <form className="terminal-pane__cwd-form" onSubmit={submitCwd}>
                 <input
                   className="terminal-pane__cwd-input"
@@ -2798,6 +2461,7 @@ ${conversation.url}`}
                   spellCheck={false}
                   autoFocus
                   aria-label="终端目录"
+                  onFocus={(event) => event.currentTarget.select()}
                   onChange={(event) => setCwdDraft(event.target.value)}
                   onBlur={() => setCwdDraft(null)}
                   onKeyDown={(event) => {
@@ -2806,37 +2470,35 @@ ${conversation.url}`}
                 />
               </form>
             ) : (
-              <button
-                type="button"
-                className="terminal-pane__cwd"
-                disabled={web2termActive && !terminal?.alive}
-                title={terminal?.cwd ? `${terminal.cwd}
-点击修改目录` : '设置终端目录'}
-                onClick={() => setCwdDraft(terminal?.cwd ?? '')}
-              >
-                {terminal?.cwd || '设置目录…'}
-              </button>
+              <span className={!web2termActive || terminal?.alive ? 'terminal-pane__directory terminal-pane__directory--editable' : 'terminal-pane__directory'}
+                title={[terminal?.cwd, !web2termActive || terminal?.alive ? '双击编辑目录' : ''].filter(Boolean).join('\n')}
+                onDoubleClick={() => {
+                  if (!web2termActive || terminal?.alive) setCwdDraft(terminal?.cwd ?? '')
+                }}>
+                {terminal?.cwd || '等待确定工作目录…'}
+              </span>
             )}
-            {web2termActive ? null : <button
-              type="button"
-              className="terminal-pane__browse"
-              title="浏览并选择目录"
-              onClick={() => void pickDirectory()}
-            >
-              浏览
-            </button>}
-            <button
-              type="button"
-              className={notesSet || notesOpen ? 'panel__sync panel__sync--on' : 'panel__sync'}
-              title={`为这台机器的当前工作目录设置说明${notesSet ? '（已设置）' : ''}`}
-              onClick={() => setNotesOpen((value) => !value)}
-            >
-              说明{notesSet ? ' ●' : ''}
-            </button>
           </div>
-        )}
+          <TerminalActionsMenu
+            containerRef={toolboxPaneRef}
+            triggerRef={terminalSwitchRef}
+            visible={terminalVisible && !(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
+            mode={sshActive ? 'ssh' : web2termActive ? 'web2term' : 'local'}
+            connected={sshActive ? ssh?.status === 'connected' : web2termActive ? Boolean(terminal?.alive) : true}
+            resetDisabled={web2termActive
+              ? terminal?.transport?.status === 'connecting' || terminal?.transport?.status === 'closing'
+              : sshActive && ssh?.status === 'connecting'}
+            closeDisabled={web2termActive && (!terminal?.transport?.canClose || terminal.transport.status === 'closing')}
+            closing={web2termActive && terminal?.transport?.status === 'closing'}
+            uploading={sshUploading}
+            notesSet={notesSet}
+            sendDelaySeconds={terminal?.sendDelaySeconds ?? 0}
+            onAction={handleTerminalAction}
+            onSendDelayChange={updateSendDelay}
+          />
+        </div>
         {/* Markdown note editor. The native embedded view is hidden while this modal is open. */}
-        {terminalCollapsed || !notesOpen ? null : (
+        {!notesOpen ? null : (
           <div
             className="modal modal--notes"
             role="dialog"
@@ -3121,8 +2783,8 @@ ${conversation.url}`}
             </div>
           </div>
         ) : null}
-        {terminalCollapsed ? null : (
-          <>            {/*
+          <>
+            {/*
               The step the loop is on, on its own.
 
               The description was already being stored on every command and shown
@@ -3311,16 +2973,8 @@ ${record.command}`
               />
             </form>
           </>
-        )}
-
-        <div
-          className="terminal-pane__resizer"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="调整终端宽度"
-          onPointerDown={startResize}
-        />
       </section>
+      </aside>
 
       <footer className={showQuestionShortcut ? 'statusbar statusbar--question' : 'statusbar'}>
         {embed.botCheckSince !== null ? (
@@ -3367,7 +3021,8 @@ ${record.command}`
             title="展开待回答问题"
             aria-label={`展开待回答问题，第 ${questionPage + 1} 题，共 ${questionCount} 题`}
             onClick={() => {
-              setTerminalCollapsed(false)
+              setPanelTab('terminal')
+              setPanelCollapsed(false)
               setQuestionMinimized(false)
             }}
           >
@@ -3377,7 +3032,7 @@ ${record.command}`
         ) : null}
       </footer>
 
-        {pendingQuestion && currentQuestion && !questionMinimized && !terminalCollapsed ? (
+        {pendingQuestion && currentQuestion && !questionMinimized && terminalVisible ? (
           <div className="modal modal--question" role="dialog" aria-modal="false" aria-label="需要你的回答">
               <div className="question-modal">
                 <div className="question-modal__head">

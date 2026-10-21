@@ -2727,7 +2727,19 @@
     const cardSelector = PAGE.fileDraftCardSelector || PAGE.fileAttachmentCardSelector
     const previewImages = PAGE.fileDraftImageSelector ? cards.flatMap((card) => [...card.querySelectorAll(PAGE.fileDraftImageSelector)])
       : cardSelector ? cards.flatMap(collectImages) : [...root.querySelectorAll('img')]
-    return previewImages.filter((img) => /^(blob:|data:)/.test(img.currentSrc || img.src || '') || (img.naturalWidth >= 40 && img.naturalHeight >= 40))
+    return previewImages.filter((img) => {
+      const localPreview = /^(blob:|data:)/.test(img.currentSrc || img.src || '')
+      if (!localPreview && !(img.naturalWidth >= 40 && img.naturalHeight >= 40)) return false
+      // Without a measured card scope, the root can include page decorations.
+      // DeepSeek's hidden static image has 132px natural dimensions but no
+      // rendered area; counting it makes an empty new chat return `busy`.
+      // Keep native cards and local upload previews conservative, even while
+      // they are hidden or hydrating, so existing user attachments stay owned.
+      if (cardSelector || localPreview) return true
+      if (!isVisibleElement(img)) return false
+      const rect = img.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    })
   }
   const attachmentSnapshot = () => {
     const root = attachmentRoot()

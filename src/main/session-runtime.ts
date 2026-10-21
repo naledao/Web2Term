@@ -158,6 +158,7 @@ export interface SessionRuntimeOptions {
   id?: string
   createdAt?: number
   customTitle?: string
+  projectId?: string | null
   initialUrl?: string
   initialConversationId?: string | null
   initialPaused?: boolean
@@ -291,6 +292,7 @@ export class SessionRuntime {
   private sshTerminalResetting = false
   readonly web2term: Web2termShell | null
   private customTitle: string
+  private projectId: string | null
   private sshCwd: string
   private lastPersistedLocalCwd: string
   private lastDirectoryNotes: TerminalNotes | null = null
@@ -339,6 +341,7 @@ export class SessionRuntime {
     this.id = options.id ?? randomUUID()
     this.createdAt = options.createdAt ?? Date.now()
     this.customTitle = options.customTitle?.trim() ?? ''
+    this.projectId = options.projectId ?? null
     this.sshCwd = options.initialSshCwd?.trim() ?? ''
     this.lastPersistedLocalCwd = options.initialLocalCwd?.trim() ?? ''
     this.activePlatformId = options.platform.id
@@ -820,8 +823,14 @@ export class SessionRuntime {
     this.options.onSummaryChanged()
   }
 
+  setProjectId(projectId: string | null): void {
+    this.projectId = projectId
+    this.options.onSummaryChanged()
+  }
+
   persistentState(): {
     id: string
+    projectId: string | null
     title: string
     url: string
     conversationId: string | null
@@ -842,6 +851,7 @@ export class SessionRuntime {
     const active = this.activeEmbed()
     return {
       id: this.id,
+      projectId: this.projectId,
       title: this.customTitle,
       /*
        * The persisted url/conversationId/platformId are the ACTIVE platform's. One session
@@ -880,7 +890,8 @@ export class SessionRuntime {
     const usingSsh = sshState.attached
     return {
       id: this.id,
-      title: this.customTitle || state.title || '当前会话',
+      projectId: this.projectId,
+      title: this.customTitle || (state.conversationId ? state.title : '') || (this.web2term ? '远程对话' : usingSsh ? 'SSH 对话' : '本地'),
       kind: this.web2term ? 'web2term' : usingSsh ? 'ssh' : 'local',
       target: this.web2term ? this.web2term.binding.deviceName || this.web2term.binding.agentId : usingSsh ? sshState.name || sshState.target || 'SSH' : '本机',
       conversationId: state.conversationId,

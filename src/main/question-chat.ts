@@ -163,7 +163,7 @@ export class QuestionChat {
       } finally { clearTimeout(timeout) }
       if (this.closed) return
       writeQuestionLog('CHAT-SEND-RESULT', { outcome: result })
-      if (result === 'ok') this.status('已发送 Markdown 附件和问题。可以在这个聊天中继续追问。', false)
+      if (result === 'ok') this.status('', false)
       else this.fail('send-' + result, result === 'unknown' || result === 'stuck'
         ? '已尝试发送，尚未确认附件和问题均已收到。请检查下方聊天，系统不会重复提交。'
         : result === 'unsupported-file-type'

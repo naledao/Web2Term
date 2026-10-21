@@ -135,6 +135,11 @@ export const IpcChannels = {
   managerSessionRename: 'manager:session-rename',
   managerSessionDestroy: 'manager:session-destroy',
   managerSessionsChanged: 'manager:sessions-changed',
+  managerSessionMove: 'manager:session-move',
+  workspaceProjectsList: 'workspace:projects-list',
+  workspaceProjectSave: 'workspace:project-save',
+  workspaceProjectRemove: 'workspace:project-remove',
+  workspaceProjectsChanged: 'workspace:projects-changed',
   sessionSwitchPlatform: 'session:switch-platform',
   sessionShowModelMenu: 'session:show-model-menu',
   workspaceGetState: 'workspace:get-state',
@@ -202,6 +207,8 @@ export interface WorkspaceState {
 
 export interface ManagedSessionSummary {
   id: string
+  /** Explicit sidebar membership; independent of the terminal's current directory. */
+  projectId: string | null
   title: string
   kind: 'local' | 'ssh' | 'web2term'
   target: string
@@ -222,6 +229,25 @@ export interface ManagedSessionSummary {
   createdAt: number
 }
 
+export interface WorkspaceProject {
+  id: string
+  name: string
+  /** Empty means use the application's normal default directory for new local chats. */
+  directory: string
+  createdAt: number
+}
+
+export interface WorkspaceProjectDraft {
+  id?: string
+  name: string
+  directory: string
+}
+
+export interface Web2termWorkspaceOptions {
+  /** Create a separate chat instead of resuming a disconnected workspace. */
+  newChat?: boolean
+  projectId?: string | null
+}
 
 /** Page the embedded view opens on. */
 export const EMBED_HOME_URL = 'https://chatgpt.com/'
@@ -2001,8 +2027,15 @@ export interface AppApi {
    * A session is created for a PURPOSE — this machine, or a host over SSH — and the model it
    * talks to is chosen inside the chat (see `switchSessionPlatform`). So the platform is not a
    * parameter: every new session starts on the default and the user switches from there.
+   * Omitting projectId always creates an unassigned chat; local project chats inherit
+   * that project's directory at creation, independently of later directory changes.
    */
-  createManagedSession(kind: 'local' | 'ssh'): Promise<ManagedSessionSummary | null>
+  createManagedSession(kind: 'local' | 'ssh', projectId?: string | null): Promise<ManagedSessionSummary | null>
+  listWorkspaceProjects(): Promise<WorkspaceProject[]>
+  saveWorkspaceProject(draft: WorkspaceProjectDraft): Promise<WorkspaceProject>
+  removeWorkspaceProject(id: string): Promise<boolean>
+  moveManagedSession(id: string, projectId: string | null): Promise<boolean>
+  onWorkspaceProjectsChanged(listener: (items: WorkspaceProject[]) => void): () => void
   openManagedSession(id: string): Promise<boolean>
   renameManagedSession(id: string, title: string): Promise<boolean>
   destroyManagedSession(id: string): Promise<boolean>
@@ -2020,7 +2053,7 @@ export interface AppApi {
   onManagedSessionsChanged(listener: (items: ManagedSessionSummary[]) => void): () => void
   getWorkspaceState(): Promise<WorkspaceState>
   /** Create/activate a normal managed workspace bound to the selected device. */
-  showWeb2termConnection(): Promise<boolean>
+  showWeb2termConnection(options?: Web2termWorkspaceOptions): Promise<boolean>
   showWorkspaceManager(): Promise<boolean>
   setWorkspaceSshDialogOpen(open: boolean): void
   onWorkspaceChanged(listener: (state: WorkspaceState) => void): () => void
