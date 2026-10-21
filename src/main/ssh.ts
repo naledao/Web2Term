@@ -213,6 +213,33 @@ export class SshManager {
     return this.exec !== null && this.exec.alive ? this.exec : null
   }
 
+  /**
+   * Open another command shell on the live connection, for a terminal the user
+   * added from the panel. Its own exec channel: it shares nothing with the
+   * model's shell or the PTY except the TCP connection.
+   */
+  openExtraShell(cwd: string, handlers: { onOutput: (chunk: string) => void; onClosed: (interrupted: boolean) => void }): Promise<RemoteShell> {
+    const client = this.client
+    if (!client || this.state.status !== 'connected') return Promise.reject(new Error('SSH 未连接，请重新连接主机。'))
+    const command = cwd.trim() === '' ? REMOTE_SHELL_COMMAND : `cd ${posixQuote(cwd.trim())} && ${REMOTE_SHELL_COMMAND}`
+    return new Promise((resolve, reject) => {
+      client.exec(command, (error, stream) => {
+        if (error) {
+          reject(new Error(`无法在远端打开终端：${error.message}`))
+          return
+        }
+        if (this.client !== client) {
+          try { stream.close() } catch { /* already gone */ }
+          reject(new Error('SSH 连接已断开。'))
+          return
+        }
+        const shell = new RemoteShell(stream, handlers)
+        if (cwd.trim() !== '') shell.noteCwd(cwd.trim())
+        resolve(shell)
+      })
+    })
+  }
+
   /** Mirror a line produced by the model's own shell into this transcript. */
   pushModelLine(line: TerminalLine): void {
     this.finishPartialLine()

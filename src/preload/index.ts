@@ -75,6 +75,7 @@ import type {
   SshPdfPreviewData,
   TerminalNotes,
   TerminalState,
+  ExtraTerminalsState,
   UpdateStatus,
   NacosConnectionDraft,
   NacosConnectionsState,
@@ -428,6 +429,23 @@ removeConversation: (id: string): Promise<Conversation[]> =>
 
   setTerminalSendDelay: (seconds: number): Promise<TerminalState> =>
     ipcRenderer.invoke(IpcChannels.terminalSetSendDelay, seconds),
+
+  getExtraTerminals: (): Promise<ExtraTerminalsState> => ipcRenderer.invoke(IpcChannels.extraTerminalsGet),
+  createExtraTerminal: (): Promise<{ state: ExtraTerminalsState; id: string } | null> =>
+    ipcRenderer.invoke(IpcChannels.extraTerminalCreate),
+  sendExtraTerminalInput: (id: string, text: string): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.extraTerminalInput, id, text),
+  setExtraTerminalCwd: (id: string, path: string): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.extraTerminalSetCwd, id, path),
+  interruptExtraTerminal: (id: string): Promise<void> => ipcRenderer.invoke(IpcChannels.extraTerminalInterrupt, id),
+  closeExtraTerminal: (id: string): Promise<ExtraTerminalsState> => ipcRenderer.invoke(IpcChannels.extraTerminalClose, id),
+  onExtraTerminalsChanged: (listener: (state: ExtraTerminalsState) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: ExtraTerminalsState): void => listener(state)
+    ipcRenderer.on(IpcChannels.extraTerminalsChanged, handler)
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.extraTerminalsChanged, handler)
+    }
+  },
 
   selectDirectory: (): Promise<string | null> =>
     ipcRenderer.invoke(IpcChannels.dialogSelectDirectory),

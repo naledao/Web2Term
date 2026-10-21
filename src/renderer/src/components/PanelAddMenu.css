@@ -1,0 +1,33 @@
+.panel-add__trigger {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.panel-add__trigger:hover,
+.panel-add__trigger[data-popup-open] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.panel-add__trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.panel-add__popup {
+  width: 180px;
+}
+
+@media (pointer: coarse) {
+  .panel-add__trigger { width: 44px; height: 44px; }
+}

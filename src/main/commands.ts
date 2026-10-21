@@ -225,7 +225,7 @@ function describeTimeout(kind: 'idle' | 'ceiling', timeoutMs?: number): string {
 }
 
 /** The one-line summary shown in the terminal after a run finishes. */
-function summariseResult(result: ShellResult): TerminalLine {
+export function summariseResult(result: ShellResult): TerminalLine {
   // `rejected` means it never ran at all — show the reason rather than a
   // meaningless "退出码 未知".
   if (result.rejected) return { kind: 'error', text: result.output.trim() || '命令未执行' }
@@ -305,7 +305,7 @@ function buildResultMessage(result: ShellResult, replayedCommand?: string): stri
 }
 
 /** Single-quote a string for a POSIX shell; an embedded quote is closed and reopened. */
-function posixQuote(value: string): string {
+export function posixQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 

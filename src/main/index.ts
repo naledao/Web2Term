@@ -60,6 +60,7 @@ import type {
   TerminalNotes,
   TerminalNotesOwner,
   TerminalState,
+  ExtraTerminalsState,
   UpdateStatus
 } from '../shared/types'
 import { embedAuthState, importCookieSet, importSessionToken, previewSessionImport } from './session-import'
@@ -1421,7 +1422,22 @@ function registerIpcHandlers(): void {
     return result.filePaths[0] ?? null
   })
   ipcMain.handle(IpcChannels.terminalSetSendDelay, (event, seconds: number): TerminalState => runtimeForEvent(event)?.setTerminalSendDelay(Number(seconds ?? 0)) ?? FALLBACK_TERMINAL_STATE)
-  ipcMain.handle(IpcChannels.environmentGet, (event) => ({ ...(runtimeForEvent(event)?.environment ?? nodeFallback()) }))
+  ipcMain.handle(IpcChannels.extraTerminalsGet, (event): ExtraTerminalsState =>
+    runtimeForEvent(event)?.extraTerminals.getState() ?? { terminals: [] })
+  ipcMain.handle(IpcChannels.extraTerminalCreate, (event): { state: ExtraTerminalsState; id: string } | null =>
+    runtimeForEvent(event)?.extraTerminals.create() ?? null)
+  ipcMain.handle(IpcChannels.extraTerminalInput, (event, id: string, text: string): void => {
+    void runtimeForEvent(event)?.extraTerminals.input(String(id ?? ''), String(text ?? ''))
+  })
+  ipcMain.handle(IpcChannels.extraTerminalSetCwd, async (event, id: string, path: string): Promise<void> => {
+    await runtimeForEvent(event)?.extraTerminals.setCwd(String(id ?? ''), String(path ?? ''))
+  })
+  ipcMain.handle(IpcChannels.extraTerminalInterrupt, async (event, id: string): Promise<void> => {
+    await runtimeForEvent(event)?.extraTerminals.interrupt(String(id ?? ''))
+  })
+  ipcMain.handle(IpcChannels.extraTerminalClose, (event, id: string): ExtraTerminalsState =>
+    runtimeForEvent(event)?.extraTerminals.close(String(id ?? '')) ?? { terminals: [] })
+  ipcMain.handle(IpcChannels.environmentGet, (event) =>({ ...(runtimeForEvent(event)?.environment ?? nodeFallback()) }))
   ipcMain.handle(IpcChannels.terminalNotesGet, (event): TerminalNotes => runtimeForEvent(event)?.currentNotes() ?? EMPTY_NOTES)
   ipcMain.handle(IpcChannels.terminalNotesSet, (event, text: string, owner: TerminalNotesOwner): TerminalNotes => {
     const runtime = runtimeForEvent(event)

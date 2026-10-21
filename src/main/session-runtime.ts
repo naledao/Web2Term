@@ -61,6 +61,8 @@ import type {
   TerminalState
 } from '../shared/types'
 import { CommandRunner } from './commands'
+import { ExtraTerminals } from './extra-terminals'
+import type { ExtraTerminalTarget } from './extra-terminals'
 import { ConversationStore } from './db'
 import { normalizeNacosUrl } from './nacos-view'
 import { readMysqlColumnMetadata, mysqlColumnDescriptions, mysqlRowKey, mysqlRowDeleteUnavailable, mysqlColumnsEditable, deleteMysqlRowWithConnection, updateMysqlCellWithConnection } from './mysql-table-rows'
@@ -262,6 +264,18 @@ export class SessionRuntime {
   readonly createdAt: number
   readonly runner: CommandRunner
   readonly ssh: SshManager
+  /** User-opened terminals beside the model's; each takes the transport and directory it has right now. */
+  readonly extraTerminals = new ExtraTerminals({
+    target: () => this.extraTerminalTarget(),
+    openSsh: (hostId, cwd, handlers) => {
+      const state = this.ssh.getState()
+      if (state.hostId !== hostId || state.status !== 'connected') {
+        return Promise.reject(new Error('这个终端所属的 SSH 主机已断开或已切换，请关闭后重新新建。'))
+      }
+      return this.ssh.openExtraShell(cwd, handlers)
+    },
+    onChanged: (state) => this.send(IpcChannels.extraTerminalsChanged, state)
+  })
 
   window: BrowserWindow | null = null
   environment: EnvironmentInfo = nodeFallback()
@@ -1945,6 +1959,26 @@ export class SessionRuntime {
     this.window = null
     this.remoteShell = null
     this.runner.disposeAll()
+    this.extraTerminals.disposeAll()
+  }
+
+  /** Same transport the session terminal pane is showing: web2term, an attached SSH host, or local. */
+  private extraTerminalTarget(): ExtraTerminalTarget {
+    const web2term = this.web2term
+    if (web2term && this.options.web2term) {
+      const connection = this.options.web2term.connection
+      return {
+        transport: 'web2term',
+        label: 'web2term · ' + (web2term.binding.deviceName || '设备'),
+        // Never resumed after a restart: added terminals live only as long as this runtime.
+        create: () => new Web2termShell({ ...web2term.binding, reconnect: false, cwd: web2term.cwd }, connection)
+      }
+    }
+    const ssh = this.ssh.getState()
+    if (ssh.attached && ssh.status === 'connected') {
+      return { transport: 'ssh', label: ssh.name || ssh.target || 'SSH', hostId: ssh.hostId, cwd: ssh.modelCwd }
+    }
+    return { transport: 'local', cwd: this.runner.getTerminalState().cwd || this.lastPersistedLocalCwd }
   }
 
   private currentConversationProject(): {

@@ -103,6 +103,13 @@ export const IpcChannels = {
   terminalSetSendDelay: 'terminal:set-send-delay',
   dialogSelectDirectory: 'dialog:select-directory',
   terminalChanged: 'terminal:changed',
+  extraTerminalsGet: 'extra-terminals:get',
+  extraTerminalCreate: 'extra-terminals:create',
+  extraTerminalInput: 'extra-terminals:input',
+  extraTerminalSetCwd: 'extra-terminals:set-cwd',
+  extraTerminalInterrupt: 'extra-terminals:interrupt',
+  extraTerminalClose: 'extra-terminals:close',
+  extraTerminalsChanged: 'extra-terminals:changed',
   terminalNotesGet: 'terminal-notes:get',
   terminalNotesSet: 'terminal-notes:set',
   terminalNotesChanged: 'terminal-notes:changed',
@@ -1543,6 +1550,32 @@ export interface TerminalState {
   sendDelaySeconds: number
 }
 
+/**
+ * A terminal the user opened from the right panel's + menu.
+ *
+ * Never driven by the model: the model keeps using the one session terminal
+ * above. Lives in memory with its session runtime.
+ */
+export interface ExtraTerminal {
+  id: string
+  title: string
+  /** Fixed at creation from what the session terminal was connected to then. */
+  transport: 'local' | 'ssh' | 'web2term'
+  /** Header text, e.g. 本机 · PowerShell, or the SSH host / web2term device. */
+  label: string
+  /** Why a remote terminal cannot take commands right now; empty when it can. */
+  message: string
+  shellKind: EnvironmentKind
+  alive: boolean
+  running: boolean
+  cwd: string
+  lines: TerminalLine[]
+}
+
+export interface ExtraTerminalsState {
+  terminals: ExtraTerminal[]
+}
+
 /* ------------------------------------------------------------------ *
  * SSH
  * ------------------------------------------------------------------ */
@@ -2239,6 +2272,13 @@ export interface AppApi {
    */
   selectDirectory(): Promise<string | null>
   onTerminalChanged(listener: (state: TerminalState) => void): () => void
+  getExtraTerminals(): Promise<ExtraTerminalsState>
+  createExtraTerminal(): Promise<{ state: ExtraTerminalsState; id: string } | null>
+  sendExtraTerminalInput(id: string, text: string): Promise<void>
+  setExtraTerminalCwd(id: string, path: string): Promise<void>
+  interruptExtraTerminal(id: string): Promise<void>
+  closeExtraTerminal(id: string): Promise<ExtraTerminalsState>
+  onExtraTerminalsChanged(listener: (state: ExtraTerminalsState) => void): () => void
 
   /**
    * The note attached to whichever machine the terminal is driving right now.

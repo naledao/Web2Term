@@ -14,6 +14,8 @@ import Web2termDevicesSettings from './components/Web2termDevicesSettings'
 import TerminalActionsMenu from './components/TerminalActionsMenu'
 import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
+import ExtraTerminalPane from './components/ExtraTerminalPane'
+import PanelAddMenu from './components/PanelAddMenu'
 import type { TerminalActionId } from './components/TerminalActionsMenu'
 import type { ToolKind } from './tool-window-state'
 import ConversationTranscript from './components/ConversationTranscript'
@@ -54,6 +56,7 @@ import type {
   SshState,
   TerminalNotes,
   TerminalState,
+  ExtraTerminal,
   UpdateStatus
 } from '@shared/types'
 
@@ -73,7 +76,8 @@ const PANEL_MIN_WIDTH = 380
 const PANEL_DEFAULT_WIDTH = 400
 const PANEL_MAX_RESERVE = 520
 
-type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question'
+/** `extra:<id>` is a terminal the user added from the + menu. */
+type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question' | `extra:${string}`
 
 const SETTINGS_SECTIONS = [
   { id: 'appearance', label: '外观' },
@@ -413,12 +417,15 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     try {
       const stored = window.localStorage.getItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId))
-      return stored === 'terminal' || stored === 'toolbox' ? stored : 'control'
+      // An added terminal outlives a session switch but not a restart; checked once the list loads.
+      return stored === 'terminal' || stored === 'toolbox' || stored?.startsWith('extra:') ? stored as PanelTab : 'control'
     } catch {
       return 'control'
     }
   })
   const terminalVisible = panelTab === 'terminal' && !panelCollapsed
+  const [extraTerminals, setExtraTerminals] = useState<ExtraTerminal[] | null>(null)
+  const [panelAddMenuOpen, setPanelAddMenuOpen] = useState(false)
   const [questionChat, setQuestionChat] = useState<QuestionChatState | null>(null)
 
   useEffect(() => {
@@ -608,6 +615,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const userAvatarEditorRef = useRef<AvatarEditorRef>(null)
   /** Keep terminal popovers inside the sidebar, away from the native chat view. */
   const toolboxPaneRef = useRef<HTMLElement>(null)
+  const panelRef = useRef<HTMLElement>(null)
+  const panelTabsRef = useRef<HTMLDivElement>(null)
   const terminalSwitchRef = useRef<HTMLButtonElement>(null)
   const terminalOutputRef = useRef<HTMLDivElement>(null)
   const promptBodyRef = useRef<HTMLDivElement>(null)
@@ -803,6 +812,64 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       offAutomation()
       offTerminal()
     }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void window.api.getExtraTerminals().then((state) => {
+      if (!cancelled) setExtraTerminals(state.terminals)
+    })
+    const off = window.api.onExtraTerminalsChanged((state) => setExtraTerminals(state.terminals))
+    return () => {
+      cancelled = true
+      off()
+    }
+  }, [])
+
+  // A remembered added-terminal tab whose terminal is gone (closed, or the app restarted).
+  useEffect(() => {
+    if (extraTerminals === null || !panelTab.startsWith('extra:')) return
+    if (!extraTerminals.some((item) => `extra:${item.id}` === panelTab)) setPanelTab('terminal')
+  }, [extraTerminals, panelTab])
+
+  // The tab strip scrolls sideways once added terminals outgrow it; a plain mouse wheel
+  // only scrolls vertically, so turn it into horizontal movement here.
+  useEffect(() => {
+    const strip = panelTabsRef.current
+    if (!strip) return
+    const onWheel = (event: WheelEvent): void => {
+      if (strip.scrollWidth <= strip.clientWidth || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
+      event.preventDefault()
+      strip.scrollLeft += event.deltaY
+    }
+    // Non-passive: React's onWheel cannot preventDefault.
+    strip.addEventListener('wheel', onWheel, { passive: false })
+    return () => strip.removeEventListener('wheel', onWheel)
+  }, [panelCollapsed])
+
+  // Keep the selected tab in view, including one just added at the far end.
+  useEffect(() => {
+    const strip = panelTabsRef.current
+    const active = strip?.querySelector<HTMLElement>('[aria-pressed="true"]')
+    if (!strip || !active) return
+    const tab = active.closest<HTMLElement>('.panel__tab') ?? active
+    const left = tab.offsetLeft - strip.offsetLeft
+    if (left < strip.scrollLeft) strip.scrollLeft = left
+    else if (left + tab.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = left + tab.offsetWidth - strip.clientWidth
+  }, [panelTab, extraTerminals, panelCollapsed])
+
+  const addExtraTerminal = useCallback(async (): Promise<void> => {
+    const created = await window.api.createExtraTerminal()
+    if (!created) return
+    setExtraTerminals(created.state.terminals)
+    setPanelTab(`extra:${created.id}`)
+    setSshPickerOpen(false)
+  }, [])
+
+  const closeExtraTerminal = useCallback(async (id: string): Promise<void> => {
+    const state = await window.api.closeExtraTerminal(id)
+    setExtraTerminals(state.terminals)
+    setPanelTab((current) => current === `extra:${id}` ? 'terminal' : current)
   }, [])
 
   const refreshConversationMessages = useCallback(async (): Promise<void> => {
@@ -2184,7 +2251,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         </div>
       </main>
 
-      <aside className={panelCollapsed ? 'panel panel--collapsed' : 'panel'}>
+      <aside ref={panelRef} className={panelCollapsed ? 'panel panel--collapsed' : 'panel'}>
         {panelCollapsed ? null : (
           <div
             className="panel__resizer"
@@ -2196,7 +2263,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         )}
         <div className="panel__collapse-head">
           {panelCollapsed ? null : (
-            <div className="panel__tabs" role="group" aria-label="右侧栏内容">
+            <div ref={panelTabsRef} className="panel__tabs" role="group" aria-label="右侧栏内容">
               <button type="button" className="panel__tab" aria-pressed={panelTab === 'control'} onClick={() => {
                 setPanelTab('control')
                 setSshPickerOpen(false)
@@ -2210,7 +2277,25 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                 setPanelTab('question')
                 setSshPickerOpen(false)
               }}>侧边聊天</button> : null}
+              {(extraTerminals ?? []).map((item) => (
+                <span key={item.id} className="panel__tab panel__tab--closable" data-active={panelTab === `extra:${item.id}`}>
+                  <button type="button" className="panel__tab-label" aria-pressed={panelTab === `extra:${item.id}`} onClick={() => {
+                    setPanelTab(`extra:${item.id}`)
+                    setSshPickerOpen(false)
+                  }}>{item.title}</button>
+                  <button type="button" className="panel__tab-close" title={`关闭${item.title}`} aria-label={`关闭${item.title}`}
+                    onClick={() => void closeExtraTerminal(item.id)}>×</button>
+                </span>
+              ))}
             </div>
+          )}
+          {panelCollapsed ? null : (
+            <PanelAddMenu
+              containerRef={panelRef}
+              visible={!(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
+              onOpenChange={setPanelAddMenuOpen}
+              onAdd={() => void addExtraTerminal()}
+            />
           )}
           <span className="panel__spacer" />
           <button
@@ -2438,9 +2523,14 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
         {questionChat ? (
           <div className="panel__view" hidden={panelTab !== 'question'}>
-            <QuestionChatPanel sessionId={sessionId} state={questionChat} visible={panelTab === 'question' && !panelCollapsed && nativeEmbedVisible} />
+            {/* The chat is a native view over this area; it would paint over the + menu. */}
+            <QuestionChatPanel sessionId={sessionId} state={questionChat} visible={panelTab === 'question' && !panelCollapsed && nativeEmbedVisible && !panelAddMenuOpen} />
           </div>
         ) : null}
+
+        {(extraTerminals ?? []).map((item) => (
+          <ExtraTerminalPane key={item.id} sessionId={sessionId} terminal={item} visible={panelTab === `extra:${item.id}` && !panelCollapsed} />
+        ))}
 
       <section ref={toolboxPaneRef} className="terminal-pane panel__view" hidden={panelTab !== 'terminal'} aria-label="终端">
         <div className="terminal-pane__meta">

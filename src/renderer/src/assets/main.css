@@ -541,6 +541,14 @@ body {
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--bg-elevated);
+  /* Added terminals can outgrow a narrow panel; scroll rather than push the header controls out. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+/* Scrolled by wheel (see App.tsx), never squeezed. */
+.panel__tabs > .panel__tab {
+  flex: none;
 }
 
 .panel__tab {
@@ -565,6 +573,60 @@ body {
 .panel__tab:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* A user-opened terminal tab: a label button and a close button sharing one tab. */
+.panel__tab--closable {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px 0 0;
+}
+
+.panel__tab--closable[data-active='true'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.panel__tab-label {
+  flex: 1;
+  padding: 5px 4px 5px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.panel__tab-close {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  opacity: .6;
+  cursor: pointer;
+}
+
+.panel__tab-close:hover {
+  background: var(--border);
+  opacity: 1;
+}
+
+.panel__tab-label:focus-visible,
+.panel__tab-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .panel > .panel__view {
