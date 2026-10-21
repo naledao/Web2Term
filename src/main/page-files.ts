@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { PreparedAttachment } from './file-access'
 import type { FileSendOutcome } from '../shared/file-requests'
 import type { FileReadingPlatform } from '../shared/types'
+import { isQuestionChatHome, selectionQuestionConversation } from '../shared/deepseek-question'
 
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 const diagnosticLogPaths = new Map<FileReadingPlatform['id'], string>()
@@ -117,25 +118,33 @@ export async function sendPageFiles(
   let chooserIntercepted = false
   let chooser: { backendNodeId: number; mode: string } | null = null
   const ownerUrl = contents.getURL()
-  let acceptedConversationUrl: string | null = null
-  const urlMatches = (): boolean => {
-    if (contents.isDestroyed()) return false
+  let acceptedConversationId: string | null = null
+  const pageContext = (): { matches: boolean; transitioning: boolean; route: string; sameOrigin: boolean; conversationAccepted: boolean } => {
+    const rejected = { matches: false, transitioning: false, route: 'other', sameOrigin: false, conversationAccepted: !!acceptedConversationId }
+    if (contents.isDestroyed()) return { ...rejected, route: 'destroyed' }
     const url = contents.getURL()
-    if (acceptedConversationUrl) return url === acceptedConversationUrl
-    if (url === ownerUrl) return true
-    // The initial attachment message creates a new DeepSeek conversation via
-    // SPA navigation. Accept that one route once, only after our submit starts.
-    if (sendClicked && options.allowNewConversation === true && platformId === 'deepseek') {
-      try {
-        const before = new URL(ownerUrl), after = new URL(url)
-        if (before.origin === 'https://chat.deepseek.com' && before.pathname === '/' && after.origin === before.origin && /^\/a\/chat\/s\/[\w-]+\/?$/.test(after.pathname)) {
-          acceptedConversationUrl = url
-          return true
-        }
-      } catch { /* Reject changed or invalid destinations. */ }
-    }
-    return false
+    const initialSend = sendClicked && options.allowNewConversation === true && isQuestionChatHome(platformId, ownerUrl)
+    try {
+      const before = new URL(ownerUrl), after = new URL(url)
+      if (!initialSend) return { ...rejected, matches: url === ownerUrl, route: url === ownerUrl ? 'owner' : 'changed', sameOrigin: after.origin === before.origin }
+      if (after.origin !== before.origin) return rejected
+      const conversation = selectionQuestionConversation(platformId, url)
+      if (conversation) {
+        // Query/hash normalization can follow creation of the new conversation.
+        // Pin its identity rather than its first absolute URL, and never borrow
+        // the acknowledgement from a different conversation.
+        const matches = !acceptedConversationId || acceptedConversationId === conversation.id
+        if (matches) acceptedConversationId = conversation.id
+        return { matches, transitioning: false, route: 'conversation', sameOrigin: true, conversationAccepted: true }
+      }
+      if (isQuestionChatHome(platformId, url)) return { ...rejected, matches: !acceptedConversationId, route: 'home', sameOrigin: true }
+      // A same-origin intermediate route may precede the final conversation.
+      // Only read the owned send token while waiting; this route cannot confirm
+      // success and does not authorize any upload, text insertion or submission.
+      return { ...rejected, transitioning: true, sameOrigin: true }
+    } catch { return { ...rejected, route: 'invalid' } }
   }
+  const urlMatches = (): boolean => pageContext().matches
   const current = (): boolean => isCurrent() && urlMatches()
   const started = Date.now()
   let stage = 'begin'
@@ -320,17 +329,24 @@ export async function sendPageFiles(
     stage = 'confirm'
     const confirmDeadline = Date.now() + 10000
     let previousConfirmation = ''
+    let previousNavigation = ''
     let lastConfirmDiagnosticsAt = 0
     while (Date.now() < confirmDeadline) {
-      if (!urlMatches() || detached) return finish('unknown', 'page-changed-after-submit')
+      const context = pageContext()
+      const navigation = JSON.stringify(context)
+      if (navigation !== previousNavigation) { log('confirm-navigation', context); previousNavigation = navigation }
+      if ((!context.matches && !context.transitioning) || detached) return finish('unknown', 'page-changed-after-submit')
       // A fast next action can supersede this run; still read the acknowledgement.
       const snapshot = await contents.executeJavaScript(`window.__cmdTerminalInterceptor?.fileSendStatus(${JSON.stringify(token)})`) as { status?: string }
       const diagnostics = diagnosticSnapshot(snapshot)
       const signature = JSON.stringify(diagnostics)
       if (signature !== previousConfirmation) { log('confirm-state', diagnostics); previousConfirmation = signature }
-      if (snapshot?.status === 'sent') return finish('ok', 'message-confirmed')
-      if (!current() || signal.aborted) return finish('unknown', 'context-changed-after-submit')
-      if (diagnostics.newTurnSeen === true && diagnostics.turnFilesSeen === false && (!lastConfirmDiagnosticsAt || Date.now() - lastConfirmDiagnosticsAt >= 3000)) {
+      // Recheck after the page call, which can itself race with SPA navigation.
+      const afterRead = pageContext()
+      if ((!afterRead.matches && !afterRead.transitioning) || detached) return finish('unknown', 'page-changed-after-submit')
+      if (afterRead.matches && snapshot?.status === 'sent') return finish('ok', 'message-confirmed')
+      if (!isCurrent() || signal.aborted) return finish('unknown', 'context-changed-after-submit')
+      if (afterRead.matches && diagnostics.newTurnSeen === true && diagnostics.turnFilesSeen === false && (!lastConfirmDiagnosticsAt || Date.now() - lastConfirmDiagnosticsAt >= 3000)) {
         try { log('confirmation-diagnostics', diagnosticSnapshot(await call('attachmentDiagnostics'))) } catch { log('confirmation-diagnostics-unavailable') }
         lastConfirmDiagnosticsAt = Date.now()
       }

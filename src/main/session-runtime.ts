@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
+import { writeFile } from 'node:fs/promises'
 import { createConnection } from 'mysql2/promise'
 import { formatMysqlCell } from './mysql-field-value'
 import type { Connection } from 'mysql2/promise'
-import { app, BrowserWindow, Notification, safeStorage } from 'electron'
+import { app, BrowserWindow, dialog, Notification, safeStorage } from 'electron'
 import { writeCommandDiagnostic } from './command-log'
 import type { CommandDiagnostic } from './command-log'
 import {
@@ -14,7 +15,7 @@ import {
   terminalNotesOwnerKey
 } from '../shared/types'
 import { CHAT_PLATFORMS, DEEPSEEK_PLATFORM } from '../shared/platforms'
-import { deepSeekConversation } from '../shared/deepseek-question'
+import { selectionQuestionConversation } from '../shared/deepseek-question'
 import type { FileReadContext } from '../shared/file-requests'
 import { prepareFiles } from './file-access'
 import { homedir } from 'node:os'
@@ -39,6 +40,7 @@ import type {
   MysqlCellUpdateResult,
   MysqlSqlExecutionResult,
   MysqlTableDdl,
+  MysqlDdlExportResult,
   MysqlTableList,
   MysqlSaveResult,
   RedisConnectionDraft,
@@ -62,6 +64,7 @@ import { CommandRunner } from './commands'
 import { ConversationStore } from './db'
 import { normalizeNacosUrl } from './nacos-view'
 import { readMysqlColumnMetadata, mysqlColumnDescriptions, mysqlRowKey, mysqlRowDeleteUnavailable, mysqlColumnsEditable, deleteMysqlRowWithConnection, updateMysqlCellWithConnection } from './mysql-table-rows'
+import { readMysqlDatabaseDdl } from './mysql-ddl-export'
 import { RedisReader, normalizeRedisDraft } from './redis-reader'
 import { ChatGptEmbed } from './embed'
 import type { EmbedHandlers } from './embed'
@@ -392,6 +395,7 @@ export class SessionRuntime {
       onRemoteLine: (line) => { if (!this.web2term) this.ssh.pushModelLine(line) },
       onRemoteOutput: (chunk) => { if (!this.web2term) this.ssh.pushModelOutput(chunk) },
       onExecutionChanged: (records) => this.send(IpcChannels.executionChanged, records),
+      onTaskStarted: () => this.embed.startTerminalTask(),
       onTerminalChanged: (state) => {
         this.send(IpcChannels.terminalChanged, state)
         this.refreshDirectoryNotes()
@@ -503,7 +507,7 @@ export class SessionRuntime {
       readQuestionContext: conversationId => {
         if (record().conversationId !== conversationId) return null
         const conversation = this.options.store.list().find(item => item.id === conversationId)
-        if (!conversation || deepSeekConversation(conversation.url)?.id !== conversationId) return null
+        if (!conversation || selectionQuestionConversation(platform.id, conversation.url)?.id !== conversationId) return null
         return { conversationId, title: conversation.title, messages: this.options.store.listConversationMessages(conversationId) }
       },
       onState: (state) => {
@@ -1635,6 +1639,50 @@ export class SessionRuntime {
       return { ok: true, ddl, message: '' }
     } catch (error) {
       return { ok: false, ddl: '', message: mysqlErrorMessage(error) }
+    } finally {
+      if (connection) await connection.end().catch(() => undefined)
+    }
+  }
+
+  /** Export schema only, after the user chooses one local SQL file. */
+  async exportMysqlDatabaseDdl(draft: MysqlConnectionDraft, database: string): Promise<MysqlDdlExportResult> {
+    const empty = { ok: false, canceled: false, tableCount: 0, filePath: '', message: '' }
+    const host = String(draft?.host ?? '').trim()
+    const db = String(database ?? '').trim()
+    if (host === '') return { ...empty, message: '请先填写主机地址。' }
+    if (db === '') return { ...empty, message: '请先选择默认数据库。' }
+    let connection: Connection | null = null
+    try {
+      // Capture credentials before the save dialog: the active machine may change meanwhile.
+      const rawPort = Number(draft?.port)
+      const options = {
+        host,
+        port: Number.isFinite(rawPort) && rawPort > 0 ? Math.trunc(rawPort) : 3306,
+        user: String(draft?.username ?? '').trim(),
+        password: this.mysqlPasswordFor(draft),
+        database: db,
+        connectTimeout: 8000,
+        multipleStatements: false
+      }
+      const saveOptions = {
+        title: '导出全部表 DDL',
+        defaultPath: db.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') + '-ddl.sql',
+        filters: [{ name: 'SQL 文件', extensions: ['sql'] }]
+      }
+      const window = this.window
+      const destination = window && !window.isDestroyed()
+        ? await dialog.showSaveDialog(window, saveOptions)
+        : await dialog.showSaveDialog(saveOptions)
+      if (destination.canceled || !destination.filePath) return { ...empty, canceled: true }
+      if (this.disposed) return { ...empty, message: '原会话已关闭，请重新打开工具。' }
+
+      connection = await createConnection(options)
+      const exported = await readMysqlDatabaseDdl(connection, db)
+      // Finish reading every table before writing, so a query failure cannot save a partial schema.
+      await writeFile(destination.filePath, exported.sql, 'utf8')
+      return { ok: true, canceled: false, tableCount: exported.tableCount, filePath: destination.filePath, message: '' }
+    } catch (error) {
+      return { ...empty, message: mysqlErrorMessage(error) }
     } finally {
       if (connection) await connection.end().catch(() => undefined)
     }

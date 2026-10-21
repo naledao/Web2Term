@@ -15,6 +15,7 @@ export const TOOLBOX_METHODS = {
   createMysqlTable: IpcChannels.mysqlConnCreateTable,
   dropMysqlTable: IpcChannels.mysqlConnDropTable,
   getMysqlTableDdl: IpcChannels.mysqlConnTableDdl,
+  exportMysqlDatabaseDdl: IpcChannels.mysqlConnExportDdl,
   removeMysqlConnection: IpcChannels.mysqlConnRemove,
   listRedisConnections: IpcChannels.redisConnList,
   saveRedisConnection: IpcChannels.redisConnSave,

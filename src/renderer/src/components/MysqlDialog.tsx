@@ -25,6 +25,7 @@ import type {
   MysqlSqlExecutionResult,
   MysqlRowKey,
   MysqlTableDdl,
+  MysqlDdlExportResult,
   MysqlTableInfo,
   MysqlTableList
 } from '../../../shared/types'
@@ -69,6 +70,7 @@ interface ConnectionTab {
   tablesLoading: boolean
   tables: MysqlTableList | null
   tableSearch: string
+  ddlExport?: { busy: boolean; message: string; error: boolean }
 }
 
 interface TableTab {
@@ -361,6 +363,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
   const [reveal, setReveal] = useState(false)
   const newTabRef = useRef(0)
   const ddlRequestRef = useRef(0)
+  const ddlExportingRef = useRef(new Set<string>())
   const tableRequestRef = useRef(0)
   const sqlRequestRef = useRef(0)
   /** Focused when saving is refused, so the missing field is the one on screen. */
@@ -579,7 +582,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
       setTabs((current) =>
         current.map((tab) =>
           tab.kind === 'connection' && tab.key === activeKey
-            ? { ...tab, form: { ...tab.form, ...patch } }
+            ? { ...tab, form: { ...tab.form, ...patch }, ddlExport: tab.ddlExport?.busy ? tab.ddlExport : undefined }
             : tab
         )
       )
@@ -618,6 +621,32 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
       })
     )
   }, [])
+
+  const exportAllDdl = async (): Promise<void> => {
+    if (activeConnection === null || activeForm === null || ddlExportingRef.current.has(activeConnection.key)) return
+    const key = activeConnection.key
+    const form = { ...activeForm }
+    ddlExportingRef.current.add(key)
+    setTabs((current) => current.map((tab) =>
+      tab.kind === 'connection' && tab.key === key
+        ? { ...tab, ddlExport: { busy: true, message: '', error: false } } : tab
+    ))
+    let result: MysqlDdlExportResult
+    try {
+      result = await api.exportMysqlDatabaseDdl(draftFromForm(form), form.database.trim())
+    } catch {
+      result = { ok: false, canceled: false, tableCount: 0, filePath: '', message: '导出 DDL 失败，请重试。' }
+    } finally {
+      ddlExportingRef.current.delete(key)
+    }
+    const message = result.canceled ? '' : result.ok
+      ? `已导出 ${form.database.trim()} 的 ${result.tableCount} 张表到 ${result.filePath}`
+      : result.message || '导出 DDL 失败，请重试。'
+    setTabs((current) => current.map((tab) =>
+      tab.kind === 'connection' && tab.key === key
+        ? { ...tab, ddlExport: { busy: false, message, error: !result.ok && !result.canceled } } : tab
+    ))
+  }
 
   const submitCreateTable = async (): Promise<void> => {
     if (activeConnection === null || activeForm === null || createTableBusy) return
@@ -1738,6 +1767,15 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
                           {tableSearch === '' ? `共 ${activeConnection.tables.tables.length} 张` : `匹配 ${visibleTables.length} / 共 ${activeConnection.tables.tables.length} 张`}
                         </span>
                       ) : null}
+                      <button
+                        type="button"
+                        className="mysql-page__btn"
+                        disabled={activeConnection === null || activeConnection.ddlExport?.busy || activeForm.host.trim() === '' || activeForm.database.trim() === ''}
+                        title="将当前数据库的全部表结构导出到一个 SQL 文件，不受搜索筛选影响，不包含视图和表数据"
+                        onClick={() => void exportAllDdl()}
+                      >
+                        {activeConnection?.ddlExport?.busy ? '导出中…' : '导出全部 DDL'}
+                      </button>
                     </div>
                     <div className="mysql-page__tables-actions">
                       <input
@@ -1779,6 +1817,14 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
                       </button>
                     </div>
                   </div>
+                  {activeConnection?.ddlExport?.message ? (
+                    <p
+                      className={`mysql-page__hint mysql-page__ddl-export-status${activeConnection.ddlExport.error ? ' mysql-page__hint--error' : ''}`}
+                      role={activeConnection.ddlExport.error ? 'alert' : 'status'}
+                    >
+                      {activeConnection.ddlExport.message}
+                    </p>
+                  ) : null}
                   {tableDropError ? (
                     <p className="mysql-page__hint mysql-page__hint--error" role="alert">{tableDropError}</p>
                   ) : null}

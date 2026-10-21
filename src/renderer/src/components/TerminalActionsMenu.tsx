@@ -7,7 +7,7 @@ import NacosIcon from './NacosIcon'
 import './TerminalActionsMenu.css'
 
 export type TerminalActionId = 'interrupt' | 'reset' | 'close' | 'ssh' | 'web2term'
-  | 'directory' | 'edit-directory' | 'upload' | 'files' | 'notes' | 'git' | 'mysql' | 'redis' | 'nacos'
+  | 'directory' | 'edit-directory' | 'upload' | 'files' | 'git' | 'mysql' | 'redis' | 'nacos'
 
 interface TerminalActionsMenuProps {
   containerRef: RefObject<HTMLElement | null>
@@ -19,7 +19,6 @@ interface TerminalActionsMenuProps {
   closeDisabled: boolean
   closing: boolean
   uploading: boolean
-  notesSet: boolean
   sendDelaySeconds: number
   onAction: (action: TerminalActionId) => void
   onSendDelayChange: (seconds: number) => Promise<void>
@@ -27,7 +26,7 @@ interface TerminalActionsMenuProps {
 
 type MenuPage = 'main' | 'connection' | 'tools'
 type IconName = 'more' | 'stop' | 'reset' | 'connection' | 'folder' | 'edit' | 'upload'
-  | 'files' | 'notes' | 'tools' | 'back' | 'next' | 'close' | 'git'
+  | 'files' | 'tools' | 'back' | 'next' | 'close' | 'git'
 
 const ICON_PATHS: Record<Exclude<IconName, 'more'>, string> = {
   stop: 'M5 5h14v14H5z',
@@ -37,7 +36,6 @@ const ICON_PATHS: Record<Exclude<IconName, 'more'>, string> = {
   edit: 'm15 4 5 5M4 15 15 4a3.5 3.5 0 0 1 5 5L9 20H4v-5z',
   upload: 'M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5',
   files: 'M3 5h7l2 3h9v12H3V5z',
-  notes: 'M6 3h9l4 4v14H6V3zm9 0v5h4M9 12h7m-7 4h7',
   tools: 'M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z',
   back: 'm14 6-6 6 6 6',
   next: 'm9 6 6 6-6 6',
@@ -68,7 +66,7 @@ function ActionButton({ children, icon, disabled, danger, trailing, onClick }: {
 
 export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JSX.Element {
   const { containerRef, triggerRef, visible, mode, connected, resetDisabled, closeDisabled,
-    closing, uploading, notesSet, sendDelaySeconds, onAction, onSendDelayChange } = props
+    closing, uploading, sendDelaySeconds, onAction, onSendDelayChange } = props
   const [open, setOpen] = useState(false)
   const [page, setPage] = useState<MenuPage>('main')
   const [delayDraft, setDelayDraft] = useState<string | null>(null)
@@ -145,7 +143,6 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
               <ActionButton icon={<ActionIcon name="upload" />} disabled={!connected || uploading} onClick={() => choose('upload')}>{uploading ? '上传中…' : '上传文件'}</ActionButton>
               <ActionButton icon={<ActionIcon name="files" />} disabled={!connected} onClick={() => choose('files')}>浏览远程文件</ActionButton>
             </> : null}
-            <ActionButton icon={<ActionIcon name="notes" />} trailing={notesSet ? <span className="terminal-actions__note-mark" aria-label="已设置说明">●</span> : undefined} onClick={() => choose('notes')}>补充说明</ActionButton>
             <ActionButton icon={<ActionIcon name="tools" />} trailing={next} onClick={() => setPage('tools')}>工具箱</ActionButton>
             <div className="terminal-actions__separator" />
             <label className="terminal-actions__delay">

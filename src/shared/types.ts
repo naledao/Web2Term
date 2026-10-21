@@ -88,7 +88,7 @@ export const IpcChannels = {
   automationSetPaused: 'automation:set-paused',
   automationCheckNow: 'automation:check-now',
   recentCommandList: 'recent-command:list',
-  recentCommandSend: 'recent-command:send',
+  recentCommandRun: 'recent-command:run',
   automationChanged: 'automation:changed',
   executionList: 'execution:list',
   executionRun: 'execution:run',
@@ -165,6 +165,7 @@ export const IpcChannels = {
   mysqlConnCreateTable: 'mysql-conn:create-table',
   mysqlConnDropTable: 'mysql-conn:drop-table',
   mysqlConnTableDdl: 'mysql-conn:table-ddl',
+  mysqlConnExportDdl: 'mysql-conn:export-ddl',
   mysqlConnChanged: 'mysql-conn:changed',
   redisConnList: 'redis-conn:list',
   redisConnSave: 'redis-conn:save',
@@ -807,6 +808,7 @@ const OUTPUT_FORMAT_SECTION = [
   '',
   '【读取结果】',
   '【上一条命令执行结果】对应你上一条请求执行的命令，回传消息不重复命令正文；以回传的结果、输出、当前目录和退出码为真实状态。',
+  '【历史指令重新执行结果】表示用户主动在当前终端重跑了一条历史命令，消息会包含本次执行的命令正文；请根据这次回传的结果继续处理。',
   '结果为成功且退出码为 0 时继续；失败、超时、中断或断线先诊断并给最小修正。退出码未知不要视为成功，空输出不等于失败。',
   '',
   '【任务完成】',
@@ -1429,9 +1431,11 @@ export interface RecentCommandJson {
   createdAt: number
 }
 
+export type RecentCommandRunResult = 'ok' | 'busy' | 'unavailable' | 'invalid' | 'paused' | 'terminal-mode-off'
+
 /** One command lifted out of an assistant reply, and what happened to it. */
 export interface ExecutionRecord {
-  /** ChatGPT's own assistant message id — the idempotency key. */
+  /** Assistant message id, or a unique rerun:<uuid> for an explicit history replay. */
   messageId: string
   conversationId: string
   command: string
@@ -1855,6 +1859,14 @@ export interface MysqlTableDdl {
   message: string
 }
 
+export interface MysqlDdlExportResult {
+  ok: boolean
+  canceled: boolean
+  tableCount: number
+  filePath: string
+  message: string
+}
+
 export interface MysqlConnectionsState {
   /** Display name of the machine these belong to, for the dialog header. */
   machineLabel: string
@@ -2183,8 +2195,8 @@ export interface AppApi {
   setAutomationPaused(paused: boolean): Promise<AutomationState>
   /** The three most recent complete command JSON payloads for the current conversation. */
   listRecentCommandJson(conversationId: string): Promise<RecentCommandJson[]>
-  /** Ask the AI to execute a selected saved instruction; never execute it directly in the shell. */
-  sendRecentCommandJson(conversationId: string, messageId: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable'>
+  /** Start a selected history command in the current terminal and automatically return its result to AI. */
+  runRecentCommand(conversationId: string, messageId: string): Promise<RecentCommandRunResult>
   /** Re-scan the last reply right now, ignoring the "already seen" guard. */
   checkLastReply(): Promise<AutomationState>
   onAutomationChanged(listener: (state: AutomationState) => void): () => void
@@ -2263,6 +2275,8 @@ export interface AppApi {
   dropMysqlTable(draft: MysqlConnectionDraft, database: string, table: string, type: string): Promise<{ ok: boolean; message: string }>
   /** Read the CREATE statement without changing the database. */
   getMysqlTableDdl(draft: MysqlConnectionDraft, database: string, table: string): Promise<MysqlTableDdl>
+  /** Save all base-table CREATE statements to one local SQL file. */
+  exportMysqlDatabaseDdl(draft: MysqlConnectionDraft, database: string): Promise<MysqlDdlExportResult>
   onMysqlConnectionChanged(listener: (state: MysqlConnectionsState) => void, sessionId?: string): () => void
 
   listRedisConnections(): Promise<RedisConnectionsState>

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import type { JSX } from 'react'
 import type { QuestionChatState } from '@shared/deepseek-question'
+import { platformById } from '@shared/platforms'
 import './QuestionChatPanel.css'
 
 export default function QuestionChatPanel({ sessionId, state, visible }: {
@@ -8,6 +9,7 @@ export default function QuestionChatPanel({ sessionId, state, visible }: {
   state: QuestionChatState
   visible: boolean
 }): JSX.Element {
+  const platformLabel = platformById(state.platformId)?.label ?? 'AI'
   const slot = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const element = slot.current
@@ -48,8 +50,8 @@ export default function QuestionChatPanel({ sessionId, state, visible }: {
       {state.status ? <p className={'question-chat-sidebar__status' + (state.error ? ' question-chat-sidebar__status--error' : '')}
         role="status" aria-live="polite">{state.status}</p> : null}
     </header>
-    <div className="question-chat-sidebar__slot" ref={slot} aria-label="DeepSeek 侧边聊天网页">
-      <p>正在加载 DeepSeek…</p>
+    <div className="question-chat-sidebar__slot" ref={slot} aria-label={`${platformLabel} 侧边聊天网页`}>
+      <p>正在加载 {platformLabel}…</p>
     </div>
   </section>
 }

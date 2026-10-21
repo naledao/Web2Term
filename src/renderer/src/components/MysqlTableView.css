@@ -275,3 +275,8 @@
 .mysql-page--dark .mysql-page__cell-null { border-color: #2a3444; background: #161d28; color: #cbd6e6; }
 .mysql-page--dark .mysql-page__cell-null:hover:not(:disabled) { background: #1c2739; }
 .mysql-page--dark .mysql-page__cell-error { color: #ff9a9a; }
+
+.mysql-page__ddl-export-status {
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}

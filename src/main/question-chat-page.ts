@@ -9,7 +9,7 @@ export function writeQuestionLog(event: string, details: Record<string, unknown>
     if (!logPath) {
       const directory = join(tmpdir(), 'gpt-login-diag')
       mkdirSync(directory, { recursive: true })
-      logPath = join(directory, `deepseek-question-${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}.log`)
+      logPath = join(directory, `selection-question-${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}.log`)
     }
     appendFileSync(logPath, `${new Date().toISOString()} ${event} ${JSON.stringify(details)}\n`, 'utf8')
   } catch { /* Logging never blocks the user's question. */ }

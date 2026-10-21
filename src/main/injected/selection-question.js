@@ -1,5 +1,5 @@
 /*
- * DeepSeek answer selection UI, injected by embed.ts as browser JavaScript.
+ * Chat answer selection UI, injected by embed.ts as browser JavaScript.
  * A closed shadow root keeps its textarea out of the page adapter's composer
  * queries. Events outside the shadow root target the host, not that textarea.
  * Submission is handed to main through a metadata-only, per-view console tag.
@@ -8,7 +8,7 @@
   const STATE_KEY = '__cmdTerminalSelectionQuestion'
   if (window[STATE_KEY]) return
 
-  let config = { answerSelectors: [], theme: 'light', css: '', reportTag: '' }
+  let config = { answerSelectors: [], answerFallbackSelectors: [], theme: 'light', css: '', reportTag: '' }
   let host = null
   let shadow = null
   let stylesheet = null
@@ -24,12 +24,34 @@
   let composing = false
   let selectionTimer = 0
   let positionFrame = 0
+  let lastDiagnostic = ''
+  let selectionStage = 'selection-read'
+
+  const reportUI = (phase, details = {}) => {
+    if (!config.reportTag) return
+    const metadata = { event: 'question-ui', phase, ...details }
+    const signature = JSON.stringify(metadata)
+    if (signature === lastDiagnostic) return
+    lastDiagnostic = signature
+    console.log(config.reportTag + signature)
+  }
+  const answerCount = () => new Set([...config.answerSelectors, ...config.answerFallbackSelectors]
+    .flatMap(selector => [...document.querySelectorAll(selector)])).size
 
   const inside = (node) => !!host && !!node && (node === host || shadow.contains(node))
   const fromPopover = (event) => !!host && event.composedPath().includes(host)
   const answerOf = (node) => {
     const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement
-    if (!element || inside(element) || element.closest('input, textarea, [contenteditable="true"], .ds-think-content')) return null
+    if (!element || inside(element) || element.closest('input, textarea, button, [role="button"], [contenteditable="true"], .ds-think-content')) return null
+    if (config.answerFallbackSelectors.length) {
+      const turn = config.answerFallbackSelectors.map(selector => element.closest(selector)).find(Boolean)
+      if (!turn) return null
+      // Match the transcript extractor's preferred answer root. Falling back
+      // only when it is absent supports Claude's code-only turns without
+      // treating user messages or surrounding controls as assistant answers.
+      const answer = config.answerSelectors.map(selector => turn.matches(selector) ? turn : turn.querySelector(selector)).find(Boolean) || turn
+      return answer.contains(element) ? answer : null
+    }
     for (const selector of config.answerSelectors) {
       const answer = element.closest(selector)
       if (answer) return answer
@@ -40,6 +62,23 @@
     left.path === right.path && left.text === right.text &&
     left.range.startContainer === right.range.startContainer && left.range.startOffset === right.range.startOffset &&
     left.range.endContainer === right.range.endContainer && left.range.endOffset === right.range.endOffset
+
+  const createUIElement = (tag, attributes = {}, text) => {
+    const element = document.createElement(tag)
+    for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value)
+    if (text !== undefined) element.textContent = text
+    return element
+  }
+  const createIcon = (paths, attributes = {}) => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    for (const [name, value] of Object.entries({ viewBox: '0 0 20 20', fill: 'none', 'aria-hidden': 'true', ...attributes })) svg.setAttribute(name, value)
+    for (const attributes of paths) {
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      for (const [name, value] of Object.entries(attributes)) path.setAttribute(name, value)
+      svg.append(path)
+    }
+    return svg
+  }
 
   function dismiss(restoreFocus = false) {
     if (busy && config.reportTag) console.log(config.reportTag + JSON.stringify({ event: 'question-cancel' }))
@@ -80,31 +119,27 @@
     stylesheet = document.createElement('style')
     stylesheet.textContent = config.css
     shadow.append(stylesheet)
-    const panel = document.createElement('section')
-    panel.setAttribute('role', 'dialog')
-    panel.setAttribute('aria-modal', 'false')
-    panel.setAttribute('aria-labelledby', 'question-title')
-    // All markup is static. Selected text is assigned through textContent below.
-    panel.innerHTML = `
-      <div class="question-head">
-        <span class="question-title" id="question-title">
-          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 14.5 2.75 17v-4.25a6.75 6.75 0 1 1 3 2.25H5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M6.75 8h6.5M6.75 11h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-          询问 AI
-        </span>
-        <button class="question-close" type="button" aria-label="关闭询问 AI" title="关闭（Esc）">
-          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m6 6 8 8M14 6l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-        </button>
-      </div>
-      <blockquote class="question-quote" id="question-quote" aria-label="选中的内容"></blockquote>
-      <textarea class="question-input" aria-label="询问 AI" aria-describedby="question-quote" placeholder="针对这段内容提问…" rows="2" spellcheck="false"></textarea>
-      <div class="question-feedback" role="status" aria-live="polite"></div>
-      <div class="question-foot"><span class="question-submit-hint">Enter 提问 · Shift+Enter 换行</span><span>Esc 关闭</span></div>
-    `
+    // Build nodes directly. A page enforcing Trusted Types rejects even static
+    // strings assigned to innerHTML; no HTML policy or security bypass is needed.
+    const panel = createUIElement('section', { role: 'dialog', 'aria-modal': 'false', 'aria-labelledby': 'question-title' })
+    const heading = createUIElement('div', { class: 'question-head' })
+    const title = createUIElement('span', { class: 'question-title', id: 'question-title' })
+    title.append(createIcon([
+      { d: 'M5 14.5 2.75 17v-4.25a6.75 6.75 0 1 1 3 2.25H5Z', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linejoin': 'round' },
+      { d: 'M6.75 8h6.5M6.75 11h4', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round' }
+    ]), '询问 AI')
+    const close = createUIElement('button', { class: 'question-close', type: 'button', 'aria-label': '关闭询问 AI', title: '关闭（Esc）' })
+    close.append(createIcon([{ d: 'm6 6 8 8M14 6l-8 8', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round' }]))
+    heading.append(title, close)
+    quote = createUIElement('blockquote', { class: 'question-quote', id: 'question-quote', 'aria-label': '选中的内容' })
+    input = createUIElement('textarea', { class: 'question-input', 'aria-label': '询问 AI', 'aria-describedby': 'question-quote',
+      placeholder: '针对这段内容提问…', rows: '2', spellcheck: 'false' })
+    feedback = createUIElement('div', { class: 'question-feedback', role: 'status', 'aria-live': 'polite' })
+    const foot = createUIElement('div', { class: 'question-foot' })
+    foot.append(createUIElement('span', { class: 'question-submit-hint' }, 'Enter 提问 · Shift+Enter 换行'), createUIElement('span', {}, 'Esc 关闭'))
+    panel.append(heading, quote, input, feedback, foot)
     shadow.append(panel)
-    quote = shadow.querySelector('.question-quote')
-    input = shadow.querySelector('.question-input')
-    feedback = shadow.querySelector('.question-feedback')
-    shadow.querySelector('.question-close').addEventListener('click', () => dismiss(true))
+    close.addEventListener('click', () => dismiss(true))
     input.addEventListener('input', () => {
       input.style.height = 'auto'
       input.style.height = Math.min(144, Math.max(64, input.scrollHeight)) + 'px'
@@ -174,26 +209,33 @@
   }
 
   function readSelection() {
+    selectionStage = 'selection-read'
     selectionTimer = 0
     if (pointerSelecting || pointerInside || document.activeElement === host) return
     const selection = window.getSelection()
     if (selection && (inside(selection.anchorNode) || inside(selection.focusNode))) return
     if (!selection || selection.isCollapsed || selection.rangeCount !== 1) {
+      reportUI('no-selection')
       dismiss()
       return
     }
     const range = selection.getRangeAt(0)
+    selectionStage = 'answer-match'
     const answer = answerOf(range.startContainer)
+    const endAnswer = answerOf(range.endContainer)
     const text = selection.toString().trim()
-    if (!answer || answer !== answerOf(range.endContainer) || !text) {
+    if (!answer || answer !== endAnswer || !text) {
+      reportUI('answer-rejected', { selectedLength: text.length, answerCount: answerCount(),
+        startAnswerFound: !!answer, endAnswerFound: !!endAnswer, sameAnswer: !!answer && answer === endAnswer })
       dismiss()
       return
     }
     const next = { range: range.cloneRange(), answer, text, path: location.pathname, answerText: answer.innerText || '',
       backward: selection.focusNode === range.startContainer && selection.focusOffset === range.startOffset }
-    if (sameSelection(next, dismissed)) return
+    if (sameSelection(next, dismissed)) { reportUI('previously-dismissed', { selectedLength: text.length }); return }
     if (!sameSelection(next, context)) {
       previousFocus = document.activeElement
+      selectionStage = 'ui-create'
       ensureUI()
       input.value = ''
       input.style.height = ''
@@ -201,34 +243,49 @@
       context = next
     }
     host.hidden = false
+    selectionStage = 'popover-open'
     if (!host.matches(':popover-open')) host.showPopover()
     // Showing the non-modal popover must not steal the text selection or Ctrl+C.
+    selectionStage = 'position'
     position()
+    reportUI(host.hidden ? 'out-of-view' : 'shown', { selectedLength: text.length, answerCount: answerCount() })
   }
 
   function scheduleSelection(delay = 100) {
     clearTimeout(selectionTimer)
-    selectionTimer = setTimeout(readSelection, delay)
+    selectionTimer = setTimeout(() => {
+      try { readSelection() } catch (error) {
+        reportUI('selection-error', { errorName: ['TypeError', 'NotSupportedError', 'InvalidStateError'].includes(error?.name) ? error.name : 'Error',
+          errorStage: selectionStage, trustedTypesBlocked: /TrustedHTML|Trusted Types|trusted-types/i.test(String(error?.message || '')) })
+      }
+    }, delay)
   }
 
   document.addEventListener('selectionchange', () => {
     if (!pointerSelecting && !pointerInside && document.activeElement !== host) scheduleSelection()
   })
-  document.addEventListener('pointerdown', (event) => {
+  window.addEventListener('pointerdown', (event) => {
     if (fromPopover(event)) { pointerInside = true; return }
     if (event.button !== 0) return
     pointerSelecting = true
     dismiss()
     // A deliberate new drag over the same words may reopen a dismissed popup.
     if (answerOf(event.target)) dismissed = null
+    reportUI('drag-start', { startAnswerFound: !!answerOf(event.target) })
   }, true)
-  document.addEventListener('pointerup', (event) => {
+  const finishPointerSelection = (event) => {
     if (pointerInside || fromPopover(event)) { pointerInside = false; return }
     if (!pointerSelecting) return
     pointerSelecting = false
+    reportUI('drag-end')
     scheduleSelection(0)
-  }, true)
-  document.addEventListener('pointercancel', () => { pointerSelecting = false; pointerInside = false })
+  }
+  // Sites can stop pointerup before it reaches document. Read the selection
+  // from the window capture phase, with mouseup covering a lost pointerup.
+  // The state guard above makes the two release events idempotent.
+  window.addEventListener('pointerup', finishPointerSelection, true)
+  window.addEventListener('mouseup', finishPointerSelection, true)
+  window.addEventListener('pointercancel', () => { pointerSelecting = false; pointerInside = false }, true)
   // Stop Enter from reaching site-level shortcuts; retain native textarea/IME
   // defaults. Escape closes this UI unless the user is still composing text.
   for (const name of ['keydown', 'keyup', 'keypress']) {
@@ -275,12 +332,15 @@
   window[STATE_KEY] = {
     configure(next) {
       config = { answerSelectors: Array.isArray(next.answerSelectors) ? next.answerSelectors : [],
+        answerFallbackSelectors: Array.isArray(next.answerFallbackSelectors) ? next.answerFallbackSelectors : [],
         theme: next.theme === 'dark' ? 'dark' : 'light', css: String(next.css || ''), reportTag: String(next.reportTag || '') }
       if (host) {
         host.dataset.theme = config.theme
         stylesheet.textContent = config.css
         schedulePosition()
       }
+      reportUI('configured', { selectorCount: config.answerSelectors.length, answerCount: answerCount(),
+        popoverSupported: typeof document.createElement('div').showPopover === 'function' })
     },
     dismiss,
     setStatus,

@@ -32,6 +32,7 @@ import type {
   ExecutionMode,
   ExecutionRecord,
   RecentCommandJson,
+  RecentCommandRunResult,
   InterceptorStatus,
   GitFileDiff,
   GitLogResult,
@@ -50,6 +51,7 @@ import type {
   MysqlCellUpdateResult,
   MysqlSqlExecutionResult,
   MysqlTableDdl,
+  MysqlDdlExportResult,
   MysqlTableList,
   MysqlSaveResult,
   RedisConnectionDraft,
@@ -382,8 +384,8 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   listRecentCommandJson: (conversationId: string): Promise<RecentCommandJson[]> =>
     ipcRenderer.invoke(IpcChannels.recentCommandList, conversationId),
 
-  sendRecentCommandJson: (conversationId: string, messageId: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable'> =>
-    ipcRenderer.invoke(IpcChannels.recentCommandSend, conversationId, messageId),
+  runRecentCommand: (conversationId: string, messageId: string): Promise<RecentCommandRunResult> =>
+    ipcRenderer.invoke(IpcChannels.recentCommandRun, conversationId, messageId),
   checkLastReply: (): Promise<AutomationState> =>
     ipcRenderer.invoke(IpcChannels.automationCheckNow),
 
@@ -480,6 +482,9 @@ removeConversation: (id: string): Promise<Conversation[]> =>
 
   getMysqlTableDdl: (draft: MysqlConnectionDraft, database: string, table: string): Promise<MysqlTableDdl> =>
     ipcRenderer.invoke(IpcChannels.mysqlConnTableDdl, draft, database, table),
+
+  exportMysqlDatabaseDdl: (draft: MysqlConnectionDraft, database: string): Promise<MysqlDdlExportResult> =>
+    ipcRenderer.invoke(IpcChannels.mysqlConnExportDdl, draft, database),
 
   listMysqlDatabases: (draft: MysqlConnectionDraft): Promise<MysqlDatabaseList> =>
     ipcRenderer.invoke(IpcChannels.mysqlConnListDatabases, draft),

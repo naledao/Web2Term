@@ -1,5 +1,5 @@
-import { DeepSeekQuestionError, deepSeekConversation } from './deepseek-question'
-import type { DeepSeekSelection } from './deepseek-question'
+import { DeepSeekQuestionError, selectionQuestionConversation, selectionQuestionTarget } from './deepseek-question'
+import type { SelectionQuestionDraft, SelectionQuestionPlatform } from './deepseek-question'
 import type { ConversationMessage } from './types'
 
 export interface SavedQuestionContext {
@@ -10,6 +10,7 @@ export interface SavedQuestionContext {
 }
 export type SavedQuestionContextReader = (conversationId: string) => SavedQuestionContext | null | Promise<SavedQuestionContext | null>
 export interface QuestionContextSnapshot {
+  platformId?: SelectionQuestionPlatform
   title: string
   messages: Pick<ConversationMessage, 'id' | 'role' | 'content'>[]
 }
@@ -20,8 +21,10 @@ const normalize = (value: string): string => value.normalize('NFKC')
   .replace(/[\p{P}\p{S}\p{Z}\s]+/gu, '')
 
 /** Use only the application's clean saved transcript, never provider/share APIs. */
-export function savedQuestionSnapshot(context: SavedQuestionContext | null, conversationId: string, selection: DeepSeekSelection): QuestionContextSnapshot {
-  if (!context || context.conversationId !== conversationId || deepSeekConversation('https://chat.deepseek.com' + selection.sourcePath)?.id !== conversationId ||
+export function savedQuestionSnapshot(context: SavedQuestionContext | null, conversationId: string, selection: SelectionQuestionDraft,
+  platformId: SelectionQuestionPlatform = 'deepseek'): QuestionContextSnapshot {
+  const { origin, label } = selectionQuestionTarget(platformId)
+  if (!context || context.conversationId !== conversationId || selectionQuestionConversation(platformId, origin + selection.sourcePath)?.id !== conversationId ||
       context.messages.some(message => message.conversationId !== conversationId)) {
     throw new DeepSeekQuestionError('local-source', '未找到当前会话的本地对话数据，请确认软件“对话”中已保存该会话。')
   }
@@ -43,12 +46,12 @@ export function savedQuestionSnapshot(context: SavedQuestionContext | null, conv
     ? '本地数据中存在多条相同回答，无法确定上下文范围，请选择另一条回答。'
     : '所选回答尚未保存到本地对话数据中，请等待保存后重试。')
   const target = context.messages.indexOf(candidates[0])
-  return { title: context.title.trim() || 'DeepSeek 对话', messages: context.messages.slice(0, target + 1)
+  return { platformId, title: context.title.trim() || `${label} 对话`, messages: context.messages.slice(0, target + 1)
     .map(({ id, role, content }) => ({ id, role, content })) }
 }
 
 export function questionContextMarkdown(snapshot: QuestionContextSnapshot): string {
-  const title = snapshot.title.replace(/[\r\n\t]+/g, ' ').trim() || 'DeepSeek 对话'
+  const title = snapshot.title.replace(/[\r\n\t]+/g, ' ').trim() || `${selectionQuestionTarget(snapshot.platformId ?? 'deepseek').label} 对话`
   return [`# ${title}`, '', '以下为本软件本地保存的对话文字，范围截至所选回答。', '',
     ...snapshot.messages.flatMap((message, index) => [
       `## ${index + 1}. ${message.role === 'user' ? '用户' : 'AI'}`, '',

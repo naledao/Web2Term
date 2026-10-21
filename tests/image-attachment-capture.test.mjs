@@ -62,7 +62,7 @@ function imageFile(name, content, { width = 1220, height = 2656, type = 'image/j
   return { name, content, type, size: Buffer.byteLength(content), width, height, pixels, gate, fail }
 }
 
-function fixture() {
+function fixture(page = null) {
   let now = 1_000_000
   let serial = 0
   const composer = new ElementFixture('div', { contenteditable: 'true', role: 'textbox' })
@@ -71,6 +71,7 @@ function fixture() {
   const form = new ElementFixture('form', {}, [cards, composer, input])
   const body = new ElementFixture('body', {}, [form])
   const resources = new Map()
+  const fetched = []
   const reports = []
   const window = {}
   const document = {
@@ -114,6 +115,7 @@ function fixture() {
     },
     createImageBitmap: async (blob) => ({ width: blob.width, height: blob.height, pixels: blob.pixels, close() {} }),
     async fetch(url) {
+      fetched.push(url)
       assert.ok(resources.has(url), 'fixtures must never fetch a real resource')
       const resource = resources.get(url)
       if (resource.canvasOnly) throw new Error('fixture fetch unavailable')
@@ -121,8 +123,9 @@ function fixture() {
     }
   })
   const controller = window.__cmdTerminalInterceptor
+  if (page) controller.configure({ page })
   return {
-    input, body, form, reports,
+    input, body, form, reports, fetched,
     remember: (files) => controller.imageFixture.rememberDraftFiles(files),
     begin: () => controller.imageFixture.beginUserImageCapture(),
     take: (token) => controller.takeUserImageAttachments(token),
@@ -130,7 +133,7 @@ function fixture() {
     preview(name, content, options = {}) {
       const resource = imageFile(name, content, { width: 940, height: 2048, type: 'image/png', ...options })
       resource.canvasOnly = options.canvasOnly === true
-      const src = `blob:https://offline.invalid/${++serial}`
+      const src = options.src || `blob:https://offline.invalid/${++serial}`
       resources.set(src, resource)
       const image = new ElementFixture('img', { alt: name })
       Object.assign(image, { src, naturalWidth: resource.width, naturalHeight: resource.height, complete: true, pixels: resource.pixels })
@@ -141,6 +144,72 @@ function fixture() {
 }
 
 const contents = (attachments) => Array.from(attachments, (attachment) => attachment.dataBase64)
+
+const nativeImagePage = {
+  fileComposerRootSelector: 'form',
+  fileDraftCardSelector: 'uploader-file-preview',
+  fileDraftImageSelector: 'img[class~="gem-attachment-style-img"]',
+  fileAttachmentCardSelector: 'user-query-file-preview',
+  fileSentImageSelector: 'img[data-test-id="uploaded-img"]',
+  fileUserTurnSelector: 'user-query',
+  fileUserTurnFallbackSelector: '',
+  fileUserTurnKeyAttr: '',
+  messageSelectors: ['model-response', 'user-query', 'message-content'],
+  assistantSelectors: ['message-content'], assistantReplySelectors: [],
+  fileAssistantSelectors: ['model-response', 'message-content']
+}
+
+test('Gemini text-only drafts never capture a 64px account avatar outside the native attachment scope', async () => {
+  const app = fixture(nativeImagePage)
+  const avatar = app.preview('account.jpg', 'account-avatar', {
+    src: 'https://images.offline.invalid/account', width: 64, height: 64, type: 'image/jpeg'
+  })
+  app.body.replaceChildren(new ElementFixture('main', {}, [app.form, avatar]))
+  assert.deepEqual(contents(await app.take(app.begin())), [])
+  assert.equal(app.fetched.length, 0, 'the avatar must not even be read as a candidate')
+})
+
+test('Gemini never borrows unrelated portal blobs or newly loaded account images for a text-only message', async () => {
+  for (const kind of ['portal-blob', 'late-avatar']) {
+    const app = fixture(nativeImagePage)
+    const picture = app.preview('unrelated.jpg', 'unrelated-image', kind === 'late-avatar' ? {
+      src: 'https://images.offline.invalid/account', width: 64, height: 64
+    } : {})
+    if (kind === 'portal-blob') app.body.replaceChildren(app.form, picture)
+    const token = app.begin()
+    if (kind === 'late-avatar') app.body.replaceChildren(app.form, picture)
+    assert.deepEqual(contents(await app.take(token)), [])
+    assert.equal(app.fetched.length, 0)
+  }
+})
+
+test('Gemini native previews retain legitimate uploaded images even when an avatar uses the same host', async () => {
+  const app = fixture(nativeImagePage)
+  const uploaded = app.preview('photo.jpg', 'actual-upload', {
+    src: 'https://images.offline.invalid/upload', width: 64, height: 64
+  })
+  uploaded.attributes.class = 'gem-attachment-style-img'
+  const avatar = app.preview('account.jpg', 'account-avatar', {
+    src: 'https://images.offline.invalid/account', width: 64, height: 64
+  })
+  app.show(new ElementFixture('uploader-file-preview', {}, [uploaded]))
+  app.body.replaceChildren(new ElementFixture('main', {}, [app.form, avatar]))
+  assert.deepEqual(contents(await app.take(app.begin())), [base64('actual-upload')])
+  assert.deepEqual(app.fetched, [uploaded.src])
+})
+
+test('Gemini sent-turn fallback reads only uploaded-img nodes in the new user query', async () => {
+  const app = fixture(nativeImagePage)
+  const token = app.begin()
+  const uploaded = app.preview('photo.jpg', 'actual-sent-upload')
+  uploaded.attributes['data-test-id'] = 'uploaded-img'
+  const avatar = app.preview('account.jpg', 'account-avatar', {
+    src: 'https://images.offline.invalid/account', width: 64, height: 64
+  })
+  app.body.replaceChildren(new ElementFixture('user-query', {}, [uploaded, avatar]), app.form)
+  assert.deepEqual(contents(await app.take(token)), [base64('actual-sent-upload')])
+  assert.deepEqual(app.fetched, [uploaded.src])
+})
 
 test('a cached JPEG and its renamed, resized PNG preview produce one original attachment', async () => {
   const app = fixture()

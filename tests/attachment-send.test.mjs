@@ -214,6 +214,84 @@ test('DeepSeek textarea uploads Markdown before inserting its caption and acknow
   assert.equal(app.send.clicks, 1)
 })
 
+test('Gemini preserves the native answer identity and confirms its document and question in the same user query', () => {
+  for (const includeCaption of [true, false]) {
+    const file = { fileName: 'gemini-context.md', mimeType: 'text/markdown', sizeBytes: 100 }
+    const app = fixture([file], {
+      ...platformExports.GEMINI_PAGE,
+      // The synthetic fixture uses a form for the composer scope; native card,
+      // answer, user-query and row selectors use the measured Gemini adapter.
+      fileComposerRootSelector: 'form'
+    })
+    const answer = element('message-content', { id: 'message-content-id-r_0123456789abcdef' }, '已保存的原回答')
+    app.body.replaceChildren(answer, app.root)
+    assert.equal(app.controller.questionSourceMessageId(answer), 'message-content-id-r_0123456789abcdef')
+    app.cards.replaceChildren(element('uploader-file-preview', {}, file.fileName))
+    assert.equal(app.status().status, 'ready')
+    const question = '请读取附件 gemini-context.md。\n我的问题：这段是什么意思？'
+    assert.equal(app.controller.prepareFileSendCaption(token, question), true)
+    app.send.onClick = () => {
+      app.composer.replaceChildren()
+      app.cards.replaceChildren()
+      const query = element('user-query', {}, [element('user-query-file-preview', {}, file.fileName),
+        ...(includeCaption ? [element('p', {}, question)] : [])])
+      app.body.replaceChildren(element('div', { class: 'conversation-container', id: '0' }, [query]), app.root)
+    }
+    assert.equal(app.submit(), true)
+    assert.equal(app.status().status, includeCaption ? 'sent' : 'confirming')
+    if (!includeCaption) {
+      assert.equal(app.status().turnFilesSeen, true)
+      assert.equal(app.status().captionSeen, false)
+    }
+    assert.equal(app.submit(), false)
+    assert.equal(app.send.clicks, 1)
+  }
+})
+
+test('Claude identifies prose and code-only answers and confirms the file and question in the same native user row', () => {
+  for (const mode of ['sent', 'missing-caption', 'split-turns']) {
+    const file = { fileName: 'claude-context.md', mimeType: 'text/markdown', sizeBytes: 100 }
+    const app = fixture([file], {
+      ...platformExports.CLAUDE_PAGE, sendButtonSelectors: ['button[aria-label="发送"]']
+    })
+    const prose = element('div', { class: 'font-claude-response' }, '已保存的原回答')
+    const answer = element('div', { 'data-testid': 'assistant-message' }, [
+      element('span', { class: 'sr-only' }, 'Claude responded: '), prose
+    ])
+    const codeOnly = element('div', { 'data-testid': 'assistant-message' }, [element('pre', {}, 'console.log("hello")')])
+    app.body.replaceChildren(answer, codeOnly, app.root)
+    const sourceKey = app.controller.questionSourceMessageId(prose)
+    assert.ok(sourceKey.startsWith('text:'), 'Claude uses the exact capture hash of its owning assistant turn')
+    assert.equal(app.controller.questionSourceMessageId(answer), null, 'prose uses the narrower stored answer root')
+    assert.ok(app.controller.questionSourceMessageId(codeOnly).startsWith('text:'), 'code-only capture falls back to the explicit assistant turn')
+    app.cards.replaceChildren(element('div', { 'data-testid': 'file-thumbnail' }, file.fileName))
+    assert.equal(app.status().status, 'ready')
+    const question = '请读取附件 claude-context.md。\n我的问题：这段是什么意思？'
+    assert.equal(app.controller.prepareFileSendCaption(token, question), true)
+    app.send.onClick = () => {
+      app.composer.replaceChildren()
+      app.cards.replaceChildren()
+      const row = element('div', { class: 'group/message-row ms-auto' }, [
+        element('div', { 'data-testid': 'file-thumbnail' }, file.fileName),
+        ...(mode === 'sent' ? [element('div', { 'data-testid': 'user-message' }, question)] : [])
+      ])
+      const rows = [element('div', { 'data-testid': 'transcript-row', 'data-rs-index': '0' }, [row])]
+      if (mode === 'split-turns') rows.push(element('div', { 'data-testid': 'transcript-row', 'data-rs-index': '1' }, [
+        element('div', { class: 'group/message-row ms-auto' }, [element('div', { 'data-testid': 'user-message' }, question)])
+      ]))
+      app.body.replaceChildren(...rows, app.root)
+    }
+    assert.equal(app.submit(), true)
+    assert.equal(app.status().status, mode === 'sent' ? 'sent' : 'confirming')
+    if (mode !== 'sent') {
+      assert.equal(app.status().turnFilesSeen, true)
+      assert.equal(app.status().captionSeen, false)
+    }
+    assert.equal(app.submit(), false)
+    assert.equal(app.send.clicks, 1)
+  }
+})
+
 test('DeepSeek hidden remote decorations do not block Markdown upload or sent confirmation', () => {
   for (const mode of ['no-layout', 'zero-area', 'aria-hidden']) {
     const files = [{ fileName: 'deepseek-context.md', mimeType: 'text/markdown', sizeBytes: 1582 }]

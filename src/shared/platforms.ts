@@ -105,8 +105,8 @@ export interface PageAdapter {
   composerSelectors: string[]
   sendButtonSelectors: string[]
   /**
-   * Stop-generating button. Its disappearance is the only trustworthy signal that a
-   * streamed reply has finished, so a site without one degrades to the settle timer.
+   * Stop-generating button. Also honor replyStreamingAttribute when the site
+   * exposes it; otherwise a site without a stop signal uses the settle timer.
    */
   stopButtonSelectors: string[]
   /** One element per assistant turn. */
@@ -118,7 +118,7 @@ export interface PageAdapter {
    * Sites with unmarked turns continue to identify the role by assistantReplySelectors.
    */
   assistantRoleSelectors?: string[]
-  /** Optional per-turn streaming attribute, observed for reply diagnostics only. */
+  /** Optional per-turn true/false streaming attribute; true prevents accepting a partial reply. */
   replyStreamingAttribute?: string
   /**
    * The element holding ONLY the assistant's answer, inside a turn.

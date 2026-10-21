@@ -5,13 +5,14 @@ import type {
   ExecutionRecord,
   FileReadingPlatform,
   ParsedCommand,
+  RecentCommandRunResult,
   TerminalLine,
   TerminalState
 } from '../shared/types'
 import { ConversationShell, IDLE_TIMEOUT_MS, MAX_RUNTIME_MS } from './shell'
 import type { ExecutionShell, ShellResult } from './shell'
 import type { ConversationStore } from './db'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { parseReadFilesRequest } from '../shared/file-requests'
 import type { FileReadContext, FileSendOutcome, StoredFileReadRequest } from '../shared/file-requests'
 import type { PreparedFileResult } from './file-access'
@@ -161,6 +162,8 @@ export interface CommandRunnerDeps {
   onRemoteOutput: (chunk: string) => void
   onExecutionChanged: (records: ExecutionRecord[]) => void
   onTerminalChanged: (state: TerminalState) => void
+  /** A user-triggered history replay starts a task before its terminal result is sent. */
+  onTaskStarted?: () => void
   /** Notify the host application when the model explicitly reports that the task is complete. */
   onTaskCompleted: (description: string) => void
 }
@@ -280,8 +283,9 @@ function describeOutcome(result: ShellResult): string {
  * The requested command is already in the preceding assistant reply and stays
  * in the local terminal and execution record. Return its outcome, exit code,
  * current directory and output without echoing the command into the chat again.
+ * A history replay includes its command, since it need not match the last reply.
  */
-function buildResultMessage(result: ShellResult): string {
+function buildResultMessage(result: ShellResult, replayedCommand?: string): string {
   // Interactive tools such as git write carriage returns and ANSI erase codes
   // to redraw progress in a terminal. They are not useful in a chat message and
   // can make a browser textarea normalize the text after insertion.
@@ -290,13 +294,14 @@ function buildResultMessage(result: ShellResult): string {
     .replace(/\r\n?/g, '\n')
   const body = readableOutput.trim() === '' ? '(命令没有任何输出)' : truncateOutput(readableOutput)
   const header = [
-    '【上一条命令执行结果】',
+    replayedCommand === undefined ? '【上一条命令执行结果】' : '【历史指令重新执行结果】',
     `结果: ${describeOutcome(result)}`,
     `退出码: ${formatExitCode(result.exitCode)}`,
     `目录: ${result.cwd}`
   ].join('\n')
 
-  return `${header}\n\n${body}`
+  const command = replayedCommand === undefined ? '' : `执行的历史命令:\n${replayedCommand}\n\n输出:\n`
+  return `${header}\n\n${command}${body}`
 }
 
 /** Single-quote a string for a POSIX shell; an embedded quote is closed and reopened. */
@@ -624,6 +629,46 @@ export class CommandRunner {
     return true
   }
 
+  /** Replay a saved command as a new execution without asking the model to regenerate it. */
+  runRecentCommand(conversationId: string, messageId: string): RecentCommandRunResult {
+    if (this.disposed || this.deps.currentConversationId() !== conversationId) return 'unavailable'
+    if (!this.terminalModeOn()) return 'terminal-mode-off'
+    if (this.automation.paused) return 'paused'
+    // A replay must not interrupt other work, including manually entered terminal commands.
+    if (this.inFlight.size > 0 || this.activeShell || this.deps.remoteShell()?.running) return 'busy'
+    const selected = this.deps.store.listRecentCommandJson(conversationId).find((item) => item.messageId === messageId)
+    if (!selected) return 'unavailable'
+    // The original execution has the normalized command and timeout represented by this JSON.
+    const original = this.deps.store.getExecution(selected.messageId)
+    if (!original || original.conversationId !== conversationId || original.kind !== 'command') return 'unavailable'
+    if (original.command.trim() === '' || isPlaceholderCommand(original.command)) return 'invalid'
+
+    // Keep the original output and the page's durable deduplication key untouched.
+    const replayId = `rerun:${randomUUID()}`
+    const created = this.deps.store.createExecution({
+      messageId: replayId,
+      conversationId,
+      command: original.command,
+      description: original.description,
+      timeoutSeconds: original.timeoutSeconds,
+      status: 'pending',
+      createdAt: Date.now()
+    })
+    if (!created) return 'unavailable'
+    this.deps.onTaskStarted?.()
+    this.appendLine({ kind: 'notice', text: '正在重新执行历史指令，完成后自动将结果返回给 AI' })
+    this.broadcastExecutions(conversationId)
+    void this.execute(replayId).catch((error) => {
+      if (this.disposed) return
+      const message = error instanceof Error ? error.message : String(error)
+      this.deps.store.finishExecution(replayId, { status: 'failed', exitCode: null, output: message, finishedAt: Date.now() })
+      this.appendLine({ kind: 'error', text: `重新执行历史指令失败：${message}` })
+      this.broadcastExecutions(conversationId)
+      this.flushTerminal()
+    })
+    return 'ok'
+  }
+
   /** Run a stored command that is still waiting (pending or blocked). */
   async runExecution(messageId: string): Promise<void> {
     const record = this.deps.store.getExecution(messageId)
@@ -872,6 +917,11 @@ export class CommandRunner {
     this.flushTerminal()
     this.broadcastExecutions(conversationId)
 
+    if (request !== this.executionRequest) {
+      this.diagnostic({ event: 'delivery', reason: 'superseded', messageId, ownerConversationId: conversationId })
+      return
+    }
+
     // A command that never ran has no result to hand back.
     if (result.rejected || result.interrupted) {
       this.diagnostic({ event: 'delivery', reason: result.rejected ? 'rejected' : 'interrupted', messageId, ownerConversationId: conversationId })
@@ -951,6 +1001,12 @@ export class CommandRunner {
       }
     }
 
+    // Pause/end can happen while waiting to return a result.
+    if (this.automation.paused || request !== this.executionRequest) {
+      this.diagnostic({ event: 'delivery', reason: this.automation.paused ? 'paused' : 'superseded', messageId, ownerConversationId: conversationId })
+      return
+    }
+
     // Terminal mode off: keep the output in the execution record but do not send it back to the model.
     if (!this.terminalModeOn()) {
       this.appendLine({ kind: 'notice', text: '终端模式已关闭，结果未回传给模型' })
@@ -958,7 +1014,7 @@ export class CommandRunner {
       this.flushTerminal()
       return
     }
-    const message = buildResultMessage(result)
+    const message = buildResultMessage(result, messageId.startsWith('rerun:') ? record.command : undefined)
     this.appendLine({ kind: 'notice', text: '正在发送...' })
     const outcome = await this.deps.sendRawToPage(message)
     this.diagnostic({ event: 'delivery', messageId, ownerConversationId: conversationId, deliveryOutcome: outcome })

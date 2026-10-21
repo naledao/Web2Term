@@ -3,7 +3,9 @@ import interceptorSource from './injected/send-interceptor.js?raw'
 import themeSource from './injected/theme.js?raw'
 import selectionQuestionSource from './injected/selection-question.js?raw'
 import selectionQuestionCss from './injected/selection-question.css?raw'
-import { DeepSeekQuestion } from './deepseek-question'
+import { SelectionQuestion } from './deepseek-question'
+import { writeQuestionLog } from './question-chat-page'
+import { supportsSelectionQuestion } from '../shared/deepseek-question'
 import type { QuestionChatAction, QuestionChatState } from '../shared/deepseek-question'
 import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
 import { sendPageFiles } from './page-files'
@@ -438,7 +440,7 @@ export interface EmbedHandlers {
 
 export class ChatGptEmbed {
   private view: WebContentsView | null = null
-  private selectionQuestion: DeepSeekQuestion | null = null
+  private selectionQuestion: SelectionQuestion | null = null
   private bounds: EmbedBounds = { x: 0, y: 0, width: 0, height: 0 }
   private visible = true
   /** Dedupe key of the last conversation handed to the store. */
@@ -597,8 +599,8 @@ export class ChatGptEmbed {
     const contents = view.webContents
     const baseUserAgent = process.env.EMBED_USER_AGENT ?? chromeLikeUserAgent()
     contents.setUserAgent(baseUserAgent)
-    if (this.platform.id === 'deepseek') {
-      this.selectionQuestion = new DeepSeekQuestion(contents, parent, this.platform, () => this.theme,
+    if (supportsSelectionQuestion(this.platform.id)) {
+      this.selectionQuestion = new SelectionQuestion(contents, parent, this.platform, () => this.theme,
         state => this.handlers.onQuestionChat?.(state), id => this.handlers.readQuestionContext?.(id) ?? null)
       this.selectionQuestion.setVisible(this.visible)
     }
@@ -736,6 +738,7 @@ export class ChatGptEmbed {
       this.publishState()
       this.captureCurrentConversation()
       this.dismissSelectionQuestion()
+      void this.installSelectionQuestion()
     })
     contents.on('page-title-updated', () => {
       this.publishState()
@@ -1089,6 +1092,14 @@ export class ChatGptEmbed {
     this.handlers.onInterceptor(status)
     return status
   }
+  /** A history replay starts in the terminal before any message is sent to the page. */
+  startTerminalTask(): void {
+    this.interceptor.pendingQuestion = null
+    this.interceptor.taskStartedAt = Date.now()
+    this.interceptor.taskFinishedAt = null
+    this.handlers.onInterceptor(this.getInterceptorStatus())
+  }
+
   /** Mark the current task finished and publish the interceptor state. */
   completeTask(): InterceptorStatus {
     this.resetTaskPrompt()
@@ -1163,9 +1174,9 @@ export class ChatGptEmbed {
     }
   }
 
-  /** Install the DeepSeek selection UI without exposing a page IPC bridge. */
+  /** Install the selection UI without exposing a page IPC bridge. */
   private async installSelectionQuestion(): Promise<void> {
-    if (this.platform.id !== 'deepseek') return
+    if (!supportsSelectionQuestion(this.platform.id)) return
     const contents = this.liveContents()
     if (!contents) return
     try {
@@ -1173,19 +1184,25 @@ export class ChatGptEmbed {
       const config = JSON.stringify({
         theme: this.theme,
         reportTag: this.selectionQuestion?.reportTag ?? '',
-        answerSelectors: this.platform.page.assistantReplySelectors,
+        // Gemini's measured assistant turn is already the answer root.
+        answerSelectors: this.platform.page.assistantReplySelectors.length
+          ? this.platform.page.assistantReplySelectors : this.platform.page.assistantSelectors,
+        // Claude code-only replies can omit the answer font container. Only an
+        // explicit assistant role may serve as the fallback, as in replyRootOf.
+        answerFallbackSelectors: this.platform.page.assistantRoleSelectors ?? [],
         css: selectionQuestionCss
       })
       await contents.executeJavaScript(
         `${selectionQuestionSource}\n;window.__cmdTerminalSelectionQuestion.configure(${config});true`
       )
     } catch (error) {
-      console.warn('[embed:deepseek] selection question injection failed:', (error as Error).message)
+      writeQuestionLog('QUESTION-UI-INSTALL-ERROR', { platformId: this.platform.id })
+      console.warn(`[embed:${this.platform.id}] selection question injection failed:`, (error as Error).message)
     }
   }
 
   private dismissSelectionQuestion(): void {
-    if (this.platform.id !== 'deepseek') return
+    if (!supportsSelectionQuestion(this.platform.id)) return
     const contents = this.liveContents()
     if (!contents) return
     void contents.executeJavaScript('window.__cmdTerminalSelectionQuestion?.dismiss();true').catch(() => {

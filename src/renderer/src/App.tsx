@@ -2,7 +2,6 @@ import { createPortal } from 'react-dom'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Filemanager, Willow } from '@svar-ui/react-filemanager'
 import MDEditor from '@uiw/react-md-editor'
-import * as mdCommands from '@uiw/react-md-editor/commands'
 import { Menu } from '@base-ui/react/menu'
 import AvatarEditor from 'react-avatar-editor'
 import type { AvatarEditorRef } from 'react-avatar-editor'
@@ -13,10 +12,12 @@ import type { PdfPreviewTarget } from './components/PdfPreviewDialog'
 import BackendLoginForm from './components/BackendLoginForm'
 import Web2termDevicesSettings from './components/Web2termDevicesSettings'
 import TerminalActionsMenu from './components/TerminalActionsMenu'
+import TerminalNotesPanel from './components/TerminalNotesPanel'
 import type { TerminalActionId } from './components/TerminalActionsMenu'
 import ConversationTranscript from './components/ConversationTranscript'
 import QuestionChatPanel from './components/QuestionChatPanel'
 import type { QuestionChatState } from '@shared/deepseek-question'
+import { supportsSelectionQuestion } from '@shared/deepseek-question'
 import type { CommandLanguage } from './components/CommandViewer'
 import { conversationScrollKey } from './conversation-scroll'
 import { canNavigateCommandHistory, navigateCommandHistory, terminalCommandHistory } from './terminal-command-history'
@@ -28,7 +29,6 @@ import { SESSION_COOKIE_NAME, terminalNotesOwnerKey } from '@shared/types'
 import { DEFAULT_BACKEND_URL, normalizeBackendUrl } from '@shared/backend-url'
 import { sshWorkingDirectory } from '@shared/ssh-directory'
 import { isPdfPath } from '@shared/pdf-preview'
-import './assets/terminal-notes.css'
 import './components/CommandViewer.css'
 import { CHAT_PLATFORMS } from '@shared/platforms'
 import type {
@@ -99,8 +99,8 @@ function SettingsSectionIcon({ section }: { section: SettingsSection }): JSX.Ele
 
 /* Layout sizes live in localStorage so they survive the App remount that happens
  * when the workspace switches to another session (WorkspaceApp keys App by session id).
- * Each session keeps its own copy under `<key>.<sessionId>`; the bare key is the value
- * written before layouts were per session and only seeds sessions that have none yet. */
+ * Each session keeps its own copy under `<key>.<sessionId>`. Width may inherit the
+ * legacy global size; collapse state is session-only so new chats start expanded. */
 const STORAGE_PANEL_WIDTH = 'layout.panelWidth'
 const STORAGE_PANEL_COLLAPSED = 'layout.panelCollapsed'
 const STORAGE_PANEL_TAB = 'layout.panelTab'
@@ -395,7 +395,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [recentCommandOpen, setRecentCommandOpen] = useState(false)
   const [recentCommands, setRecentCommands] = useState<RecentCommandJson[]>([])
   const [recentCommandLoading, setRecentCommandLoading] = useState(false)
-  const [recentCommandSending, setRecentCommandSending] = useState<string | null>(null)
+  const [recentCommandRunning, setRecentCommandRunning] = useState<string | null>(null)
   const [recentCommandError, setRecentCommandError] = useState('')
   const [conversationTranscript, setConversationTranscript] = useState<{ ownerKey: string | null; messages: ConversationMessage[] }>({ ownerKey: null, messages: [] })
   const conversationRequestRef = useRef(0)
@@ -407,7 +407,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     PANEL_MIN_WIDTH,
     readStoredNumber(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), readStoredNumber(STORAGE_PANEL_WIDTH, PANEL_DEFAULT_WIDTH))
   ))
-  const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), readStoredBool(STORAGE_PANEL_COLLAPSED, false)))
+  const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), false))
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     try {
       return window.localStorage.getItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId)) === 'terminal' ? 'terminal' : 'control'
@@ -425,7 +425,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     setQuestionChat(null)
     setPanelTab(current => current === 'question' ? 'control' : current)
     const accept = (state: QuestionChatState | null): void => {
-      if (!alive || platformId !== 'deepseek') return
+      if (!alive || !supportsSelectionQuestion(platformId) || (state && state.platformId !== platformId)) return
       setQuestionChat(state)
       if (!state) {
         openedId = ''
@@ -439,7 +439,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setPanelWidth(previous => Math.min(Math.max(previous, 480), Math.max(PANEL_MIN_WIDTH, window.innerWidth - PANEL_MAX_RESERVE)))
     }
     const unsubscribe = window.api.onQuestionChatState((state, ownerId) => {
-      if (ownerId !== sessionId) return
+      if (ownerId !== sessionId || (state && state.platformId !== platformId)) return
       revision++
       accept(state)
     })
@@ -515,12 +515,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [ssh, setSsh] = useState<SshState | null>(null)
   const [sshHosts, setSshHosts] = useState<SshHost[]>([])
   /** Notes for the current machine and working directory. */
-  const [notesOpen, setNotesOpen] = useState(false)
   const [notes, setNotes] = useState<TerminalNotes | null>(null)
   const [notesDraft, setNotesDraft] = useState('')
   const [notesSaving, setNotesSaving] = useState(false)
   const [notesError, setNotesError] = useState('')
-  const [notesPreview, setNotesPreview] = useState(false)
   const tools = useToolWindows()
   const toolWindowOpen = tools.windows.some((item) => item.sessionId === sessionId && !item.minimized)
   /** One viewer with separate base-prompt and tool-prompt content. */
@@ -601,8 +599,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * place keeps the switcher's "you are here" mark honest.
    */
   const sshLive = sshActive && (ssh?.status === 'connected' || ssh?.status === 'connecting')
-  /** True when the machine in charge has a note; the marker on the 说明 button. */
-  const notesSet = (notes?.text ?? '').trim() !== ''
   const slotRef = useRef<HTMLDivElement>(null)
   const placeholderCloseTimerRef = useRef<number | null>(null)
   const userAvatarInputRef = useRef<HTMLInputElement>(null)
@@ -1056,7 +1052,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
   /** Open a picker without automatically re-running the last assistant reply. */
   const openRecentCommands = useCallback(async (): Promise<void> => {
-    if (!conversationId || taskRunning || recentCommandSending) return
+    if (!conversationId || taskRunning || recentCommandRunning) return
     if (recentCommandOpen) {
       setRecentCommandOpen(false)
       return
@@ -1072,25 +1068,34 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     } finally {
       setRecentCommandLoading(false)
     }
-  }, [conversationId, taskRunning, recentCommandSending, recentCommandOpen])
+  }, [conversationId, taskRunning, recentCommandRunning, recentCommandOpen])
 
-  const sendRecentCommand = useCallback(async (messageId: string): Promise<void> => {
-    if (!conversationId || taskRunning || recentCommandSending) return
-    setRecentCommandSending(messageId)
+  const runRecentCommand = useCallback(async (messageId: string): Promise<void> => {
+    if (!conversationId || taskRunning || recentCommandRunning) return
+    setRecentCommandRunning(messageId)
     setRecentCommandError('')
     try {
-      const result = await window.api.sendRecentCommandJson(conversationId, messageId)
+      const result = await window.api.runRecentCommand(conversationId, messageId)
       if (result === 'ok') {
         setRecentCommandOpen(false)
+        setPanelTab('terminal')
+        setPanelCollapsed(false)
       } else {
-        setRecentCommandError(result === 'busy' ? 'AI 正在生成或输入框已有内容，请稍后重试。' : result === 'stuck' ? '未确认发送成功，请检查 AI 输入框，避免重复发送。' : result === 'unavailable' ? '当前对话或所选指令已失效，请重新打开。' : '发送失败，请确认 AI 页面及输入框可用。')
+        const errors = {
+          busy: '当前任务或终端正在运行，请结束后再重试。',
+          unavailable: '当前对话或所选指令已失效，请重新打开。',
+          invalid: '这条历史指令为空或是占位符，无法执行。',
+          paused: '当前已暂停，请先恢复后再执行历史指令。',
+          'terminal-mode-off': '请先开启终端模式，再执行历史指令。'
+        }
+        setRecentCommandError(errors[result])
       }
     } catch {
-      setRecentCommandError('发送失败，请检查当前会话连接。')
+      setRecentCommandError('启动执行失败，请检查当前会话及终端状态。')
     } finally {
-      setRecentCommandSending(null)
+      setRecentCommandRunning(null)
     }
-  }, [conversationId, taskRunning, recentCommandSending])
+  }, [conversationId, taskRunning, recentCommandRunning])
 
   useEffect(() => {
     setRecentCommandOpen(false)
@@ -1676,7 +1681,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * it while they are open; the pending-question widget is deliberately excluded because it
    * lives in the terminal column and must leave the chat page usable underneath.
    */
-  const terminalModalOpen = terminalVisible && (notesOpen || sshFilesOpen)
+  const terminalModalOpen = terminalVisible && sshFilesOpen
   const nativeEmbedVisible = !placeholderToggle && !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
   useEffect(() => {
     window.api.setEmbedVisible(nativeEmbedVisible)
@@ -1705,7 +1710,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * Adopt the note the main process hands over.
    *
    * Main pushes on every save AND whenever the machine in charge changes, so the
-   * draft is only replaced when the editor is showing a DIFFERENT machine —
+   * draft is only replaced when the editor is showing a DIFFERENT machine/directory —
    * otherwise a routine broadcast would wipe whatever is being typed.
    */
   const applyNotes = useCallback((value: TerminalNotes): void => {
@@ -1748,7 +1753,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       const saved = await window.api.setTerminalNotes(notesDraft, owner)
       if (notesSnapshotRef.current && terminalNotesOwnerKey(notesSnapshotRef.current) === terminalNotesOwnerKey(saved)) {
         applyNotes(saved)
-        setNotesOpen(false)
       }
     } catch {
       setNotesError('说明未保存，请确认当前工作目录后重试。')
@@ -1875,7 +1879,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
   // …and dismisses the transient panels that live in the terminal column.
   useEffect(() => {
-    if (!sshPickerOpen && !notesOpen && !sshFilesOpen) return
+    if (!sshPickerOpen && !sshFilesOpen) return
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || event.defaultPrevented) return
       if (pdfPreview) {
@@ -1884,12 +1888,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         return
       }
       setSshPickerOpen(false)
-      setNotesOpen(false)
       setSshFilesOpen(false)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [sshPickerOpen, notesOpen, sshFilesOpen, pdfPreview])
+  }, [sshPickerOpen, sshFilesOpen, pdfPreview])
 
   const saveSettings = useCallback(async (): Promise<void> => {
     if (savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null) return
@@ -1988,7 +1991,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       case 'edit-directory': setCwdDraft(terminal?.cwd ?? ''); break
       case 'upload': void uploadSshFiles(); break
       case 'files': toggleSshFiles(); break
-      case 'notes': setNotesOpen(true); break
       case 'git': tools.open(sessionId, 'git', sshActive ? sshCwd : (terminal?.cwd ?? '')); break
       case 'mysql': tools.open(sessionId, 'mysql'); break
       case 'redis': tools.open(sessionId, 'redis'); break
@@ -2193,13 +2195,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               <button type="button" className="panel__tab" aria-pressed={panelTab === 'control'} onClick={() => {
                 setPanelTab('control')
                 setSshPickerOpen(false)
-                setNotesOpen(false)
               }}>控制</button>
               <button type="button" className="panel__tab" aria-pressed={panelTab === 'terminal'} onClick={() => setPanelTab('terminal')}>终端</button>
               {questionChat ? <button type="button" className="panel__tab" aria-pressed={panelTab === 'question'} onClick={() => {
                 setPanelTab('question')
                 setSshPickerOpen(false)
-                setNotesOpen(false)
               }}>侧边聊天</button> : null}
             </div>
           )}
@@ -2212,13 +2212,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             onClick={() => {
               setPanelCollapsed((value) => !value)
               setSshPickerOpen(false)
-              setNotesOpen(false)
             }}
           >
             {panelCollapsed ? '«' : '»'}
           </button>
         </div>
-        <div className="panel__view" hidden={panelTab !== 'control'}>
+        <div className="panel__view panel__view--control" hidden={panelTab !== 'control'}>
         <div className="terminal-controls">
           <div className="terminal__row">
             <span className="terminal__label">终端模式</span>
@@ -2324,9 +2323,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             <button
               type="button"
               className="btn"
-              disabled={!conversationId || taskRunning}
+              disabled={!conversationId || taskRunning || recentCommandRunning !== null}
               aria-expanded={recentCommandOpen}
-              title="从最近三条完整指令中选择一条发送给 AI"
+              title="选择最近三条指令之一，在当前终端执行并自动将结果返回给 AI"
               onClick={() => void openRecentCommands()}
             >
               重新执行指令
@@ -2342,7 +2341,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               <div className="recent-command-picker__header">
                 <div>
                   <strong>选择历史指令</strong>
-                  <p>最近三条 · 选择后将完整 JSON 发给 AI</p>
+                  <p>最近三条 · 在当前终端执行，完成后自动回传结果</p>
                 </div>
                 <button type="button" className="recent-command-picker__close" aria-label="关闭选择区域" onClick={() => setRecentCommandOpen(false)}>×</button>
               </div>
@@ -2362,17 +2361,16 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                       <button
                         type="button"
                         className="btn btn--primary recent-command-picker__send"
-                        disabled={recentCommandSending !== null}
-                        onClick={() => void sendRecentCommand(item.messageId)}
+                        disabled={recentCommandRunning !== null}
+                        onClick={() => void runRecentCommand(item.messageId)}
                       >
-                        {recentCommandSending === item.messageId ? '正在发送…' : '发送此指令给 AI'}
+                        {recentCommandRunning === item.messageId ? '正在启动执行…' : '执行此指令'}
                       </button>
                     </div>
                   ))}
                 </div>
               )}
               {recentCommandError ? <p className="recent-command-picker__error" role="alert">{recentCommandError}</p> : null}
-              <p className="recent-command-picker__foot">不会直接在终端执行；AI 回复后按当前自动化模式处理。</p>
             </div>
           ) : null}
 
@@ -2414,6 +2412,15 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           </div>
         </div>
 
+        <TerminalNotesPanel
+          theme={theme}
+          notes={notes}
+          value={notesDraft}
+          saving={notesSaving}
+          error={notesError}
+          onChange={setNotesDraft}
+          onSave={() => void saveNotes()}
+        />
         </div>
 
         {questionChat ? (
@@ -2491,101 +2498,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             closeDisabled={web2termActive && (!terminal?.transport?.canClose || terminal.transport.status === 'closing')}
             closing={web2termActive && terminal?.transport?.status === 'closing'}
             uploading={sshUploading}
-            notesSet={notesSet}
             sendDelaySeconds={terminal?.sendDelaySeconds ?? 0}
             onAction={handleTerminalAction}
             onSendDelayChange={updateSendDelay}
           />
         </div>
-        {/* Markdown note editor. The native embedded view is hidden while this modal is open. */}
-        {!notesOpen ? null : (
-          <div
-            className="modal modal--notes"
-            role="dialog"
-            aria-modal="true"
-            aria-label="编辑补充说明"
-            onMouseDown={(event) => {
-              if (event.target === event.currentTarget) setNotesOpen(false)
-            }}
-          >
-            <div className="notes-modal" data-color-mode={theme}>
-              <div className="notes-modal__head">
-                <div className="notes-modal__heading">
-                  <span className="notes-modal__title">发送给 AI 的补充说明</span>
-                  <span className="notes-modal__scope" title={notes?.label}>
-                    {web2termActive ? `web2term · ${notes?.label || '设备'}` : notes?.scope === 'ssh' ? `SSH · ${notes.label}` : '本机'}
-                  </span>
-                </div>
-                <span className="panel__spacer" />
-                <span className={notesDraft === (notes?.text ?? '') ? 'notes-modal__saved notes-modal__saved--ok' : 'notes-modal__saved'}>
-                  <span>●</span>{notesDraft === (notes?.text ?? '') ? '已保存' : '未保存'}
-                </span>
-                <button type="button" className="notes-modal__close" aria-label="关闭" onClick={() => setNotesOpen(false)}>×</button>
-              </div>
-
-              <div className="notes-modal__context">
-                <div className="notes-modal__directory" title={notes?.directory || ''}>
-                  <span>当前目录</span>
-                  <strong>{notes?.directory || '等待终端确定工作目录…'}</strong>
-                </div>
-                <p>仅用于这台机器的当前目录，其他目录独立保存。</p>
-                {notesError ? <p className="notes-modal__error" role="alert">{notesError}</p> : null}
-              </div>
-
-              <div className="notes-modal__editor-wrap">
-                <div className="notes-modal__toolbar-mode">
-                  <button
-                    type="button"
-                    className={notesPreview ? 'notes-modal__preview-toggle notes-modal__preview-toggle--on' : 'notes-modal__preview-toggle'}
-                    onClick={() => setNotesPreview((value) => !value)}
-                  >
-                    ◉ {notesPreview ? '编辑' : '预览'}
-                  </button>
-                </div>
-                <MDEditor
-                  value={notesDraft}
-                  preview={notesPreview ? 'preview' : 'edit'}
-                  visibleDragbar={false}
-                  commands={[
-                    mdCommands.title,
-                    mdCommands.divider,
-                    mdCommands.bold,
-                    mdCommands.italic,
-                    mdCommands.strikethrough,
-                    mdCommands.divider,
-                    mdCommands.link,
-                    mdCommands.code,
-                    mdCommands.quote,
-                    mdCommands.divider,
-                    mdCommands.unorderedListCommand,
-                    mdCommands.orderedListCommand,
-                    mdCommands.divider,
-                    mdCommands.image
-                  ]}
-                  extraCommands={[]}
-                  textareaProps={{
-                    placeholder: '继续输入补充说明…',
-                    disabled: notesSaving || !notes?.directoryKey,
-                    'aria-label': '补充说明 Markdown 编辑器'
-                  }}
-                  onChange={(value) => setNotesDraft(value ?? '')}
-                />
-              </div>
-
-              <div className="notes-modal__foot">
-                <button type="button" className="notes-modal__button" disabled={notesSaving || notesDraft === ''} onClick={() => setNotesDraft('')}>清空</button>
-                {notes?.legacyText ? (
-                  <button type="button" className="notes-modal__button" disabled={notesSaving || !notes.directoryKey || notesDraft !== ''} title="将旧的机器说明放入编辑区；保存后仅用于当前目录" onClick={() => setNotesDraft(notes.legacyText)}>导入原机器说明</button>
-                ) : null}
-                <span className="panel__spacer" />
-                <button type="button" className="notes-modal__button" onClick={() => setNotesOpen(false)}>取消</button>
-                <button type="button" className="notes-modal__button notes-modal__button--primary" disabled={notesSaving || !notes?.directoryKey || notesDraft === (notes?.text ?? '')} onClick={() => void saveNotes()}>
-                  {notesSaving ? '保存中…' : '保存'}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
         {sshActive && sshFilesOpen ? (
           <div
             ref={sshFilesModalRef}

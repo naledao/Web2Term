@@ -311,7 +311,9 @@
     return node
   }
 
+  let pendingAssistantCompletion = null
   const setReplyWaiting = (since, reason, messageId = null) => {
+    pendingAssistantCompletion = null
     const awaitingReplyBefore = state.awaitingReplySince !== 0
     state.awaitingReplySince = since
     report({ event: 'reply-state', reason, messageId, awaitingReplyBefore })
@@ -476,6 +478,13 @@
   }
 
   const findStopButton = () => findComposerControl(PAGE.stopButtonSelectors)
+  const replyIsGenerating = (node) => {
+    if (findStopButton()) return true
+    // Claude can keep its turn explicitly streaming after the toolbar stop
+    // control disappears. A pause in thinking/searching is not a final answer.
+    try { return !!(node && PAGE.replyStreamingAttribute && node.getAttribute(PAGE.replyStreamingAttribute) === 'true') }
+    catch (_) { return false }
+  }
 
   /* ------------------------------------------------------------------ *
    * Site-specific element lookup
@@ -539,7 +548,7 @@
     return node.getAttribute(PAGE.messageIdAttr) || null
   }
 
-  const pageMessageIdAttrs = () => (PAGE.messageIdAttr ? [PAGE.messageIdAttr] : [])
+  const pageReplyAttrs = () => [...new Set([PAGE.messageIdAttr, PAGE.replyStreamingAttribute].filter(Boolean))]
 
   /**
    * Identity for one assistant turn — and it must NEVER be empty.
@@ -605,7 +614,7 @@
   const beginUserImageCapture = () => {
     userImageCaptureSerial += 1
     const token = `img:${Date.now().toString(36)}:${userImageCaptureSerial.toString(36)}`
-    const turns = userTurns()
+    const turns = hasNativeImageScope() ? fileUserTurns() : userTurns()
     const baselineImages = new Map(
       [...document.querySelectorAll('img')].map((image) => [image, imageSourceOf(image)])
     )
@@ -704,6 +713,18 @@
     if (root.tagName === 'IMG') found.push(root)
     found.push(...root.querySelectorAll('img'))
     return found
+  }
+
+  // Measured attachment markup is authoritative. Page-wide image discovery
+  // would otherwise archive account avatars and decorative images as uploads.
+  const hasNativeImageScope = () => !!(PAGE.fileDraftCardSelector || PAGE.fileAttachmentCardSelector ||
+    PAGE.fileDraftImageSelector || PAGE.fileSentImageSelector)
+  const sentImageCandidates = (turn) => {
+    const root = fileAttachmentRoot(turn)
+    if (!root) return []
+    if (PAGE.fileSentImageSelector) return [...root.querySelectorAll(PAGE.fileSentImageSelector)]
+    if (PAGE.fileAttachmentCardSelector) return [...root.querySelectorAll(PAGE.fileAttachmentCardSelector)].flatMap(collectImages)
+    return collectImages(root)
   }
 
   const imageMimeType = (source) => {
@@ -897,19 +918,25 @@
       .filter((file) => String(file.type || '').startsWith('image/'))
     const images = []
     const seen = new Set()
-    let root = attachmentRoot() || getComposer()
-    for (let depth = 0; depth < 8 && root && root !== document.body; depth += 1, root = root.parentElement) {
-      if (attachmentHasMessages(root)) break
-      for (const image of collectImages(root)) {
-        if (seen.has(image)) continue
-        seen.add(image)
-        if (imageLooksLikeAttachment(image)) images.push(image)
+    const nativeScope = hasNativeImageScope()
+    if (nativeScope) {
+      const root = attachmentRoot()
+      if (root) images.push(...attachmentDraftImages(root, attachmentDraftCards(root)))
+    } else {
+      let root = attachmentRoot() || getComposer()
+      for (let depth = 0; depth < 8 && root && root !== document.body; depth += 1, root = root.parentElement) {
+        if (attachmentHasMessages(root)) break
+        for (const image of collectImages(root)) {
+          if (seen.has(image)) continue
+          seen.add(image)
+          if (imageLooksLikeAttachment(image)) images.push(image)
+        }
       }
     }
     // Some ChatGPT builds render the upload preview in a portal that is not an
     // ancestor of the composer. A blob URL is still a strong attachment signal;
     // ordinary remote page images are deliberately not included by this fallback.
-    if (images.length === 0) {
+    if (!nativeScope && images.length === 0) {
       for (const image of document.querySelectorAll('img')) {
         if (seen.has(image)) continue
         if ([...PAGE.messageSelectors, ...PAGE.assistantReplySelectors,
@@ -994,20 +1021,21 @@
     let turn = null
     let turnSeenAt = 0
     let images = []
-    const newImages = () => [...document.querySelectorAll('img')].filter((image) => {
+    const nativeScope = hasNativeImageScope()
+    const newImages = () => nativeScope ? [] : [...document.querySelectorAll('img')].filter((image) => {
       const previousSource = capture.baselineImages?.get(image)
       const source = imageSourceOf(image)
       return source !== '' && (previousSource === undefined || previousSource !== source) && imageLooksLikeAttachment(image)
     })
     while (Date.now() < deadline) {
-      const turns = userTurns()
+      const turns = nativeScope ? fileUserTurns() : userTurns()
       const newest = turns.length > 0 ? turns[turns.length - 1] : null
       if (newest && newest !== capture.baselineTurn) {
         if (turn !== newest) {
           turn = newest
           turnSeenAt = Date.now()
         }
-        images = collectImages(turn).filter((image) => imageLooksLikeAttachment(image))
+        images = (nativeScope ? sentImageCandidates(turn) : collectImages(turn)).filter((image) => imageLooksLikeAttachment(image))
         if (images.length > 0) break
         // Text-only sends should not make persistence wait the full timeout. Keep a
         // little longer than the old 700ms window because ChatGPT may append the
@@ -2127,7 +2155,7 @@
   const syncRenderedAssistantHistory = () => {
     if (!PAGE.messageIdAttr || findStopButton()) return
     for (const node of queryAllAssistant()) {
-      if (!isAssistantTurn(node)) continue
+      if (!isAssistantTurn(node) || replyIsGenerating(node)) continue
       const messageId = messageIdOf(node)
       if (!messageId) continue
       const text = readReplyMarkdown(node)
@@ -2326,8 +2354,11 @@
      * command the model never issued to us.
      */
     const text = readReplyText(node)
+    if (replyIsGenerating(node)) {
+      noteScan(messageId, 'still-generating')
+      return
+    }
     if (looksLikeReadFilesReply(text)) {
-      if (findStopButton()) return
       const parsed = extractReadFiles(text)
       if (!parsed) {
         if (state.lastUnparsedMessageId !== messageId) {
@@ -2341,10 +2372,6 @@
       return
     }
     if (looksLikeQuestionReply(text)) {
-      if (findStopButton()) {
-        noteScan(messageId, 'question-still-generating')
-        return
-      }
       // Live clarification continues even when terminal command execution is disabled.
       if (state.awaitingReplySince === 0) {
         state.lastCommandMessageId = messageId
@@ -2428,36 +2455,46 @@
         return
       }
 
-      // A settled non-command reply is the final answer for this goal.
-      // A quiet period while streaming is not final: the stop button remains visible until generation ends.
-      if (text.trim() && state.awaitingReplySince !== 0 && !findStopButton()) {
-        const completed = text.trimStart().startsWith('【任务完成】')
-        state.lastCommandMessageId = messageId
-        setReplyWaiting(0, 'non-command-reply', messageId)
-        if (completed) {
-          state.taskActive = false
-          resetTaskPrompt()
-        }
+      // Commit only a settled final answer. Keep the wait owned until the
+      // delayed Markdown read confirms that generation has not resumed.
+      if (text.trim() && state.awaitingReplySince !== 0 && pendingAssistantCompletion?.messageId !== messageId) {
+        const completion = { messageId, path: location.pathname, generation: state.taskPromptGeneration }
+        pendingAssistantCompletion = completion
         // ChatGPT can remove the stop control before its Markdown renderer has
         // replaced the final plain text with <code>/<strong>/<table> nodes. Read
         // once more after that DOM pass so the database keeps the formatting.
         setTimeout(() => {
-          const latest = queryAllAssistant().find((candidate) => turnKeyOf(candidate) === messageId) || node
-          report({ event: 'assistant-message', messageId, text: readReplyMarkdown(latest) || text })
+          if (pendingAssistantCompletion !== completion) return
+          pendingAssistantCompletion = null
+          if (completion.path !== location.pathname || completion.generation !== state.taskPromptGeneration ||
+              state.awaitingReplySince === 0 || state.pendingQuestion) return
+          const nodes = queryAllAssistant()
+          const latest = latestReplyNode(nodes)
+          if (!latest || !isAssistantTurn(latest) || !latest.isConnected) return
+          if (replyIsGenerating(latest) || turnKeyOf(latest) !== messageId || readReplyText(latest) !== text) {
+            scheduleCheck()
+            return
+          }
+          const markdown = readReplyMarkdown(latest) || text
+          const completed = text.trimStart().startsWith('【任务完成】')
+          replyScanSnapshot = snapshotReplyScan(latest, nodes)
+          state.lastCommandMessageId = messageId
+          setReplyWaiting(0, 'non-command-reply', messageId)
+          if (completed) {
+            state.taskActive = false
+            resetTaskPrompt()
+          }
+          report({ event: 'assistant-message', messageId, text: markdown })
+          report({ event: 'task-finished', messageId, completed })
         }, 250)
-        report({
-          event: 'task-finished',
-          messageId,
-          completed
-        })
       }
 
       /*
        * The catch-all, and the one that would have answered the question this was written for.
        *
-       * A site with NO stop button cannot tell "still streaming, just quiet" from "finished" —
-       * `findStopButton()` above is the only thing that could, and on DeepSeek it is always null
-       * by design. So a pause longer than REPLY_SETTLE_MS mid-reply is taken as final, the turn
+       * A site with neither a stop button nor a streaming attribute cannot tell "still
+       * streaming, just quiet" from "finished". DeepSeek has neither, so a pause longer
+       * than REPLY_SETTLE_MS mid-reply can be taken as final, the turn
        * is marked handled, and the command that arrives afterwards is skipped forever by the
        * `already-handled` guard. The three fields below are what separate that from an ordinary
        * "the model wrote prose and meant nothing by it".
@@ -2482,13 +2519,6 @@
     // would let the shell finish before the current assistant turn is done, so the
     // raw result gets inserted into a composer that ChatGPT still refuses to send.
     // The stop button disappearing mutates the DOM and schedules another check.
-    if (findStopButton()) {
-      // A command is on screen and the reply is still generating. Nothing is wrong; the stop
-      // button disappearing mutates the DOM and schedules another check.
-      noteScan(messageId, 'still-generating')
-      return
-    }
-
     // Terminal mode is off: treat the reply as ordinary chat and never report it as a command.
     if (!state.enabled) {
       state.lastCommandMessageId = messageId
@@ -2591,16 +2621,18 @@
       scheduleRenderedAssistantHistory()
     }
   })
-  observer.observe(document.body, {
+  const observeReplyMutations = () => observer.observe(document.body, {
     childList: true,
     subtree: true,
     characterData: true,
     // ChatGPT may create a turn node before assigning data-message-id. Without
     // observing that attribute, a fully rendered reply can remain invisible to
-    // the scanner if no later text mutation happens.
+    // the scanner if no later text mutation happens. Claude can finish solely
+    // by flipping data-is-streaming, without another text mutation.
     attributes: true,
-    attributeFilter: pageMessageIdAttrs()
+    attributeFilter: pageReplyAttrs()
   })
+  observeReplyMutations()
 
   /**
    * Last resort for 结束任务: click the composer's primary action, when nothing else found a
@@ -3289,6 +3321,7 @@
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
         PAGE = { ...PAGE, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing
       // it renders can be a reply to us.

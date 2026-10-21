@@ -92,6 +92,7 @@ function fixture(nodes, page = CLAUDE_PAGE) {
   const timers = new Map()
   let timerSerial = 0
   let notifyMutation
+  let observationOptions
   const body = element('body', {}, nodes)
   const window = {}
   const refreshPositions = () => {
@@ -111,7 +112,7 @@ function fixture(nodes, page = CLAUDE_PAGE) {
     Node: { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_PRECEDING: 2 },
     MutationObserver: class {
       constructor(callback) { notifyMutation = callback }
-      observe() {}
+      observe(_target, options) { observationOptions = options }
     },
     getComputedStyle: () => ({ visibility: 'visible' }),
     setTimeout(callback, delay) { const id = ++timerSerial; timers.set(id, { callback, delay }); return id },
@@ -122,6 +123,7 @@ function fixture(nodes, page = CLAUDE_PAGE) {
   controller.configure({ enabled: true, page })
   return {
     controller, events,
+    observation: () => observationOptions,
     commands: () => events.filter((event) => event.event === 'command'),
     replaceNodes(next) {
       body.childNodes = next
@@ -232,24 +234,121 @@ test('reconfiguration clears Claude roles and retains DeepSeek answer-based reco
   assert.equal(app.commands()[0].command, 'pwd')
 })
 
-test('diagnostics explain a waiting-state reset during thinking before a skipped question', () => {
+test('Claude thinking keeps the reply waiting without a stop button, so a later question is still live', () => {
   const thinking = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'true' }, '权衡中 Claude 正在思考')
   const app = fixture([thinking])
   app.controller.checkNow()
-  const reset = app.events.find((event) => event.event === 'reply-state' && event.reason === 'non-command-reply')
-  assert.equal(reset.awaitingReplyBefore, true)
-  assert.equal(reset.awaitingReply, false)
-  assert.equal(reset.replyStreamingState, 'true')
-  assert.equal(reset.stopButtonFound, false)
-  assert.equal(reset.stopButtonOnPage, false)
+  const waiting = app.events.find((event) => event.reason === 'still-generating')
+  assert.equal(waiting.awaitingReply, true)
+  assert.equal(waiting.replyStreamingState, 'true')
+  assert.equal(waiting.stopButtonFound, false)
+  assert.equal(waiting.stopButtonOnPage, false)
+  assert.equal(app.events.some(event => event.event === 'assistant-message' || event.event === 'task-finished'), false)
+  assert.equal(app.controller.status().lastCommandMessageId, null)
   const question = JSON.stringify({ type: 'questions', questions: [{ question: '选择哪个安装方式？' }] })
   app.replaceNodes([element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'false' }, question)])
   app.scan()
-  const skipped = app.events.find((event) => event.reason === 'question-not-live')
-  assert.equal(skipped.awaitingReply, false)
-  assert.equal(skipped.replyKind, 'questions')
-  assert.equal(skipped.replyStreamingState, 'false')
-  assert.equal(skipped.replyTextLength, question.length)
+  const detected = app.events.find((event) => event.event === 'question')
+  assert.equal(detected.live, true)
+  assert.equal(detected.replyKind, 'questions')
+  assert.equal(detected.replyStreamingState, 'false')
+  assert.equal(detected.replyTextLength, question.length)
+  assert.equal(app.events.some(event => event.reason === 'question-not-live'), false)
+})
+
+test('Claude saves only the completed full answer after thinking and web search fragments', () => {
+  const thinking = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'true' }, '确定问题具体指什么内容。运行中')
+  const app = fixture([thinking])
+  app.controller.checkNow()
+  app.tick(250)
+  for (const text of ['继续确定问题的具体内容', '搜索网页中', '搜索到了相关资料']) {
+    app.replaceNodes([element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'true' }, text)])
+    app.scan(); app.tick(250)
+    assert.equal(app.events.some(event => event.event === 'assistant-message' || event.event === 'task-finished'), false)
+    assert.notEqual(app.controller.status().awaitingReplySince, 0)
+  }
+  const fullAnswer = '没有找到 Day 16 的具体内容。以下是背景和已知信息，不能当作 Day 16 的改进清单。'
+  const final = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'false' }, [element('p', {}, fullAnswer)])
+  app.replaceNodes([final]); app.scan()
+  assert.equal(app.events.some(event => event.event === 'assistant-message'), false, 'the final Markdown rendering pass has not completed yet')
+  app.tick(250)
+  const saved = app.events.filter(event => event.event === 'assistant-message')
+  assert.equal(saved.length, 1)
+  assert.equal(saved[0].text, fullAnswer)
+  assert.equal(saved[0].messageId, app.controller.questionSourceMessageId(final))
+  assert.equal(saved[0].replyStreamingState, 'false')
+  assert.equal(app.controller.status().awaitingReplySince, 0)
+  app.scan(); app.tick(250)
+  assert.equal(app.events.filter(event => event.event === 'assistant-message').length, 1)
+  assert.equal(app.events.filter(event => event.event === 'task-finished').length, 1)
+})
+
+test('Claude streaming-state changes are observed after configuring the adapter, even with no text change', () => {
+  const reply = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'true' }, '最终回答内容')
+  const app = fixture([reply])
+  assert.ok(app.observation().attributeFilter.includes('data-is-streaming'))
+  app.controller.checkNow()
+  app.tick(250)
+  assert.equal(app.events.some(event => event.event === 'assistant-message'), false)
+  reply.attributes['data-is-streaming'] = 'false'
+  app.scan(); app.tick(250)
+  assert.equal(app.events.filter(event => event.event === 'assistant-message').length, 1)
+  app.controller.configure({ page: CHATGPT_PAGE })
+  assert.equal(app.observation().attributeFilter.includes('data-is-streaming'), false)
+  assert.ok(app.observation().attributeFilter.includes(CHATGPT_PAGE.messageIdAttr))
+})
+
+test('a reply that resumes streaming during the delayed Markdown read never saves a partial turn', () => {
+  const reply = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'false' }, '刚刚生成的片段')
+  const app = fixture([reply])
+  app.controller.checkNow()
+  assert.notEqual(app.controller.status().awaitingReplySince, 0)
+  reply.attributes['data-is-streaming'] = 'true'
+  app.tick(250)
+  assert.equal(app.events.some(event => event.event === 'assistant-message' || event.event === 'task-finished'), false)
+  assert.notEqual(app.controller.status().awaitingReplySince, 0)
+  app.replaceNodes([element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'false' }, '完整的最终回答')])
+  app.scan(); app.tick(250)
+  assert.equal(app.events.filter(event => event.event === 'assistant-message').length, 1)
+  assert.equal(app.events.find(event => event.event === 'assistant-message').text, '完整的最终回答')
+})
+
+test('a delayed answer keeps its Markdown formatting and is cancelled when the source wait is reset', () => {
+  for (const cancelled of [false, true]) {
+    const initial = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'false' }, '【任务完成】最终回答')
+    const app = fixture([initial])
+    app.controller.checkNow()
+    const formatted = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'false' }, [
+      element('p', {}, ['【任务完成】', element('strong', {}, '最终回答')])
+    ])
+    app.replaceNodes([formatted])
+    if (cancelled) app.controller.armBaseline()
+    app.tick(250)
+    const saved = app.events.filter(event => event.event === 'assistant-message')
+    assert.equal(saved.length, cancelled ? 0 : 1)
+    if (!cancelled) {
+      assert.equal(saved[0].text, '【任务完成】**最终回答**')
+      assert.equal(app.events.find(event => event.event === 'task-finished').completed, true)
+    }
+  }
+})
+
+test('Claude does not accept streamed commands, questions or file requests before the turn is complete', () => {
+  for (const [event, text] of [
+    ['command', commandJson('pwd')],
+    ['question', JSON.stringify({ type: 'questions', questions: [{ question: '选哪个？' }] })],
+    ['read-files', JSON.stringify({ type: 'read_files', files: [{ path: '/tmp/example.md' }], description: '读取文件' })]
+  ]) {
+    const reply = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'true' }, text)
+    const app = fixture([reply])
+    app.controller.checkNow(); app.tick(250)
+    assert.equal(app.events.some(item => item.event === event), false)
+    assert.notEqual(app.controller.status().awaitingReplySince, 0)
+    reply.attributes['data-is-streaming'] = 'false'
+    app.scan()
+    assert.equal(app.events.filter(item => item.event === event).length, 1)
+    assert.equal(app.events.find(item => item.event === event).live, true)
+  }
 })
 
 test('question detection records its live-state transition and pending status', () => {
@@ -363,6 +462,7 @@ test('a latest ChatGPT prose reply does not cause an earlier command to be execu
   ])
   const app = fixture([chatgptReply('old-message', 'old-command'), prose], CHATGPT_PAGE)
   app.controller.checkNow()
+  app.tick(250)
   assert.equal(app.commands().length, 0)
   assert.ok(app.events.some((event) => event.event === 'task-finished' && event.messageId === 'new-message'))
 })

@@ -41,6 +41,7 @@ import type {
   EmbedState,
   ExecutionMode,
   ExecutionRecord,
+  RecentCommandRunResult,
   InterceptorStatus,
   ManagedSessionSummary,
   WorkspaceState,
@@ -243,6 +244,8 @@ function showManagerWhenReady(): void {
    * user's next action is aimed at the window underneath it.
    */
   if (managerWindow.isMinimized()) managerWindow.restore()
+  // Maximize on the initial reveal, after the splash has finished closing.
+  managerWindow.maximize()
   managerWindow.show()
   managerWindow.focus()
 }
@@ -1322,14 +1325,12 @@ function registerIpcHandlers(): void {
     if (!runtime || !store || typeof conversationId !== 'string' || runtime.embed.getState().conversationId !== conversationId) return []
     return store.listRecentCommandJson(conversationId)
   })
-  ipcMain.handle(IpcChannels.recentCommandSend, async (event, conversationId: string, messageId: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable'> => {
+  ipcMain.handle(IpcChannels.recentCommandRun, (event, conversationId: string, messageId: string): RecentCommandRunResult => {
     const runtime = runtimeForEvent(event)
     if (!runtime || !store || typeof conversationId !== 'string' || runtime.embed.getState().conversationId !== conversationId || typeof messageId !== 'string') return 'unavailable'
     const status = runtime.embed.getInterceptorStatus()
     if (status.taskStartedAt !== null && status.taskFinishedAt === null) return 'busy'
-    const selected = store.listRecentCommandJson(conversationId).find((item) => item.messageId === messageId)
-    if (!selected) return 'unavailable'
-    return runtime.embed.sendRaw(selected.payloadJson)
+    return runtime.runner.runRecentCommand(conversationId, messageId)
   })
   ipcMain.handle(IpcChannels.executionList, (event, conversationId: string): ExecutionRecord[] => {
     if (!runtimeForEvent(event) || !store) return []
@@ -1438,6 +1439,7 @@ function registerIpcHandlers(): void {
   tool('createMysqlTable', (runtime, draft, database, sql) => runtime.createMysqlTable(draft, database, sql))
   tool('dropMysqlTable', (runtime, draft, database, table, type) => runtime.dropMysqlTable(draft, database, table, type))
   tool('getMysqlTableDdl', (runtime, draft, database, table) => runtime.getMysqlTableDdl(draft, database, table))
+  tool('exportMysqlDatabaseDdl', (runtime, draft, database) => runtime.exportMysqlDatabaseDdl(draft, database))
   tool('removeMysqlConnection', (runtime, id) => runtime.removeMysqlConnection(id))
   tool('listRedisConnections', (runtime) => runtime.listRedisConnections())
   tool('saveRedisConnection', (runtime, draft) => runtime.saveRedisConnection(draft))
