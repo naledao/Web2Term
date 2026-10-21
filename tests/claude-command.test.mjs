@@ -364,6 +364,36 @@ test('question detection records its live-state transition and pending status', 
   assert.equal(detected.replyKind, 'questions')
 })
 
+test('question options written as {label, description} objects become one line each and keep the raw JSON', () => {
+  const question = JSON.stringify({ type: 'questions', questions: [{
+    question: '下一步怎么做？',
+    options: [{ label: 'A: 寻找新增信息', description: '先证明信息增量' }, { label: 'B: 结束本轮' }, '自定义']
+  }] })
+  const app = fixture([element('div', { 'data-testid': 'assistant-message' }, question)])
+  app.controller.checkNow()
+  const detected = app.events.find((event) => event.event === 'question')
+  assert.deepEqual(detected.questions[0].options, ['A: 寻找新增信息：先证明信息增量', 'B: 结束本轮', '自定义'])
+  assert.equal(detected.rawJson, question)
+})
+
+test('a restored question is reported for history only and can be replayed as a live question', () => {
+  const question = JSON.stringify({ type: 'questions', questions: [{ question: '选择哪个安装方式？', options: ['A', 'B'] }] })
+  const app = fixture([element('div', { 'data-testid': 'assistant-message' }, question)])
+  app.controller.armBaseline()
+  app.scan()
+  assert.equal(app.events.some((event) => event.event === 'question'), false)
+  const history = app.events.find((event) => event.event === 'question-history')
+  assert.equal(history.rawJson, question)
+  assert.equal(app.controller.status().pendingQuestion, null)
+
+  assert.equal(app.controller.replayQuestion(history.messageId, '{"type":"questions","questions":[]}'), 'invalid')
+  assert.equal(app.controller.replayQuestion(history.messageId, question), 'ok')
+  assert.equal(app.controller.status().pendingQuestion.messageId, history.messageId)
+  const replayed = app.events.find((event) => event.event === 'question')
+  assert.equal(replayed.live, true)
+  assert.deepEqual(replayed.questions[0].options, ['A', 'B'])
+})
+
 test('unavailable diagnostic DOM metadata does not block command recognition', () => {
   const reply = codeReply()
   const getAttribute = reply.getAttribute.bind(reply)

@@ -29,7 +29,7 @@ import type { CommandHistoryCursor } from './terminal-command-history'
 import brandIcon from './assets/brand-icon.png'
 import type { IApi as FilemanagerApi, IEntity as FilemanagerEntity } from '@svar-ui/react-filemanager'
 import type { CSSProperties, FormEvent, JSX, PointerEvent as ReactPointerEvent } from 'react'
-import { SESSION_COOKIE_NAME, terminalNotesOwnerKey } from '@shared/types'
+import { SESSION_COOKIE_NAME, isQuestionPayload, terminalNotesOwnerKey } from '@shared/types'
 import { DEFAULT_BACKEND_URL, normalizeBackendUrl } from '@shared/backend-url'
 import { sshWorkingDirectory } from '@shared/ssh-directory'
 import { isPdfPath } from '@shared/pdf-preview'
@@ -222,6 +222,15 @@ function statusTone(status: ExecutionStatus): string {
   if (status === 'interrupted') return 'badge badge--warn'
   if (status === 'blocked') return 'badge badge--warn'
   return 'badge'
+}
+
+/** A 重新执行指令 entry that asks the user again instead of running a command. */
+function isRecentQuestion(payloadJson: string): boolean {
+  try {
+    return isQuestionPayload(JSON.parse(payloadJson))
+  } catch {
+    return false
+  }
 }
 
 function formatTerminalCommand(text: string, posix: boolean): string {
@@ -1157,7 +1166,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         const errors = {
           busy: '当前任务或终端正在运行，请结束后再重试。',
           unavailable: '当前对话或所选指令已失效，请重新打开。',
-          invalid: '这条历史指令为空或是占位符，无法执行。',
+          invalid: '这条历史指令为空、是占位符，或问题格式无效，无法执行。',
           paused: '当前已暂停，请先恢复后再执行历史指令。',
           'terminal-mode-off': '请先开启终端模式，再执行历史指令。'
         }
@@ -2441,7 +2450,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               <div className="recent-command-picker__header">
                 <div>
                   <strong>选择历史指令</strong>
-                  <p>最近三条 · 在当前终端执行，完成后自动回传结果</p>
+                  <p>最近三条 · 指令在当前终端执行并自动回传结果；问题会重新弹出，回答后发给 AI</p>
                 </div>
                 <button type="button" className="recent-command-picker__close" aria-label="关闭选择区域" onClick={() => setRecentCommandOpen(false)}>×</button>
               </div>
@@ -2454,7 +2463,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                   {recentCommands.map((item, index) => (
                     <div className="recent-command-picker__item" key={item.messageId}>
                       <div className="recent-command-picker__meta">
-                        <strong>第 {index + 1} 条{index === 0 ? ' · 最新' : ''}</strong>
+                        <strong>第 {index + 1} 条{isRecentQuestion(item.payloadJson) ? ' · 问题' : ''}{index === 0 ? ' · 最新' : ''}</strong>
                         <time>{new Date(item.createdAt).toLocaleString('zh-CN')}</time>
                       </div>
                       <pre className="recent-command-picker__json">{item.payloadJson}</pre>
@@ -2464,7 +2473,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                         disabled={recentCommandRunning !== null}
                         onClick={() => void runRecentCommand(item.messageId)}
                       >
-                        {recentCommandRunning === item.messageId ? '正在启动执行…' : '执行此指令'}
+                        {isRecentQuestion(item.payloadJson)
+                          ? recentCommandRunning === item.messageId ? '正在打开问题…' : '重新提问'
+                          : recentCommandRunning === item.messageId ? '正在启动执行…' : '执行此指令'}
                       </button>
                     </div>
                   ))}

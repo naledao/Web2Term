@@ -1193,7 +1193,7 @@ export interface InterceptorControl {
 
 /** Events reported by the injected page script (over the console bridge). */
 export interface InterceptorPageEvent {
-  /** Complete JSON payload of a detected command. */
+  /** Complete JSON payload of a detected command or question. */
   rawJson?: string
   event:
     | 'installed'
@@ -1206,6 +1206,8 @@ export interface InterceptorPageEvent {
     | 'assistant-message'
     | 'assistant-history-markdown'
     | 'question'
+    /** An old (not live) question reply, reported only so it can be recorded for replay. */
+    | 'question-history'
     | 'question-cleared'
     | 'task-finished'
     | 'send-failed'
@@ -1441,6 +1443,19 @@ export interface RecentCommandJson {
 }
 
 export type RecentCommandRunResult = 'ok' | 'busy' | 'unavailable' | 'invalid' | 'paused' | 'terminal-mode-off'
+
+/** A recorded clarification request (`question` / `questions`) rather than a command. */
+export function isQuestionPayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
+  const type = (payload as { type?: unknown }).type
+  return type === 'question' || type === 'questions'
+}
+
+/** What 重新执行指令 keeps: a command object, or a question object to ask again. */
+export function isRecentCommandPayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
+  return typeof (payload as { command?: unknown }).command === 'string' || isQuestionPayload(payload)
+}
 
 /** One command lifted out of an assistant reply, and what happened to it. */
 export interface ExecutionRecord {

@@ -610,6 +610,15 @@ export class SessionRuntime {
       onQuestion: (question, count) => {
         if (isActive()) this.notifyQuestion(question, count)
       },
+      onQuestionRecorded: (messageId, rawJson) => {
+        const conversationId = record().conversationId
+        if (!conversationId) return
+        try {
+          this.options.store.saveRecentCommandJson(conversationId, messageId, rawJson)
+        } catch (error) {
+          console.warn('[cmd] question not recorded:', (error as Error).message)
+        }
+      },
       onTaskCompleted: () => {
         if (isActive()) this.notifyTaskCompleted('任务已完成')
       },

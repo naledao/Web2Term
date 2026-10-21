@@ -7,6 +7,7 @@ import { parseReadFilesRequest } from '../shared/file-requests'
 import { normalizeTerminalNotesDirectory } from './terminal-notes'
 import { interruptRunningCommands, recoverInterruptedExecutions } from './execution-recovery'
 import type { StoredFileReadRequest, FileDeliveryStatus } from '../shared/file-requests'
+import { isRecentCommandPayload } from '../shared/types'
 import type {
   Conversation,
   ConversationImageAttachmentInput,
@@ -841,12 +842,9 @@ export class ConversationStore {
     return true
   }
 
-  /** Persist a complete command JSON object; keep only the latest three per conversation. */
+  /** Persist a complete command or question JSON object; keep only the latest three per conversation. */
   saveRecentCommandJson(conversationId: string, messageId: string, payloadJson: string): void {
-    const payload: unknown = JSON.parse(payloadJson)
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || typeof (payload as { command?: unknown }).command !== 'string') {
-      throw new Error('Invalid command JSON payload')
-    }
+    if (!isRecentCommandPayload(JSON.parse(payloadJson))) throw new Error('Invalid command JSON payload')
     this.db.exec('BEGIN IMMEDIATE')
     try {
       this.db.prepare('INSERT OR IGNORE INTO recent_command_json (conversation_id, message_id, payload_json, created_at) VALUES (?, ?, ?, ?)')

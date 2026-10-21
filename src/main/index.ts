@@ -68,7 +68,7 @@ import { ConversationStore } from './db'
 import { workspaceProjectDraft, workspaceSessionOptions } from './workspace-projects'
 import { EMPTY_SSH_STATE, SessionRuntime } from './session-runtime'
 import { installAppLog, installNetLog } from './app-log'
-import { EMPTY_NACOS_VIEW_STATE } from '../shared/types'
+import { EMPTY_NACOS_VIEW_STATE, isQuestionPayload } from '../shared/types'
 import { NacosView } from './nacos-view'
 import { applyUpdateProxy, checkForUpdates, downloadUpdate, getUpdateStatus, installUpdate, setUpdaterBroadcast, startUpdateSchedule } from './updater'
 
@@ -1332,11 +1332,17 @@ function registerIpcHandlers(): void {
     if (!runtime || !store || typeof conversationId !== 'string' || runtime.embed.getState().conversationId !== conversationId) return []
     return store.listRecentCommandJson(conversationId)
   })
-  ipcMain.handle(IpcChannels.recentCommandRun, (event, conversationId: string, messageId: string): RecentCommandRunResult => {
+  ipcMain.handle(IpcChannels.recentCommandRun, async (event, conversationId: string, messageId: string): Promise<RecentCommandRunResult> => {
     const runtime = runtimeForEvent(event)
     if (!runtime || !store || typeof conversationId !== 'string' || runtime.embed.getState().conversationId !== conversationId || typeof messageId !== 'string') return 'unavailable'
     const status = runtime.embed.getInterceptorStatus()
     if (status.taskStartedAt !== null && status.taskFinishedAt === null) return 'busy'
+    const selected = store.listRecentCommandJson(conversationId).find((item) => item.messageId === messageId)
+    let payload: unknown = null
+    try { payload = selected ? JSON.parse(selected.payloadJson) : null } catch { /* treated as a command below */ }
+    // A question is asked again in the page rather than run: the answer goes back to the model.
+    // Terminal mode and 暂停 do not gate it, just as they do not gate a live question.
+    if (selected && isQuestionPayload(payload)) return runtime.embed.replayQuestion(selected.messageId, selected.payloadJson)
     return runtime.runner.runRecentCommand(conversationId, messageId)
   })
   ipcMain.handle(IpcChannels.executionList, (event, conversationId: string): ExecutionRecord[] => {

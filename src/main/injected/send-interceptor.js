@@ -2101,6 +2101,34 @@
   // Questions have their own discriminator. Never send a question-shaped object
   // through the lenient command parser, even if it also contains a command field.
   const looksLikeQuestionReply = (text) => /"type"\s*:\s*"questions?"/.test(String(text || ''))
+  // Options are strings, but models also write {"label","description"}; both become one line.
+  const questionOption = (option) => {
+    if (typeof option === 'string') return option.trim()
+    if (!option || typeof option !== 'object' || typeof option.label !== 'string') return ''
+    const label = option.label.trim()
+    const description = typeof option.description === 'string' ? option.description.trim() : ''
+    const text = label && description ? `${label}：${description}` : label
+    return text.length > 300 ? `${text.slice(0, 299)}…` : text
+  }
+  /** A parsed question/questions object as dialog pages, or null when any part is unusable. */
+  const questionPages = (parsed) => {
+    if (!parsed || (parsed.type !== 'question' && parsed.type !== 'questions') || 'command' in parsed) return null
+    const items = parsed.type === 'questions'
+      ? parsed.questions
+      : [{ question: parsed.question, placeholder: parsed.placeholder, options: parsed.options }]
+    if (!Array.isArray(items) || items.length < 1 || items.length > 20) return null
+    const questions = []
+    for (const item of items) {
+      if (!item || typeof item !== 'object') return null
+      if (typeof item.question !== 'string' || !item.question.trim() || item.question.length > 16000) return null
+      if (item.placeholder !== undefined && (typeof item.placeholder !== 'string' || item.placeholder.length > 1000)) return null
+      if (item.options !== undefined && (!Array.isArray(item.options) || item.options.length > 8)) return null
+      const options = (item.options || []).map(questionOption)
+      if (options.some((option) => !option || option.length > 300)) return null
+      questions.push({ question: item.question.trim(), placeholder: (item.placeholder || '').trim(), options })
+    }
+    return { questions }
+  }
   const extractQuestion = (rawText) => {
     // The string-aware scanner ignores outer fences while preserving Markdown
     // fences inside question values. Replacing them before JSON.parse corrupts
@@ -2115,25 +2143,9 @@
           continue
         }
         if (!parsed || (parsed.type !== 'question' && parsed.type !== 'questions')) continue
-        if ('command' in parsed) return null
-        const items = parsed.type === 'questions'
-          ? parsed.questions
-          : [{ question: parsed.question, placeholder: parsed.placeholder, options: parsed.options }]
-        if (!Array.isArray(items) || items.length < 1 || items.length > 20) return null
-        const questions = []
-        for (const item of items) {
-          if (!item || typeof item !== 'object') return null
-          if (typeof item.question !== 'string' || !item.question.trim() || item.question.length > 16000) return null
-          if (item.placeholder !== undefined && (typeof item.placeholder !== 'string' || item.placeholder.length > 1000)) return null
-          if (item.options !== undefined && (!Array.isArray(item.options) || item.options.length > 8 ||
-            item.options.some((option) => typeof option !== 'string' || !option.trim() || option.length > 300))) return null
-          questions.push({
-            question: item.question.trim(),
-            placeholder: (item.placeholder || '').trim(),
-            options: (item.options || []).map((option) => option.trim())
-          })
-        }
-        return { questions }
+        const question = questionPages(parsed)
+        // The model's own JSON is kept so 重新执行指令 can show and replay exactly what it sent.
+        return question ? { ...question, rawJson: attempt } : null
       }
     }
     return null
@@ -2376,6 +2388,9 @@
       if (state.awaitingReplySince === 0) {
         state.lastCommandMessageId = messageId
         noteScan(messageId, 'question-not-live')
+        // Not asked again, but kept for 重新执行指令 — an old question can still be replayed.
+        const history = extractQuestion(text)
+        if (history) report({ event: 'question-history', messageId, rawJson: history.rawJson })
         return
       }
       const question = extractQuestion(text)
@@ -3517,6 +3532,21 @@
       // the task's prompt boundary so DOM/configuration updates cannot reopen it.
       report({ event: 'question-cleared', messageId })
       return 'cancelled'
+    },
+
+    /** Reopen a recorded question (from 重新执行指令) as if the model had just asked it. */
+    replayQuestion(messageId, payloadJson) {
+      if (typeof messageId !== 'string' || !messageId) return 'invalid'
+      let question = null
+      try {
+        question = questionPages(JSON.parse(String(payloadJson)))
+      } catch (_) { /* reported as invalid below */ }
+      if (!question) return 'invalid'
+      if (state.programmatic || state.awaitingReplySince !== 0) return 'busy'
+      state.pendingQuestion = { messageId, ...question }
+      state.answerDraft = null
+      report({ event: 'question', messageId, ...question, rawJson: String(payloadJson), live: true })
+      return 'ok'
     },
 
     async answerQuestion(messageId, answer) {

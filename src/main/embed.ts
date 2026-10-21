@@ -420,6 +420,8 @@ export interface EmbedHandlers {
   onCommand(command: ParsedAction): void
   /** An explicitly marked plain-text reply reports that the task is complete. */
   onQuestion(question: string, count: number): void
+  /** A question reply's JSON, live or from history, to keep for 重新执行指令. */
+  onQuestionRecorded(messageId: string, rawJson: string): void
   onTaskCompleted(): void
   /**
    * This view finished loading its page for the first time since it was created.
@@ -1030,6 +1032,20 @@ export class ChatGptEmbed {
     return this.getInterceptorStatus()
   }
 
+  /**
+   * Ask a recorded question again. The page validates the JSON and reports it back as a live
+   * `question`, which is what opens the app dialog; answering then works like the original.
+   */
+  async replayQuestion(messageId: string, payloadJson: string): Promise<'ok' | 'busy' | 'invalid' | 'unavailable'> {
+    const contents = this.liveContents()
+    if (!contents) return 'unavailable'
+    const outcome: unknown = await contents.executeJavaScript(
+      `window.__cmdTerminalInterceptor && window.__cmdTerminalInterceptor.replayQuestion ? window.__cmdTerminalInterceptor.replayQuestion(${JSON.stringify(messageId)}, ${JSON.stringify(payloadJson)}) : 'unavailable'`
+    ).catch(() => 'unavailable')
+    console.info(`[embed:${this.platform.id}] question replay outcome=${String(outcome)} messageId=${messageId}`)
+    return outcome === 'ok' || outcome === 'busy' || outcome === 'invalid' ? outcome : 'unavailable'
+  }
+
   /** Clear only this question and its owned draft; do not end the task or submit a message. */
   async cancelQuestion(messageId: string): Promise<InterceptorStatus> {
     if (this.interceptor.pendingQuestion?.messageId !== messageId) {
@@ -1593,6 +1609,7 @@ export class ChatGptEmbed {
             // page script also reports assistant-message for this turn; the database's
             // source-message uniqueness makes that duplicate harmless.
             if (isNewQuestion) this.handlers.onQuestion(questions[0].question, questions.length)
+            if (typeof payload.rawJson === 'string') this.handlers.onQuestionRecorded(messageId, payload.rawJson)
             this.handlers.onAssistantMessage(
               messageId,
               questions.map((item, index) => `${index + 1}. ${item.question}`).join('\n')
@@ -1602,6 +1619,11 @@ export class ChatGptEmbed {
         break
       case 'question-cleared':
         if (this.interceptor.pendingQuestion?.messageId === payload.messageId) this.interceptor.pendingQuestion = null
+        break
+      case 'question-history':
+        if (typeof payload.messageId === 'string' && payload.messageId !== '' && typeof payload.rawJson === 'string') {
+          this.handlers.onQuestionRecorded(payload.messageId, payload.rawJson)
+        }
         break
       case 'task-finished':
         /*
