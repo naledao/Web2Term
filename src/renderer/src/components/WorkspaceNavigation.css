@@ -3,8 +3,6 @@
 .workspace-navigation button { font: inherit; color: inherit; cursor: pointer; }
 .workspace-navigation button:disabled { opacity: .5; cursor: wait; }
 .workspace-navigation button:focus-visible, .workspace-navigation input:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.workspace-navigation__create { display: grid; gap: 2px; padding-bottom: 16px; }
-.workspace-navigation__create > button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; text-align: left; }
 .workspace-navigation__list { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 0 0 12px; }
 .workspace-navigation__project { margin-bottom: 12px; }
 .workspace-navigation__project-head, .workspace-navigation__chat { position: relative; display: flex; align-items: center; min-width: 0; min-height: 36px; border-radius: 9px; }
@@ -13,10 +11,10 @@
 .workspace-navigation__title { display: block; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-navigation__children .workspace-navigation__chat-link { padding-left: 35px; }
 .workspace-navigation__ungrouped { padding-top: 4px; }
-.workspace-navigation__local-head { position: relative; display: flex; align-items: center; min-height: 32px; margin-bottom: 2px; padding: 0 34px 0 8px; color: var(--text-muted); }
-.workspace-navigation__local-head h2 { margin: 0; font-size: 12px; font-weight: 400; }
+.workspace-navigation__section-head { position: relative; display: flex; align-items: center; min-height: 32px; margin-bottom: 2px; padding: 0 34px 0 8px; color: var(--text-muted); }
+.workspace-navigation__section-head h2 { margin: 0; font-size: 12px; font-weight: 400; }
 .workspace-navigation__chat.is-active { background: color-mix(in srgb, var(--text) 7%, transparent); }
-.workspace-navigation__project-head:hover, .workspace-navigation__chat:hover, .workspace-navigation__create > button:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 5%, transparent); }
+.workspace-navigation__project-head:hover, .workspace-navigation__chat:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
 .workspace-navigation .workspace-navigation__icon { position: absolute; right: 2px; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 27px; height: 28px; padding: 4px; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; }
 .workspace-navigation .workspace-navigation__add { right: 30px; }
 .workspace-navigation__icon:hover { background: color-mix(in srgb, var(--text) 9%, transparent); }

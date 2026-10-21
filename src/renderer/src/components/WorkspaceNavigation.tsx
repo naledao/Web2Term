@@ -5,9 +5,8 @@ import type { ManagedSessionSummary, WorkspaceProject } from '@shared/types'
 import { platformById } from '@shared/platforms'
 import './WorkspaceNavigation.css'
 
-function Icon({ kind }: { kind: 'chat' | 'folder' | 'open' | 'plus' | 'more' }): ReactElement {
+function Icon({ kind }: { kind: 'folder' | 'open' | 'plus' | 'more' }): ReactElement {
   return <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    {kind === 'chat' ? <><path d="M14 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" /><path d="m12 12 8-8 2 2-8 8-3 1z" /></> : null}
     {kind === 'folder' || kind === 'open' ? <><path d="M3 8V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2" />{kind === 'open' ? <path d="M3 9h17a1 1 0 0 1 1 1.3l-2 8a2 2 0 0 1-2 1.7H5a2 2 0 0 1-2-2z" /> : <path d="M3 8h18v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />}</> : null}
     {kind === 'plus' ? <path d="M12 5v14M5 12h14" /> : null}
     {kind === 'more' ? <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></> : null}
@@ -117,11 +116,12 @@ export default function WorkspaceNavigation({ sessions, projects, activeId, them
   }
   const ungrouped = sessions.filter(item => !item.projectId || !projects.some(project => project.id === item.projectId))
   return <div className="workspace-navigation">
-    <div className="workspace-navigation__create">
-      <button type="button" ref={newChatButton} disabled={creating} onClick={() => onNewChat(null)}><Icon kind="chat" /><span>新建聊天</span></button>
-      <button type="button" onClick={onNewProject}><Icon kind="folder" /><span>新建项目</span></button>
-    </div>
     <div className="workspace-navigation__list">
+      <div className="workspace-navigation__section-head">
+        <h2>项目</h2>
+        <button type="button" className="workspace-navigation__icon" aria-label="新建项目" title="新建项目"
+          onClick={onNewProject}><Icon kind="plus" /></button>
+      </div>
       {projects.map(project => <section className="workspace-navigation__project" key={project.id} onDragOver={dragOver} onDrop={event => drop(event, project.id)}>
         <div className="workspace-navigation__project-head">
           <button type="button" className="workspace-navigation__folder" title={project.directory ? `${project.name}\n${project.directory}` : `${project.name}\n默认目录`}
@@ -142,9 +142,9 @@ export default function WorkspaceNavigation({ sessions, projects, activeId, them
         </div>
       </section>)}
       <section className="workspace-navigation__ungrouped" aria-labelledby="workspace-local-chats-heading" onDragOver={dragOver} onDrop={event => drop(event, null)}>
-        <div className="workspace-navigation__local-head">
+        <div className="workspace-navigation__section-head">
           <h2 id="workspace-local-chats-heading">本电脑</h2>
-          <button type="button" className="workspace-navigation__icon" disabled={creating} aria-label="在本电脑中新建聊天" title="新建聊天"
+          <button type="button" ref={newChatButton} className="workspace-navigation__icon" disabled={creating} aria-label="在本电脑中新建聊天" title="新建聊天"
             onClick={() => onNewChat(null)}><Icon kind="plus" /></button>
         </div>
         {ungrouped.map(row)}
