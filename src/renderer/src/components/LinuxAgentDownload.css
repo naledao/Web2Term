@@ -3,7 +3,6 @@
 .linux-agent-download__head { display:flex; align-items:center; flex-wrap:wrap; gap:14px; }
 .linux-agent-download__info { display:grid; flex:1 1 220px; min-width:0; gap:4px; }
 .linux-agent-download__info strong { color:#25314a; font-size:15px; }
-.linux-agent-download__info span { color:#78839a; font-size:12.5px; }
 .linux-agent-download__actions { display:flex; flex-wrap:wrap; gap:8px; }
 .linux-agent-download__actions button { flex:none; }
 .linux-agent-download__bar { height:6px; overflow:hidden; border-radius:3px; background:#e8edf6; }
@@ -11,15 +10,9 @@
 .linux-agent-download__status { margin:0; color:#667085; font-size:13px; overflow-wrap:anywhere; user-select:text; }
 .linux-agent-download__status--ok { color:#21835c; }
 .linux-agent-download__status--error { color:#c2410c; }
-.linux-agent-download__hint { margin:4px 0 0; color:#667085; font-size:13px; }
-.linux-agent-download__commands { margin:0; padding:10px 12px; overflow-x:auto; border-radius:8px; background:#f4f6fa; color:#25314a; font-size:12px; line-height:1.7; user-select:text; }
 .workspace[data-theme='dark'] .linux-agent-download { border-color:#3a4254; background:#252a36; }
-.workspace[data-theme='dark'] .linux-agent-download__info strong,
-.workspace[data-theme='dark'] .linux-agent-download__commands { color:#e7edf7; }
-.workspace[data-theme='dark'] .linux-agent-download__info span,
-.workspace[data-theme='dark'] .linux-agent-download__status,
-.workspace[data-theme='dark'] .linux-agent-download__hint { color:#aab6cd; }
+.workspace[data-theme='dark'] .linux-agent-download__info strong { color:#e7edf7; }
+.workspace[data-theme='dark'] .linux-agent-download__status { color:#aab6cd; }
 .workspace[data-theme='dark'] .linux-agent-download__status--ok { color:#7bd6a8; }
 .workspace[data-theme='dark'] .linux-agent-download__status--error { color:#f5a37a; }
 .workspace[data-theme='dark'] .linux-agent-download__bar { background:#3a4254; }
-.workspace[data-theme='dark'] .linux-agent-download__commands { background:#1d212b; }
