@@ -12,8 +12,10 @@ import type { PdfPreviewTarget } from './components/PdfPreviewDialog'
 import BackendLoginForm from './components/BackendLoginForm'
 import Web2termDevicesSettings from './components/Web2termDevicesSettings'
 import TerminalActionsMenu from './components/TerminalActionsMenu'
+import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
 import type { TerminalActionId } from './components/TerminalActionsMenu'
+import type { ToolKind } from './tool-window-state'
 import ConversationTranscript from './components/ConversationTranscript'
 import QuestionChatPanel from './components/QuestionChatPanel'
 import type { QuestionChatState } from '@shared/deepseek-question'
@@ -71,7 +73,7 @@ const PANEL_MIN_WIDTH = 380
 const PANEL_DEFAULT_WIDTH = 400
 const PANEL_MAX_RESERVE = 520
 
-type PanelTab = 'control' | 'terminal' | 'question'
+type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question'
 
 const SETTINGS_SECTIONS = [
   { id: 'appearance', label: '外观' },
@@ -410,7 +412,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), false))
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     try {
-      return window.localStorage.getItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId)) === 'terminal' ? 'terminal' : 'control'
+      const stored = window.localStorage.getItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId))
+      return stored === 'terminal' || stored === 'toolbox' ? stored : 'control'
     } catch {
       return 'control'
     }
@@ -1991,11 +1994,13 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       case 'edit-directory': setCwdDraft(terminal?.cwd ?? ''); break
       case 'upload': void uploadSshFiles(); break
       case 'files': toggleSshFiles(); break
-      case 'git': tools.open(sessionId, 'git', sshActive ? sshCwd : (terminal?.cwd ?? '')); break
-      case 'mysql': tools.open(sessionId, 'mysql'); break
-      case 'redis': tools.open(sessionId, 'redis'); break
-      case 'nacos': tools.open(sessionId, 'nacos'); break
     }
+  }
+
+  const gitCwd = sshActive ? sshCwd : (terminal?.cwd ?? '')
+  const openTool = (kind: ToolKind): void => {
+    setSshPickerOpen(false)
+    tools.open(sessionId, kind, kind === 'git' ? gitCwd : undefined)
   }
 
   return (
@@ -2197,6 +2202,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                 setSshPickerOpen(false)
               }}>控制</button>
               <button type="button" className="panel__tab" aria-pressed={panelTab === 'terminal'} onClick={() => setPanelTab('terminal')}>终端</button>
+              <button type="button" className="panel__tab" aria-pressed={panelTab === 'toolbox'} onClick={() => {
+                setPanelTab('toolbox')
+                setSshPickerOpen(false)
+              }}>工具箱</button>
               {questionChat ? <button type="button" className="panel__tab" aria-pressed={panelTab === 'question'} onClick={() => {
                 setPanelTab('question')
                 setSshPickerOpen(false)
@@ -2421,6 +2430,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           onChange={setNotesDraft}
           onSave={() => void saveNotes()}
         />
+        </div>
+
+        <div className="panel__view" hidden={panelTab !== 'toolbox'}>
+          <ToolboxPanel gitDisabled={web2termActive} gitCwd={gitCwd} onOpen={openTool} />
         </div>
 
         {questionChat ? (

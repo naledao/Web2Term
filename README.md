@@ -100,7 +100,7 @@ flowchart LR
 
 ### 工具箱
 
-在展开的终端面板顶部点击 **工具箱**，可打开以下工具：
+在右侧栏顶部切换到 **工具箱** 页签，可打开以下工具：
 
 | 工具 | 当前功能 |
 | --- | --- |
@@ -269,7 +269,7 @@ See the [web2term Linux agent guide](agents/linux/README.md) for installation an
 
 ### Toolbox
 
-Click **工具箱** (Toolbox) at the top of the expanded terminal panel to open these tools:
+Switch to the **工具箱** (Toolbox) tab at the top of the right sidebar to open these tools:
 
 | Tool | Current functionality |
 | --- | --- |

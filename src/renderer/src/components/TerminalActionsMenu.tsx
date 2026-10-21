@@ -1,13 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JSX, ReactNode, RefObject } from 'react'
 import { Popover } from '@base-ui/react/popover'
-import MysqlIcon from './MysqlIcon'
-import RedisIcon from './RedisIcon'
-import NacosIcon from './NacosIcon'
 import './TerminalActionsMenu.css'
 
 export type TerminalActionId = 'interrupt' | 'reset' | 'close' | 'ssh' | 'web2term'
-  | 'directory' | 'edit-directory' | 'upload' | 'files' | 'git' | 'mysql' | 'redis' | 'nacos'
+  | 'directory' | 'edit-directory' | 'upload' | 'files'
 
 interface TerminalActionsMenuProps {
   containerRef: RefObject<HTMLElement | null>
@@ -24,9 +21,9 @@ interface TerminalActionsMenuProps {
   onSendDelayChange: (seconds: number) => Promise<void>
 }
 
-type MenuPage = 'main' | 'connection' | 'tools'
+type MenuPage = 'main' | 'connection'
 type IconName = 'more' | 'stop' | 'reset' | 'connection' | 'folder' | 'edit' | 'upload'
-  | 'files' | 'tools' | 'back' | 'next' | 'close' | 'git'
+  | 'files' | 'back' | 'next' | 'close'
 
 const ICON_PATHS: Record<Exclude<IconName, 'more'>, string> = {
   stop: 'M5 5h14v14H5z',
@@ -36,11 +33,9 @@ const ICON_PATHS: Record<Exclude<IconName, 'more'>, string> = {
   edit: 'm15 4 5 5M4 15 15 4a3.5 3.5 0 0 1 5 5L9 20H4v-5z',
   upload: 'M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5',
   files: 'M3 5h7l2 3h9v12H3V5z',
-  tools: 'M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z',
   back: 'm14 6-6 6 6 6',
   next: 'm9 6 6 6-6 6',
-  close: 'm6 6 12 12M6 18 18 6',
-  git: 'M7 6v12m0-8c0 4 10 0 10 5M5 4h4v4H5zm0 12h4v4H5zm10-3h4v4h-4z'
+  close: 'm6 6 12 12M6 18 18 6'
 }
 
 function ActionIcon({ name }: { name: IconName }): JSX.Element {
@@ -143,7 +138,6 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
               <ActionButton icon={<ActionIcon name="upload" />} disabled={!connected || uploading} onClick={() => choose('upload')}>{uploading ? '上传中…' : '上传文件'}</ActionButton>
               <ActionButton icon={<ActionIcon name="files" />} disabled={!connected} onClick={() => choose('files')}>浏览远程文件</ActionButton>
             </> : null}
-            <ActionButton icon={<ActionIcon name="tools" />} trailing={next} onClick={() => setPage('tools')}>工具箱</ActionButton>
             <div className="terminal-actions__separator" />
             <label className="terminal-actions__delay">
               <span>回传等待</span>
@@ -168,22 +162,14 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
               </span>
             </label>
           </> : <>
-            <Popover.Title className="terminal-actions__sr-only">{page === 'connection' ? '连接方式' : '工具箱'}</Popover.Title>
+            <Popover.Title className="terminal-actions__sr-only">连接方式</Popover.Title>
             <button type="button" className="terminal-actions__item terminal-actions__back" onClick={() => setPage('main')}>
               <span className="terminal-actions__icon"><ActionIcon name="back" /></span>
-              {page === 'connection' ? '连接方式' : '工具箱'}
+              连接方式
             </button>
             <div className="terminal-actions__separator" />
-            {page === 'connection' ? <>
-              <ActionButton icon={<ActionIcon name="connection" />} onClick={() => choose('ssh')}>SSH 连接</ActionButton>
-              <ActionButton icon={<ActionIcon name="connection" />} onClick={() => choose('web2term')}>web2term 设备</ActionButton>
-            </> : <>
-              <ActionButton icon={<ActionIcon name="git" />} disabled={mode === 'web2term'} onClick={() => choose('git')}>Git 管理</ActionButton>
-              <ActionButton icon={<MysqlIcon size={16} />} onClick={() => choose('mysql')}>MySQL 连接</ActionButton>
-              <ActionButton icon={<RedisIcon size={16} />} onClick={() => choose('redis')}>Redis 连接</ActionButton>
-              <ActionButton icon={<NacosIcon size={16} />} onClick={() => choose('nacos')}>Nacos 连接</ActionButton>
-              {mode === 'web2term' ? <p className="terminal-actions__hint">web2term 可在终端运行 Git 命令。</p> : null}
-            </>}
+            <ActionButton icon={<ActionIcon name="connection" />} onClick={() => choose('ssh')}>SSH 连接</ActionButton>
+            <ActionButton icon={<ActionIcon name="connection" />} onClick={() => choose('web2term')}>web2term 设备</ActionButton>
           </>}
         </Popover.Popup>
       </Popover.Positioner>

@@ -35,7 +35,7 @@ export function ToolWindowsProvider({ sessionIds, children }: { sessionIds: stri
   const restore = useCallback((id: string) => dispatch({ type: 'restore', id }), [])
   const close = useCallback((id: string) => {
     dispatch({ type: 'close', id })
-    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('button[title="打开工具箱"]')?.focus())
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-tool-open="${CSS.escape(id.slice(id.lastIndexOf(':') + 1))}"]`)?.focus())
   }, [])
   const value = useMemo(() => ({ windows, open, minimize, restore, close }), [windows, open, minimize, restore, close])
   return <ToolWindowsContext.Provider value={value}>{children}</ToolWindowsContext.Provider>
@@ -47,7 +47,7 @@ export function useToolWindows() {
   return value
 }
 
-function ToolIcon({ kind }: { kind: ToolKind }) {
+export function ToolIcon({ kind }: { kind: ToolKind }) {
   if (kind === 'mysql') return <MysqlIcon size={15} />
   if (kind === 'redis') return <RedisIcon size={15} />
   if (kind === 'nacos') return <NacosIcon size={15} />

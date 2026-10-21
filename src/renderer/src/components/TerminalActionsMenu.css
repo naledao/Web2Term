@@ -114,7 +114,6 @@
   text-align: center;
 }
 
-.terminal-actions__hint { margin: 8px 10px; color: var(--text-muted); font-size: 12px; }
 .terminal-actions__sr-only {
   position: absolute;
   width: 1px;
