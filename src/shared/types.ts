@@ -448,6 +448,8 @@ export interface AppSettings {
   userAvatarPositionY: number
   /** Zoom level used by the visual avatar crop editor. */
   userAvatarScale: number
+  /** `ChatPlatform['id']` a newly created chat starts on; switching inside the chat is unaffected. */
+  defaultPlatformId: string
 }
 
 /** Everything the renderer may change; every field is optional. */

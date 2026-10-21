@@ -119,6 +119,7 @@ const SETTING_EMBED_PROXY_LEGACY = 'embedProxy'
 const embedProxyKey = (platformId: string): string => `embedProxy:${platformId}`
 const SETTING_SSH_PROXY = 'sshProxy'
 const SETTING_UPDATE_PROXY = 'updateProxy'
+const SETTING_DEFAULT_PLATFORM = 'defaultPlatformId'
 const SETTING_USER_AVATAR = 'userAvatarDataUrl'
 const SETTING_USER_AVATAR_SOURCE = 'userAvatarSourceDataUrl'
 const SETTING_USER_AVATAR_POSITION_X = 'userAvatarPositionX'
@@ -145,7 +146,7 @@ let store: ConversationStore | null = null
 let backendAuth: BackendAuthService | null = null
 let web2termConnection: Web2termConnection | null = null
 let localMachineId = ''
-let settings: AppSettings = { theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1 }
+let settings: AppSettings = { theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID }
 const runtimes = new Map<string, SessionRuntime>()
 let currentSessionId: string | null = null
 const unseenCompletedTasks = new Map<string, number>()
@@ -745,6 +746,11 @@ function persistManagedSession(runtime: SessionRuntime): void {
   store.upsertManagedSession(runtime.persistentState())
   if (runtime.web2term) store.setSetting(`web2termSession:${runtime.id}`, JSON.stringify(runtime.web2term.persistentBinding()))
 }
+/** The model a newly created chat starts on: the one picked in settings, else the registry default. */
+function newChatPlatform(): ChatPlatform {
+  return platformById(settings.defaultPlatformId) ?? platformById(DEFAULT_PLATFORM_ID) ?? CHATGPT_PLATFORM
+}
+
 function createSession(
   kind: 'local' | 'ssh' | 'web2term' = 'local',
   activate = true,
@@ -838,7 +844,7 @@ function showWeb2termWorkspace(options: Web2termWorkspaceOptions = {}): boolean 
   if (existing) { existing.web2term!.reconnect(); return selectSession(existing.id) }
   const active = web2termConnection!.terminals.getState().sessions.filter(item => ['opening', 'ready', 'closing'].includes(item.status))
   if (active.length >= 3) throw new Error('最多同时运行 3 个终端，请先关闭一个会话。')
-  return createSession('web2term', true, undefined, platformById(DEFAULT_PLATFORM_ID) ?? CHATGPT_PLATFORM, binding, creation) !== null
+  return createSession('web2term', true, undefined, newChatPlatform(), binding, creation) !== null
 }
 
 function destroySession(id: string): boolean {
@@ -1057,14 +1063,14 @@ function registerIpcHandlers(): void {
       const creation = workspaceSessionOptions(kind === 'ssh' ? 'ssh' : 'local', projectId, store?.listWorkspaceProjects() ?? [])
       /*
        * No platform parameter: a session is created for a purpose (this machine, or a host over
-       * SSH) and the model is switched inside the chat. `DEFAULT_PLATFORM_ID` is used rather
-       * than a literal so the default lives with the platform registry.
+       * SSH) and the model is switched inside the chat. It starts on the model chosen in
+       * settings, so that choice lives in one place rather than at every call site.
        */
       const runtime = createSession(
         kind === 'ssh' ? 'ssh' : 'local',
         true,
         undefined,
-        platformById(DEFAULT_PLATFORM_ID) ?? CHATGPT_PLATFORM,
+        newChatPlatform(),
         undefined,
         creation
       )
@@ -1552,7 +1558,7 @@ function registerIpcHandlers(): void {
     return runtime.ssh.getState()
   })
 
-  ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { theme: 'light', backendUrl: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1 })
+  ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { theme: 'light', backendUrl: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID })
   ipcMain.handle(IpcChannels.settingsUpdate, async (event, patch: AppSettingsPatch): Promise<AppSettings> => {
     if (!isManagerEvent(event) || !store) return { ...settings }
     // Validate before applying any setting so an invalid URL cannot partly save a patch.
@@ -1600,6 +1606,12 @@ function registerIpcHandlers(): void {
       settings = { ...settings, updateProxy: proxy }
       store.setSetting(SETTING_UPDATE_PROXY, proxy)
       await applyUpdateProxy(proxy)
+    }
+    // Only a known platform id is stored; anything else keeps the current choice.
+    const defaultPlatform = typeof patch?.defaultPlatformId === 'string' ? platformById(patch.defaultPlatformId) : null
+    if (defaultPlatform) {
+      settings = { ...settings, defaultPlatformId: defaultPlatform.id }
+      store.setSetting(SETTING_DEFAULT_PLATFORM, defaultPlatform.id)
     }
     if (typeof patch?.userAvatarDataUrl === 'string') {
       settings = { ...settings, userAvatarDataUrl: patch.userAvatarDataUrl }
@@ -1749,7 +1761,8 @@ if (!app.requestSingleInstanceLock()) {
       userAvatarSourceDataUrl: conversationStore.getSetting(SETTING_USER_AVATAR_SOURCE) ?? conversationStore.getSetting(SETTING_USER_AVATAR) ?? '',
       userAvatarPositionX: readAvatarPosition(conversationStore.getSetting(SETTING_USER_AVATAR_POSITION_X)),
       userAvatarPositionY: readAvatarPosition(conversationStore.getSetting(SETTING_USER_AVATAR_POSITION_Y)),
-      userAvatarScale: readAvatarScale(conversationStore.getSetting(SETTING_USER_AVATAR_SCALE))
+      userAvatarScale: readAvatarScale(conversationStore.getSetting(SETTING_USER_AVATAR_SCALE)),
+      defaultPlatformId: platformById(conversationStore.getSetting(SETTING_DEFAULT_PLATFORM) ?? '')?.id ?? DEFAULT_PLATFORM_ID
     }
     backendAuth = new BackendAuthService(conversationStore, {
       encrypt(value) {

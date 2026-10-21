@@ -81,6 +81,7 @@ type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question' | `extra:${strin
 
 const SETTINGS_SECTIONS = [
   { id: 'appearance', label: '外观' },
+  { id: 'chat', label: '对话' },
   { id: 'backend', label: '后端服务' },
   { id: 'devices', label: 'web2term 设备' },
   { id: 'proxy', label: '网络代理' },
@@ -94,6 +95,7 @@ function SettingsSectionIcon({ section }: { section: SettingsSection }): JSX.Ele
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       {section === 'appearance' ? <><circle cx="12" cy="12" r="8" /><path d="M12 4v16" /><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none" /></> : null}
+      {section === 'chat' ? <><path d="M4 5h16v11H9l-5 4V5z" /><path d="M8 9h8M8 12h5" /></> : null}
       {section === 'backend' ? <><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M12 10v4" /></> : null}
       {section === 'devices' ? <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8m-4-4v4M7 9l2 2-2 2m5 0h4" /></> : null}
       {section === 'proxy' ? <><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></> : null}
@@ -584,6 +586,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   })
   const [sshProxyDraft, setSshProxyDraft] = useState('')
   const [updateProxyDraft, setUpdateProxyDraft] = useState('')
+  const [defaultPlatformDraft, setDefaultPlatformDraft] = useState('')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   /** True between clicking download and the first progress event. */
   const [preparingDownload, setPreparingDownload] = useState(false)
@@ -1667,6 +1670,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         setThemeDraft(value.theme)
         setSshProxyDraft(value.sshProxy)
         setUpdateProxyDraft(value.updateProxy)
+        setDefaultPlatformDraft(value.defaultPlatformId)
         setUserAvatarDraft(value.userAvatarDataUrl)
         setUserAvatarSourceDraft(value.userAvatarSourceDataUrl || value.userAvatarDataUrl)
         setUserAvatarPositionXDraft(value.userAvatarPositionX)
@@ -1990,6 +1994,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         embedProxy: proxyDrafts,
         sshProxy: sshProxyDraft,
         updateProxy: updateProxyDraft,
+        defaultPlatformId: defaultPlatformDraft,
         userAvatarDataUrl: avatarDataUrl,
         userAvatarSourceDataUrl: userAvatarSourceDraft,
         userAvatarPositionX: userAvatarPositionXDraft,
@@ -2003,6 +2008,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setProxyDrafts(next.embedProxy ?? {})
       setSshProxyDraft(next.sshProxy)
       setUpdateProxyDraft(next.updateProxy)
+      setDefaultPlatformDraft(next.defaultPlatformId)
       setUserAvatarDraft(next.userAvatarDataUrl)
       setUserAvatarSourceDraft(next.userAvatarSourceDataUrl || next.userAvatarDataUrl)
       setUserAvatarPositionXDraft(next.userAvatarPositionX)
@@ -2015,7 +2021,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     } finally {
       setSavingSettings(false)
     }
-  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
+  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
 
   /** Drag the shared sidebar's left edge to resize it. */
   const startPanelResize = useCallback(
@@ -3384,6 +3390,34 @@ ${record.command}`
                 </section>
 
                 <section
+                  id="settings-panel-chat"
+                  role="tabpanel"
+                  aria-labelledby="settings-tab-chat"
+                  tabIndex={0}
+                  hidden={settingsSection !== 'chat'}
+                  className="settings-card settings-appearance-card"
+                >
+                  <div className="settings-card__heading">
+                    <span className="settings-card__icon"><SettingsSectionIcon section="chat" /></span>
+                    <h2>对话</h2>
+                  </div>
+                  <div className="settings-appearance-row">
+                    <div>
+                      <div className="settings-proxy-row__label">新建对话默认模型</div>
+                    </div>
+                    <select
+                      className="settings-theme-select"
+                      value={defaultPlatformDraft}
+                      aria-label="新建对话默认模型"
+                      title="新建对话时打开的模型；已有对话不受影响，对话里仍可随时切换"
+                      onChange={(event) => setDefaultPlatformDraft(event.target.value)}
+                    >
+                      {CHAT_PLATFORMS.map((platform) => <option key={platform.id} value={platform.id}>{platform.label}</option>)}
+                    </select>
+                  </div>
+                </section>
+
+                <section
                   id="settings-panel-backend"
                   role="tabpanel"
                   aria-labelledby="settings-tab-backend"
@@ -3642,8 +3676,8 @@ ${record.command}`
             <div className="modal__foot settings-modal__foot">
               {settingsError ? <p className="settings-feedback settings-feedback--save" role="alert">{settingsError}</p> : null}
               <span className="panel__spacer" />
-              <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' ? '关闭' : '取消'}</button>
-              {settingsSection !== 'devices' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' ? '保存' : '保存并重新加载'}</button> : null}
+              <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setDefaultPlatformDraft(settings?.defaultPlatformId ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' ? '关闭' : '取消'}</button>
+              {settingsSection !== 'devices' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' || settingsSection === 'chat' ? '保存' : '保存并重新加载'}</button> : null}
             </div>
           </div>
         </div>
