@@ -2,7 +2,7 @@ name: Build and Release Linux Agent
 
 on:
   workflow_run:
-    workflows: ["Build and Release Windows"]
+    workflows: ["Build and Release Desktop"]
     types: [completed]
     branches:
       - main
