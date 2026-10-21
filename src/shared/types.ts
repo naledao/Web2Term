@@ -103,6 +103,10 @@ export const IpcChannels = {
   terminalSetSendDelay: 'terminal:set-send-delay',
   dialogSelectDirectory: 'dialog:select-directory',
   terminalChanged: 'terminal:changed',
+  linuxAgentDownloadGet: 'linux-agent-download:get',
+  linuxAgentDownloadStart: 'linux-agent-download:start',
+  linuxAgentDownloadReveal: 'linux-agent-download:reveal',
+  linuxAgentDownloadChanged: 'linux-agent-download:changed',
   extraTerminalsGet: 'extra-terminals:get',
   extraTerminalCreate: 'extra-terminals:create',
   extraTerminalInput: 'extra-terminals:input',
@@ -1444,6 +1448,16 @@ export interface RecentCommandJson {
 
 export type RecentCommandRunResult = 'ok' | 'busy' | 'unavailable' | 'invalid' | 'paused' | 'terminal-mode-off'
 
+/** Progress of downloading the web2term Linux tool from the client. */
+export interface LinuxAgentDownloadState {
+  phase: 'idle' | 'downloading' | 'done' | 'error'
+  percent: number
+  /** Status line while preparing, or the failure reason. */
+  message: string
+  /** Where the file is (or was going to be) saved. */
+  path: string
+}
+
 /** A recorded clarification request (`question` / `questions`) rather than a command. */
 export function isQuestionPayload(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
@@ -2289,6 +2303,11 @@ export interface AppApi {
    */
   selectDirectory(): Promise<string | null>
   onTerminalChanged(listener: (state: TerminalState) => void): () => void
+  getLinuxAgentDownload(): Promise<LinuxAgentDownloadState>
+  /** Asks where to save, then starts the download; resolves with the state after the choice. */
+  downloadLinuxAgent(): Promise<LinuxAgentDownloadState>
+  revealLinuxAgentDownload(): Promise<void>
+  onLinuxAgentDownloadChanged(listener: (state: LinuxAgentDownloadState) => void): () => void
   getExtraTerminals(): Promise<ExtraTerminalsState>
   createExtraTerminal(): Promise<{ state: ExtraTerminalsState; id: string } | null>
   sendExtraTerminalInput(id: string, text: string): Promise<void>

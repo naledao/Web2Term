@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { BackendAuthState, Web2termDevice } from '@shared/types'
+import LinuxAgentDownload from './LinuxAgentDownload'
 import './Web2termDevicesSettings.css'
 
 interface Props {
@@ -112,6 +113,7 @@ export default function Web2termDevicesSettings({ onOpenBackend, onBusyChange }:
 
   return (
     <div className="settings-devices">
+      <LinuxAgentDownload />
       <div className="settings-devices__toolbar">
         <button type="button" className="settings-outline-btn" disabled={refreshing || saving} onClick={() => void refresh()}>{refreshing ? '刷新中…' : '刷新设备'}</button>
       </div>

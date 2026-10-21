@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactElement } from 'react'
 import { EMPTY_WEB2TERM_CONNECTION } from '@shared/types'
 import type { Web2termConnectionState, Web2termDevice } from '@shared/types'
+import LinuxAgentDownload from './LinuxAgentDownload'
 import './Web2termDeviceDialog.css'
 
 interface Props {
@@ -147,7 +148,7 @@ export default function Web2termDeviceDialog({ onClose, onConnected }: Props): R
           {!error && (loading || (signedIn && (current.phase === 'idle' || current.phase === 'loading'))) ? <p className="web2term-connect__empty" role="status">正在读取设备列表…</p> : null}
           {!loading && !signedIn && !error ? <p className="web2term-connect__empty">{state.auth.status === 'expired' ? '登录已过期，' : ''}请先在“设置 → 后端服务”中登录，再选择设备。</p> : null}
           {current.phase === 'error' ? <p className="web2term-connect__feedback web2term-connect__feedback--error" role="alert">{current.error} <button type="button" className="web2term-connect__retry" disabled={locked} onClick={() => void refreshDevices()}>重试</button></p> : null}
-          {current.phase === 'ready' && !current.devices.length ? <div className="web2term-connect__empty"><strong>当前账号还没有设备</strong><p>在设备上登录同一账号并运行 web2term run，设备注册后点击“刷新设备”。</p></div> : null}
+          {current.phase === 'ready' && !current.devices.length ? <div className="web2term-connect__empty"><strong>当前账号还没有设备</strong><p>在设备上登录同一账号并运行 web2term run，设备注册后点击“刷新设备”。</p><LinuxAgentDownload compact /></div> : null}
           {current.phase === 'ready' && current.devices.length > 0 ? (
             <ul className="web2term-connect__device-list">
               {current.devices.map((device) => (

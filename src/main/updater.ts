@@ -42,6 +42,11 @@ export function setUpdaterBroadcast(fn: (status: UpdateStatus) => void): void {
  * Called at startup and whenever the setting is saved. An empty string means
  * direct, matching how the embed proxy treats it.
  */
+/** The session update traffic goes through, so other GitHub Release downloads honour the update proxy too. */
+export function updaterSession(): Electron.Session {
+  return session.fromPartition(UPDATER_PARTITION)
+}
+
 export async function applyUpdateProxy(proxy: string): Promise<void> {
   const updaterSession = session.fromPartition(UPDATER_PARTITION)
   try {

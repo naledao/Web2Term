@@ -7,6 +7,7 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, Tray } from 'electron'
 import { taskbarCountIcon } from './taskbar-badge'
+import { LINUX_AGENT_FILE_NAME, LinuxAgentDownloader } from './linux-agent-download'
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
 import {
   EMBED_LOGIN_URL,
@@ -61,6 +62,7 @@ import type {
   TerminalNotesOwner,
   TerminalState,
   ExtraTerminalsState,
+  LinuxAgentDownloadState,
   UpdateStatus
 } from '../shared/types'
 import { embedAuthState, importCookieSet, importSessionToken, previewSessionImport } from './session-import'
@@ -140,6 +142,9 @@ function readAvatarScale(value: string | null): number {
 }
 
 let managerWindow: BrowserWindow | null = null
+const linuxAgentDownloader = new LinuxAgentDownloader((state) => {
+  if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.linuxAgentDownloadChanged, state)
+})
 let tray: Tray | null = null
 let quitting = false
 let store: ConversationStore | null = null
@@ -1716,6 +1721,24 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.updateGetState, (): UpdateStatus => getUpdateStatus())
   ipcMain.handle(IpcChannels.updateCheck, (): Promise<UpdateStatus> => checkForUpdates())
   ipcMain.handle(IpcChannels.updateDownload, (): Promise<UpdateStatus> => downloadUpdate())
+  ipcMain.handle(IpcChannels.linuxAgentDownloadGet, (event): LinuxAgentDownloadState | null =>
+    isManagerEvent(event) ? linuxAgentDownloader.getState() : null)
+  ipcMain.handle(IpcChannels.linuxAgentDownloadStart, async (event): Promise<LinuxAgentDownloadState | null> => {
+    if (!isManagerEvent(event)) return null
+    if (linuxAgentDownloader.busy) return linuxAgentDownloader.getState()
+    const options = { title: '保存 web2term Linux 工具', defaultPath: join(app.getPath('downloads'), LINUX_AGENT_FILE_NAME) }
+    const result = managerWindow && !managerWindow.isDestroyed()
+      ? await dialog.showSaveDialog(managerWindow, options)
+      : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) return linuxAgentDownloader.getState()
+    // Not awaited: progress arrives over linuxAgentDownloadChanged.
+    void linuxAgentDownloader.download(result.filePath)
+    return linuxAgentDownloader.getState()
+  })
+  ipcMain.handle(IpcChannels.linuxAgentDownloadReveal, (event): void => {
+    const state = linuxAgentDownloader.getState()
+    if (isManagerEvent(event) && state.phase === 'done' && state.path) shell.showItemInFolder(state.path)
+  })
   ipcMain.handle(IpcChannels.updateInstall, (): void => installUpdate())
 }
 

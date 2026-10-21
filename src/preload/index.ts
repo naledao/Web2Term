@@ -76,6 +76,7 @@ import type {
   TerminalNotes,
   TerminalState,
   ExtraTerminalsState,
+  LinuxAgentDownloadState,
   UpdateStatus,
   NacosConnectionDraft,
   NacosConnectionsState,
@@ -430,6 +431,16 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   setTerminalSendDelay: (seconds: number): Promise<TerminalState> =>
     ipcRenderer.invoke(IpcChannels.terminalSetSendDelay, seconds),
 
+  getLinuxAgentDownload: (): Promise<LinuxAgentDownloadState> => ipcRenderer.invoke(IpcChannels.linuxAgentDownloadGet),
+  downloadLinuxAgent: (): Promise<LinuxAgentDownloadState> => ipcRenderer.invoke(IpcChannels.linuxAgentDownloadStart),
+  revealLinuxAgentDownload: (): Promise<void> => ipcRenderer.invoke(IpcChannels.linuxAgentDownloadReveal),
+  onLinuxAgentDownloadChanged: (listener: (state: LinuxAgentDownloadState) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: LinuxAgentDownloadState): void => listener(state)
+    ipcRenderer.on(IpcChannels.linuxAgentDownloadChanged, handler)
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.linuxAgentDownloadChanged, handler)
+    }
+  },
   getExtraTerminals: (): Promise<ExtraTerminalsState> => ipcRenderer.invoke(IpcChannels.extraTerminalsGet),
   createExtraTerminal: (): Promise<{ state: ExtraTerminalsState; id: string } | null> =>
     ipcRenderer.invoke(IpcChannels.extraTerminalCreate),
