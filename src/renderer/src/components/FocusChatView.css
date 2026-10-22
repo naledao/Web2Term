@@ -11,6 +11,7 @@
 .focus-chat button:focus-visible,.focus-chat summary:focus-visible,.focus-chat a:focus-visible{outline:2px solid var(--fc-accent);outline-offset:3px}
 .focus-chat__header{flex:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px 22px;border-bottom:1px solid var(--fc-border);font-size:12px}
 .focus-chat__header strong{font-weight:650}
+.focus-chat__header .focus-chat__brand-icon{width:40px;height:40px;object-fit:contain;display:block}
 .focus-chat__notice button,.focus-chat__error button{padding:4px 8px;border:1px solid var(--fc-border);border-radius:6px;background:var(--fc-bg);font-size:11px}
 .focus-chat__muted{color:var(--fc-muted)}
 .focus-chat__transcript{position:relative;flex:1;min-height:0;overflow:hidden}

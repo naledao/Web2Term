@@ -290,7 +290,7 @@ export default function FocusChatView(props: Props): JSX.Element {
     </article>
   }
   return <section className="focus-chat" aria-label="专注对话" data-theme={theme}>
-    <header className="focus-chat__header"><span><strong>DeepSeek</strong><span className="focus-chat__muted"> · 专注对话</span></span></header>
+    <header className="focus-chat__header"><span><img className="focus-chat__brand-icon" src={deepseekIcon} alt="DeepSeek" /></span></header>
     <div className="focus-chat__transcript">
       <ConversationTranscript scrollKey={'focus:' + ownerKey} ready={messagesReady && state !== null}>
         {entries.length === 0 ? <div className="focus-chat__empty"><img src={deepseekIcon} alt="" /><h2>从一个目标开始</h2><p>描述你想完成的任务，处理过程会归入同一轮对话。</p></div> : entries.map(entry => entry.turn ? renderTurn(entry.turn) :
