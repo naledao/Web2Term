@@ -409,6 +409,13 @@ export class CommandRunner {
     return { ...this.automation }
   }
 
+  /** Do not interleave an automatic task result with a command or attachment send. */
+  canSendAutomaticResult(): boolean {
+    return !this.disposed && !this.automation.paused && this.terminalModeOn()
+      && this.inFlight.size === 0 && !this.activeShell && !this.fileAbort
+      && !this.localShell?.running && !this.deps.remoteShell()?.running
+  }
+
   setMode(mode: ExecutionMode): AutomationState {
     const previous = this.automation.mode
     this.automation = { ...this.automation, mode }
@@ -902,10 +909,12 @@ export class CommandRunner {
     })
     if (this.disposed) return
 
+    let backgroundTaskCount = 0
     if (!result.rejected && registerBackgroundTasks) {
       try {
         const count = registerBackgroundTasks(result.output)
-        if (count > 0) this.appendLine({ kind: 'notice', text: `已登记 ${count} 个后台任务，可从右侧「＋ → 后台任务」查看输出。` })
+        backgroundTaskCount = count
+        if (count > 0) this.appendLine({ kind: 'notice', text: `已登记 ${count} 个后台任务；创建确认将发送给 AI，软件监控结束后再自动发送最终结果。` })
         else if (result.output.split(/\r?\n/).some(line => line.startsWith(BACKGROUND_TASK_MARKER))) {
           this.appendLine({ kind: 'notice', text: '后台任务登记信息无效或已登记，请检查真实 PID、任务名和日志绝对路径。' })
         }
@@ -932,6 +941,10 @@ export class CommandRunner {
     this.appendLine(summariseResult(result))
     this.flushTerminal()
     this.broadcastExecutions(conversationId)
+
+    // Dedicated creation/final notifications replace the ordinary startup result.
+    // They explicitly tell the model that software owns monitoring.
+    if (backgroundTaskCount > 0) return
 
     if (request !== this.executionRequest) {
       this.diagnostic({ event: 'delivery', reason: 'superseded', messageId, ownerConversationId: conversationId })

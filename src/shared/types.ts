@@ -824,6 +824,10 @@ const OUTPUT_FORMAT_SECTION = [
   'command 是当前 shell 可直接执行的一条命令；有依赖的动作在其中用 shell 连接符。description 用中文一句话说明目的，不要只复制命令；timeout_seconds 为按工作量估算的 1–1800 整数。',
     'JSON 必须合法：双引号、反斜杠、换行正确转义；命令中的 _、$、* 原样保留。',
   '',
+  '【执行方式】',
+  '执行前判断任务的耗时和运行方式：预计超过 2 分钟、持续输出、等待外部事件，或需要脱离当前终端继续运行的非交互任务，使用 background_task 工具创建后台任务；短时、一次性命令直接执行。必须依赖 stdin/TTY 的明确交互任务保留前台执行。',
+  '后台任务由软件监控，结束后自动回传结果；不要自行发送命令轮询。具体启动、登记和等待约定见工具提示词中的 background_task 说明。',
+  '',
   '【读取结果】',
   '【上一条命令执行结果】对应你上一条请求执行的命令，回传消息不重复命令正文；以回传的结果、输出、当前目录和退出码为真实状态。',
   '【历史指令重新执行结果】表示用户主动在当前终端重跑了一条历史命令，消息会包含本次执行的命令正文；请根据这次回传的结果继续处理。',
@@ -836,17 +840,27 @@ const OUTPUT_FORMAT_SECTION = [
 /**
  * Guidance for work that outlives one terminal command. The runner only knows
  * about one command at a time, so the model must create the durable background
- * process first and then observe it with bounded, spaced checks instead of
- * holding the interactive shell open or starting the same work repeatedly.
+ * process first. Software observes it and returns the final result, rather
+ * than asking the model to spend turns polling.
  */
-const LONG_TASK_SECTION = [
-  '【长任务与后台监控】',
-  '预计 >2 分钟、持续输出、等待外部事件，或须跨终端运行的任务：先启动不依赖当前终端生命周期的后台任务，记录 PID/任务名、日志路径、完成/失败标记；stdout/stderr 必须落盘。',
-  `后台进程启动成功后，启动命令必须另起一行打印 ${BACKGROUND_TASK_MARKER} 后紧跟一个紧凑 JSON，格式示例：{"pid":12345,"name":"任务名称","log_path":"标准输出或合并日志的绝对路径","stderr_path":"单独错误日志的绝对路径","exit_code_path":"退出码文件的绝对路径"}。12345 仅为格式示例，必须替换成实际取得的 PID。stderr_path 仅在错误输出单独落盘时提供；exit_code_path 可选，任务结束时向该文件写入整数退出码。`,
-  '登记信息由启动命令在执行后打印，不能提前猜 PID，也不能只在聊天文字里描述；打印的是实际后台任务的 PID，不是当前终端 Shell 的 PID。每次启动使用唯一日志和退出码文件，日志统一 UTF-8。Windows 用 Start-Process -WindowStyle Hidden -PassThru 获取 PID，stdout/stderr 重定向到不同日志文件；POSIX 用脱离终端的进程并从 $! 获取实际 PID。启动命令打印登记信息后立即返回，不要在启动命令里等待任务结束。',
-  '软件会自动将登记的任务加入右侧「＋ → 后台任务」，独立读取日志供用户查看；后台启动成功不等于任务已完成。',
-  '启动只执行一次；之后用只读、可重复、有界命令按 10–30 秒（重任务 30–60 秒）间隔检查进程、退出状态、标记和新增日志。可在单次命令中使用一次有界的 Start-Sleep/sleep；禁止 busy-loop、无限循环和无输出重启。',
-  '仍在运行则继续按间隔监控；完成、失败、超时或进程消失即停止，并报告状态、日志、产物和验证结果。仅需 stdin/TTY 的明确交互任务可前台运行。'
+const backgroundTaskToolPrompt = [
+  '【工具：background_task】',
+  '通过 command JSON 启动脱离当前终端的后台进程，stdout/stderr 以 UTF-8 写入本次独立日志。',
+  `启动成功后，命令输出一整行：\`${BACKGROUND_TASK_MARKER}\` 紧接紧凑 JSON；标记与 JSON 之间不换行，不带代码围栏。对象结构：`,
+  '',
+  '```json',
+  '{',
+  '  "pid": 12345,',
+  '  "name": "任务名称",',
+  '  "log_path": "标准输出或合并日志绝对路径",',
+  '  "stderr_path": "错误日志绝对路径",',
+  '  "exit_code_path": "退出码文件绝对路径"',
+  '}',
+  '```',
+  '',
+  'pid 必须为本次真实后台进程 PID（12345 仅为示例）；路径均为任务机器上的绝对路径。stderr_path 仅在错误输出单独落盘时提供；有限任务应使用独立 exit_code_path，结束时写入真实整数退出码。',
+  'Windows 用 Start-Process -WindowStyle Hidden -PassThru 取得 PID，stdout/stderr 分开重定向；POSIX 从脱离终端进程的 $! 取得 PID。',
+  '打印登记行后立即返回。软件先发送【后台任务已创建】，结束后发送【后台任务执行结果】。收到创建通知只简短确认并等待，不轮询、sleep、重复启动或报告【任务完成】；无退出码不算成功，持续服务退出后才回传。'
 ].join('\n')
 
 /** Keep terminal mode from turning every kind of request into a shell command. */
@@ -930,9 +944,9 @@ const readFilesToolPrompt = [
 ].join('\n')
 
 /** Only expose tools that the selected platform can execute. */
-export function toolPromptForPlatform(platformId: string): string {
+export function toolPromptForPlatform(platformId: string, fileReading = true): string {
   const platform = fileReadingPlatform(platformId)
-  return platform ? readFilesToolPrompt : ''
+  return platform ? [...(fileReading ? [readFilesToolPrompt] : []), backgroundTaskToolPrompt].join('\n\n') : ''
 }
 
 /** The parts of the prompt only true of a Windows PowerShell session. */
@@ -986,8 +1000,6 @@ function buildWindowsPrompt(env: EnvironmentInfo): string {
     '',
     OUTPUT_FORMAT_SECTION,
     '',
-    LONG_TASK_SECTION,
-    '',
     ASK_USER_SECTION,
     '',
     '【执行环境】',
@@ -1039,8 +1051,6 @@ function buildPosixPrompt(env: EnvironmentInfo): string {
     TASK_ROUTING_SECTION,
     '',
     OUTPUT_FORMAT_SECTION,
-    '',
-    LONG_TASK_SECTION,
     '',
     ASK_USER_SECTION,
     '',
@@ -1122,7 +1132,7 @@ function notesSection(notes: string): string[] {
   return [
     '',
     '【用户补充】',
-    '与通用约定冲突时，以这台机器当前目录的补充说明为准：',
+    '与通用约定冲突时，以以下补充说明为准：',
     text
   ]
 }
@@ -1764,16 +1774,16 @@ export interface SshState {
 }
 
 /* ------------------------------------------------------------------ *
- * Per-directory notes on one machine
+ * Project notes, or per-directory notes for chats outside a project
  * ------------------------------------------------------------------ */
 
 /**
- * Free-form text for ONE working directory on ONE machine, appended to its system prompt.
- *
- * Multiple sessions in the same machine/directory share these project conventions.
- * A different directory or host has its own notes, without parent-directory inheritance.
+ * Project chats share one note regardless of their terminal's machine or directory.
+ * Chats outside projects share notes only for the same machine and exact directory.
  */
 export interface TerminalNotesOwner {
+  /** Sidebar project, when present; takes precedence over the terminal directory. */
+  projectId?: string | null
   /** Which kind of machine owns this note. */
   scope: 'local' | 'ssh'
   /** Saved SSH host id, or the installation's local machine id. */
@@ -1783,7 +1793,12 @@ export interface TerminalNotesOwner {
 }
 
 export function terminalNotesOwnerKey(owner: TerminalNotesOwner): string {
+  if (owner.projectId) return JSON.stringify(['project', owner.projectId])
   return JSON.stringify([owner.scope, owner.hostId, owner.directoryKey])
+}
+
+export function canEditTerminalNotes(owner: TerminalNotesOwner | null): boolean {
+  return Boolean(owner && (owner.projectId || (owner.hostId && owner.directoryKey)))
 }
 
 export interface TerminalNotes extends TerminalNotesOwner {

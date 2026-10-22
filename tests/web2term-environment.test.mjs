@@ -42,7 +42,7 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
     'node:os': { homedir: forbidden }, './commands': {}, './db': {}, './nacos-view': {},
     './mysql-table-rows': {}, './redis-reader': {}, './embed': {}, './environment': environment,
     './shell': { resolvePowerShell: () => 'powershell.exe' }, './ssh': {}, './web2term-shell': {}, './terminal-notes': {},
-    './background-tasks': {}, './extra-terminals': {}, 'node:fs/promises': {}, '../shared/deepseek-question': {}
+    './background-tasks': {}, './background-task-results': {}, './extra-terminals': {}, 'node:fs/promises': {}, '../shared/deepseek-question': {}
   }, desktop)
   const runtime = Object.create(SessionRuntime.prototype)
   const prompts = new Map()
@@ -92,7 +92,9 @@ test('web2term on a Windows desktop uses the remote Linux report and updates eve
     assert.ok(parts.basePrompt.includes('/usr/bin/bash'))
     assert.ok(parts.basePrompt.includes('/home/fixture'))
     assert.ok(parts.basePrompt.endsWith('directory-specific guidance'))
-    assert.equal(parts.toolPrompt, '')
+    assert.ok(parts.toolPrompt.includes('【工具：background_task】'))
+    assert.ok(!parts.toolPrompt.includes('【工具：read_files】'))
+    assert.ok(!parts.basePrompt.includes('【工具：background_task】'))
     for (const privateValue of ['Private device name', 'private-device-id', 'Private SSH name', 'private-ssh-address', 'C:\\Users\\desktop']) {
       assert.ok(!parts.prefix.includes(privateValue))
     }

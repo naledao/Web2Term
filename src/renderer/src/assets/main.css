@@ -512,7 +512,7 @@ body {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 4px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
 }
@@ -530,103 +530,6 @@ body {
 .panel__collapse-button {
   min-width: 28px;
   padding: 0 7px;
-}
-
-.panel__tabs {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--bg-elevated);
-  /* Added terminals can outgrow a narrow panel; scroll rather than push the header controls out. */
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-/* Scrolled by wheel (see App.tsx), never squeezed. */
-.panel__tabs > .panel__tab {
-  flex: none;
-}
-
-.panel__tab {
-  flex: 1;
-  padding: 5px 14px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.panel__tab:hover,
-.panel__tab[aria-pressed='true'] {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-.panel__tab:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* A user-opened terminal tab: a label button and a close button sharing one tab. */
-.panel__tab--closable {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 0 4px 0 0;
-}
-
-.panel__tab--closable[data-active='true'] {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-.panel__tab-label {
-  flex: 1;
-  padding: 5px 4px 5px 12px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.panel__tab-close {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 14px;
-  line-height: 1;
-  opacity: .6;
-  cursor: pointer;
-}
-
-.panel__tab-close:hover {
-  background: var(--border);
-  opacity: 1;
-}
-
-.panel__tab-label:focus-visible,
-.panel__tab-close:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 .panel > .panel__view {
@@ -6414,10 +6317,19 @@ body {
 }
 
 .workspace:not(.workspace--manager) .panel__collapse-head {
+  --panel-tabs-surface: #fbfcfe;
   min-height: 58px;
-  padding: 0 16px;
+  padding: 0 8px;
   border-bottom: 1px solid #e5ebf3;
   background: #fbfcfe;
+}
+
+.workspace:not(.workspace--manager) .panel--collapsed .panel__collapse-head {
+  padding: 8px 0;
+}
+
+.workspace[data-theme='dark'] .panel__collapse-head {
+  --panel-tabs-surface: #080808;
 }
 
 .workspace:not(.workspace--manager) .panel__collapse-head .panel__title {

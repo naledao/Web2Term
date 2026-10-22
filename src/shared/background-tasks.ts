@@ -10,6 +10,8 @@ export interface BackgroundTaskRegistration {
 }
 
 export type BackgroundTaskStatus = 'checking' | 'running' | 'completed' | 'failed' | 'exited' | 'unknown'
+export type BackgroundTaskDeliveryStatus = 'pending' | 'sent' | 'needs-attention' | 'cancelled'
+export type BackgroundTaskNotificationKind = 'created' | 'finished'
 
 export interface BackgroundTask {
   id: string
@@ -31,19 +33,33 @@ export interface BackgroundTask {
   errorOutput: string
   outputTruncated: boolean
   errorOutputTruncated: boolean
+  deliveryStatus?: BackgroundTaskDeliveryStatus
+  deliveryMessage?: string
+  creationDeliveryStatus?: BackgroundTaskDeliveryStatus
+  creationDeliveryMessage?: string
 }
 
 export interface BackgroundTasksState {
   tasks: BackgroundTask[]
 }
 
-/** Only recognize complete, explicitly marked lines from a command's actual output. */
+/** Recognize explicit command-output records, including a marker followed by JSON on the next line. */
 export function parseBackgroundTaskRegistrations(output: string): BackgroundTaskRegistration[] {
   const registrations: BackgroundTaskRegistration[] = []
-  for (const line of output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').split(/\r?\n/)) {
+  const lines = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').split(/\r?\n/)
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
     if (!line.startsWith(BACKGROUND_TASK_MARKER) || line.length > 16384) continue
+    let payload = line.slice(BACKGROUND_TASK_MARKER.length)
+    // Two Write-Output calls produce exactly this shape. Only consume the
+    // immediately adjacent JSON object, never search later ordinary output.
+    if (!payload.trim() && lines[index + 1]?.trimStart().startsWith('{')) {
+      payload = lines[index + 1]
+      index += 1
+    }
+    if (payload.length + BACKGROUND_TASK_MARKER.length > 16384) continue
     try {
-      const value = JSON.parse(line.slice(BACKGROUND_TASK_MARKER.length))
+      const value = JSON.parse(payload)
       if (!value || typeof value !== 'object' || Array.isArray(value)) continue
       if (!Number.isSafeInteger(value.pid) || value.pid <= 1 || value.pid > 2147483647) continue
       if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200) continue

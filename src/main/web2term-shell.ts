@@ -16,6 +16,11 @@ export interface Web2termSessionBinding {
   cwd?: string
 }
 
+/** Stable device/account identity, also used when inheriting saved directory notes. */
+export function web2termHostId(binding: Pick<Web2termSessionBinding, 'backendUrl' | 'userId' | 'agentId'>): string {
+  return 'web2term:' + createHash('sha256').update(JSON.stringify([binding.backendUrl, binding.userId, binding.agentId])).digest('hex')
+}
+
 export function parseWeb2termBinding(value: string | null): Web2termSessionBinding | null {
   try {
     const item = JSON.parse(value ?? 'null')
@@ -111,7 +116,7 @@ export class Web2termShell implements ExecutionShell {
   constructor(readonly binding: Web2termSessionBinding, private readonly connection: Web2termConnection) {
     this.resumeAfterRestart = binding.reconnect !== false
     this.lastCwd = binding.cwd ?? ''
-    this.hostId = 'web2term:' + createHash('sha256').update(JSON.stringify([binding.backendUrl, binding.userId, binding.agentId])).digest('hex')
+    this.hostId = web2termHostId(binding)
     this.unsubscribe = connection.terminals.subscribe(() => queueMicrotask(() => this.sync()), output => this.receive(output))
   }
 

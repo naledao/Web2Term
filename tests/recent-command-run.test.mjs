@@ -11,6 +11,10 @@ const source = readFileSync(new URL('../src/main/commands.ts', import.meta.url),
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText
+const protocol = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/background-tasks.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: protocol })
 
 function fixture(t, options = {}) {
   const original = {
@@ -63,7 +67,7 @@ function fixture(t, options = {}) {
       if (id === 'node:crypto') return crypto
       if (id === './shell') return { ConversationShell: FakeShell, IDLE_TIMEOUT_MS: 300000, MAX_RUNTIME_MS: 1800000 }
       if (id === '../shared/file-requests') return { parseReadFilesRequest: () => assert.fail('no file request expected') }
-      if (id === '../shared/background-tasks') return { BACKGROUND_TASK_MARKER: '__W2T_BACKGROUND_TASK__' }
+      if (id === '../shared/background-tasks') return protocol
       assert.fail(`unexpected dependency: ${id}`)
     }
   })
@@ -130,6 +134,46 @@ test('captures background task ownership before execution and registers raw resu
   await f.settled()
   assert.equal(registrations[0], output, 'registration must receive untruncated actual output')
   assert.equal(f.sent.length, 0, 'a different conversation must not receive the old result')
+})
+
+test('registered background startups are archived while dedicated notifications replace ordinary output', async t => {
+  const f = fixture(t, { captureBackgroundTasks: () => () => 1 })
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'ok')
+  await f.settled()
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.sent.length, 0, 'creation and final notifications use the background delivery queue')
+  assert.equal([...f.records.values()].at(-1).status, 'done')
+  assert.equal([...f.records.values()].at(-1).output, 'fresh output')
+  assert.equal(f.runner.canSendAutomaticResult(), true)
+  f.runner.setPaused(true)
+  assert.equal(f.runner.canSendAutomaticResult(), false)
+  f.runner.setPaused(false)
+  f.setTerminalMode(false)
+  assert.equal(f.runner.canSendAutomaticResult(), false)
+})
+
+test('split-line background registration is captured and its startup output is not sent to AI', async t => {
+  const output = '__W2T_BACKGROUND_TASK__\r\n' + JSON.stringify({ pid: 33464, name: '6分钟性能监控',
+    log_path: 'C:\\Temp\\perf-monitor-fixture\\stdout.log', exit_code_path: 'C:\\Temp\\perf-monitor-fixture\\exit_code.txt' })
+  const captured = []
+  const f = fixture(t, { result: { output }, captureBackgroundTasks: () => text => {
+    const parsed = protocol.parseBackgroundTaskRegistrations(text)
+    captured.push(...parsed)
+    return parsed.length
+  } })
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'ok')
+  await f.settled()
+  assert.equal(captured.length, 1)
+  assert.equal(captured[0].pid, 33464)
+  assert.equal(f.sent.length, 0)
+  assert.equal([...f.records.values()].at(-1).output, output)
+})
+
+test('an invalid registration still returns the startup result for the model to diagnose', async t => {
+  const f = fixture(t, { captureBackgroundTasks: () => () => 0 })
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'ok')
+  await f.settled()
+  assert.equal(f.sent.length, 1)
 })
 
 for (const mode of ['manual', 'auto']) {

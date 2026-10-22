@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import type { JSX, RefObject } from 'react'
 import { Popover } from '@base-ui/react/popover'
 import './TerminalActionsMenu.css'
@@ -7,25 +7,21 @@ import './PanelAddMenu.css'
 export type PanelAddItem = 'terminal' | 'background' | 'question'
 
 /** The + beside the right panel's tabs: opens a menu of tabs that can be added. */
-export default function PanelAddMenu({ containerRef, visible, questionChatAvailable, onOpenChange, onAdd }: {
+export default function PanelAddMenu({ containerRef, visible, open, questionChatAvailable, onOpenChange, onAdd }: {
   containerRef: RefObject<HTMLElement | null>
   visible: boolean
+  open: boolean
   questionChatAvailable: boolean
   onOpenChange: (open: boolean) => void
   onAdd: (item: PanelAddItem) => void
 }): JSX.Element {
-  const [open, setOpen] = useState(false)
   const shown = open && visible
 
   useEffect(() => {
-    if (!visible) setOpen(false)
-  }, [visible])
+    if (open && !visible) onOpenChange(false)
+  }, [open, visible, onOpenChange])
 
-  useEffect(() => {
-    onOpenChange(shown)
-  }, [shown, onOpenChange])
-
-  return <Popover.Root open={shown} onOpenChange={setOpen}>
+  return <Popover.Root open={shown} onOpenChange={onOpenChange}>
     <Popover.Trigger className="panel-add__trigger" title="新增页签" aria-label="新增页签">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
     </Popover.Trigger>
@@ -36,7 +32,7 @@ export default function PanelAddMenu({ containerRef, visible, questionChatAvaila
         <Popover.Popup className="terminal-actions__popup panel-add__popup">
           <Popover.Title className="terminal-actions__heading">新增页签</Popover.Title>
           <button type="button" className="terminal-actions__item" onClick={() => {
-            setOpen(false)
+            onOpenChange(false)
             onAdd('terminal')
           }}>
             <span className="terminal-actions__icon">
@@ -45,7 +41,7 @@ export default function PanelAddMenu({ containerRef, visible, questionChatAvaila
             <span className="terminal-actions__label">终端</span>
           </button>
           <button type="button" className="terminal-actions__item" onClick={() => {
-            setOpen(false)
+            onOpenChange(false)
             onAdd('background')
           }}>
             <span className="terminal-actions__icon">
@@ -55,7 +51,7 @@ export default function PanelAddMenu({ containerRef, visible, questionChatAvaila
           </button>
           <button type="button" className="terminal-actions__item" disabled={!questionChatAvailable}
             title={questionChatAvailable ? '新建侧边聊天' : '当前平台不支持侧边聊天'} onClick={() => {
-              setOpen(false)
+            onOpenChange(false)
               onAdd('question')
             }}>
             <span className="terminal-actions__icon">

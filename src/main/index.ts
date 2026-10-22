@@ -22,7 +22,7 @@ import { nodeFallback } from './environment'
 import { DEFAULT_BACKEND_URL, normalizeBackendUrl, readBackendUrl } from '../shared/backend-url'
 import { BackendAuthService } from './backend-auth'
 import { Web2termConnection } from './web2term-connection'
-import { disconnectUnusedWeb2term, parseWeb2termBinding, restoreWeb2termSessions } from './web2term-shell'
+import { disconnectUnusedWeb2term, parseWeb2termBinding, restoreWeb2termSessions, web2termHostId } from './web2term-shell'
 import type { Web2termSessionBinding } from './web2term-shell'
 import { EMPTY_WEB2TERM_CONNECTION, EMPTY_WEB2TERM_TERMINALS } from '../shared/types'
 import { CHAT_PLATFORMS, CHATGPT_PLATFORM, DEFAULT_PLATFORM_ID, platformById } from '../shared/platforms'
@@ -755,6 +755,24 @@ function persistManagedSession(runtime: SessionRuntime): void {
 /** The model a newly created chat starts on: the one picked in settings, else the registry default. */
 function newChatPlatform(): ChatPlatform {
   return platformById(settings.defaultPlatformId) ?? platformById(DEFAULT_PLATFORM_ID) ?? CHATGPT_PLATFORM
+}
+
+/** Seed project notes before any runtime opens a different directory or reconnects. */
+function inheritWorkspaceProjectNotes(conversationStore: ConversationStore): void {
+  const savedSessions = conversationStore.listManagedSessions()
+  for (const project of conversationStore.listWorkspaceProjects()) {
+    const targets: Array<{ scope: 'local' | 'ssh'; hostId: string; directory: string }> = [
+      { scope: 'local', hostId: localMachineId, directory: project.directory }
+    ]
+    for (const session of savedSessions) {
+      if (session.projectId !== project.id) continue
+      const binding = parseWeb2termBinding(conversationStore.getSetting(`web2termSession:${session.id}`))
+      if (binding) targets.push({ scope: 'ssh', hostId: web2termHostId(binding), directory: binding.cwd ?? '' })
+      else if (session.sshAttached) targets.push({ scope: 'ssh', hostId: session.sshHostId, directory: session.sshCwd })
+      else targets.push({ scope: 'local', hostId: localMachineId, directory: session.localCwd })
+    }
+    conversationStore.inheritWorkspaceProjectNote(project.id, targets)
+  }
 }
 
 function createSession(
@@ -1855,6 +1873,7 @@ if (!app.requestSingleInstanceLock()) {
     const savedWorkspaceSessionId = conversationStore.getSetting(SETTING_WORKSPACE_SESSION_ID) ?? ''
     const savedWorkspaceOpenSshDialog = conversationStore.getSetting(SETTING_WORKSPACE_OPEN_SSH_DIALOG) === '1'
     const savedSessions = conversationStore.listManagedSessions()
+    inheritWorkspaceProjectNotes(conversationStore)
     for (const savedSession of savedSessions) {
         // Restore each session onto the site it was created on. An id this build does not
         // know (a row from a newer version, or a removed platform) falls back to the

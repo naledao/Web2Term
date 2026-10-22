@@ -1263,15 +1263,18 @@ export class ChatGptEmbed {
    * `stuck` means the text went in but the page never accepted the submit.
    */
   async sendRaw(
-    text: string
+    text: string,
+    options?: { conversationId: string; requireIdle: boolean }
   ): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed'> {
     const contents = this.liveContents()
     if (!contents) return 'no-composer'
 
     try {
+      const path = new URL(contents.getURL()).pathname
+      if (options && this.platform.conversationIdFromPath(path) !== options.conversationId) return 'busy'
       const outcome = (await contents.executeJavaScript(
         `window.__cmdTerminalInterceptor
-           ? window.__cmdTerminalInterceptor.sendRaw(${JSON.stringify(text)})
+           ? window.__cmdTerminalInterceptor.sendRaw(${JSON.stringify(text)}, null, ${JSON.stringify(options ? { requireIdle: options.requireIdle, path } : null)})
            : 'no-composer'`
       )) as unknown
 

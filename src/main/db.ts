@@ -195,6 +195,7 @@ CREATE TABLE IF NOT EXISTS workspace_projects (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   directory TEXT NOT NULL DEFAULT '',
+  terminal_notes TEXT,
   created_at INTEGER NOT NULL
 );
 -- App-level chats and their terminal/connection state, restored after restart.
@@ -440,6 +441,10 @@ export class ConversationStore {
       }
       this.db.exec('DROP TABLE mysql_connections_legacy')
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_mysql_connections_machine ON mysql_connections (machine_scope, host_id, updated_at)')
+    }
+    const workspaceProjectColumns = this.db.prepare('PRAGMA table_info(workspace_projects)').all() as unknown as Array<{ name: string }>
+    if (!workspaceProjectColumns.some(column => column.name === 'terminal_notes')) {
+      this.db.exec('ALTER TABLE workspace_projects ADD COLUMN terminal_notes TEXT')
     }
     const managedSessionColumns = this.db
       .prepare('PRAGMA table_info(managed_sessions)')
@@ -1373,6 +1378,34 @@ export class ConversationStore {
       ON CONFLICT(id) DO UPDATE SET name = excluded.name, directory = excluded.directory`)
       .run(project.id, project.name, project.directory, project.createdAt)
     return project
+  }
+
+  /** Null means never saved; an explicitly cleared project note stays empty. */
+  getWorkspaceProjectNote(id: string): string | null {
+    const row = this.db.prepare('SELECT terminal_notes FROM workspace_projects WHERE id = ?').get(id) as
+      { terminal_notes: string | null } | undefined
+    return row?.terminal_notes ?? null
+  }
+
+  setWorkspaceProjectNote(id: string, text: string): void {
+    const result = this.db.prepare('UPDATE workspace_projects SET terminal_notes = ? WHERE id = ?').run(text, id)
+    if (Number(result.changes) === 0) throw new Error('项目不存在，请重新选择。')
+  }
+
+  /** Seed an old project from its most recently saved directory note, retaining the originals. */
+  inheritWorkspaceProjectNote(id: string, targets: Array<{ scope: 'local' | 'ssh'; hostId: string; directory: string }>): boolean {
+    if (this.getWorkspaceProjectNote(id) !== null) return false
+    let latest: { note: string; updated_at: number } | undefined
+    const lookup = this.db.prepare('SELECT note, updated_at FROM terminal_directory_notes WHERE machine_scope = ? AND host_id = ? AND directory_key = ?')
+    for (const target of targets) {
+      const key = normalizeTerminalNotesDirectory(target.scope, target.directory)
+      if (!target.hostId || !key) continue
+      const row = lookup.get(target.scope, target.hostId, key) as { note: string; updated_at: number } | undefined
+      if (row && (!latest || row.updated_at > latest.updated_at)) latest = row
+    }
+    if (!latest) return false
+    this.setWorkspaceProjectNote(id, latest.note)
+    return true
   }
 
   removeWorkspaceProject(id: string): boolean {

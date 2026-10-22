@@ -12,6 +12,7 @@ import {
   buildTerminalPromptParts,
   toolPromptForPlatform,
   fileReadingPlatform,
+  canEditTerminalNotes,
   terminalNotesOwnerKey
 } from '../shared/types'
 import { CHAT_PLATFORMS, DEEPSEEK_PLATFORM } from '../shared/platforms'
@@ -63,6 +64,7 @@ import type {
 import { CommandRunner } from './commands'
 import { ExtraTerminals } from './extra-terminals'
 import { BackgroundTasks } from './background-tasks'
+import { BackgroundTaskResults } from './background-task-results'
 import type { BackgroundTaskTarget } from './background-tasks'
 import type { ExtraTerminalTarget } from './extra-terminals'
 import { ConversationStore } from './db'
@@ -268,6 +270,16 @@ export class SessionRuntime {
   readonly runner: CommandRunner
   readonly ssh: SshManager
   readonly backgroundTasks = new BackgroundTasks(state => this.send(IpcChannels.backgroundTasksChanged, state))
+  private readonly backgroundTaskResults = new BackgroundTaskResults({
+    canSend: owner => {
+      if (this.disposed || this.activePlatformId !== owner.platformId || !this.runner.canSendAutomaticResult()) return false
+      const embed = this.embeds.get(owner.platformId)?.embed
+      return Boolean(embed && embed.getState().conversationId === owner.conversationId
+        && embed.getInterceptorStatus().enabled && !embed.getInterceptorStatus().pendingQuestion)
+    },
+    send: (text, owner) => this.embeds.get(owner.platformId)!.embed!.sendRaw(text, { conversationId: owner.conversationId, requireIdle: true }),
+    onStatus: (id, status, message, kind) => this.backgroundTasks.setDelivery(id, status, message, kind)
+  })
   /** User-opened terminals beside the model's; each takes the transport and directory it has right now. */
   readonly extraTerminals = new ExtraTerminals({
     target: () => this.extraTerminalTarget(),
@@ -415,7 +427,15 @@ export class SessionRuntime {
       onExecutionChanged: (records) => this.send(IpcChannels.executionChanged, records),
       captureBackgroundTasks: (record, shell) => {
         const target = this.backgroundTaskTarget(shell)
-        return output => this.backgroundTasks.register(output, record, target)
+        const owner = { platformId: this.activePlatformId, conversationId: record.conversationId }
+        const ready = (): boolean => {
+          if (!target.available()) return false
+          if (target.transport === 'local') return !this.web2term && !this.ssh.getState().attached
+          return target.transport === 'web2term' ? Boolean(this.web2term?.alive) : Boolean(this.remoteShell?.alive)
+        }
+        const settled = this.backgroundTaskResults.capture(owner, ready)
+        const registered = this.backgroundTaskResults.capture(owner, ready, 'created')
+        return output => this.backgroundTasks.register(output, record, target, settled, registered)
       },
       onTaskStarted: () => this.embed.startTerminalTask(),
       onTerminalChanged: (state) => {
@@ -860,6 +880,7 @@ export class SessionRuntime {
 
   setProjectId(projectId: string | null): void {
     this.projectId = projectId
+    this.refreshDirectoryNotes()
     this.options.onSummaryChanged()
   }
 
@@ -973,6 +994,8 @@ export class SessionRuntime {
 
   async endTask() {
     this.deferredCommands.clear()
+    const conversationId = this.embed.getState().conversationId
+    if (conversationId) this.backgroundTaskResults.cancel({ platformId: this.activePlatformId, conversationId })
     const runner = this.runner.endTask()
     const status = await this.embed.endTask()
     await runner
@@ -1030,7 +1053,7 @@ export class SessionRuntime {
     return { scope: 'local', hostId: '', cwd: this.runner.getTerminalState().cwd || homedir() }
   }
 
-  private toolPrompt(platformId: string): string { return this.web2term ? '' : toolPromptForPlatform(platformId) }
+  private toolPrompt(platformId: string): string { return toolPromptForPlatform(platformId, !this.web2term) }
 
   private flushDeferredCommands(conversationId: string): void {
     if (this.deferredCommands.size === 0) return
@@ -1188,40 +1211,46 @@ export class SessionRuntime {
   private notesTarget(): Omit<TerminalNotes, 'text' | 'legacyText'> {
     if (this.web2term) {
       const directory = this.web2term.alive ? this.web2term.cwd : ''
-      return { scope: 'ssh', hostId: this.web2term.hostId, label: this.web2term.binding.deviceName || this.web2term.binding.agentId,
+      return { projectId: this.projectId, scope: 'ssh', hostId: this.web2term.hostId, label: this.web2term.binding.deviceName || this.web2term.binding.agentId,
         directory, directoryKey: normalizeTerminalNotesDirectory('ssh', directory) }
     }
     const ssh = this.ssh?.getState()
     if (ssh?.attached) {
       const directory = this.remoteShell?.alive ? this.remoteShell.cwd || ssh.modelCwd : ''
       return {
-        scope: 'ssh', hostId: ssh.hostId ?? '', label: ssh.name || ssh.target || '远端主机',
+        projectId: this.projectId, scope: 'ssh', hostId: ssh.hostId ?? '', label: ssh.name || ssh.target || '远端主机',
         directory, directoryKey: normalizeTerminalNotesDirectory('ssh', directory)
       }
     }
     const directory = this.runner?.getTerminalState().cwd ?? this.lastPersistedLocalCwd
     return {
-      scope: 'local', hostId: this.options.localMachineId, label: '本机',
+      projectId: this.projectId, scope: 'local', hostId: this.options.localMachineId, label: '本机',
       directory, directoryKey: normalizeTerminalNotesDirectory('local', directory)
     }
   }
 
   currentNotes(): TerminalNotes {
     const target = this.notesTarget()
-    const saved = this.options.store.getDirectoryNote(target.scope, target.hostId, target.directoryKey)
+    const store = this.options.store
+    const saved = target.projectId ? store.getWorkspaceProjectNote(target.projectId)
+      : store.getDirectoryNote(target.scope, target.hostId, target.directoryKey)
     const legacyText = saved === null
       ? target.scope === 'ssh' ? this.options.store.getSshNote(target.hostId) : this.options.store.getSetting(SETTING_LOCAL_NOTES) ?? ''
       : ''
     return { ...target, text: saved ?? '', legacyText }
   }
 
-  /** Called after cwd changes and after another session saves this same directory. */
+  /** Called after target changes and after another session saves this same note. */
   private refreshDirectoryNotes(force = false): void {
     if (this.disposed) return
+    // Older remote sessions may establish their saved directory only after
+    // reconnecting. Broadcast any inherited note to already open project chats.
+    const inherited = this.projectId && this.options.store.inheritWorkspaceProjectNote(this.projectId, [this.notesTarget()])
     const notes = this.currentNotes()
     const previous = this.lastDirectoryNotes
-    if (!force && previous && terminalNotesOwnerKey(previous) === terminalNotesOwnerKey(notes)
+    if (!force && !inherited && previous && terminalNotesOwnerKey(previous) === terminalNotesOwnerKey(notes)
       && previous.text === notes.text && previous.legacyText === notes.legacyText
+      && previous.scope === notes.scope && previous.hostId === notes.hostId
       && previous.directory === notes.directory && previous.label === notes.label) return
     this.lastDirectoryNotes = notes
     this.environment = { ...this.environment, workingDirectory: notes.directory, extraNotes: notes.text }
@@ -1230,6 +1259,7 @@ export class SessionRuntime {
     }
     this.send(IpcChannels.terminalNotesChanged, notes)
     this.send(IpcChannels.environmentChanged, { ...this.environment })
+    if (inherited) this.options.onTerminalNotesSaved(notes)
   }
 
   refreshTerminalNotesForOwner(owner: TerminalNotesOwner): void {
@@ -1238,12 +1268,13 @@ export class SessionRuntime {
 
   applyTerminalNotes(raw: string, expectedOwner: TerminalNotesOwner): TerminalNotes {
     const target = this.notesTarget()
-    if (!target.directoryKey || !target.hostId) throw new Error('当前机器或工作目录尚未确定，无法保存说明。')
+    if (!canEditTerminalNotes(target)) throw new Error('当前机器或工作目录尚未确定，无法保存说明。')
     if (!expectedOwner || terminalNotesOwnerKey(expectedOwner) !== terminalNotesOwnerKey(target)) {
-      throw new Error('工作目录已变化，请确认当前目录后重新保存说明。')
+      throw new Error('所属项目或工作目录已变化，请确认后重新保存说明。')
     }
     const text = raw.trim() === '' ? '' : raw
-    this.options.store.setDirectoryNote(target.scope, target.hostId, target.directoryKey, text)
+    if (target.projectId) this.options.store.setWorkspaceProjectNote(target.projectId, text)
+    else this.options.store.setDirectoryNote(target.scope, target.hostId, target.directoryKey, text)
     this.refreshDirectoryNotes()
     this.options.onTerminalNotesSaved(target)
     return this.currentNotes()
@@ -1961,6 +1992,7 @@ export class SessionRuntime {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.backgroundTaskResults.dispose()
     this.backgroundTasks.dispose()
     this.redisReader.dispose()
     this.web2term?.dispose()

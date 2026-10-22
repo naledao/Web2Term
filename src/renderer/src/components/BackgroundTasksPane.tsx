@@ -78,6 +78,8 @@ export default function BackgroundTasksPane({ sessionId, visible }: { sessionId:
         </details>
       </div>
       {selected.message ? <p className="background-tasks__notice" role="status">{selected.message}</p> : null}
+      {selected.creationDeliveryMessage ? <p className="background-tasks__notice" role="status">{selected.creationDeliveryMessage}</p> : null}
+      {selected.deliveryMessage ? <p className="background-tasks__notice" role="status">{selected.deliveryMessage}</p> : null}
       <div className="background-tasks__log-tools" role="group" aria-label="日志视图">
         <button type="button" className="background-tasks__button" aria-pressed={selectedLog === 'stdout'} onClick={() => { setSelectedLog('stdout'); setFollowOutput(true) }}>{selected.stderrPath ? '标准输出' : '输出'}</button>
         {selected.stderrPath ? <button type="button" className="background-tasks__button" aria-pressed={selectedLog === 'stderr'} onClick={() => { setSelectedLog('stderr'); setFollowOutput(true) }}>错误输出</button> : null}
@@ -92,7 +94,6 @@ export default function BackgroundTasksPane({ sessionId, visible }: { sessionId:
       </div>
     </> : <div className="background-tasks__list">
       {state === null && !loadError ? <p className="background-tasks__empty">正在读取后台任务…</p> : null}
-      {state !== null && running.length === 0 ? <p className="background-tasks__empty">当前没有待完成的后台任务。后台任务启动并登记后，会自动出现在这里。</p> : null}
       {running.map(task => <TaskRow key={task.id} task={task} onOpen={openTask} />)}
       {ended.length > 0 ? <>
         <button type="button" className="background-tasks__history" aria-expanded={showFinished} onClick={() => setShowFinished(value => !value)}>{showFinished ? '收起' : '查看'}已结束任务（{ended.length}）</button>
@@ -108,5 +109,7 @@ function TaskRow({ task, onOpen }: { task: BackgroundTask; onOpen: (task: Backgr
     <span className="background-tasks__meta">PID {task.pid} · {task.targetLabel}</span>
     <span className="background-tasks__meta">{timeLabel(task.createdAt)}</span>
     {task.message ? <span className="background-tasks__row-message">{task.message}</span> : null}
+    {task.creationDeliveryMessage ? <span className="background-tasks__row-message">{task.creationDeliveryMessage}</span> : null}
+    {task.deliveryMessage ? <span className="background-tasks__row-message">{task.deliveryMessage}</span> : null}
   </button>
 }

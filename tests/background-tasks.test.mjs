@@ -81,13 +81,66 @@ test('only explicit complete output lines register; ordinary prose, fabricated J
   assert.equal(result[0].name, '开发服务')
 })
 
+test('two Write-Output calls with a marker then compact JSON register on both LF and CRLF', () => {
+  const value = { pid: 33464, name: '6分钟性能监控', log_path: 'C:\\Temp\\perf-monitor-fixture\\stdout.log',
+    stderr_path: 'C:\\Temp\\perf-monitor-fixture\\stderr.log', exit_code_path: 'C:\\Temp\\perf-monitor-fixture\\exit_code.txt' }
+  for (const newline of ['\n', '\r\n']) {
+    for (const padding of ['', '  ']) {
+      const output = `startup output${newline}${marker}${padding}${newline}  ${JSON.stringify(value)}${newline}`
+      const parsed = protocol.parseBackgroundTaskRegistrations(output)
+      assert.equal(parsed.length, 1)
+      assert.deepEqual(JSON.parse(JSON.stringify(parsed[0])), value)
+    }
+  }
+})
+
+test('split markers never search past a blank or unrelated line, and still reject malformed or oversized JSON', () => {
+  const json = JSON.stringify({ pid: 33464, name: '任务', log_path: '/tmp/task.log' })
+  for (const output of [
+    marker, json, `${marker}\n\n${json}`, `${marker}\nordinary output\n${json}`,
+    `${marker}\n{"pid":33464`, `${marker}\n${JSON.stringify({ pid: '33464', name: '任务', log_path: '/tmp/task.log' })}`,
+    `${marker}\n${JSON.stringify({ pid: 33464, name: '任务', log_path: '/tmp/task.log', unused: 'x'.repeat(16384) })}`
+  ]) {
+    assert.equal(protocol.parseBackgroundTaskRegistrations(output).length, 0)
+  }
+  assert.equal(protocol.parseBackgroundTaskRegistrations(`${marker}\n${registration()}`).length, 1,
+    'an empty marker must not consume the next complete marked record')
+})
+
+test('split-line registration enters software monitoring and publishes the final result', async t => {
+  const f = fixture(t), completed = []
+  const value = { pid: 33464, name: '6分钟性能监控', log_path: 'C:\\Temp\\perf-monitor-fixture\\stdout.log',
+    stderr_path: 'C:\\Temp\\perf-monitor-fixture\\stderr.log', exit_code_path: 'C:\\Temp\\perf-monitor-fixture\\exit_code.txt' }
+  f.pending.push(sample())
+  assert.equal(f.manager.register(`${marker}\r\n${JSON.stringify(value)}`, record, { ...f.target, kind: 'windows' }, task => completed.push(task)), 1)
+  await flush()
+  assert.equal(f.manager.getState().tasks[0].pid, 33464)
+  assert.equal(f.manager.getState().tasks[0].status, 'running')
+  assert.equal(completed.length, 0)
+  f.pending.push(sample({ alive: false, exitCode: 0 }))
+  await f.tick()
+  f.pending.push(sample({ alive: false, exitCode: 0, stdout: log('final sample\n', 'final') }))
+  await f.tick()
+  assert.equal(completed.length, 1)
+  assert.equal(completed[0].status, 'completed')
+  assert.equal(completed[0].output, 'final sample\n')
+})
+
 test('registration runs without a mounted view, deduplicates reports and retains its original owner', async t => {
   const f = fixture(t)
+  const created = []
   f.pending.push(sample())
-  assert.equal(f.manager.register(registration(), record, f.target), 1)
+  assert.equal(f.manager.register(registration(), record, f.target, undefined, task => created.push(task)), 1)
+  assert.equal(created.length, 1)
+  assert.equal(created[0].status, 'checking')
+  assert.equal(created[0].pid, 12345)
   assert.equal(f.pushes[0].tasks[0].status, 'checking')
-  assert.equal(f.manager.register(registration(), record, f.target), 0)
-  assert.equal(f.manager.register(registration(), { ...record, messageId: 'report-again' }, f.target), 0)
+  assert.equal(f.manager.register(registration(), record, f.target, undefined, task => created.push(task)), 0)
+  assert.equal(f.manager.register(registration(), { ...record, messageId: 'report-again' }, f.target, undefined, task => created.push(task)), 0)
+  assert.equal(created.length, 1, 'duplicate reports must not notify the model again')
+  f.manager.setDelivery(created[0].id, 'sent', '创建确认已发送', 'created')
+  assert.equal(f.manager.getState().tasks[0].creationDeliveryStatus, 'sent')
+  assert.equal(f.manager.getState().tasks[0].deliveryStatus, undefined, 'creation confirmation is not the final result')
   await flush()
   const [task] = f.manager.getState().tasks
   assert.equal(task.status, 'running')
@@ -142,6 +195,64 @@ test('a missing PID is exited with unknown exit code, followed by a final log re
   assert.equal(f.manager.getState().tasks[0].output, 'last output\nflushed\n')
   assert.equal(f.timers.size, 0)
   assert.equal(f.calls.disposes, 1)
+})
+
+test('completion is published exactly once, after exit and the final log read, never during running or disconnect', async t => {
+  const f = fixture(t), completed = []
+  f.pending.push(sample())
+  f.manager.register(registration(), record, f.target, task => completed.push(task))
+  await flush()
+  assert.equal(completed.length, 0)
+  f.setAvailable(false)
+  await f.tick()
+  assert.equal(completed.length, 0)
+  f.setAvailable(true)
+  f.pending.push(sample({ alive: false, exitCode: 0, stdout: log('ending\n') }))
+  await f.tick()
+  assert.equal(completed.length, 0, 'wait for the final flush')
+  f.pending.push(sample({ alive: false, exitCode: 0, stdout: log('ending\nfinal output\n', 'final') }))
+  await f.tick()
+  assert.equal(completed.length, 1)
+  assert.equal(completed[0].status, 'completed')
+  assert.equal(completed[0].output, 'ending\nfinal output\n')
+  await f.tick()
+  assert.equal(completed.length, 1)
+  f.manager.setDelivery(completed[0].id, 'sent', '已发送')
+  assert.equal(f.manager.getState().tasks[0].deliveryStatus, 'sent')
+  assert.equal(completed[0].deliveryStatus, undefined, 'completion snapshots cannot be mutated by later UI updates')
+})
+
+test('failure and unknown exit codes both notify once without reporting success', async t => {
+  for (const exitCode of [7, null]) {
+    const f = fixture(t), completed = []
+    f.pending.push(sample({ alive: false, exitCode }))
+    f.manager.register(registration(), record, f.target, task => completed.push(task))
+    await flush()
+    f.pending.push(sample({ alive: false, exitCode }))
+    await f.tick()
+    assert.equal(completed.length, 1)
+    assert.equal(completed[0].status, exitCode === null ? 'exited' : 'failed')
+    assert.equal(completed[0].exitCode, exitCode)
+  }
+})
+
+test('a failed final read retries before notifying, and disposal suppresses late completion', async t => {
+  const f = fixture(t), completed = []
+  f.pending.push(sample({ alive: false, exitCode: 0 }))
+  f.manager.register(registration(), record, f.target, task => completed.push(task))
+  await flush()
+  f.pending.push(new Error('temporary observer failure'))
+  await f.tick()
+  assert.equal(completed.length, 0)
+  f.pending.push(sample({ alive: false, exitCode: 0 }))
+  await f.tick()
+  assert.equal(completed.length, 1)
+  const disposed = fixture(t)
+  disposed.pending.push(sample({ alive: false, exitCode: 0 }))
+  disposed.manager.register(registration(), record, disposed.target, () => assert.fail('disposed completion'))
+  await flush()
+  disposed.manager.dispose()
+  await disposed.tick()
 })
 
 test('an exit-code file distinguishes success and failure; its value survives a later missing file', async t => {

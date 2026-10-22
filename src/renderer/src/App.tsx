@@ -16,7 +16,10 @@ import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
 import ExtraTerminalPane from './components/ExtraTerminalPane'
 import BackgroundTasksPane from './components/BackgroundTasksPane'
+import type { BackgroundTasksState } from '@shared/background-tasks'
 import PanelAddMenu from './components/PanelAddMenu'
+import PanelTabs from './components/PanelTabs'
+import type { PanelTabItem } from './components/PanelTabs'
 import type { TerminalActionId } from './components/TerminalActionsMenu'
 import type { ToolKind } from './tool-window-state'
 import ConversationTranscript from './components/ConversationTranscript'
@@ -30,7 +33,7 @@ import type { CommandHistoryCursor } from './terminal-command-history'
 import brandIcon from './assets/brand-icon.png'
 import type { IApi as FilemanagerApi, IEntity as FilemanagerEntity } from '@svar-ui/react-filemanager'
 import type { CSSProperties, FormEvent, JSX, PointerEvent as ReactPointerEvent } from 'react'
-import { SESSION_COOKIE_NAME, isQuestionPayload, terminalNotesOwnerKey } from '@shared/types'
+import { SESSION_COOKIE_NAME, isQuestionPayload, canEditTerminalNotes, terminalNotesOwnerKey } from '@shared/types'
 import { DEFAULT_BACKEND_URL, normalizeBackendUrl } from '@shared/backend-url'
 import { sshWorkingDirectory } from '@shared/ssh-directory'
 import { isPdfPath } from '@shared/pdf-preview'
@@ -80,6 +83,14 @@ const PANEL_MAX_RESERVE = 520
 /** `extra:<id>` is a terminal the user added from the + menu. */
 type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question' | 'background' | `extra:${string}`
 
+function adjacentPanelTab(ids: PanelTab[], removed: PanelTab, remaining = ids.filter(id => id !== removed)): PanelTab {
+  const index = ids.indexOf(removed)
+  if (index < 0) return 'terminal'
+  return ids.slice(index + 1).find(id => remaining.includes(id))
+    ?? ids.slice(0, index).reverse().find(id => remaining.includes(id))
+    ?? 'terminal'
+}
+
 const SETTINGS_SECTIONS = [
   { id: 'appearance', label: '外观' },
   { id: 'chat', label: '对话' },
@@ -114,6 +125,7 @@ const STORAGE_PANEL_WIDTH = 'layout.panelWidth'
 const STORAGE_PANEL_COLLAPSED = 'layout.panelCollapsed'
 const STORAGE_PANEL_TAB = 'layout.panelTab'
 const STORAGE_BACKGROUND_TASKS_OPEN = 'layout.backgroundTasksOpen'
+const STORAGE_BACKGROUND_TASK_LATEST = 'layout.backgroundTaskLatest'
 
 function sessionLayoutKey(key: string, sessionId: string): string {
   return `${key}.${sessionId}`
@@ -440,6 +452,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const terminalVisible = panelTab === 'terminal' && !panelCollapsed
   const [extraTerminals, setExtraTerminals] = useState<ExtraTerminal[] | null>(null)
   const [panelAddMenuOpen, setPanelAddMenuOpen] = useState(false)
+  const [panelTabListOpen, setPanelTabListOpen] = useState(false)
   const [questionChat, setQuestionChat] = useState<QuestionChatState | null>(null)
   const [questionChatOpen, setQuestionChatOpen] = useState(false)
   const [questionChatCreating, setQuestionChatCreating] = useState(false)
@@ -651,7 +664,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   /** Keep terminal popovers inside the sidebar, away from the native chat view. */
   const toolboxPaneRef = useRef<HTMLElement>(null)
   const panelRef = useRef<HTMLElement>(null)
-  const panelTabsRef = useRef<HTMLDivElement>(null)
   const terminalSwitchRef = useRef<HTMLButtonElement>(null)
   const terminalOutputRef = useRef<HTMLDivElement>(null)
   const promptBodyRef = useRef<HTMLDivElement>(null)
@@ -862,37 +874,58 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     }
   }, [])
 
-  // A remembered added-terminal tab whose terminal is gone (closed, or the app restarted).
+  // Observe registrations even while the background pane is closed. Remember
+  // the latest task so log/status pushes and session remounts do not steal focus.
   useEffect(() => {
-    if (extraTerminals === null || !panelTab.startsWith('extra:')) return
-    if (!extraTerminals.some((item) => `extra:${item.id}` === panelTab)) setPanelTab('terminal')
-  }, [extraTerminals, panelTab])
-
-  // The tab strip scrolls sideways once added terminals outgrow it; a plain mouse wheel
-  // only scrolls vertically, so turn it into horizontal movement here.
-  useEffect(() => {
-    const strip = panelTabsRef.current
-    if (!strip) return
-    const onWheel = (event: WheelEvent): void => {
-      if (strip.scrollWidth <= strip.clientWidth || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
-      event.preventDefault()
-      strip.scrollLeft += event.deltaY
+    let cancelled = false
+    let receivedPush = false
+    const key = sessionLayoutKey(STORAGE_BACKGROUND_TASK_LATEST, sessionId)
+    let latestSeen = ''
+    try { latestSeen = window.localStorage.getItem(key) ?? '' } catch { /* Optional layout storage. */ }
+    const apply = (state: BackgroundTasksState): void => {
+      const latest = state.tasks.at(-1)?.id
+      if (cancelled || !latest || latest === latestSeen) return
+      latestSeen = latest
+      try { window.localStorage.setItem(key, latest) } catch { /* Keep the in-memory guard. */ }
+      setBackgroundTasksOpen(true)
+      setPanelCollapsed(false)
+      setPanelTab('background')
     }
-    // Non-passive: React's onWheel cannot preventDefault.
-    strip.addEventListener('wheel', onWheel, { passive: false })
-    return () => strip.removeEventListener('wheel', onWheel)
-  }, [panelCollapsed])
+    const off = window.api.onBackgroundTasksChanged((state, ownerId) => {
+      if (ownerId !== sessionId || cancelled) return
+      receivedPush = true
+      apply(state)
+    })
+    void window.api.getBackgroundTasks(sessionId).then(state => {
+      if (!receivedPush) apply(state)
+    }).catch(() => { /* The task pane provides its own read-error state. */ })
+    return () => { cancelled = true; off() }
+  }, [sessionId])
 
-  // Keep the selected tab in view, including one just added at the far end.
+  const panelTabs = useMemo<PanelTabItem<PanelTab>[]>(() => {
+    const items: PanelTabItem<PanelTab>[] = [
+      { id: 'control', title: '控制' },
+      { id: 'terminal', title: '终端' },
+      { id: 'toolbox', title: '工具箱' }
+    ]
+    if (questionChatOpen) items.push({ id: 'question', title: '侧边聊天', closable: true, closeDisabled: questionChatCreating })
+    if (backgroundTasksOpen) items.push({ id: 'background', title: '后台任务', closable: true, closeTitle: '关闭后台任务页签（任务继续运行）' })
+    for (const item of extraTerminals ?? []) items.push({ id: `extra:${item.id}`, title: item.title, closable: true })
+    return items
+  }, [questionChatOpen, questionChatCreating, backgroundTasksOpen, extraTerminals])
+  const panelTabIds = useMemo(() => panelTabs.map(item => item.id), [panelTabs])
+  const panelTabIdsRef = useRef(panelTabIds)
+  panelTabIdsRef.current = panelTabIds
+  const previousPanelTabIdsRef = useRef(panelTabIds)
+
+  // Also handle terminals closed elsewhere, keeping the closest remaining view selected.
   useEffect(() => {
-    const strip = panelTabsRef.current
-    const active = strip?.querySelector<HTMLElement>('[aria-pressed="true"]')
-    if (!strip || !active) return
-    const tab = active.closest<HTMLElement>('.panel__tab') ?? active
-    const left = tab.offsetLeft - strip.offsetLeft
-    if (left < strip.scrollLeft) strip.scrollLeft = left
-    else if (left + tab.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = left + tab.offsetWidth - strip.clientWidth
-  }, [panelTab, extraTerminals, panelCollapsed, backgroundTasksOpen, questionChatOpen])
+    const previous = previousPanelTabIdsRef.current
+    previousPanelTabIdsRef.current = panelTabIds
+    if (panelTabIds.includes(panelTab) || (extraTerminals === null && panelTab.startsWith('extra:'))) return
+    const next = adjacentPanelTab(previous, panelTab, panelTabIds)
+    setPanelTab(current => current === panelTab ? next : current)
+  }, [extraTerminals, panelTab, panelTabIds])
 
   const addExtraTerminal = useCallback(async (): Promise<void> => {
     const created = await window.api.createExtraTerminal()
@@ -933,10 +966,34 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [sessionId, platformId])
 
   const closeExtraTerminal = useCallback(async (id: string): Promise<void> => {
+    const tabId: PanelTab = `extra:${id}`
+    const ids = panelTabIdsRef.current
     const state = await window.api.closeExtraTerminal(id)
+    const remaining = panelTabIdsRef.current.filter(tab => tab !== tabId
+      && (!tab.startsWith('extra:') || state.terminals.some(item => `extra:${item.id}` === tab)))
+    const next = adjacentPanelTab(ids, tabId, remaining)
     setExtraTerminals(state.terminals)
-    setPanelTab((current) => current === `extra:${id}` ? 'terminal' : current)
+    setPanelTab(current => current === tabId ? next : current)
   }, [])
+
+  const closePanelTab = (id: PanelTab): void => {
+    if (id.startsWith('extra:')) {
+      void closeExtraTerminal(id.slice('extra:'.length))
+      return
+    }
+    if (id === 'question') {
+      if (questionChatCreating) return
+      questionChatDismissedId.current = questionChat?.id ?? questionChatKnownId.current
+      questionChatKnownId.current = ''
+      questionChatRequest.current += 1
+      if (questionChat) window.api.questionChatAction(sessionId, questionChat.id, 'close')
+      setQuestionChat(null)
+      setQuestionChatOpen(false)
+    } else if (id === 'background') setBackgroundTasksOpen(false)
+    else return
+    const next = adjacentPanelTab(panelTabIdsRef.current, id)
+    setPanelTab(current => current === id ? next : current)
+  }
 
   const refreshConversationMessages = useCallback(async (): Promise<void> => {
     const request = ++conversationRequestRef.current
@@ -1847,7 +1904,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * Adopt the note the main process hands over.
    *
    * Main pushes on every save AND whenever the machine in charge changes, so the
-   * draft is only replaced when the editor is showing a DIFFERENT machine/directory —
+   * draft is only replaced when the editor is showing a different project or machine/directory —
    * otherwise a routine broadcast would wipe whatever is being typed.
    */
   const applyNotes = useCallback((value: TerminalNotes): void => {
@@ -1883,7 +1940,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
   const saveNotes = useCallback(async (): Promise<void> => {
     const owner = notesSnapshotRef.current
-    if (!owner?.directoryKey || notesSaving) return
+    if (!owner || !canEditTerminalNotes(owner) || notesSaving) return
     setNotesSaving(true)
     setNotesError('')
     try {
@@ -1892,7 +1949,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         applyNotes(saved)
       }
     } catch {
-      setNotesError('说明未保存，请确认当前工作目录后重试。')
+      setNotesError('说明未保存，请确认当前项目或工作目录后重试。')
     } finally {
       setNotesSaving(false)
     }
@@ -2332,59 +2389,24 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         )}
         <div className="panel__collapse-head">
           {panelCollapsed ? null : (
-            <div ref={panelTabsRef} className="panel__tabs" role="group" aria-label="右侧栏内容">
-              <button type="button" className="panel__tab" aria-pressed={panelTab === 'control'} onClick={() => {
-                setPanelTab('control')
-                setSshPickerOpen(false)
-              }}>控制</button>
-              <button type="button" className="panel__tab" aria-pressed={panelTab === 'terminal'} onClick={() => setPanelTab('terminal')}>终端</button>
-              <button type="button" className="panel__tab" aria-pressed={panelTab === 'toolbox'} onClick={() => {
-                setPanelTab('toolbox')
-                setSshPickerOpen(false)
-              }}>工具箱</button>
-              {questionChatOpen ? <span className="panel__tab panel__tab--closable" data-active={panelTab === 'question'}>
-                <button type="button" className="panel__tab-label" aria-pressed={panelTab === 'question'} onClick={() => {
-                  setPanelTab('question')
-                  setSshPickerOpen(false)
-                }}>侧边聊天</button>
-                <button type="button" className="panel__tab-close" disabled={questionChatCreating} title="关闭侧边聊天" aria-label="关闭侧边聊天页签" onClick={() => {
-                  questionChatDismissedId.current = questionChat?.id ?? questionChatKnownId.current
-                  questionChatKnownId.current = ''
-                  questionChatRequest.current += 1
-                  if (questionChat) window.api.questionChatAction(sessionId, questionChat.id, 'close')
-                  setQuestionChat(null)
-                  setQuestionChatOpen(false)
-                  setPanelTab(current => current === 'question' ? 'control' : current)
-                }}>×</button>
-              </span> : null}
-              {backgroundTasksOpen ? <span className="panel__tab panel__tab--closable" data-active={panelTab === 'background'}>
-                <button type="button" className="panel__tab-label" aria-pressed={panelTab === 'background'} onClick={() => {
-                  setPanelTab('background')
-                  setSshPickerOpen(false)
-                }}>后台任务</button>
-                <button type="button" className="panel__tab-close" title="关闭后台任务页签（任务继续运行）" aria-label="关闭后台任务页签" onClick={() => {
-                  setBackgroundTasksOpen(false)
-                  setPanelTab(current => current === 'background' ? 'terminal' : current)
-                }}>×</button>
-              </span> : null}
-              {(extraTerminals ?? []).map((item) => (
-                <span key={item.id} className="panel__tab panel__tab--closable" data-active={panelTab === `extra:${item.id}`}>
-                  <button type="button" className="panel__tab-label" aria-pressed={panelTab === `extra:${item.id}`} onClick={() => {
-                    setPanelTab(`extra:${item.id}`)
-                    setSshPickerOpen(false)
-                  }}>{item.title}</button>
-                  <button type="button" className="panel__tab-close" title={`关闭${item.title}`} aria-label={`关闭${item.title}`}
-                    onClick={() => void closeExtraTerminal(item.id)}>×</button>
-                </span>
-              ))}
-            </div>
+            <PanelTabs
+              items={panelTabs}
+              active={panelTab}
+              containerRef={panelRef}
+              visible={!(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
+              open={panelTabListOpen}
+              onOpenChange={open => { setPanelTabListOpen(open); if (open) setPanelAddMenuOpen(false) }}
+              onSelect={id => { setPanelTab(id); if (id !== 'terminal') setSshPickerOpen(false) }}
+              onClose={closePanelTab}
+            />
           )}
           {panelCollapsed ? null : (
             <PanelAddMenu
               containerRef={panelRef}
               visible={!(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
+              open={panelAddMenuOpen}
               questionChatAvailable={supportsSelectionQuestion(platformId)}
-              onOpenChange={setPanelAddMenuOpen}
+              onOpenChange={open => { setPanelAddMenuOpen(open); if (open) setPanelTabListOpen(false) }}
               onAdd={item => {
                 if (item === 'background') {
                   setBackgroundTasksOpen(true)
@@ -2396,7 +2418,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               }}
             />
           )}
-          <span className="panel__spacer" />
           <button
             type="button"
             className="panel__sync panel__collapse-button"
@@ -2404,6 +2425,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             aria-label={panelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
             onClick={() => {
               setPanelCollapsed((value) => !value)
+              setPanelAddMenuOpen(false)
+              setPanelTabListOpen(false)
               setSshPickerOpen(false)
             }}
           >
@@ -2624,8 +2647,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
         {questionChatOpen || questionChat ? (
           <div className="panel__view" hidden={!questionChatOpen || panelTab !== 'question'}>
-            {/* The chat is a native view over this area; it would paint over the + menu. */}
-            {questionChat ? <QuestionChatPanel key={questionChat.id} sessionId={sessionId} state={questionChat} visible={questionChatOpen && panelTab === 'question' && !panelCollapsed && nativeEmbedVisible && !panelAddMenuOpen} /> : (
+            {/* Native chat would otherwise paint over either header popup. */}
+            {questionChat ? <QuestionChatPanel key={questionChat.id} sessionId={sessionId} state={questionChat} visible={questionChatOpen && panelTab === 'question' && !panelCollapsed && nativeEmbedVisible && !panelAddMenuOpen && !panelTabListOpen} /> : (
               <section className="question-chat-sidebar question-chat-sidebar--empty" aria-label="侧边聊天">
                 <strong>{questionChatCreateError ? '侧边聊天暂未打开' : '正在新建侧边聊天…'}</strong>
                 {questionChatCreateError ? <>

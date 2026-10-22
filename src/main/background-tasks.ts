@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { posix, win32 } from 'node:path'
 import { parseBackgroundTaskRegistrations } from '../shared/background-tasks'
-import type { BackgroundTask, BackgroundTasksState } from '../shared/background-tasks'
+import type { BackgroundTask, BackgroundTaskDeliveryStatus, BackgroundTaskNotificationKind, BackgroundTasksState } from '../shared/background-tasks'
 import type { EnvironmentKind, ExecutionRecord } from '../shared/types'
 import type { ExecutionShell } from './shell'
 
@@ -44,6 +44,7 @@ interface Entry {
   /** One final read after exit captures output flushed during process teardown. */
   finalRead: boolean
   settled: boolean
+  onSettled?: (task: BackgroundTask) => void
 }
 
 const quotePosix = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`
@@ -150,7 +151,8 @@ export class BackgroundTasks {
   }
 
   register(output: string, record: Pick<ExecutionRecord, 'messageId' | 'conversationId' | 'command'>,
-    target: BackgroundTaskTarget): number {
+    target: BackgroundTaskTarget, onSettled?: (task: BackgroundTask) => void,
+    onRegistered?: (task: BackgroundTask) => void): number {
     if (this.disposed) return 0
     let count = 0
     for (const registration of parseBackgroundTaskRegistrations(output)) {
@@ -170,8 +172,10 @@ export class BackgroundTasks {
         createdAt: Date.now(), checkedAt: null, message: '正在读取进程状态和日志…',
         output: '', errorOutput: '', outputTruncated: false, errorOutputTruncated: false
       }
-      this.entries.set(key, { task, target, identity: '', stdoutStamp: '', stderrStamp: '', finalRead: false, settled: false })
+      this.entries.set(key, { task, target, identity: '', stdoutStamp: '', stderrStamp: '', finalRead: false, settled: false, onSettled })
       count += 1
+      try { onRegistered?.({ ...task }) }
+      catch (error) { console.warn('[background] registration callback failed:', error instanceof Error ? error.name : 'Error') }
     }
     if (count) {
       this.onChanged(this.getState())
@@ -179,6 +183,22 @@ export class BackgroundTasks {
       void this.poll()
     }
     return count
+  }
+
+  setDelivery(id: string, status: BackgroundTaskDeliveryStatus, message: string, kind: BackgroundTaskNotificationKind = 'finished'): void {
+    if (this.disposed) return
+    const entry = [...this.entries.values()].find(item => item.task.id === id)
+    if (!entry) return
+    if (kind === 'created') {
+      if (entry.task.creationDeliveryStatus === status && entry.task.creationDeliveryMessage === message) return
+      entry.task.creationDeliveryStatus = status
+      entry.task.creationDeliveryMessage = message
+    } else {
+      if (entry.task.deliveryStatus === status && entry.task.deliveryMessage === message) return
+      entry.task.deliveryStatus = status
+      entry.task.deliveryMessage = message
+    }
+    this.onChanged(this.getState())
   }
 
   dispose(): void {
@@ -266,6 +286,12 @@ export class BackgroundTasks {
       if (['completed', 'failed', 'exited'].includes(task.status)) {
         entry.settled = entry.finalRead
         entry.finalRead = true
+        if (entry.settled) {
+          // Publish only after the final read, including output flushed at exit.
+          // Delivery failures must not reopen or rerun a completed task.
+          try { entry.onSettled?.({ ...task }) }
+          catch (error) { console.warn('[background] completion callback failed:', error instanceof Error ? error.name : 'Error') }
+        }
       }
     } catch (error) {
       if (this.disposed) return

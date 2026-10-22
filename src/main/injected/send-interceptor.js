@@ -152,6 +152,9 @@
     /** True while WE are driving the composer; suppresses prefixing/interception. */
     programmatic: false,
     lastCommandMessageId: null,
+    // A settled command is waiting for its result even while awaitingReplySince
+    // stays armed for the live command loop. Clear this on every confirmed send.
+    replyActionDetected: false,
     /**
      * Timestamp of the last message we sent, cleared once its reply is handled.
      *
@@ -1403,13 +1406,16 @@
     const replyBaselineId = lastAssistantId()
 
     const finish = (ok) => {
-      if (sendContext.taskPromptGeneration !== state.taskPromptGeneration) {
+      if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
+          (sendContext.path !== undefined && sendContext.path !== location.pathname)) {
         discardUserImageCapture(attachmentToken)
+        if (sendContext.taskPromptGeneration === state.taskPromptGeneration) state.programmatic = false
         if (done) done('stuck')
         return
       }
       state.programmatic = false
       if (ok) {
+        state.replyActionDetected = false
         if (!isRaw) {
           if (sendContext.promptInjected) state.taskPromptInjected = true
           draftRejected = false
@@ -1450,7 +1456,8 @@
 
     // A task may end during the initial send delay, retry wait or confirmation poll.
     // Its old submission must never click Send or re-open the task afterwards.
-    if (sendContext.taskPromptGeneration !== state.taskPromptGeneration) {
+    if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
+        (sendContext.path !== undefined && sendContext.path !== location.pathname)) {
       finish(false)
       return
     }
@@ -1538,7 +1545,8 @@
      */
     const confirmStartedAt = Date.now()
     const confirm = () => {
-      if (sendContext.taskPromptGeneration !== state.taskPromptGeneration) {
+      if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
+          (sendContext.path !== undefined && sendContext.path !== location.pathname)) {
         finish(false)
         return
       }
@@ -2380,6 +2388,7 @@
         return
       }
       state.lastCommandMessageId = messageId
+      state.replyActionDetected = state.enabled
       if (state.enabled) report({ event: 'read-files', messageId, ...parsed, live: state.awaitingReplySince !== 0 })
       return
     }
@@ -2542,6 +2551,7 @@
     }
     const live = state.awaitingReplySince !== 0
     state.lastCommandMessageId = messageId
+    state.replyActionDetected = true
 
     report({
       event: 'command',
@@ -3436,7 +3446,7 @@
      *
      * @returns Promise<'ok' | 'no-composer' | 'busy' | 'insert-failed' | 'stuck'>
      */
-    sendRaw(text, ownedDraft = null) {
+    sendRaw(text, ownedDraft = null, options = null) {
       const element = getComposer()
       if (!element) return Promise.resolve('no-composer')
       const blocked = (reason, details = {}) => {
@@ -3446,6 +3456,8 @@
         return Promise.resolve('busy')
       }
       if (state.programmatic) return blocked('programmatic-send')
+      if (options?.path !== undefined && options.path !== location.pathname) return blocked('conversation-changed')
+      if (options?.requireIdle && ((state.awaitingReplySince !== 0 && !state.replyActionDetected) || state.pendingQuestion)) return blocked('awaiting-reply')
       if (findStopButton()) return blocked('model-generating', { stopButtonFound: true })
       if (hasDraftImageAttachment()) return blocked('image-draft')
       const attachments = attachmentSnapshot()
@@ -3512,7 +3524,9 @@
           done,
           Date.now() + SEND_TIMEOUT_MS,
           0,
-          Date.now() + SEND_BUTTON_GRACE_MS
+          Date.now() + SEND_BUTTON_GRACE_MS,
+          null,
+          { taskPromptGeneration, promptInjected: false, ...(options?.path !== undefined ? { path: options.path } : {}) }
         )
       })
     },
