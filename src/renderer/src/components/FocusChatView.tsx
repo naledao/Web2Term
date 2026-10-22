@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, JSX, ReactNode } from 'react'
 import MDEditor from '@uiw/react-md-editor'
 import ConversationTranscript from './ConversationTranscript'
@@ -86,9 +86,10 @@ function executionNeedsAction(record: ExecutionRecord, delivery?: FocusDelivery)
     delivery === 'blocked' || delivery === 'failed' ||
     (record.kind === 'read_files' && record.deliveryStatus === 'failed')
 }
-function Markdown({ text, theme }: { text: string; theme: AppTheme }): JSX.Element {
+// Memoized: parsing and highlighting every answer again on each keystroke made typing stutter.
+const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: AppTheme }): JSX.Element {
   return <MDEditor.Markdown source={cleanFocusAnswer(text)} skipHtml wrapperElement={{ 'data-color-mode': theme }} />
-}
+})
 
 export default function FocusChatView(props: Props): JSX.Element {
   const { owner, visible, theme, messages, messagesReady } = props
@@ -304,9 +305,12 @@ export default function FocusChatView(props: Props): JSX.Element {
       </div>
     </article>
   }
-  return <section className="focus-chat" aria-label="专注对话" data-theme={theme}>
-    <header className="focus-chat__header"><span><img className="focus-chat__brand-icon" src={deepseekIcon} alt="DeepSeek" /></span></header>
-    <div className="focus-chat__transcript">
+  /*
+   * The draft lives in this component, so every keystroke re-renders it. Rebuilding the whole
+   * transcript each time (and re-running ProcessScroll's layout read) is what made typing
+   * stutter in a long task; it depends only on the values listed here, never on the draft.
+   */
+  const transcript = useMemo(() =>
       <ConversationTranscript scrollKey={'focus:' + ownerKey} ready={messagesReady && state !== null}>
         {entries.length === 0 ? <div className="focus-chat__empty"><img src={deepseekIcon} alt="" /><h2>从一个目标开始</h2><p>描述你想完成的任务，处理过程会归入同一轮对话。</p></div> : entries.map(entry => entry.turn ? renderTurn(entry.turn) :
           <article className={'focus-history focus-history--' + entry.message!.role} data-message-id={entry.message!.id} key={entry.message!.id}>
@@ -315,7 +319,12 @@ export default function FocusChatView(props: Props): JSX.Element {
             {entry.message!.role === 'assistant' ? <Markdown text={entry.message!.content} theme={theme} /> : <p>{cleanFocusUserText(entry.message!.content)}</p>}
           </article>)}
         {unlinkedAttention.map(record => renderExecution(record, focusDelivery(record), true))}
-      </ConversationTranscript>
+      </ConversationTranscript>,
+  [state, messages, messagesReady, theme, ownerKey, actionId, props.renderAttachment, props.onControl, props.onRun, props.onSkip])
+  return <section className="focus-chat" aria-label="专注对话" data-theme={theme}>
+    <header className="focus-chat__header"><span><img className="focus-chat__brand-icon" src={deepseekIcon} alt="DeepSeek" /></span></header>
+    <div className="focus-chat__transcript">
+      {transcript}
     </div>
     <div className="focus-chat__bottom">
       {props.needsAnswer ? <div className="focus-chat__notice" role="status">DeepSeek 需要你的回答，任务正在等待。<button type="button" onClick={props.onQuestion}>回答问题</button></div> : null}
