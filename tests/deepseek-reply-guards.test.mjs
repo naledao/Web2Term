@@ -234,3 +234,42 @@ test('platforms without measured labels ignore look-alike buttons', () => {
   app.controller.checkNow()
   assert.equal(button.clicks, 0)
 })
+
+const commandJson = (command) => JSON.stringify({ command, description: '替换头部图标', timeout_seconds: 30 })
+const commandTurn = (key, text) => element('div', { 'data-virtual-list-item-key': key }, [
+  element('div', { class: 'ds-assistant-message-main-content' }, text)
+])
+
+test('a reply that grows after its command was reported does not report the same command again', () => {
+  const turn = commandTurn('2', commandJson('Get-Content a.txt'))
+  const app = fixture([userTurn('1'), turn])
+  app.controller.checkNow()
+  assert.equal(app.commands().length, 1)
+  // Same turn element, more text after the JSON: a new content hash, the same command.
+  turn.childNodes[0].childNodes.push({ nodeType: 3, nodeValue: '\n命令已给出，等待结果。' })
+  app.scan()
+  assert.equal(app.commands().length, 1)
+  assert.ok(app.events.some((event) => event.reason === 'duplicate-command'))
+})
+
+test('a remounted row at the same position is still the same turn', () => {
+  const app = fixture([userTurn('1'), commandTurn('2', commandJson('Get-Content a.txt'))])
+  app.controller.checkNow()
+  app.replaceNodes([userTurn('1'), commandTurn('2', commandJson('Get-Content a.txt') + '\n补充说明')])
+  app.scan()
+  assert.equal(app.commands().length, 1)
+})
+
+test('a different command in the grown reply, or the same command after a new send, still runs', () => {
+  const turn = commandTurn('2', commandJson('Get-Content a.txt'))
+  const app = fixture([userTurn('1'), turn])
+  app.controller.checkNow()
+  app.replaceNodes([userTurn('1'), commandTurn('2', commandJson('Get-Content b.txt'))])
+  app.scan()
+  assert.deepEqual(app.commands().map((event) => event.command), ['Get-Content a.txt', 'Get-Content b.txt'])
+
+  app.advance(1)
+  // A new wait (what a confirmed send does) starts a new reply, even on a recycled row.
+  app.controller.checkNow()
+  assert.equal(app.commands().length, 3)
+})
