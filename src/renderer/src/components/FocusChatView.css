@@ -83,7 +83,7 @@
 .focus-composer__tools>span{margin-left:auto;color:var(--fc-muted);font-size:11px}
 .focus-composer__tools .focus-composer__send{width:34px;height:34px;border:0;border-radius:50%;display:grid;place-items:center;padding:0;background:var(--fc-accent);color:var(--fc-bg);font-size:19px;line-height:1
 .focus-composer__send .focus-composer__stop-icon{display:block;width:16px;height:16px}
-.focus-composer__hint{max-width:880px;margin:7px auto 0;text-align:center;font-size:10px;color:var(--fc-muted)}
+.focus-composer__hint{margin:7px auto 0;text-align:center;font-size:11px;color:var(--fc-muted)}
 .focus-chat__status{color:var(--fc-accent)}
 .focus-chat__pulse{width:6px;height:6px;background:var(--fc-accent);border-radius:50%;animation:focus-chat-pulse 900ms ease-in-out infinite alternate;flex:none}
 @keyframes focus-chat-pulse{to{opacity:.3}}
