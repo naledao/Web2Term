@@ -1,6 +1,6 @@
 // User-run offline regression tests: the actual injected script runs in a VM with
 // synthetic DOM nodes and timers. No Electron, browser session, network or shell.
-// Run from the repository root: node --test tests/deepseek-continue.test.mjs
+// Run from the repository root: node --test tests/deepseek-reply-guards.test.mjs
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
@@ -132,6 +132,7 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
   return {
     controller, events,
     continues: () => events.filter((event) => event.event === 'continue-generation'),
+    commands: () => events.filter((event) => event.event === 'command'),
     replaceNodes(next) {
       body.childNodes = next
       for (const node of next) node.parentElement = body

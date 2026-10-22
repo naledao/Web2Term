@@ -2,7 +2,8 @@ import type { ExecutionRecord } from './types'
 
 export type ChatView = 'original' | 'local' | 'focus'
 export type FocusTurnStatus = 'working' | 'answered' | 'stopped'
-export type FocusDelivery = 'pending' | 'sent' | 'blocked' | 'failed'
+/** `superseded`: a newer execution took over before this result was handed back; nothing to do. */
+export type FocusDelivery = 'pending' | 'sent' | 'blocked' | 'failed' | 'superseded'
 export const FOCUS_MAX_FILES = 3
 export const FOCUS_MAX_FILE_BYTES = 20 * 1024 * 1024
 export const FOCUS_MAX_BATCH_BYTES = 25 * 1024 * 1024

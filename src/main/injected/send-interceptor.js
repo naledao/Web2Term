@@ -2200,6 +2200,8 @@
   }
 
   let settleTimer = null
+  /** The last live command reported, so a reply that keeps growing cannot report it twice. */
+  let lastLiveCommand = null
   let lastReplyScanAt = 0
   let lastReplyMutationAt = 0
 
@@ -2629,6 +2631,28 @@
       return
     }
     const live = state.awaitingReplySince !== 0
+    /*
+     * The same command from the same turn, during the same wait, is the same command.
+     *
+     * Without a stable message id the turn key is a content hash, so a reply that grows after
+     * it looked settled gets a NEW key. Measured on DeepSeek, 2026-10-22: the answer went from
+     * 721 to 762 characters a second after its command was reported, with no stop button on
+     * either scan, and the identical 671-character command ran twice. The row position covers
+     * a turn element the site remounts while it grows.
+     */
+    const position = PAGE.fileTurnPositionAttr ? node.getAttribute(PAGE.fileTurnPositionAttr) : null
+    if (live && lastLiveCommand && lastLiveCommand.since === state.awaitingReplySince &&
+        (lastLiveCommand.node === node || (position && lastLiveCommand.position === position)) &&
+        lastLiveCommand.command === parsed.command && lastLiveCommand.description === parsed.description) {
+      state.lastCommandMessageId = messageId
+      noteScan(messageId, 'duplicate-command')
+      return
+    }
+    if (live) {
+      lastLiveCommand = {
+        since: state.awaitingReplySince, node, position, command: parsed.command, description: parsed.description
+      }
+    }
     state.lastCommandMessageId = messageId
     state.replyActionDetected = true
 

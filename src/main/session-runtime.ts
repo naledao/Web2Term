@@ -426,7 +426,7 @@ export class SessionRuntime {
         if (details.event === 'delivery') {
           this.focusChat.delivery(platform.id, details.ownerConversationId ?? undefined, details.messageId,
             details.deliveryOutcome === 'ok' || details.deliveryOutcome === 'sent' ? 'sent' :
-              details.deliveryOutcome === 'busy' ? 'blocked' : 'failed')
+              details.deliveryOutcome === 'busy' ? 'blocked' : details.reason === 'superseded' ? 'superseded' : 'failed')
         }
       },
       sendRawToPage: (text) => this.embed.sendRaw(text),
