@@ -1,5 +1,6 @@
 import type { ToolboxInvocation } from '../shared/toolbox'
 import type { BackgroundTasksState } from '../shared/background-tasks'
+import type { FocusOwner, FocusChatState, FocusSendRequest, FocusSendOutcome } from '../shared/focus-chat'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { IpcChannels } from '../shared/types'
@@ -178,6 +179,8 @@ const api: AppApi = {
   },
 
   getEmbedState: (): Promise<EmbedState> => ipcRenderer.invoke(IpcChannels.embedGetState),
+  getFocusChat: (owner: FocusOwner): Promise<FocusChatState | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner),
+  sendFocusMessage: (request: FocusSendRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatSend, request),
 
   getQuestionChatState: (sessionId: string): Promise<QuestionChatState | null> => ipcRenderer.invoke(IpcChannels.questionChatGetState, sessionId),
   createQuestionChat: (sessionId: string, platformId: string): Promise<QuestionChatState | null> => ipcRenderer.invoke(IpcChannels.questionChatCreate, sessionId, platformId),

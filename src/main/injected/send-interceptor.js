@@ -196,6 +196,9 @@
   ])
   const replyScanEvents = new Set(['scan', 'question', 'command', 'read-files', 'parse-failed', 'task-finished'])
   let replyScanSnapshot = {}
+  let focusReplyBaseline = null
+  let focusBaselinePosition = null
+  let focusReplyPosition = null
   const report = (payload) => {
     try {
       const includeScan = replyScanEvents.has(payload.event) ||
@@ -1404,6 +1407,8 @@
     // composer clears can therefore mark the fresh reply as already handled and
     // make every later MutationObserver scan skip its command forever.
     const replyBaselineId = lastAssistantId()
+    const focusBaselineNode = latestReplyNode(queryAllAssistant().filter(node => isAssistantTurn(node)))
+    const replyBaselinePosition = focusBaselineNode?.getAttribute('data-virtual-list-item-key') || null
 
     const finish = (ok) => {
       if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
@@ -1415,6 +1420,9 @@
       }
       state.programmatic = false
       if (ok) {
+        focusReplyBaseline = replyBaselineId
+        focusBaselinePosition = replyBaselinePosition
+        focusReplyPosition = null
         state.replyActionDetected = false
         if (!isRaw) {
           if (sendContext.promptInjected) state.taskPromptInjected = true
@@ -3037,6 +3045,7 @@
   const fileSendStatus = (token) => {
     if (confirmedFileSends.has(token)) return { status: 'sent' }
     if (!fileSend || fileSend.token !== token) return { status: 'stale' }
+    if (fileSend.focus && fileSend.focus.generation !== state.taskPromptGeneration) return { status: 'busy' }
     const composer = getComposer()
     if (!composer) return { status: 'no-composer' }
     const snapshot = attachmentSnapshot()
@@ -3051,16 +3060,26 @@
       const draftCleared = composerMatches(composer, '') && !draftAttachmentEvidence()
       const newTurnSeen = isNewFileUserTurn(newest, turns, fileSend.baselineUser)
       const turnFilesSeen = turnShowsFiles(newest, fileSend.files)
-      const captionSeen = !fileSend.caption || (!!newest && fileTurnText(newest).replace(/\s+/g, '').includes(fileSend.caption.replace(/\s+/g, '')))
+      const captionToMatch = fileSend.focus ? fileSend.focus.text : fileSend.caption
+      const captionSeen = !captionToMatch || (!!newest && fileTurnText(newest).replace(/\s+/g, '').includes(captionToMatch.replace(/\s+/g, '')))
       const sent = !fileSend.edited && draftCleared && newTurnSeen && turnFilesSeen && captionSeen
       if (sent) {
+        const focus = fileSend.focus
+        const focusFiles = fileSend.files
         confirmedFileSends.add(token)
         if (confirmedFileSends.size > 8) confirmedFileSends.delete(confirmedFileSends.values().next().value)
         state.programmatic = false
         lastDraftImageCapturedAt = 0
         lastDraftImagePromise = Promise.resolve([])
         fileSend = null
-        report({ event: 'sent-raw', text: '[read_files attachments]' })
+        if (focus) {
+          if (focus.promptInjected) state.taskPromptInjected = true
+          draftRejected = false
+          state.replyActionDetected = false
+          report({ event: 'user-message', text: focus.text, focusFiles, focusSendToken: token, attachmentToken: focus.attachmentToken })
+          report({ event: 'sent', text: focus.text.slice(0, 400), promptInjected: focus.promptInjected,
+            taskPromptGeneration: focus.generation })
+        } else report({ event: 'sent-raw', text: '[read_files attachments]' })
         if (state.enabled && state.awaitingReplySince !== 0) scheduleCheck()
         scheduleScrollToBottom()
         return { status: 'sent' }
@@ -3126,6 +3145,34 @@
       return 'ok'
     },
     fileSendStatus,
+    beginFocusFileSend(token, files, text, expectedPath) {
+      if (location.pathname !== expectedPath || typeof text !== 'string' || text.length > 20000 ||
+        !Array.isArray(files) || files.length < 1 || files.length > 3 || state.awaitingReplySince !== 0 || state.pendingQuestion) return 'busy'
+      if (state.enabled && state.promptInjectionEnabled && !state.prefix) return 'busy'
+      const result = this.beginFileSend(token, files)
+      if (result === 'ok' || result === 'resume') {
+        fileSend.focus = { text: normalizeLineEndings(text), generation: state.taskPromptGeneration, prepared: false }
+      }
+      return result
+    },
+    prepareFocusFileSendCaption(token) {
+      if (fileSend?.token !== token || !fileSend.focus || fileSend.focus.prepared ||
+        fileSend.focus.generation !== state.taskPromptGeneration || fileSendStatus(token).status !== 'ready') return false
+      const composer = getComposer()
+      if (!composer || !composerMatches(composer, '')) return false
+      const focus = fileSend.focus
+      focus.promptInjected = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected
+      if (focus.promptInjected && !state.prefix) return false
+      fileSend.caption = focus.promptInjected ? state.prefix + USER_TEXT_SENTINEL + focus.text : focus.text
+      if (fileSend.caption && !insertText(composer, fileSend.caption)) { fileSend.edited = true; return false }
+      focus.prepared = true
+      if (focus.promptInjected) {
+        state.injectedCount++
+        report({ event: 'injected', count: state.injectedCount, prefixLength: state.prefix.length,
+          taskPromptGeneration: state.taskPromptGeneration, prefixHead: collapse(state.prefix).slice(0, 220) })
+      }
+      return true
+    },
     openFileChooser(token) {
       const active = () => fileSend?.token === token && !fileSend.selected && !fileSend.submitted && !fileSend.edited &&
         state.programmatic && composerMatches(getComposer(), '') && !findStopButton() && !draftAttachmentEvidence()
@@ -3287,6 +3334,7 @@
     },
     submitFileSend(token) {
       if (fileSendStatus(token).status !== 'ready') return false
+      if (fileSend.focus && (!fileSend.focus.prepared || fileSend.focus.generation !== state.taskPromptGeneration)) return false
       const button = findSendButton()
       const turns = fileUserTurns()
       const positions = turns.map(fileUserTurnPosition).filter((position) => position !== null)
@@ -3295,7 +3343,13 @@
         maxPosition: positions.length ? Math.max(...positions) : turns.length ? null : -1
       }
       fileSend.baselineAssistant = lastAssistantId()
+      const focusBaselineNode = latestReplyNode(queryAllAssistant().filter(node => isAssistantTurn(node)))
+      focusReplyBaseline = fileSend.baselineAssistant
+      focusBaselinePosition = focusBaselineNode?.getAttribute('data-virtual-list-item-key') || null
+      focusReplyPosition = null
       fileSend.submitted = true
+      // App-owned uploads retain the original image bytes in main, bound to this send token.
+      // The acknowledgement records those bytes, without scraping a thumbnail from the page.
       // Mark the reply before clicking: a synchronous new assistant turn must not be baselined.
       setReplyWaiting(Date.now(), 'file-send-submitted')
       state.taskActive = true
@@ -3306,6 +3360,11 @@
     releaseFileSend(token) {
       if (fileSend?.token === token) {
         state.programmatic = false
+        if (fileSend.focus && !fileSend.submitted) {
+          discardUserImageCapture(fileSend.focus.attachmentToken)
+          fileSend = null
+          return true
+        }
         if (fileSend.submitted) {
           // Preserve the main-process 'unknown' outcome and never click again,
           // but don't let an expired acknowledgement block all future replies.
@@ -3446,6 +3505,83 @@
      *
      * @returns Promise<'ok' | 'no-composer' | 'busy' | 'insert-failed' | 'stuck'>
      */
+    /** App-owned composer: the same confirmed user-send path and prompt boundary. */
+    sendUser(text, expectedPath) {
+      const element = getComposer()
+      if (!element) return Promise.resolve('no-composer')
+      if (typeof text !== 'string' || !text.trim() || text.length > 20000) return Promise.resolve('invalid')
+      if (location.pathname !== expectedPath || state.programmatic || fileSend || state.awaitingReplySince !== 0 ||
+        state.pendingQuestion || findStopButton() || collapse(readComposer(element)) !== '' ||
+        draftAttachmentEvidence(attachmentSnapshot()) || hasDraftImageAttachment()) return Promise.resolve('busy')
+      if (state.enabled && state.promptInjectionEnabled && !state.prefix) return Promise.resolve('unavailable')
+      const shouldInject = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected
+      const payload = shouldInject ? state.prefix + USER_TEXT_SENTINEL + normalizeLineEndings(text) : normalizeLineEndings(text)
+      const sendContext = { taskPromptGeneration: state.taskPromptGeneration, promptInjected: shouldInject }
+      state.programmatic = true
+      if (!insertText(element, payload) || !composerMatches(element, payload)) {
+        state.programmatic = false
+        return Promise.resolve('insert-failed')
+      }
+      if (shouldInject) {
+        state.injectedCount++
+        report({ event: 'injected', count: state.injectedCount, prefixLength: state.prefix.length,
+          taskPromptGeneration: state.taskPromptGeneration, prefixHead: collapse(state.prefix).slice(0, 220) })
+      }
+      return new Promise(resolve => submitWithRetry(
+        payload, 0, false, resolve, Date.now() + SEND_TIMEOUT_MS, 0,
+        Date.now() + SEND_BUTTON_GRACE_MS, null, sendContext
+      ))
+    },
+
+    /** Read-only view data. Never expose user rows, injected prefixes or protocol JSON. */
+    focusSnapshot() {
+      const composer = getComposer()
+      const primary = [...composerToolbarControls()].reverse().find(control =>
+        control.matches('.ds-button--primary.ds-button--circle'))
+      const icon = primary?.querySelector('svg path')?.getAttribute('d') || ''
+      // These two icon shapes were recorded in the user's 2026-10-22 run.
+      const generating = icon.startsWith('M2 4.88C2 3.68009') ? 'active' :
+        icon.startsWith('M8.3125 0.980206') ? 'idle' : 'unknown'
+      const rows = queryAllAssistant().filter(node => isAssistantTurn(node))
+      let node = focusReplyPosition === null ? latestReplyNode(rows) :
+        rows.find(item => item.getAttribute('data-virtual-list-item-key') === focusReplyPosition)
+      if (!node || (focusReplyPosition === null && turnKeyOf(node) === focusReplyBaseline)) node = null
+      if (node && focusReplyPosition === null) {
+        const position = node.getAttribute('data-virtual-list-item-key')
+        // A virtual position is valid only during this send, never persisted as an identity.
+        if (!position || !/^\d+$/.test(position) ||
+          (focusBaselinePosition && /^\d+$/.test(focusBaselinePosition) && Number(position) <= Number(focusBaselinePosition))) node = null
+        else focusReplyPosition = position
+      }
+      let reply = null
+      if (node) {
+        const answer = node.querySelector('.ds-assistant-message-main-content')
+        const thoughts = [...node.querySelectorAll('.ds-think-content')]
+        const sources = [...node.querySelectorAll('a[href]')].filter(link =>
+          !answer?.contains(link) && !thoughts.some(thought => thought.contains(link)))
+        const ordered = [...thoughts.map(element => ({ kind: 'reasoning', element })),
+          ...sources.map(element => ({ kind: 'search', element }))]
+          .sort((a, b) => a.element.compareDocumentPosition(b.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
+        const parts = ordered.slice(0, 50).flatMap(part => {
+          const text = part.kind === 'reasoning' ? readReplyMarkdown(part.element) : String(part.element.innerText || '').trim()
+          if (!text.trim()) return []
+          if (part.kind === 'reasoning') return [{ kind: part.kind, text: text.slice(0, 50000) }]
+          try {
+            const url = new URL(part.element.getAttribute('href'), location.href)
+            return /^https?:$/.test(url.protocol) ? [{ kind: part.kind, text: text.slice(0, 500), url: url.href.slice(0, 2000) }] : []
+          } catch { return [] }
+        })
+        const raw = answer ? readReplyText(node) : ''
+        const protocol = looksLikeCommandReply(raw) || looksLikeQuestionReply(raw) || extractCommand(raw) ||
+          (state.enabled && state.awaitingReplySince !== 0 &&
+            (raw.trim().startsWith('{') || raw.trim().startsWith(String.fromCharCode(96).repeat(3) + 'json')))
+        reply = { sourceMessageId: turnKeyOf(node), parts,
+          answer: answer && !protocol ? readReplyMarkdown(node).slice(0, 250000) : '' }
+      }
+      return { path: location.pathname, ready: !!composer, nativeDraft: !!composer && collapse(readComposer(composer)) !== '',
+        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply }
+    },
+
     sendRaw(text, ownedDraft = null, options = null) {
       const element = getComposer()
       if (!element) return Promise.resolve('no-composer')

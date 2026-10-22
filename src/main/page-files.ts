@@ -107,7 +107,7 @@ export async function sendPageFiles(
   token: string,
   isCurrent: () => boolean,
   signal: AbortSignal,
-  options: { caption?: string; allowNewConversation?: boolean } = {}
+  options: { caption?: string; allowNewConversation?: boolean; userText?: string } = {}
 ): Promise<FileSendOutcome> {
   const debuggerApi = contents.debugger
   let attached = false
@@ -205,7 +205,10 @@ export async function sendPageFiles(
     if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
     if (!attachments.length) return finish('upload-failed', 'no-attachments')
     if (attachments.length && debuggerApi.isAttached()) return finish('upload-failed', 'debugger-already-attached')
-    const begin = await call('beginFileSend', token, attachments.map(({ fileName, mimeType, sizeBytes }) => ({ fileName, mimeType, sizeBytes })))
+    const fileInfo = attachments.map(({ fileName, mimeType, sizeBytes }) => ({ fileName, mimeType, sizeBytes }))
+    const begin = options.userText !== undefined
+      ? await call('beginFocusFileSend', token, fileInfo, options.userText, new URL(ownerUrl).pathname)
+      : await call('beginFileSend', token, fileInfo)
     log('begin-result', { result: begin ?? 'missing-handler' })
     if (begin !== 'ok' && begin !== 'resume') {
       try { log('page-diagnostics', diagnosticSnapshot(await call('attachmentDiagnostics', attachments.map(({ fileName, mimeType, sizeBytes }) => ({ fileName, mimeType, sizeBytes }))))) } catch { log('page-diagnostics-unavailable') }
@@ -305,9 +308,12 @@ export async function sendPageFiles(
     }
     if (!readySince || Date.now() >= deadline) return finish('upload-failed', 'upload-ready-timeout')
     if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
-    if (options.caption) {
+    if (options.caption || options.userText !== undefined) {
       stage = 'caption'
-      if (await call('prepareFileSendCaption', token, options.caption) !== true) return finish('busy', 'caption-not-prepared')
+      const prepared = options.userText !== undefined
+        ? await call('prepareFocusFileSendCaption', token)
+        : await call('prepareFileSendCaption', token, options.caption)
+      if (prepared !== true) return finish('busy', 'caption-not-prepared')
       const captionDeadline = Date.now() + 5000
       let ready = false
       while (Date.now() < captionDeadline) {

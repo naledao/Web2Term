@@ -1,4 +1,5 @@
 import type { ToolboxInvocation } from './toolbox'
+import type { FocusOwner, FocusChatState, FocusSendRequest, FocusSendOutcome, FocusAttachmentInfo } from './focus-chat'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import { BACKGROUND_TASK_MARKER } from './background-tasks'
 import type { BackgroundTasksState } from './background-tasks'
@@ -18,6 +19,8 @@ export const IpcChannels = {
   embedCommand: 'embed:command',
   embedNavigate: 'embed:navigate',
   embedGetState: 'embed:get-state',
+  focusChatGet: 'focus-chat:get',
+  focusChatSend: 'focus-chat:send',
   embedState: 'embed:state',
   questionChatGetState: 'question-chat:get-state',
   questionChatCreate: 'question-chat:create',
@@ -1250,6 +1253,8 @@ export interface InterceptorPageEvent {
   text?: string
   /** Token for a page-side batch of user image attachments, on user-message. */
   attachmentToken?: string
+  focusFiles?: FocusAttachmentInfo[]
+  focusSendToken?: string
   /** Capture diagnostics: where the image was found and how many were read. */
   phase?: 'draft' | 'sent-turn'
   enabled?: boolean
@@ -2169,6 +2174,8 @@ export interface AppApi {
   navigateEmbed(url: string): void
   /** Current embed snapshot; call once on mount to cover events fired before subscribing. */
   getEmbedState(): Promise<EmbedState>
+  getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
+  sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome>
   /** Subscribe to embed state; returns an unsubscribe function. */
   onEmbedState(listener: (state: EmbedState) => void): () => void
   getQuestionChatState(sessionId: string): Promise<QuestionChatState | null>

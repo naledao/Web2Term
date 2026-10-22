@@ -526,6 +526,14 @@ test('attachment caption is prepared before exactly one submit and the initial n
   assert.equal(fixture.logs.join('').includes('synthetic question'), false)
 })
 
+test('DeepSeek waits for a delayed first user row after its initial conversation binding', async () => {
+  const fixture = uploadFixture({ confirmationStatuses: ['confirming', 'confirming', 'sent'] })
+  assert.equal(await fixture.send(), 'ok')
+  assert.equal(fixture.calls.filter(call => call === 'submitFileSend').length, 1)
+  assert.ok(fixture.calls.filter(call => call === 'fileSendStatus').length >= 3)
+  assert.ok(fixture.logs.some(log => log.includes('message-confirmed')))
+})
+
 test('navigation is permitted only after submitting into an opted-in new DeepSeek chat', async () => {
   for (const options of [{ allow: false }, { nextUrl: 'https://evil.test/a/chat/s/x' }, { changeBeforeSubmit: true }]) {
     const fixture = uploadFixture(options)

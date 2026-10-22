@@ -1193,6 +1193,19 @@ function registerIpcHandlers(): void {
     const runtime = runtimeForEvent(event)
     return runtime?.id === sessionId ? runtime : null
   }
+  const focusRuntime = (event: IpcMainInvokeEvent, owner: unknown): SessionRuntime | null => {
+    if (!owner || typeof owner !== 'object') return null
+    const value = owner as { sessionId?: unknown; platformId?: unknown; conversationId?: unknown }
+    if (typeof value.sessionId !== 'string' || value.sessionId.length > 128 || value.platformId !== 'deepseek' ||
+      (value.conversationId !== null && (typeof value.conversationId !== 'string' || value.conversationId.length > 512))) return null
+    return questionRuntime(event, value.sessionId)
+  }
+  ipcMain.handle(IpcChannels.focusChatGet, (event, owner) => focusRuntime(event, owner)?.getFocusChat(owner) ?? null)
+  ipcMain.handle(IpcChannels.focusChatSend, (event, request) => {
+    const runtime = focusRuntime(event, request)
+    if (!runtime || typeof request.text !== 'string' || request.text.length > 20000) return 'invalid'
+    return runtime.sendFocusMessage(request)
+  })
   ipcMain.handle(IpcChannels.questionChatGetState, (event, sessionId: string) => questionRuntime(event, sessionId)?.embed.getQuestionChatState() ?? null)
   ipcMain.handle(IpcChannels.questionChatCreate, (event, sessionId: string, platformId: string) => {
     const runtime = questionRuntime(event, sessionId)
@@ -1200,7 +1213,7 @@ function registerIpcHandlers(): void {
     return runtime.embed.createQuestionChat()
   })
   ipcMain.on(IpcChannels.questionChatViewport, (event, sessionId: string, chatId: string, bounds: unknown, visible: boolean) => {
-    questionRuntime(event, sessionId)?.embed.setQuestionChatViewport(chatId, bounds, visible === true)
+    questionRuntime(event, sessionId)?.setQuestionChatViewport(chatId, bounds, visible === true)
   })
   ipcMain.on(IpcChannels.questionChatAction, (event, sessionId: string, chatId: string, action: string) => {
     if (action !== 'close' && action !== 'copy-prompt' && action !== 'open-context' && action !== 'reveal-context') return

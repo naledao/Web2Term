@@ -8,6 +8,7 @@ import { normalizeTerminalNotesDirectory } from './terminal-notes'
 import { interruptRunningCommands, recoverInterruptedExecutions } from './execution-recovery'
 import type { StoredFileReadRequest, FileDeliveryStatus } from '../shared/file-requests'
 import { isRecentCommandPayload } from '../shared/types'
+import type { FocusTurn } from '../shared/focus-chat'
 import type {
   Conversation,
   ConversationImageAttachmentInput,
@@ -136,6 +137,17 @@ CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_messages_source
   ON conversation_messages (conversation_id, role, source_message_id)
   WHERE source_message_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS focus_turns (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  platform_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_focus_turns_owner
+  ON focus_turns(session_id, platform_id, conversation_id, created_at);
 
 CREATE TABLE IF NOT EXISTS message_attachments (
   id           TEXT PRIMARY KEY,
@@ -762,6 +774,7 @@ export class ConversationStore {
       )
       .run(id)
     this.db.prepare('DELETE FROM conversation_messages WHERE conversation_id = ?').run(id)
+    this.db.prepare('DELETE FROM focus_turns WHERE conversation_id = ?').run(id)
     this.db.prepare('DELETE FROM conversations WHERE id = ?').run(id)
 
     for (const row of paths) {
@@ -870,6 +883,43 @@ export class ConversationStore {
       .all(conversationId) as unknown as Array<{ message_id: string; payload_json: string; created_at: number }>
     return rows.map((row) => ({ messageId: row.message_id, payloadJson: row.payload_json, createdAt: row.created_at }))
   }
+  listFocusTurns(sessionId: string, platformId: string, conversationId: string): FocusTurn[] {
+    const rows = this.db.prepare(
+      'SELECT payload FROM focus_turns WHERE session_id = ? AND platform_id = ? AND conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 80'
+    ).all(sessionId, platformId, conversationId) as unknown as Array<{ payload: string }>
+    return rows.reverse().flatMap(row => {
+      try {
+        if (row.payload.length > 20_000_000) return []
+        const turn = JSON.parse(row.payload) as FocusTurn
+        if (!turn || typeof turn.id !== 'string' || typeof turn.userText !== 'string' ||
+          !Number.isFinite(turn.createdAt) || !Array.isArray(turn.segments) || !Array.isArray(turn.executionIds) ||
+          !turn.deliveries || !['working', 'answered', 'stopped'].includes(turn.status)) return []
+        if (turn.userMessageId !== null && typeof turn.userMessageId !== 'string') return []
+        if (turn.userAttachments !== undefined && (!Array.isArray(turn.userAttachments) || turn.userAttachments.length > 3 ||
+          turn.userAttachments.some(file => !file || typeof file.fileName !== 'string' || typeof file.mimeType !== 'string' ||
+            !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes < 1))) return []
+        if (turn.executionIds.some(id => typeof id !== 'string') ||
+          turn.segments.some(segment => !segment || !Number.isInteger(segment.cycle) || segment.cycle < 0 ||
+            (segment.sourceMessageId !== null && typeof segment.sourceMessageId !== 'string') ||
+            typeof segment.answer !== 'string' || typeof segment.settled !== 'boolean' || !Array.isArray(segment.parts) ||
+            segment.parts.some(part => !part || !['reasoning', 'search'].includes(part.kind) || typeof part.text !== 'string' ||
+              (part.url !== undefined && (typeof part.url !== 'string' || !/^https?:\/\//.test(part.url)))))) return []
+        turn.executionCycles ??= {}
+        return [turn]
+      } catch { return [] }
+    })
+  }
+
+  saveFocusTurn(sessionId: string, platformId: string, conversationId: string, turn: FocusTurn): void {
+    const payload = JSON.stringify(turn)
+    if (payload.length > 20_000_000) throw new Error('focus-turn-too-large')
+    if (!this.db.prepare('SELECT 1 FROM conversations WHERE id = ?').get(conversationId)) throw new Error('focus-conversation-pending')
+    this.db.prepare(
+      'INSERT INTO focus_turns (id, session_id, platform_id, conversation_id, payload, created_at) VALUES (?, ?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(id) DO UPDATE SET payload = excluded.payload WHERE focus_turns.session_id = excluded.session_id AND focus_turns.platform_id = excluded.platform_id AND focus_turns.conversation_id = excluded.conversation_id'
+    ).run(turn.id, sessionId, platformId, conversationId, payload, turn.createdAt)
+  }
+
   /** Persist one clean chat turn plus any user image attachments. */
   appendConversationMessage(
     conversationId: string,
@@ -894,6 +944,11 @@ export class ConversationStore {
     if (Number(result.changes) === 0) return null
     if (role === 'user' && attachments.length > 0) this.persistMessageAttachments(id, attachments, now)
     return id
+  }
+
+  countMessageAttachments(messageId: string): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM message_attachments WHERE message_id = ?').get(messageId) as { count: number }
+    return Number(row.count)
   }
 
   /** Restore Markdown for a message already captured from this exact page turn. */
@@ -1509,6 +1564,7 @@ export class ConversationStore {
   }
 
   removeManagedSession(id: string): void {
+    this.db.prepare('DELETE FROM focus_turns WHERE session_id = ?').run(id)
     this.db.prepare('DELETE FROM managed_sessions WHERE id = ?').run(id)
   }
   /* ---------------- settings ---------------- */

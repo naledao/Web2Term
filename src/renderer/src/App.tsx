@@ -23,6 +23,8 @@ import type { PanelTabItem } from './components/PanelTabs'
 import type { TerminalActionId } from './components/TerminalActionsMenu'
 import type { ToolKind } from './tool-window-state'
 import ConversationTranscript from './components/ConversationTranscript'
+import FocusChatView from './components/FocusChatView'
+import type { ChatView } from '@shared/focus-chat'
 import QuestionChatPanel from './components/QuestionChatPanel'
 import type { QuestionChatState } from '@shared/deepseek-question'
 import { supportsSelectionQuestion } from '@shared/deepseek-question'
@@ -129,6 +131,13 @@ const STORAGE_BACKGROUND_TASK_LATEST = 'layout.backgroundTaskLatest'
 
 function sessionLayoutKey(key: string, sessionId: string): string {
   return `${key}.${sessionId}`
+}
+
+function readChatView(sessionId: string, platformId: string): ChatView {
+  try {
+    const view = localStorage.getItem('chat.view.' + sessionId + '.' + platformId)
+    return view === 'local' ? 'local' : view === 'focus' && platformId === 'deepseek' ? 'focus' : 'original'
+  } catch { return 'original' }
 }
 
 function readStoredNumber(key: string, fallback: number): number {
@@ -402,6 +411,11 @@ function ConversationAttachmentImage({ attachment }: { attachment: ConversationA
   )
 }
 export default function App({ sessionId, sessionKind, initialSshDialogOpen = false, platformId = '', theme, globalModalOpen = false, onOpenWeb2termConnection, onThemeChange }: AppProps): JSX.Element {
+  const [chatView, setChatView] = useState<ChatView>(() => readChatView(sessionId, platformId))
+  const [focusPanelOpen, setFocusPanelOpen] = useState(false)
+  const isFocusView = chatView === 'focus' && platformId === 'deepseek'
+  const placeholderToggle = chatView === 'local'
+  useEffect(() => { setChatView(readChatView(sessionId, platformId)) }, [sessionId, platformId])
   const [embed, setEmbed] = useState<EmbedState>(INITIAL_EMBED_STATE)
   /*
    * The site this session is actually showing.
@@ -439,6 +453,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     readStoredNumber(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), readStoredNumber(STORAGE_PANEL_WIDTH, PANEL_DEFAULT_WIDTH))
   ))
   const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), false))
+  const effectivePanelCollapsed = isFocusView ? !focusPanelOpen : panelCollapsed
   const [backgroundTasksOpen, setBackgroundTasksOpen] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_BACKGROUND_TASKS_OPEN, sessionId), false))
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     try {
@@ -449,7 +464,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       return 'control'
     }
   })
-  const terminalVisible = panelTab === 'terminal' && !panelCollapsed
+  const terminalVisible = panelTab === 'terminal' && !effectivePanelCollapsed
   const [extraTerminals, setExtraTerminals] = useState<ExtraTerminal[] | null>(null)
   const [panelAddMenuOpen, setPanelAddMenuOpen] = useState(false)
   const [panelTabListOpen, setPanelTabListOpen] = useState(false)
@@ -506,8 +521,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     return () => { alive = false; questionChatRequest.current += 1; unsubscribe() }
   }, [sessionId, platformId])
   const [switchingPlatform, setSwitchingPlatform] = useState(false)
-  const [placeholderToggle, setPlaceholderToggle] = useState(false)
-  const [placeholderClosing, setPlaceholderClosing] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance')
   const settingsBodyRef = useRef<HTMLDivElement>(null)
@@ -658,7 +671,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    */
   const sshLive = sshActive && (ssh?.status === 'connected' || ssh?.status === 'connecting')
   const slotRef = useRef<HTMLDivElement>(null)
-  const placeholderCloseTimerRef = useRef<number | null>(null)
   const userAvatarInputRef = useRef<HTMLInputElement>(null)
   const userAvatarEditorRef = useRef<AvatarEditorRef>(null)
   /** Keep terminal popovers inside the sidebar, away from the native chat view. */
@@ -1841,34 +1853,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [updateStatus?.phase])
 
 
-  const togglePlaceholderView = useCallback(() => {
-    if (!placeholderToggle) {
-      if (placeholderCloseTimerRef.current !== null) {
-        window.clearTimeout(placeholderCloseTimerRef.current)
-        placeholderCloseTimerRef.current = null
-      }
-      setPlaceholderClosing(false)
-      setPlaceholderToggle(true)
-      return
-    }
-
-    if (placeholderClosing) return
-    setPlaceholderClosing(true)
-    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    placeholderCloseTimerRef.current = window.setTimeout(() => {
-      setPlaceholderToggle(false)
-      setPlaceholderClosing(false)
-      placeholderCloseTimerRef.current = null
-    }, reducedMotion ? 0 : 150)
-  }, [placeholderClosing, placeholderToggle])
-
-  useEffect(() => {
-    return () => {
-      if (placeholderCloseTimerRef.current !== null) {
-        window.clearTimeout(placeholderCloseTimerRef.current)
-      }
-    }
-  }, [])
+  const selectChatView = useCallback((view: ChatView) => {
+    if (view === 'focus' && platformId !== 'deepseek') return
+    setChatView(view)
+    try { localStorage.setItem('chat.view.' + sessionId + '.' + platformId, view) } catch { /* In-memory preference remains usable. */ }
+  }, [sessionId, platformId])
 
   /**
    * The embedded page is a NATIVE view: it always paints above the DOM. Regular dialogs hide
@@ -1876,7 +1865,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * lives in the terminal column and must leave the chat page usable underneath.
    */
   const terminalModalOpen = terminalVisible && sshFilesOpen
-  const nativeEmbedVisible = !placeholderToggle && !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
+  const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
+  const nativeEmbedVisible = !placeholderToggle && !isFocusView && chatSurfaceVisible
   useEffect(() => {
     window.api.setEmbedVisible(nativeEmbedVisible)
     window.api.setWorkspaceSshDialogOpen(sshDialogOpen)
@@ -2197,7 +2187,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }
 
   return (
-    <div className={panelCollapsed ? 'app app--panel-collapsed' : 'app'} style={{ '--panel-width': `${panelWidth}px` } as CSSProperties}>
+    <div className={'app' + (effectivePanelCollapsed ? ' app--panel-collapsed' : '') + (isFocusView ? ' app--focus' : '')} style={{ '--panel-width': `${panelWidth}px` } as CSSProperties}>
       <header className="topbar">
         <div className="brand">
           <span className="brand__mark" aria-hidden="true">
@@ -2282,19 +2272,25 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             </button>
           </div>
 
-          <button
-            type="button"
-            role="switch"
-            aria-checked={placeholderToggle && !placeholderClosing}
-            aria-label="切换对话视图"
-            title="切换对话视图"
-            className={placeholderToggle && !placeholderClosing ? 'toolbar__toggle toolbar__toggle--on' : 'toolbar__toggle'}
-            onClick={togglePlaceholderView}
-          >
-            <svg className="toolbar__toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M7 10h14l-4-4m0 8H3l4 4" />
-            </svg>
-          </button>
+          <div className="chat-view-switch" role="tablist" aria-label="聊天视图"
+            onKeyDown={event => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+              const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')]
+              const index = buttons.indexOf(document.activeElement as HTMLButtonElement)
+              const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 :
+                (index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length
+              event.preventDefault()
+              buttons[next]?.focus()
+              buttons[next]?.click()
+            }}>
+            {([{ id: 'original', label: '原始' }, { id: 'local', label: '本地对话' }, { id: 'focus', label: '专注对话' }] as const).map(view =>
+              <button key={view.id} id={'chat-view-tab-' + view.id} type="button" role="tab"
+                aria-selected={view.id === (isFocusView ? 'focus' : placeholderToggle ? 'local' : 'original')}
+                tabIndex={view.id === (isFocusView ? 'focus' : placeholderToggle ? 'local' : 'original') ? 0 : -1}
+                aria-controls="chat-view-panel" disabled={view.id === 'focus' && platformId !== 'deepseek'}
+                title={view.id === 'focus' && platformId !== 'deepseek' ? '专注对话当前支持 DeepSeek' : view.label}
+                onClick={() => selectChatView(view.id)}>{view.label}</button>)}
+          </div>
           <button
             type="button"
             title="设置"
@@ -2313,9 +2309,19 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           exactly, so nothing may overlap it — a native view always paints above
           the DOM and cannot be rounded or z-ordered.
         */}
-        <div className="stage__slot" ref={slotRef}>
-          {placeholderToggle ? (
-            <div className={placeholderClosing ? 'stage__alternate-card stage__alternate-card--leaving' : 'stage__alternate-card'} aria-label="对话视图">
+        <div className="stage__slot" ref={slotRef} id="chat-view-panel" role="tabpanel"
+          aria-labelledby={'chat-view-tab-' + (isFocusView ? 'focus' : placeholderToggle ? 'local' : 'original')}>
+          {isFocusView ? (
+            <FocusChatView key={transcriptScrollKey} owner={{ sessionId, platformId, conversationId }} theme={theme}
+              visible={chatSurfaceVisible} messages={conversationMessages} messagesReady={conversationMessagesReady}
+              needsAnswer={!!pendingQuestion}
+              onQuestion={() => { setPanelTab('terminal'); setFocusPanelOpen(true); setQuestionMinimized(false) }}
+              onOriginal={() => selectChatView('original')}
+              onControl={() => { setPanelTab('control'); setFocusPanelOpen(true) }}
+              onRun={runExecution} onSkip={skipExecution} onStop={endTask}
+              renderAttachment={attachment => <ConversationAttachmentImage key={attachment.id} attachment={attachment} />} />
+          ) : placeholderToggle ? (
+            <div className="stage__alternate-card" aria-label="本地对话视图">
               <ConversationTranscript key={transcriptScrollKey} scrollKey={transcriptScrollKey} ready={conversationMessagesReady}>
                 {!conversationMessagesReady ? (
                   <div className="conversation-transcript__empty">正在加载对话记录…</div>
@@ -2377,8 +2383,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         </div>
       </main>
 
-      <aside ref={panelRef} className={panelCollapsed ? 'panel panel--collapsed' : 'panel'}>
-        {panelCollapsed ? null : (
+      <aside ref={panelRef} className={effectivePanelCollapsed ? 'panel panel--collapsed' : 'panel'}>
+        {effectivePanelCollapsed ? null : (
           <div
             className="panel__resizer"
             role="separator"
@@ -2388,7 +2394,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           />
         )}
         <div className="panel__collapse-head">
-          {panelCollapsed ? null : (
+          {effectivePanelCollapsed ? null : (
             <PanelTabs
               items={panelTabs}
               active={panelTab}
@@ -2400,7 +2406,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               onClose={closePanelTab}
             />
           )}
-          {panelCollapsed ? null : (
+          {effectivePanelCollapsed ? null : (
             <PanelAddMenu
               containerRef={panelRef}
               visible={!(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
@@ -2421,16 +2427,17 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           <button
             type="button"
             className="panel__sync panel__collapse-button"
-            title={panelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
-            aria-label={panelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
+            title={effectivePanelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
+            aria-label={effectivePanelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
             onClick={() => {
-              setPanelCollapsed((value) => !value)
+              if (isFocusView) setFocusPanelOpen(value => !value)
+              else setPanelCollapsed((value) => !value)
               setPanelAddMenuOpen(false)
               setPanelTabListOpen(false)
               setSshPickerOpen(false)
             }}
           >
-            {panelCollapsed ? '«' : '»'}
+            {effectivePanelCollapsed ? '«' : '»'}
           </button>
         </div>
         <div className="panel__view panel__view--control" hidden={panelTab !== 'control'}>
@@ -2648,7 +2655,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         {questionChatOpen || questionChat ? (
           <div className="panel__view" hidden={!questionChatOpen || panelTab !== 'question'}>
             {/* Native chat would otherwise paint over either header popup. */}
-            {questionChat ? <QuestionChatPanel key={questionChat.id} sessionId={sessionId} state={questionChat} visible={questionChatOpen && panelTab === 'question' && !panelCollapsed && nativeEmbedVisible && !panelAddMenuOpen && !panelTabListOpen} /> : (
+            {questionChat ? <QuestionChatPanel key={questionChat.id} sessionId={sessionId} state={questionChat} visible={questionChatOpen && panelTab === 'question' && !effectivePanelCollapsed && chatSurfaceVisible && !panelAddMenuOpen && !panelTabListOpen} /> : (
               <section className="question-chat-sidebar question-chat-sidebar--empty" aria-label="侧边聊天">
                 <strong>{questionChatCreateError ? '侧边聊天暂未打开' : '正在新建侧边聊天…'}</strong>
                 {questionChatCreateError ? <>
@@ -2660,10 +2667,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           </div>
         ) : null}
 
-        {backgroundTasksOpen ? <BackgroundTasksPane sessionId={sessionId} visible={panelTab === 'background' && !panelCollapsed} /> : null}
+        {backgroundTasksOpen ? <BackgroundTasksPane sessionId={sessionId} visible={panelTab === 'background' && !effectivePanelCollapsed} /> : null}
 
         {(extraTerminals ?? []).map((item) => (
-          <ExtraTerminalPane key={item.id} sessionId={sessionId} terminal={item} visible={panelTab === `extra:${item.id}` && !panelCollapsed} />
+          <ExtraTerminalPane key={item.id} sessionId={sessionId} terminal={item} visible={panelTab === `extra:${item.id}` && !effectivePanelCollapsed} />
         ))}
 
       <section ref={toolboxPaneRef} className="terminal-pane panel__view" hidden={panelTab !== 'terminal'} aria-label="终端">
@@ -3177,6 +3184,7 @@ ${record.command}`
             onClick={() => {
               setPanelTab('terminal')
               setPanelCollapsed(false)
+              setFocusPanelOpen(true)
               setQuestionMinimized(false)
             }}
           >

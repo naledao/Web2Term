@@ -8,13 +8,14 @@ import { writeQuestionLog } from './question-chat-page'
 import { supportsSelectionQuestion } from '../shared/deepseek-question'
 import type { QuestionChatAction, QuestionChatState } from '../shared/deepseek-question'
 import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
+import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
 import { writeRawSendDiagnostic } from './raw-send-log'
 import { writePromptDiagnostic } from './prompt-log'
 import { writeReplyDiagnostic } from './reply-log'
 import { parseReadFilesRequest } from '../shared/file-requests'
 import type { FileSendOutcome } from '../shared/file-requests'
-import type { PreparedFileResult } from './file-access'
+import type { PreparedFileResult, PreparedAttachment } from './file-access'
 import { FALLBACK_ENVIRONMENT, buildTerminalPromptParts, fileReadingPlatform, isConversationId } from '../shared/types'
 import type { ChatPlatform } from '../shared/platforms'
 import type {
@@ -411,7 +412,9 @@ export interface EmbedHandlers {
   /** Terminal-mode interceptor changed state. */
   onInterceptor(status: InterceptorStatus): void
   /** Clean user text, with the injected system prefix already removed. */
-  onUserMessage(text: string, attachments: ConversationImageAttachmentInput[]): void
+  onUserStarted?(text: string, files?: FocusAttachmentInfo[]): string | undefined
+  onUserMessage(text: string, attachments: ConversationImageAttachmentInput[], focusTurnId?: string, imageSource?: 'provided' | 'page'): void
+  onRawSent?(): void
   /** An assistant message that belongs in the app's conversation transcript. */
   onAssistantMessage(messageId: string, text: string): void
   /** Re-read Markdown for an already stored assistant turn in restored history. */
@@ -483,6 +486,7 @@ export class ChatGptEmbed {
   private taskPromptInjected = false
   private taskPromptGeneration = 0
   private replyDiagnosticLogPath: string | null = null
+  private readonly focusSendImages = new Map<string, ConversationImageAttachmentInput[]>()
 
   /**
    * Replace the injected prompt.
@@ -885,7 +889,12 @@ export class ChatGptEmbed {
 
   getQuestionChatState(): QuestionChatState | null { return this.selectionQuestion?.getState() ?? null }
   createQuestionChat(): QuestionChatState | null { return this.selectionQuestion?.createChat() ?? null }
-  setQuestionChatViewport(id: string, bounds: unknown, visible: boolean): void { this.selectionQuestion?.setViewport(id, bounds, visible) }
+  setQuestionChatViewport(id: string, bounds: unknown, visible: boolean): void {
+    // The owned side chat can remain visible beside an app-owned focus surface.
+    // Session hiding still clears owner visibility through setVisible(false).
+    if (visible && this.selectionQuestion?.getState()?.id === id) this.selectionQuestion.setVisible(true)
+    this.selectionQuestion?.setViewport(id, bounds, visible)
+  }
   questionChatAction(id: string, action: QuestionChatAction): void { this.selectionQuestion?.action(id, action) }
 
   /**
@@ -1262,6 +1271,55 @@ export class ChatGptEmbed {
    * `busy` means a send/generation is in progress or a user draft exists.
    * `stuck` means the text went in but the page never accepted the submit.
    */
+  async readFocusSnapshot(): Promise<FocusPageSnapshot | null> {
+    const contents = this.liveContents()
+    if (!contents || this.platform.id !== 'deepseek') return null
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const url = contents.getURL()
+      if (new URL(url).origin !== 'https://chat.deepseek.com') return null
+      const raw = await Promise.race([
+        contents.executeJavaScript('window.__cmdTerminalInterceptor?.focusSnapshot() ?? null'),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 2500) })
+      ]) as FocusPageSnapshot | null
+      if (!raw || contents.isDestroyed() || contents.getURL() !== url || raw.path !== new URL(url).pathname ||
+        typeof raw.ready !== 'boolean' || typeof raw.nativeDraft !== 'boolean' || typeof raw.waiting !== 'boolean' ||
+        !['active', 'idle', 'unknown'].includes(raw.generating)) return null
+      if (raw.reply && (typeof raw.reply.sourceMessageId !== 'string' || raw.reply.sourceMessageId.length > 512 ||
+        typeof raw.reply.answer !== 'string' || raw.reply.answer.length > 250000 || !Array.isArray(raw.reply.parts) ||
+        raw.reply.parts.length > 50 || raw.reply.parts.some(part => !part || !['reasoning', 'search'].includes(part.kind) ||
+          typeof part.text !== 'string' || part.text.length > 50000 ||
+          (part.url !== undefined && (typeof part.url !== 'string' || !/^https?:\/\//.test(part.url) || part.url.length > 2000))))) return null
+      return raw
+    } catch { return null }
+    finally { if (timer) clearTimeout(timer) }
+  }
+
+  async sendFocusUser(text: string): Promise<FocusSendOutcome> {
+    const contents = this.liveContents()
+    if (!contents || this.platform.id !== 'deepseek') return 'unavailable'
+    try {
+      const url = new URL(contents.getURL())
+      if (url.origin !== 'https://chat.deepseek.com') return 'unavailable'
+      const result = await contents.executeJavaScript(
+        'window.__cmdTerminalInterceptor?.sendUser(' + JSON.stringify(text) + ', ' + JSON.stringify(url.pathname) + ') ?? "unavailable"'
+      )
+      return ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed', 'unavailable', 'invalid'].includes(result) ? result : 'unavailable'
+    } catch { return 'unavailable' }
+  }
+
+  async sendFocusFiles(text: string, files: PreparedAttachment[], token: string, current: () => boolean, signal: AbortSignal,
+    images: ConversationImageAttachmentInput[] = []): Promise<FocusSendOutcome> {
+    const contents = this.liveContents()
+    if (!contents || this.platform.id !== 'deepseek') return 'unavailable'
+    try {
+      if (new URL(contents.getURL()).origin !== 'https://chat.deepseek.com') return 'unavailable'
+      this.focusSendImages.set(token, images)
+      return await sendPageFiles(contents, 'deepseek', files, token, current, signal, { userText: text, allowNewConversation: true })
+    } catch { return 'upload-failed' }
+    finally { this.focusSendImages.delete(token) }
+  }
+
   async sendRaw(
     text: string,
     options?: { conversationId: string; requireIdle: boolean }
@@ -1444,7 +1502,7 @@ export class ChatGptEmbed {
    * The count is accumulated HERE rather than taken from the page, because the
    * page's own counter resets on every full reload.
    */
-  private async deliverUserMessage(text: string, attachmentToken: string | null): Promise<void> {
+  private async deliverUserMessage(text: string, attachmentToken: string | null, focusTurnId?: string): Promise<void> {
     let attachments: ConversationImageAttachmentInput[] = []
     if (attachmentToken) {
       const contents = this.liveContents()
@@ -1476,7 +1534,7 @@ export class ChatGptEmbed {
         }
       }
     }
-    if (text.trim() !== '' || attachments.length > 0) this.handlers.onUserMessage(text, attachments)
+    if (text.trim() !== '' || attachments.length > 0) this.handlers.onUserMessage(text, attachments, focusTurnId, 'page')
   }
   private handlePageReport(message: string): void {
     if (typeof message !== 'string' || !message.startsWith(INTERCEPTOR_LOG_TAG)) return
@@ -1526,6 +1584,11 @@ export class ChatGptEmbed {
         break
       case 'user-message': {
         const text = typeof payload.text === 'string' ? payload.text : ''
+        const focusSendToken = typeof payload.focusSendToken === 'string' ? payload.focusSendToken : null
+        const providedImages = focusSendToken ? this.focusSendImages.get(focusSendToken) : undefined
+        // A focus upload acknowledgement must belong to this exact outstanding send.
+        // Consume it once; duplicate or late acknowledgements cannot create another human turn.
+        if (focusSendToken && !providedImages) break
         const attachmentToken =
           typeof payload.attachmentToken === 'string' && payload.attachmentToken !== ''
             ? payload.attachmentToken
@@ -1534,8 +1597,15 @@ export class ChatGptEmbed {
           `[embed:${this.platform.id}] user-message textLength=${text.length} ` +
             `attachmentToken=${attachmentToken ? 'yes' : 'no'}`
         )
-        if (text.trim() !== '' || attachmentToken) {
-          void this.deliverUserMessage(text, attachmentToken)
+        if (text.trim() !== '' || attachmentToken || providedImages) {
+          const files = Array.isArray(payload.focusFiles) ? payload.focusFiles.slice(0, 3).filter(file =>
+            file && typeof file.fileName === 'string' && file.fileName.length <= 240 &&
+            typeof file.mimeType === 'string' && file.mimeType.length <= 160 && Number.isSafeInteger(file.sizeBytes) && file.sizeBytes > 0) : []
+          const turnId = this.handlers.onUserStarted?.(text, files)
+          if (providedImages) {
+            this.focusSendImages.delete(focusSendToken!)
+            this.handlers.onUserMessage(text, providedImages, turnId, 'provided')
+          } else void this.deliverUserMessage(text, attachmentToken, turnId)
         }
         break
       }
@@ -1554,6 +1624,9 @@ export class ChatGptEmbed {
         if (payload.messageId && typeof payload.text === 'string' && payload.text.trim() !== '') {
           this.handlers.onAssistantHistoryMarkdown(payload.messageId, payload.text)
         }
+        break
+      case 'sent-raw':
+        this.handlers.onRawSent?.()
         break
       case 'sent':
         if (payload.taskPromptGeneration !== this.taskPromptGeneration) break
@@ -1813,18 +1886,19 @@ export class ChatGptEmbed {
 
     const { x, y, width, height } = this.bounds
     // A zero-sized or hidden slot must not keep a native rectangle on screen.
-    if (!this.visible || width < 1 || height < 1) {
+    if (width < 1 || height < 1) {
       view.setVisible(false)
       return
     }
 
-    view.setVisible(true)
     view.setBounds({
       x: Math.round(x),
       y: Math.round(y),
       width: Math.round(width),
       height: Math.round(height)
     })
+    // A hidden chat still needs a real viewport for its composer and virtual list.
+    view.setVisible(this.visible)
   }
 
   private publishState(): void {

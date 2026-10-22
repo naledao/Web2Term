@@ -38,6 +38,7 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
   const { SessionRuntime } = load('../src/main/session-runtime.ts', {
     'node:crypto': { randomUUID: forbidden }, 'mysql2/promise': { createConnection: forbidden },
     './mysql-field-value': {}, electron: {}, './command-log': {},
+    './focus-chat': {}, './focus-attachments': {}, './focus-chat-log': {}, '../shared/focus-chat': {},
     '../shared/types': types, '../shared/platforms': platforms, './file-access': {},
     'node:os': { homedir: forbidden }, './commands': {}, './db': {}, './nacos-view': {},
     './mysql-table-rows': {}, './redis-reader': {}, './embed': {}, './environment': environment,

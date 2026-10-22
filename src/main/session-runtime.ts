@@ -73,6 +73,11 @@ import { readMysqlColumnMetadata, mysqlColumnDescriptions, mysqlRowKey, mysqlRow
 import { readMysqlDatabaseDdl } from './mysql-ddl-export'
 import { RedisReader, normalizeRedisDraft } from './redis-reader'
 import { ChatGptEmbed } from './embed'
+import { FocusChat } from './focus-chat'
+import { stageFocusAttachments } from './focus-attachments'
+import { validFocusFiles } from '../shared/focus-chat'
+import { writeFocusDiagnostic } from './focus-chat-log'
+import type { FocusChatState, FocusOwner, FocusSendRequest, FocusSendOutcome } from '../shared/focus-chat'
 import type { EmbedHandlers } from './embed'
 import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseWindowsEnvironment } from './environment'
 import { ConversationShell, resolvePowerShell } from './shell'
@@ -354,6 +359,9 @@ export class SessionRuntime {
    * `deferredCommands` exists for.
    */
   private pendingGoal = ''
+  private readonly focusChat: FocusChat
+  private focusSending = false
+  private focusUploadAbort: AbortController | null = null
   /** Clean chat turns waiting for a brand-new conversation to receive its URL/id. */
   private readonly pendingConversationMessages = new Map<
     string,
@@ -362,6 +370,7 @@ export class SessionRuntime {
       text: string
       sourceMessageId: string | null
       attachments: ConversationImageAttachmentInput[]
+      focusTurnId?: string
     }>
   >()
 
@@ -372,6 +381,7 @@ export class SessionRuntime {
       this.environmentScope = { scope: 'ssh', hostId: this.web2term.hostId, label: this.web2term.binding.deviceName || this.web2term.binding.agentId }
     }
     this.id = options.id ?? randomUUID()
+    this.focusChat = new FocusChat(this.id, options.store)
     this.createdAt = options.createdAt ?? Date.now()
     this.customTitle = options.customTitle?.trim() ?? ''
     this.projectId = options.projectId ?? null
@@ -413,6 +423,11 @@ export class SessionRuntime {
           this.commandDiagnosticPlatforms.set(owner, platform)
         }
         this.traceCommand(platform, details)
+        if (details.event === 'delivery') {
+          this.focusChat.delivery(platform.id, details.ownerConversationId ?? undefined, details.messageId,
+            details.deliveryOutcome === 'ok' || details.deliveryOutcome === 'sent' ? 'sent' :
+              details.deliveryOutcome === 'busy' ? 'blocked' : 'failed')
+        }
       },
       sendRawToPage: (text) => this.embed.sendRaw(text),
       fileContext: () => this.fileReadContext(),
@@ -580,6 +595,7 @@ export class SessionRuntime {
         if (state.conversationId !== entry.conversationId) {
           const previousConversationId = entry.conversationId
           entry.conversationId = state.conversationId
+          if (platform.id === 'deepseek') this.focusChat.context(platform.id, state.conversationId)
           const createdNewChat = previousConversationId === null && state.conversationId !== null
           // The first send creates its conversation id; keep that task's injection.
           // A real conversation change starts with an unused prompt in every execution mode.
@@ -609,17 +625,30 @@ export class SessionRuntime {
         this.flushDeferredCommands(conversation.id)
         this.flushPendingGoal(conversation.id)
         this.flushPendingConversationMessages(platform.id, conversation.id)
+        this.focusChat.flush(platform.id)
         this.broadcastConversations()
       },
       onSynced: (scraped) => {
         this.options.store.upsertMany(scraped)
         this.broadcastConversations()
       },
-      onUserMessage: (text, attachments) => {
-        this.captureConversationMessage(platform.id, 'user', text, null, attachments)
+      onUserStarted: (text, files) => {
+        const turnId = this.focusChat.begin(platform.id, record().conversationId, text, files)
+        if (platform.id === 'deepseek') writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: record().conversationId },
+          { event: 'user-started', turnId, inputLength: text.length, attachmentCount: files?.length ?? 0 })
+        return turnId
       },
+      onUserMessage: (text, attachments, turnId, imageSource) => {
+        const discarded = !!turnId && !this.focusChat.ownsTurn(platform.id, turnId)
+        if (platform.id === 'deepseek') writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: record().conversationId },
+          { event: discarded ? 'user-discarded' : 'user-captured', turnId, imageSource, inputLength: text.length, attachmentCount: attachments.length })
+        if (discarded) return
+        this.captureConversationMessage(platform.id, 'user', text, null, attachments, turnId)
+      },
+      onRawSent: () => this.focusChat.rawSent(platform.id),
       onAssistantMessage: (messageId, text) => {
         this.captureConversationMessage(platform.id, 'assistant', text, messageId)
+        this.focusChat.settled(platform.id, messageId, text)
       },
       onAssistantHistoryMarkdown: (messageId, text) => {
         const conversationId = record().conversationId
@@ -691,8 +720,10 @@ export class SessionRuntime {
           })}`
         )
         this.handleDetectedCommand(command)
+        this.focusChat.command(platform.id, command.messageId, command.live)
       },
       onParseFailed: (text) => {
+        if (isActive()) this.focusChat.parseFailed(platform.id)
         console.warn(`[session] reply did not parse as a command ${JSON.stringify({ text })}`)
         if (isActive()) this.runner.noteParseFailure(text)
       }
@@ -977,7 +1008,12 @@ export class SessionRuntime {
     this.applyVisibility()
   }
 
+  setQuestionChatViewport(id: string, bounds: unknown, visible: boolean): void {
+    this.embed.setQuestionChatViewport(id, bounds, visible && this.active)
+  }
+
   private taskRunning(): boolean {
+    if (this.focusSending) return true
     const status = this.embed.getInterceptorStatus()
     return status.taskStartedAt !== null && status.taskFinishedAt === null
   }
@@ -992,13 +1028,77 @@ export class SessionRuntime {
     this.embed.navigate(url)
   }
 
+  private ownsFocus(owner: FocusOwner): boolean {
+    return !this.disposed && owner.sessionId === this.id && owner.platformId === 'deepseek' &&
+      this.activePlatformId === owner.platformId && this.embed.getState().conversationId === owner.conversationId
+  }
+
+  async getFocusChat(owner: FocusOwner): Promise<FocusChatState | null> {
+    if (!this.ownsFocus(owner)) return null
+    this.focusChat.context(owner.platformId, owner.conversationId)
+    const token = this.focusChat.token(owner.platformId)
+    const page = await this.embed.readFocusSnapshot()
+    if (!this.ownsFocus(owner)) return null
+    if (page) this.focusChat.snapshot(owner.platformId, token, page)
+    writeFocusDiagnostic(owner, { event: 'view-state', ready: page?.ready === true,
+      nativeDraft: page?.nativeDraft === true, waiting: page?.waiting === true, generating: page?.generating ?? 'unknown',
+      turnCount: this.focusChat.turns(owner.platformId, owner.conversationId).length,
+      answerLength: page?.reply?.answer.length ?? 0,
+      reasoningCount: page?.reply?.parts.filter(part => part.kind === 'reasoning').length ?? 0,
+      searchCount: page?.reply?.parts.filter(part => part.kind === 'search').length ?? 0 })
+    return { ...owner, ready: page?.ready === true, nativeDraft: page?.nativeDraft === true,
+      generating: page?.generating ?? 'unknown', waiting: page?.waiting === true,
+      turns: this.focusChat.turns(owner.platformId, owner.conversationId),
+      executions: owner.conversationId ? this.options.store.listExecutions(owner.conversationId) : [] }
+  }
+
+  async sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome> {
+    if (!this.ownsFocus(request)) return 'unavailable'
+    if (typeof request.text !== 'string' || request.text.length > 20000 ||
+      !validFocusFiles(request.files ?? []) || (!request.text.trim() && !request.files?.length)) return 'invalid'
+    if (this.focusSending) return 'busy'
+    this.focusSending = true
+    writeFocusDiagnostic(request, { event: 'send-request', inputLength: request.text.length, attachmentCount: request.files?.length ?? 0 })
+    const controller = new AbortController()
+    this.focusUploadAbort = controller
+    const embed = this.embed
+    // The page uploader pins the first created conversation after its single submit.
+    // The runtime guard owns the workspace/platform; it must not reject that home -> chat binding.
+    const uploadCurrent = (): boolean => !this.disposed && !controller.signal.aborted &&
+      this.focusUploadAbort === controller && this.activePlatformId === request.platformId && this.embed === embed &&
+      (request.conversationId === null || embed.getState().conversationId === request.conversationId)
+    let staged: Awaited<ReturnType<typeof stageFocusAttachments>> | undefined
+    try {
+      if (request.files?.length) staged = await stageFocusAttachments(request.files)
+      const outcome = controller.signal.aborted || !this.ownsFocus(request) ? 'cancelled' : staged
+        ? await embed.sendFocusFiles(request.text, staged.attachments, 'focus:' + randomUUID(), uploadCurrent, controller.signal,
+          (request.files ?? []).filter(file => file.mimeType.startsWith('image/')).map(file => ({ ...file, width: null, height: null })))
+        : await this.embed.sendFocusUser(request.text)
+      writeFocusDiagnostic(request, { event: 'send-outcome', outcome })
+      return outcome
+    }
+    catch {
+      writeFocusDiagnostic(request, { event: 'send-outcome', outcome: 'upload-failed' })
+      return 'upload-failed'
+    } finally {
+      await staged?.cleanup().catch(() => {})
+      if (this.focusUploadAbort === controller) this.focusUploadAbort = null
+      this.focusSending = false
+    }
+  }
+
   async endTask() {
+    this.focusUploadAbort?.abort()
+    const platformId = this.activePlatformId
+    const focusTurnId = this.focusChat.currentTurnId(platformId)
     this.deferredCommands.clear()
     const conversationId = this.embed.getState().conversationId
     if (conversationId) this.backgroundTaskResults.cancel({ platformId: this.activePlatformId, conversationId })
     const runner = this.runner.endTask()
     const status = await this.embed.endTask()
     await runner
+    if (focusTurnId) this.focusChat.stop(platformId, focusTurnId)
+    if (platformId === 'deepseek') writeFocusDiagnostic({ sessionId: this.id, platformId, conversationId }, { event: 'end-task' })
     return status
   }
 
@@ -1079,12 +1179,13 @@ export class SessionRuntime {
     role: 'user' | 'assistant',
     text: string,
     sourceMessageId: string | null,
-    attachments: ConversationImageAttachmentInput[] = []
+    attachments: ConversationImageAttachmentInput[] = [],
+    focusTurnId?: string
   ): void {
     if (text.trim() === '' && attachments.length === 0) return
     const conversationId = this.embeds.get(platformId)?.conversationId ?? null
     if (conversationId) {
-      this.options.store.appendConversationMessage(
+      const savedId = this.options.store.appendConversationMessage(
         conversationId,
         role,
         text,
@@ -1092,10 +1193,16 @@ export class SessionRuntime {
         Date.now(),
         attachments
       )
+      if (role === 'user') {
+        this.focusChat.linkUser(platformId, focusTurnId, savedId)
+        if (platformId === 'deepseek') writeFocusDiagnostic({ sessionId: this.id, platformId, conversationId },
+          { event: 'user-stored', turnId: focusTurnId, messageId: savedId, attachmentCount: attachments.length,
+            savedAttachmentCount: savedId ? this.options.store.countMessageAttachments(savedId) : 0 })
+      }
       return
     }
     const pending = this.pendingConversationMessages.get(platformId) ?? []
-    pending.push({ role, text, sourceMessageId, attachments })
+    pending.push({ role, text, sourceMessageId, attachments, focusTurnId })
     this.pendingConversationMessages.set(platformId, pending)
   }
 
@@ -1103,7 +1210,7 @@ export class SessionRuntime {
     const pending = this.pendingConversationMessages.get(platformId)
     if (!pending || pending.length === 0) return
     for (const message of pending) {
-      this.options.store.appendConversationMessage(
+      const savedId = this.options.store.appendConversationMessage(
         conversationId,
         message.role,
         message.text,
@@ -1111,6 +1218,12 @@ export class SessionRuntime {
         Date.now(),
         message.attachments
       )
+      if (message.role === 'user') {
+        this.focusChat.linkUser(platformId, message.focusTurnId, savedId)
+        if (platformId === 'deepseek') writeFocusDiagnostic({ sessionId: this.id, platformId, conversationId },
+          { event: 'user-stored', turnId: message.focusTurnId, messageId: savedId, attachmentCount: message.attachments.length,
+            savedAttachmentCount: savedId ? this.options.store.countMessageAttachments(savedId) : 0 })
+      }
     }
     this.pendingConversationMessages.delete(platformId)
   }
@@ -1992,6 +2105,8 @@ export class SessionRuntime {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.focusUploadAbort?.abort()
+    this.focusChat.flush()
     this.backgroundTaskResults.dispose()
     this.backgroundTasks.dispose()
     this.redisReader.dispose()

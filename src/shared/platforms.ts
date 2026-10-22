@@ -603,29 +603,15 @@ export const DEEPSEEK_PAGE: PageAdapter = {
     'button[type="submit"]'
   ],
   /*
-   * EMPTY, and it has to STAY empty — a measured conclusion, not an omission.
-   *
-   * A live `end-task` snapshot taken while a reply was streaming shows the composer holding two
-   * controls, the second of them:
-   *
-   *   <div role="button" class="ds-button ds-button--primary ds-button--filled ds-button--circle
-   *                              ds-button--m ds-button--icon-relative-m _52c986b">
-   *
-   * which is byte for byte what `sendButtonSelectors[0]` matches once the composer holds text,
-   * with no `ds-button--disabled` to separate the two states. Send and stop differ only in the
-   * icon INSIDE the button, and no CSS selector can see an icon.
-   *
-   * Putting that selector here anyway is the tempting move and the wrong one: it would also match
-   * an IDLE page, and `checkForCommand` returns on its first line whenever `findStopButton()` is
-   * truthy. DeepSeek would stop detecting commands entirely — silently, looking exactly like the
-   * model having stopped cooperating.
-   *
-   * So 结束任务 stops DeepSeek STRUCTURALLY instead: `clickPrimaryWhileWaiting` in
-   * send-interceptor.js clicks the composer's primary action, gated on a reply being pending and
-   * the composer being empty. The empty composer is the discriminator CSS cannot express — with
-   * nothing typed, a live primary action cannot be a send.
+   * Measured in the user's 2026-10-22 chat-view log: send and stop share their
+   * outer classes, but stop's SVG path starts M2 4.88C2 3.68009; send starts
+   * M8.3125 0.980206. Match that child explicitly rather than the shared class.
+   * A disabled button or spinner remains unknown, never proof of completion.
+   * clickPrimaryWhileWaiting remains the existing structural stop fallback.
    */
-  stopButtonSelectors: [],
+  stopButtonSelectors: [
+    '.ds-button--primary.ds-button--circle:has(svg path[d^="M2 4.88C2 3.68009"])'
+  ],
   // Turns of either role; the role is decided by the reply selector, not by a class.
   assistantSelectors: ['[data-virtual-list-item-key]'],
   assistantReplySelectors: ['.ds-assistant-message-main-content'],
