@@ -146,6 +146,12 @@ export interface PageAdapter {
   messageIdAttr: string
   /** Additional disabled states used by custom controls instead of native buttons. */
   disabledControlSelectors?: string[]
+  /**
+   * Exact visible text of the control that resumes a reply the SERVER cut off.
+   * While the app waits for its own reply, such a control is pressed instead of
+   * accepting the partial text as the final answer.
+   */
+  continueButtonLabels?: string[]
   /** Attachment acknowledgements only; never used as command message identities. */
   fileTurnPositionAttr?: string
   /** The list position can live on a surrounding row rather than the user wrapper. */
@@ -586,6 +592,12 @@ export const DEEPSEEK_PAGE: PageAdapter = {
   composerKind: 'textarea',
   composerSelectors: ['textarea[placeholder]', 'textarea'],
   disabledControlSelectors: ['.ds-button--disabled'],
+  /*
+   * From the user's 2026-10-22 screenshot: after 服务器暂时不可用 the reply reads 已停止
+   * and a 继续生成 button sits on its action row. Matched by text — its classes were
+   * not captured.
+   */
+  continueButtonLabels: ['继续生成'],
   // Virtual row keys (numeric or opaque) are used only across this one send.
   fileTurnPositionAttr: 'data-virtual-list-item-key',
   fileAssistantSelectors: ['.ds-think-content'],

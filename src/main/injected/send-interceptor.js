@@ -192,7 +192,8 @@
   let lastDraftImagePromise = Promise.resolve([])
   const replyDiagnosticEvents = new Set([
     'installed', 'configured', 'sent', 'sent-raw', 'scan', 'reply-state', 'question',
-    'question-cleared', 'command', 'read-files', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog'
+    'question-cleared', 'command', 'read-files', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
+    'continue-generation'
   ])
   const replyScanEvents = new Set(['scan', 'question', 'command', 'read-files', 'parse-failed', 'task-finished'])
   let replyScanSnapshot = {}
@@ -2295,6 +2296,73 @@
   }
 
   /**
+   * A reply the SERVER cut off (DeepSeek: 服务器暂时不可用 → 已停止 → 继续生成).
+   *
+   * Without this the partial text settles like any other reply: prose is saved as the final
+   * answer and the task ends, or a thinking-only turn simply sits there, and auto mode stalls
+   * until the user presses the button. Pressing it is what the user would do.
+   *
+   * Only while the app is waiting for its OWN reply, so a restored conversation's old
+   * stopped turn is never resumed. Only a button inside or after the newest turn, so an
+   * earlier turn's leftover control is history. Cooldown between presses because the
+   * retry needs time to restart the stream; a cap because a server that keeps failing must
+   * eventually hand the partial reply back to the normal path instead of looping forever.
+   */
+  const CONTINUE_COOLDOWN_MS = 5000
+  const CONTINUE_LIMIT = 5
+  let continueAttempts = { since: 0, count: 0, at: 0 }
+  let continueTimer = null
+
+  const findContinueButton = (latest) => {
+    const labels = PAGE.continueButtonLabels || []
+    if (labels.length === 0) return null
+    const matches = [...document.querySelectorAll(CONTROL_SELECTOR)].filter((element) =>
+      labels.includes(collapse(element.innerText)) && isVisibleElement(element) && !controlDisabled(element))
+    const button = matches[matches.length - 1] || null
+    if (!button || !latest || latest.contains(button)) return button
+    return latest.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_PRECEDING ? null : button
+  }
+
+  /** @returns true while the cut-off reply is being resumed and must not be read as final. */
+  const continueCutOffReply = (latest) => {
+    if (state.awaitingReplySince === 0 || state.pendingQuestion || findStopButton()) return false
+    const button = findContinueButton(latest)
+    if (!button) return false
+    if (continueAttempts.since !== state.awaitingReplySince) {
+      continueAttempts = { since: state.awaitingReplySince, count: 0, at: 0 }
+    }
+    if (continueAttempts.count >= CONTINUE_LIMIT) {
+      if (continueAttempts.count === CONTINUE_LIMIT) {
+        continueAttempts.count += 1
+        report({ event: 'continue-generation', reason: 'continue-limit', attempt: CONTINUE_LIMIT })
+      }
+      return false
+    }
+    const wait = continueAttempts.at + CONTINUE_COOLDOWN_MS - Date.now()
+    if (wait <= 0) {
+      continueAttempts.count += 1
+      continueAttempts.at = Date.now()
+      report({ event: 'continue-generation', reason: 'continue-clicked', attempt: continueAttempts.count })
+      // Same guard as clickPrimaryWhileWaiting: the click interceptor must not treat this as a send.
+      state.programmatic = true
+      try {
+        pressButton(button)
+      } finally {
+        setTimeout(() => {
+          state.programmatic = false
+        }, 0)
+      }
+    }
+    // A press that changes nothing renders no mutation, so re-check on a timer.
+    if (continueTimer) clearTimeout(continueTimer)
+    continueTimer = setTimeout(() => {
+      continueTimer = null
+      scheduleCheck()
+    }, wait > 0 ? wait : CONTINUE_COOLDOWN_MS)
+    return true
+  }
+
+  /**
    * Runs after the reply has been quiet for REPLY_SETTLE_MS. Only the LAST
    * assistant message is considered, and each message id is reported at most
    * once — the main process does the durable deduplication against SQLite.
@@ -2319,6 +2387,8 @@
       noteScan('', 'no-visible-turns')
       return
     }
+    // Before the role check: a turn cut off while thinking may have no answer marker yet.
+    if (continueCutOffReply(node)) return
 
     /*
      * Only assistant turns count, and this is checked FIRST.
@@ -2503,6 +2573,7 @@
           const nodes = queryAllAssistant()
           const latest = latestReplyNode(nodes)
           if (!latest || !isAssistantTurn(latest) || !latest.isConnected) return
+          if (continueCutOffReply(latest)) return
           if (replyIsGenerating(latest) || turnKeyOf(latest) !== messageId || readReplyText(latest) !== text) {
             scheduleCheck()
             return
@@ -3404,7 +3475,7 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], continueButtonLabels: [], fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
         observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing

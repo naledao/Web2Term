@@ -1245,6 +1245,8 @@ export interface InterceptorPageEvent {
     | 'scan'
     | 'reply-state'
     | 'reply-watchdog'
+    /** The page's own "continue" control was pressed on a reply the server cut off. */
+    | 'continue-generation'
     | 'sent-raw'
     | 'raw-busy'
     /** Reported by the injected theme script; see src/main/injected/theme.js. */
@@ -1310,7 +1312,10 @@ export interface InterceptorPageEvent {
    * on it.
    */
   attempts?: number
-  /** Present on `send-recovery`: retry index before the recovery action. */
+  /**
+   * Present on `send-recovery`: retry index before the recovery action.
+   * On `continue-generation`: presses made for the current reply wait.
+   */
   attempt?: number
   /** Which recovery action the failing pass used, or null when none had run yet. */
   recoveryTried?: string | null
