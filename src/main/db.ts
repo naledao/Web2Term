@@ -149,6 +149,18 @@ CREATE TABLE IF NOT EXISTS focus_turns (
 CREATE INDEX IF NOT EXISTS idx_focus_turns_owner
   ON focus_turns(session_id, platform_id, conversation_id, created_at);
 
+-- Background tasks of one workspace session, restored after a restart (see docs/background-tasks.md).
+CREATE TABLE IF NOT EXISTS background_tasks (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  -- 1 while the task runs or a notification is still owed; such rows are never pruned.
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_background_tasks_session
+  ON background_tasks(session_id, created_at);
+
 CREATE TABLE IF NOT EXISTS message_attachments (
   id           TEXT PRIMARY KEY,
   message_id   TEXT NOT NULL,
@@ -920,6 +932,30 @@ export class ConversationStore {
     ).run(turn.id, sessionId, platformId, conversationId, payload, turn.createdAt)
   }
 
+  /** Raw payloads, oldest first; the runtime parses and validates them. */
+  listBackgroundTaskPayloads(sessionId: string): string[] {
+    const rows = this.db.prepare(
+      'SELECT payload FROM background_tasks WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 100'
+    ).all(sessionId) as unknown as Array<{ payload: string }>
+    return rows.reverse().map(row => row.payload)
+  }
+
+  /**
+   * Upsert one task, then keep the newest 50 per session. An older row goes only when it is
+   * no longer `active`: the task has ended and no notification for it is still pending.
+   */
+  saveBackgroundTask(sessionId: string, id: string, createdAt: number, payload: string, active: boolean): void {
+    if (payload.length > 1_000_000) throw new Error('background-task-too-large')
+    this.db.prepare(
+      'INSERT INTO background_tasks (id, session_id, payload, active, created_at) VALUES (?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, active = excluded.active WHERE background_tasks.session_id = excluded.session_id'
+    ).run(id, sessionId, payload, active ? 1 : 0, createdAt)
+    this.db.prepare(
+      `DELETE FROM background_tasks WHERE session_id = ? AND active = 0 AND id IN (
+        SELECT id FROM background_tasks WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET 50)`
+    ).run(sessionId, sessionId)
+  }
+
   /** Persist one clean chat turn plus any user image attachments. */
   appendConversationMessage(
     conversationId: string,
@@ -1565,6 +1601,7 @@ export class ConversationStore {
 
   removeManagedSession(id: string): void {
     this.db.prepare('DELETE FROM focus_turns WHERE session_id = ?').run(id)
+    this.db.prepare('DELETE FROM background_tasks WHERE session_id = ?').run(id)
     this.db.prepare('DELETE FROM managed_sessions WHERE id = ?').run(id)
   }
   /* ---------------- settings ---------------- */

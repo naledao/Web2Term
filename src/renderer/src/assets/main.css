@@ -8999,6 +8999,10 @@ body {
   gap: 18px;
 }
 
+.settings-appearance-row + .settings-appearance-row {
+  margin-top: 16px;
+}
+
 @media (max-width: 720px) {
   .settings-appearance-row {
     align-items: flex-start;

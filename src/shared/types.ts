@@ -1,5 +1,5 @@
 import type { ToolboxInvocation } from './toolbox'
-import type { FocusOwner, FocusChatState, FocusSendRequest, FocusSendOutcome, FocusAttachmentInfo } from './focus-chat'
+import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusSendOutcome, FocusAttachmentInfo } from './focus-chat'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import { BACKGROUND_TASK_MARKER } from './background-tasks'
 import type { BackgroundTasksState } from './background-tasks'
@@ -21,6 +21,7 @@ export const IpcChannels = {
   embedGetState: 'embed:get-state',
   focusChatGet: 'focus-chat:get',
   focusChatSend: 'focus-chat:send',
+  focusChatAsk: 'focus-chat:ask',
   embedState: 'embed:state',
   questionChatGetState: 'question-chat:get-state',
   questionChatCreate: 'question-chat:create',
@@ -462,6 +463,8 @@ export interface AppSettings {
   userAvatarScale: number
   /** `ChatPlatform['id']` a newly created chat starts on; switching inside the chat is unaffected. */
   defaultPlatformId: string
+  /** View a newly opened conversation starts on: original page, local transcript, or focus chat. */
+  defaultChatView: 'original' | 'local' | 'focus'
 }
 
 /** Everything the renderer may change; every field is optional. */
@@ -1317,6 +1320,9 @@ export interface InterceptorPageEvent {
    * On `continue-generation`: presses made for the current reply wait.
    */
   attempt?: number
+  /** On `continue-generation` / `continue-clicked`: viewport CSS-pixel point the main process clicks. */
+  x?: number
+  y?: number
   /** Which recovery action the failing pass used, or null when none had run yet. */
   recoveryTried?: string | null
   composerKind?: string | null
@@ -2181,6 +2187,8 @@ export interface AppApi {
   getEmbedState(): Promise<EmbedState>
   getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
   sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome>
+  /** Ask about a focus-view selection in the side chat; '' once it is open, otherwise the message to show. */
+  askFocusSelection(request: FocusSelectionRequest): Promise<string>
   /** Subscribe to embed state; returns an unsubscribe function. */
   onEmbedState(listener: (state: EmbedState) => void): () => void
   getQuestionChatState(sessionId: string): Promise<QuestionChatState | null>

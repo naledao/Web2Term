@@ -5,7 +5,8 @@ import type { ChatPlatform } from '../shared/platforms'
 import type { InterceptorPageEvent } from '../shared/types'
 
 const logPaths = new Map<ChatPlatform['id'], string>()
-const reasons = ['programmatic-send', 'model-generating', 'image-draft', 'attachment-draft', 'text-draft']
+const reasons = ['programmatic-send', 'model-generating', 'image-draft', 'attachment-draft', 'text-draft',
+  'conversation-changed', 'awaiting-reply', 'file-send']
 
 /** Persist only raw-send guard metadata, even when the optional app log is off. */
 export function writeRawSendDiagnostic(platformId: ChatPlatform['id'], payload: InterceptorPageEvent): string | null {

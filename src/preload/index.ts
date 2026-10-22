@@ -1,6 +1,6 @@
 import type { ToolboxInvocation } from '../shared/toolbox'
 import type { BackgroundTasksState } from '../shared/background-tasks'
-import type { FocusOwner, FocusChatState, FocusSendRequest, FocusSendOutcome } from '../shared/focus-chat'
+import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusSendOutcome } from '../shared/focus-chat'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { IpcChannels } from '../shared/types'
@@ -181,6 +181,8 @@ const api: AppApi = {
   getEmbedState: (): Promise<EmbedState> => ipcRenderer.invoke(IpcChannels.embedGetState),
   getFocusChat: (owner: FocusOwner): Promise<FocusChatState | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner),
   sendFocusMessage: (request: FocusSendRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatSend, request),
+  /** '' once the side chat is open, otherwise the message to show. */
+  askFocusSelection: (request: FocusSelectionRequest): Promise<string> => ipcRenderer.invoke(IpcChannels.focusChatAsk, request),
 
   getQuestionChatState: (sessionId: string): Promise<QuestionChatState | null> => ipcRenderer.invoke(IpcChannels.questionChatGetState, sessionId),
   createQuestionChat: (sessionId: string, platformId: string): Promise<QuestionChatState | null> => ipcRenderer.invoke(IpcChannels.questionChatCreate, sessionId, platformId),

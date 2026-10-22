@@ -147,6 +147,23 @@ export interface PageAdapter {
   /** Additional disabled states used by custom controls instead of native buttons. */
   disabledControlSelectors?: string[]
   /**
+   * The sidebar's links to other conversations — the same selector its `sidebarScript`
+   * reads. The composer's attachment area never extends to an ancestor holding one: before
+   * the message list renders, nothing else stops that walk short of the page shell.
+   */
+  conversationLinkSelectors?: string[]
+  /**
+   * What the focus view reads off this page. Present only on a platform listed in
+   * `FOCUS_PLATFORMS` (shared/focus-chat.ts); measured like every selector here.
+   */
+  focus?: FocusPageRules
+  /**
+   * An answer component that is not Markdown: an interactive chart. Turned into Markdown, it
+   * is written as its title, its accessible data list and its caption, never as the text
+   * scattered through its SVG. Selectors inside `rootSelector` are queried from that root.
+   */
+  answerCharts?: { rootSelector: string; titleSelector: string; dataItemSelector: string; captionSelector?: string }
+  /**
    * Exact visible text of the control that resumes a reply the SERVER cut off.
    * While the app waits for its own reply, such a control is pressed instead of
    * accepting the partial text as the final answer.
@@ -187,6 +204,42 @@ export interface PageAdapter {
   fileLocalUploadLabels?: string[]
   /** How this site's page is told which theme to render. See `PageThemeRules`. */
   theme: PageThemeRules
+}
+
+/**
+ * The focus view's reads of a page, beyond what the command loop already needs.
+ *
+ * The answer itself comes from `assistantReplySelectors` and the turns from
+ * `assistantSelectors`; these are the parts only the focus view uses.
+ */
+export interface FocusPageRules {
+  /**
+   * Generating vs idle read off the composer's primary action, for a site whose stop control
+   * shares the send button's classes (DeepSeek). Absent: the measured `stopButtonSelectors`
+   * decide — present means 'active', absent means 'idle'.
+   */
+  generatingIcon?: {
+    primaryControlSelector: string
+    /**
+     * Start of that icon's first SVG path while generating, and while idle. Any other icon —
+     * a spinner, a disabled state — reads as 'unknown', never as finished.
+     */
+    generatingPrefixes: string[]
+    idlePrefixes: string[]
+  }
+  /**
+   * Per-turn attribute holding a numeric list position, for a site without stable message
+   * ids (DeepSeek). Used only for the span of one send, to recognise the reply that follows
+   * it; never stored. Absent: that reply is anchored by its `messageIdAttr` instead.
+   */
+  rowPositionAttr?: string
+  /** Reasoning blocks inside an assistant turn, shown as 思考过程. Empty until measured. */
+  reasoningSelectors: string[]
+  /**
+   * Where `reasoningSelectors` are queried when reasoning sits OUTSIDE the turn element: the
+   * turn's closest ancestor matching this. Absent: inside the turn element itself.
+   */
+  reasoningScopeSelector?: string
 }
 
 /**
@@ -428,6 +481,8 @@ const SIDEBAR_SCRIPT_BY_DEFAULT = (linkSelector: string, pathPrefix: string): st
  */
 export const CHATGPT_PAGE: PageAdapter = {
   composerKind: 'contenteditable',
+  // The sidebar selector CHATGPT_PLATFORM.sidebarScript reads.
+  conversationLinkSelectors: ['a[href^="/c/"]'],
   /*
    * The live selector FIRST, because `queryFirst` returns the first match in list order and
    * the historical one is now dead weight. `[data-composer-markdown]` is the attribute the
@@ -544,6 +599,35 @@ export const CHATGPT_PAGE: PageAdapter = {
   // 2026-10-05 attachment capture: this button contains the selected model.
   // Version text such as GPT-6.1 must not look like a file draft or uncleared upload.
   fileDraftIgnoreSelector: 'button[aria-label="选择 ChatGPT 模型"]',
+  /*
+   * The focus view's reads. The stop button decides generating, and the stable message id
+   * anchors the reply to a send.
+   *
+   * Reasoning, MEASURED 2026-10-22 (tools/diag/chatgpt-reasoning-probe.cjs, streaming,
+   * expanded and collapsed): ChatGPT's 已处理 N秒 activity is NOT inside the id-bearing turn.
+   * The turn group holds a block opening with `span[data-chatgpt-agent-turn-start]`, then a
+   * sibling with the header button and a panel (`hidden` while collapsed, same content) of
+   * steps; each step is its own assistant-styled Markdown root. The answer is in a later
+   * block. When a reply has no activity, the marker sits directly before the answer's
+   * `data-content-search-unit-key` unit — hence the `:not(...)`, which keeps the answer out.
+   */
+  /*
+   * MEASURED 2026-10-22 (chatgpt-reasoning-probe.cjs, a five-point line chart): the chart is
+   * `[data-testid="chatgpt-chart-content-reference"]`, holding a `section[aria-label]` (its
+   * title), a recharts SVG (axis ticks, tooltip), `ul.sr-only` with one `li` per data point
+   * for screen readers, a `p.line-clamp-2` caption, and share/more buttons. Read as text,
+   * the SVG and list came out as "CPU内存0%25%50%…1234…" followed by every data point.
+   */
+  answerCharts: {
+    rootSelector: '[data-testid="chatgpt-chart-content-reference"]',
+    titleSelector: 'section[aria-label]',
+    dataItemSelector: 'ul.sr-only > li',
+    captionSelector: 'p.line-clamp-2'
+  },
+  focus: {
+    reasoningScopeSelector: '[data-content-search-turn-key]',
+    reasoningSelectors: ['[data-chatgpt-agent-turn-start] ~ :not([data-content-search-unit-key]) [data-markdown-text-style="assistant-message"]']
+  },
   // Not measured yet; DeepSeek is the platform the theme probe runs against first.
   theme: THEME_UNMEASURED
 }
@@ -592,12 +676,28 @@ export const DEEPSEEK_PAGE: PageAdapter = {
   composerKind: 'textarea',
   composerSelectors: ['textarea[placeholder]', 'textarea'],
   disabledControlSelectors: ['.ds-button--disabled'],
+  // The sidebar selector DEEPSEEK_PLATFORM.sidebarScript reads.
+  conversationLinkSelectors: ['a[href^="/a/chat/s/"]'],
   /*
    * From the user's 2026-10-22 screenshot: after 服务器暂时不可用 the reply reads 已停止
    * and a 继续生成 button sits on its action row. Matched by text — its classes were
    * not captured.
    */
   continueButtonLabels: ['继续生成'],
+  /*
+   * The focus view's reads, measured in the user's 2026-10-22 chat-view log: send and stop
+   * share their classes and differ only in the icon (stop M2 4.88C2 3.68009, send
+   * M8.3125 0.980206). Reasoning is `.ds-think-content`; the row key is the virtual list's.
+   */
+  focus: {
+    generatingIcon: {
+      primaryControlSelector: '.ds-button--primary.ds-button--circle',
+      generatingPrefixes: ['M2 4.88C2 3.68009'],
+      idlePrefixes: ['M8.3125 0.980206']
+    },
+    rowPositionAttr: 'data-virtual-list-item-key',
+    reasoningSelectors: ['.ds-think-content']
+  },
   // Virtual row keys (numeric or opaque) are used only across this one send.
   fileTurnPositionAttr: 'data-virtual-list-item-key',
   fileAssistantSelectors: ['.ds-think-content'],

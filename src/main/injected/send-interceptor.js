@@ -200,6 +200,21 @@
   let focusReplyBaseline = null
   let focusBaselinePosition = null
   let focusReplyPosition = null
+  // The focus view's list position (`PAGE.focus.rowPositionAttr`); null on a platform without focus rules.
+  const focusRowPosition = (node) => {
+    const attribute = PAGE.focus?.rowPositionAttr
+    return node && attribute ? node.getAttribute(attribute) || null : null
+  }
+  /*
+   * What pins the reply to the current send: the list position where the rules name one,
+   * otherwise the site's stable message id. Never a content hash — that changes while the
+   * reply streams, and the anchor would lose its own row.
+   */
+  const focusReplyAnchor = (node) => {
+    if (!node || !PAGE.focus) return null
+    if (PAGE.focus.rowPositionAttr) return focusRowPosition(node)
+    return PAGE.messageIdAttr ? node.getAttribute(PAGE.messageIdAttr) || null : null
+  }
   const report = (payload) => {
     try {
       const includeScan = replyScanEvents.has(payload.event) ||
@@ -328,6 +343,59 @@
 
   const readReplyText = (node) => String(replyRootOf(node)?.innerText || '')
 
+  /**
+   * A chart as Markdown: its title, its accessible data points and its caption. Walking its
+   * DOM instead spelled out the SVG's axis ticks and tooltip ("CPU内存0%25%…1234…") and then
+   * the screen-reader list, line by line. The interactive chart stays in the original view.
+   */
+  const chartMarkdown = (root, chart) => {
+    // The card's own heading when it has one (the 2026-10-22 screenshot shows it inside the
+    // card); the section's aria-label otherwise.
+    const heading = collapse(root.querySelector('h1, h2, h3, h4, h5, h6')?.textContent || '')
+    const named = heading || collapse(root.querySelector(chart.titleSelector)?.getAttribute('aria-label') || '')
+    // The section's label can be just a type word ("图表 图表", 2026-10-22) while the real title
+    // is a heading above the card that is already written out; such a label is no title.
+    const title = /^(?:图表|chart)(?:\s+(?:图表|chart))*$/i.test(named) ? '' : named
+    const points = [...root.querySelectorAll(chart.dataItemSelector)].map((item) => collapse(item.textContent)).filter(Boolean).slice(0, 200)
+    const caption = chart.captionSelector ? collapse(root.querySelector(chart.captionSelector)?.textContent || '') : ''
+    const lines = [title ? '> 📊 **' + title + '**（图表，可在原始视图中交互查看）' : '> 📊 图表（可在原始视图中交互查看）',
+      ...(points.length ? ['>', ...points.map((point) => '> - ' + point)] : []),
+      ...(caption ? ['>', '> ' + caption] : [])]
+    // A machine-readable copy for the focus view, which draws the chart from it. An HTML
+    // comment: invisible wherever Markdown is rendered, so the quote above stays the fallback.
+    const data = chartData(points)
+    const marker = data ? '<!--focus-chart ' + JSON.stringify({ title, caption, ...data }).replace(/--/g, '\\u002d\\u002d') + ' -->\n' : ''
+    return '\n\n' + marker + lines.join('\n') + '\n\n'
+  }
+
+  /**
+   * Parse accessible data points such as "周一: 数值 12" or "1: CPU 20%, 内存 50.9%" into
+   * series. All-or-nothing: if any point does not parse, or the points disagree on their
+   * series, there is no chart and the quoted list is all that is shown.
+   */
+  const chartData = (points) => {
+    if (points.length < 2) return null
+    const series = []
+    const rows = []
+    for (const point of points) {
+      const split = point.search(/[:：]/)
+      if (split <= 0) return null
+      const label = point.slice(0, split).trim()
+      const parts = point.slice(split + 1).split(/[,，;；]/).map((part) => part.trim()).filter(Boolean)
+      if (!label || !parts.length) return null
+      const values = []
+      for (const part of parts) {
+        const match = /^(.*?)\s*(-?\d+(?:\.\d+)?)\s*(%|[A-Za-z]{1,6})?$/.exec(part)
+        if (!match) return null
+        values.push({ name: match[1].trim(), value: Number(match[2]), unit: match[3] || '' })
+      }
+      if (!rows.length) values.forEach((value) => series.push({ name: value.name || '数值', unit: value.unit }))
+      else if (values.length !== series.length || values.some((value, index) => (value.name || '数值') !== series[index].name)) return null
+      rows.push({ label: label.slice(0, 40), values: values.map((value) => value.value) })
+    }
+    return series.length <= 6 ? { series, rows } : null
+  }
+
   /** Preserve the rendered answer structure as Markdown for the app-owned transcript. */
   const readReplyMarkdown = (node) => {
     const root = replyRootOf(node)
@@ -341,6 +409,8 @@
       const element = current
       const tag = element.tagName.toLowerCase()
       const children = () => [...element.childNodes].map((child) => render(child, depth)).join('')
+      const chart = PAGE.answerCharts
+      if (chart && element.matches(chart.rootSelector)) return chartMarkdown(element, chart)
       // ChatGPT's current renderer uses a span marker for inline code instead of a
       // semantic <code> element. Preserve the Markdown delimiter so the backup transcript
       // renders the same gray monospace pill as the native page.
@@ -612,7 +682,14 @@
         const src = String(image.currentSrc || image.src || '')
         const width = Number(image.naturalWidth || image.width || 0)
         const height = Number(image.naturalHeight || image.height || 0)
-        return src !== '' && width >= 40 && height >= 40
+        if (src === '' || width < 40 || height < 40) return false
+        // Same rule as `attachmentDraftImages`: a local upload preview always counts, but a
+        // page image counts only while it is rendered. DeepSeek keeps a hidden 132px static
+        // image near the composer; counting it made every focus-view send return busy.
+        if (/^(blob:|data:)/.test(src)) return true
+        if (!isVisibleElement(image)) return false
+        const rect = image.getBoundingClientRect()
+        return rect.width > 0 && rect.height > 0
       })) return true
     }
     return false
@@ -933,6 +1010,7 @@
       let root = attachmentRoot() || getComposer()
       for (let depth = 0; depth < 8 && root && root !== document.body; depth += 1, root = root.parentElement) {
         if (attachmentHasMessages(root)) break
+        if ((PAGE.conversationLinkSelectors || []).some((selector) => root.querySelector(selector))) break
         for (const image of collectImages(root)) {
           if (seen.has(image)) continue
           seen.add(image)
@@ -1409,7 +1487,7 @@
     // make every later MutationObserver scan skip its command forever.
     const replyBaselineId = lastAssistantId()
     const focusBaselineNode = latestReplyNode(queryAllAssistant().filter(node => isAssistantTurn(node)))
-    const replyBaselinePosition = focusBaselineNode?.getAttribute('data-virtual-list-item-key') || null
+    const replyBaselinePosition = focusRowPosition(focusBaselineNode)
 
     const finish = (ok) => {
       if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
@@ -2344,16 +2422,28 @@
     if (wait <= 0) {
       continueAttempts.count += 1
       continueAttempts.at = Date.now()
-      report({ event: 'continue-generation', reason: 'continue-clicked', attempt: continueAttempts.count })
-      // Same guard as clickPrimaryWhileWaiting: the click interceptor must not treat this as a send.
-      state.programmatic = true
-      try {
-        pressButton(button)
-      } finally {
-        setTimeout(() => {
-          state.programmatic = false
-        }, 0)
-      }
+      /*
+       * The press itself is made by the main process, as a real mouse click at the point
+       * reported here. A script-dispatched click is untrusted, and DeepSeek ignores it: on
+       * 2026-10-22 five `pressButton` presses in a row produced no DOM mutation at all.
+       *
+       * Only a point that actually lands on the button is reported — never a click on
+       * whatever covers it — and never a control that is also a send button, because the
+       * capturing click interceptor would then compose and submit the prompt.
+       */
+      try { button.scrollIntoView({ block: 'nearest' }) } catch (_) { /* measured as-is */ }
+      const rect = button.getBoundingClientRect()
+      const x = Math.round(rect.left + rect.width / 2)
+      const y = Math.round(rect.top + rect.height / 2)
+      const hit = document.elementFromPoint(x, y)
+      const reachable = !!hit && (hit === button || button.contains(hit)) &&
+        !PAGE.sendButtonSelectors.some((selector) => button.closest(selector))
+      report({
+        event: 'continue-generation',
+        reason: reachable ? 'continue-clicked' : 'continue-unreachable',
+        attempt: continueAttempts.count,
+        ...(reachable ? { x, y } : {})
+      })
     }
     // A press that changes nothing renders no mutation, so re-check on a timer.
     if (continueTimer) clearTimeout(continueTimer)
@@ -2854,13 +2944,16 @@
       // The 2026-10-06 capture placed the active inputs at depth 8 and their
       // native form at depth 10, beyond the former eight-ancestor limit.
       if (attachmentHasMessages(root)) break
+      // The page shell: a page that has not rendered its message rows yet is bounded by its sidebar.
+      if ((PAGE.conversationLinkSelectors || []).some((selector) => root.querySelector(selector))) break
       if (root.matches('form') || root.querySelectorAll(CONTROL_SELECTOR).length >= 2) candidate = root
     }
     return candidate
   }
-  const attachmentNameSources = (root, referenceAttribute = '') => {
+  const attachmentNameSources = (root, referenceAttribute = '', withoutNavigation = false) => {
     const clone = root.cloneNode(true)
     clone.querySelectorAll('textarea, [contenteditable]:not([contenteditable="false"]), input').forEach((node) => node.remove())
+    if (withoutNavigation) clone.querySelectorAll('a[href], nav, aside, [role="navigation"]').forEach((node) => node.remove())
     if (PAGE.fileDraftIgnoreSelector) clone.querySelectorAll(PAGE.fileDraftIgnoreSelector).forEach((node) => node.remove())
     // Keep every filename node/label as its own source. A container's textContent
     // concatenates sibling cards without spaces ("first...second.mdthird...").
@@ -2910,9 +3003,20 @@
     const images = attachmentDraftImages(root, cards)
     const nameSources = [...new Set((PAGE.fileDraftCardSelector ? cards : [root])
       .flatMap((node) => attachmentNameSources(node, PAGE.fileDraftNameReferenceAttribute)))]
+    /*
+     * Filename-shaped text counts as a pending draft only when it is not navigation.
+     *
+     * The root is bounded by the message list, and a page that starts HIDDEN (the focus view
+     * is the default) renders no message rows at all — so the root widened to the whole page
+     * shell and the sidebar's conversation titles, which are links, read as a file nobody
+     * attached: every focus-view send returned busy until the page had been shown once
+     * (2026-10-22 raw-send log: attachment-draft with 0 cards, 0 files, 0 images).
+     */
+    const draftText = PAGE.fileDraftCardSelector ? nameSources.join(' ')
+      : attachmentNameSources(root, PAGE.fileDraftNameReferenceAttribute, true).join(' ')
     return {
       rootFound: true,
-      text: nameSources.join(' '), nameSources,
+      text: nameSources.join(' '), draftText, nameSources,
       images: images.length,
       cards: cards.length,
       uploading: cardSelector
@@ -3000,7 +3104,8 @@
     // Claude has measured native cards, including extensionless files after
     // FileList resets. Toolbar text such as "Sonnet 5.5" is not file evidence.
     if (PAGE.fileAttachmentCardSelector) return false
-    return /[^\s]+\.[a-z0-9]{1,10}(?:\s|$)/i.test(snapshot.text) || /\S{12,}(?:…+|\.{3,})(?:\s|$)/.test(snapshot.text)
+    const text = snapshot.draftText ?? snapshot.text
+    return /[^\s]+\.[a-z0-9]{1,10}(?:\s|$)/i.test(text) || /\S{12,}(?:…+|\.{3,})(?:\s|$)/.test(text)
   }
   // ChatGPT exposes separate media/image inputs alongside a general attachment
   // input. A picture matches all three; prefer the unique unrestricted input.
@@ -3440,7 +3545,7 @@
       fileSend.baselineAssistant = lastAssistantId()
       const focusBaselineNode = latestReplyNode(queryAllAssistant().filter(node => isAssistantTurn(node)))
       focusReplyBaseline = fileSend.baselineAssistant
-      focusBaselinePosition = focusBaselineNode?.getAttribute('data-virtual-list-item-key') || null
+      focusBaselinePosition = focusRowPosition(focusBaselineNode)
       focusReplyPosition = null
       fileSend.submitted = true
       // App-owned uploads retain the original image bytes in main, bound to this send token.
@@ -3499,7 +3604,7 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], continueButtonLabels: [], fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], focus: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
         observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing
@@ -3605,9 +3710,24 @@
       const element = getComposer()
       if (!element) return Promise.resolve('no-composer')
       if (typeof text !== 'string' || !text.trim() || text.length > 20000) return Promise.resolve('invalid')
-      if (location.pathname !== expectedPath || state.programmatic || fileSend || state.awaitingReplySince !== 0 ||
-        state.pendingQuestion || findStopButton() || collapse(readComposer(element)) !== '' ||
-        draftAttachmentEvidence(attachmentSnapshot()) || hasDraftImageAttachment()) return Promise.resolve('busy')
+      // Same guards as before, each now named in the raw-send log: a bare 'busy' left
+      // "the focus view cannot send after startup" with nothing to read.
+      const busy = (reason, details = {}) => {
+        report({ event: 'raw-busy', reason, composerTextLength: readComposer(element).length, ...details })
+        return Promise.resolve('busy')
+      }
+      if (location.pathname !== expectedPath) return busy('conversation-changed')
+      if (state.programmatic) return busy('programmatic-send')
+      if (fileSend) return busy('file-send')
+      if (state.awaitingReplySince !== 0 || state.pendingQuestion) return busy('awaiting-reply')
+      if (findStopButton()) return busy('model-generating', { stopButtonFound: true })
+      if (collapse(readComposer(element)) !== '') return busy('text-draft')
+      const attachments = attachmentSnapshot()
+      if (draftAttachmentEvidence(attachments)) return busy('attachment-draft', {
+        attachmentRootFound: attachments.rootFound, attachmentCards: attachments.cards,
+        attachmentInputFiles: attachments.inputFiles, attachmentImages: attachments.images, attachmentUploading: attachments.uploading
+      })
+      if (hasDraftImageAttachment()) return busy('image-draft')
       if (state.enabled && state.promptInjectionEnabled && !state.prefix) return Promise.resolve('unavailable')
       const shouldInject = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected
       const payload = shouldInject ? state.prefix + USER_TEXT_SENTINEL + normalizeLineEndings(text) : normalizeLineEndings(text)
@@ -3630,30 +3750,55 @@
 
     /** Read-only view data. Never expose user rows, injected prefixes or protocol JSON. */
     focusSnapshot() {
+      // Every page-specific read below comes from the platform's measured focus rules.
+      const rules = PAGE.focus || { reasoningSelectors: [] }
       const composer = getComposer()
-      const primary = [...composerToolbarControls()].reverse().find(control =>
-        control.matches('.ds-button--primary.ds-button--circle'))
-      const icon = primary?.querySelector('svg path')?.getAttribute('d') || ''
-      // These two icon shapes were recorded in the user's 2026-10-22 run.
-      const generating = icon.startsWith('M2 4.88C2 3.68009') ? 'active' :
-        icon.startsWith('M8.3125 0.980206') ? 'idle' : 'unknown'
+      let generating = 'unknown'
+      if (rules.generatingIcon) {
+        const { primaryControlSelector, generatingPrefixes, idlePrefixes } = rules.generatingIcon
+        const primary = [...composerToolbarControls()].reverse().find(control => control.matches(primaryControlSelector))
+        const icon = primary?.querySelector('svg path')?.getAttribute('d') || ''
+        generating = generatingPrefixes.some(prefix => icon.startsWith(prefix)) ? 'active' :
+          idlePrefixes.some(prefix => icon.startsWith(prefix)) ? 'idle' : 'unknown'
+      } else if (PAGE.focus) {
+        // A measured stop control is shown exactly while a reply streams.
+        generating = findStopButton() ? 'active' : 'idle'
+      }
       const rows = queryAllAssistant().filter(node => isAssistantTurn(node))
       let node = focusReplyPosition === null ? latestReplyNode(rows) :
-        rows.find(item => item.getAttribute('data-virtual-list-item-key') === focusReplyPosition)
+        rows.find(item => focusReplyAnchor(item) === focusReplyPosition)
       if (!node || (focusReplyPosition === null && turnKeyOf(node) === focusReplyBaseline)) node = null
       if (node && focusReplyPosition === null) {
-        const position = node.getAttribute('data-virtual-list-item-key')
-        // A virtual position is valid only during this send, never persisted as an identity.
-        if (!position || !/^\d+$/.test(position) ||
-          (focusBaselinePosition && /^\d+$/.test(focusBaselinePosition) && Number(position) <= Number(focusBaselinePosition))) node = null
-        else focusReplyPosition = position
+        const anchor = focusReplyAnchor(node)
+        // A virtual position is valid only during this send, never persisted as an identity;
+        // a stable id needs no ordering check, the baseline id above already excluded the old reply.
+        if (!anchor || (rules.rowPositionAttr && (!/^\d+$/.test(anchor) ||
+          (focusBaselinePosition && /^\d+$/.test(focusBaselinePosition) && Number(anchor) <= Number(focusBaselinePosition))))) node = null
+        else focusReplyPosition = anchor
+      }
+      /*
+       * A reply still working, before its id-bearing element exists. ChatGPT renders its
+       * 已处理 activity first and the id only arrives with the answer — measured 2026-10-22:
+       * id turns stayed at 7 for the whole 70 s of activity and became 8 on completion. So
+       * the newest turn group that holds no id yet is this send's reply in progress; it has
+       * reasoning but no answer, and no identity to pin until the id appears.
+       */
+      let pending = null
+      if (!node && focusReplyPosition === null && rules.reasoningScopeSelector && PAGE.messageIdAttr) {
+        const groups = queryAll([rules.reasoningScopeSelector]).filter(isVisibleElement)
+        const last = groups.at(-1)
+        if (last && !last.querySelector('[' + PAGE.messageIdAttr + ']')) pending = last
       }
       let reply = null
-      if (node) {
-        const answer = node.querySelector('.ds-assistant-message-main-content')
-        const thoughts = [...node.querySelectorAll('.ds-think-content')]
-        const sources = [...node.querySelectorAll('a[href]')].filter(link =>
-          !answer?.contains(link) && !thoughts.some(thought => thought.contains(link)))
+      if (node || pending) {
+        const answer = node ? PAGE.assistantReplySelectors.map(selector => node.querySelector(selector)).find(Boolean) || null : null
+        // Reasoning may live beside the turn rather than in it (ChatGPT's activity block).
+        const reasoningRoot = pending || (rules.reasoningScopeSelector ? node.closest(rules.reasoningScopeSelector) || node : node)
+        const thoughts = [...new Set(rules.reasoningSelectors.flatMap(selector => [...reasoningRoot.querySelectorAll(selector)]))]
+          .filter(thought => !answer || (thought !== answer && !answer.contains(thought) && !thought.contains(answer)))
+        // A pending group also holds the user's own message: its links are not sources.
+        const sources = node ? [...node.querySelectorAll('a[href]')].filter(link =>
+          !answer?.contains(link) && !thoughts.some(thought => thought.contains(link))) : []
         const ordered = [...thoughts.map(element => ({ kind: 'reasoning', element })),
           ...sources.map(element => ({ kind: 'search', element }))]
           .sort((a, b) => a.element.compareDocumentPosition(b.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
@@ -3670,7 +3815,7 @@
         const protocol = looksLikeCommandReply(raw) || looksLikeQuestionReply(raw) || extractCommand(raw) ||
           (state.enabled && state.awaitingReplySince !== 0 &&
             (raw.trim().startsWith('{') || raw.trim().startsWith(String.fromCharCode(96).repeat(3) + 'json')))
-        reply = { sourceMessageId: turnKeyOf(node), parts,
+        reply = { sourceMessageId: node ? turnKeyOf(node) : '', parts,
           answer: answer && !protocol ? readReplyMarkdown(node).slice(0, 250000) : '' }
       }
       return { path: location.pathname, ready: !!composer, nativeDraft: !!composer && collapse(readComposer(composer)) !== '',

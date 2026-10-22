@@ -66,6 +66,8 @@ import { ExtraTerminals } from './extra-terminals'
 import { BackgroundTasks } from './background-tasks'
 import { BackgroundTaskResults } from './background-task-results'
 import type { BackgroundTaskTarget } from './background-tasks'
+import { parseStoredBackgroundTask } from '../shared/background-tasks'
+import type { BackgroundTaskTargetDescriptor, StoredBackgroundTask } from '../shared/background-tasks'
 import type { ExtraTerminalTarget } from './extra-terminals'
 import { ConversationStore } from './db'
 import { normalizeNacosUrl } from './nacos-view'
@@ -75,9 +77,9 @@ import { RedisReader, normalizeRedisDraft } from './redis-reader'
 import { ChatGptEmbed } from './embed'
 import { FocusChat } from './focus-chat'
 import { stageFocusAttachments } from './focus-attachments'
-import { validFocusFiles } from '../shared/focus-chat'
+import { supportsFocusView, validFocusFiles } from '../shared/focus-chat'
 import { writeFocusDiagnostic } from './focus-chat-log'
-import type { FocusChatState, FocusOwner, FocusSendRequest, FocusSendOutcome } from '../shared/focus-chat'
+import type { FocusChatState, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusSendOutcome } from '../shared/focus-chat'
 import type { EmbedHandlers } from './embed'
 import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseWindowsEnvironment } from './environment'
 import { ConversationShell, resolvePowerShell } from './shell'
@@ -274,7 +276,8 @@ export class SessionRuntime {
   readonly createdAt: number
   readonly runner: CommandRunner
   readonly ssh: SshManager
-  readonly backgroundTasks = new BackgroundTasks(state => this.send(IpcChannels.backgroundTasksChanged, state))
+  readonly backgroundTasks = new BackgroundTasks(state => this.send(IpcChannels.backgroundTasksChanged, state),
+    stored => this.persistBackgroundTask(stored))
   private readonly backgroundTaskResults = new BackgroundTaskResults({
     canSend: owner => {
       if (this.disposed || this.activePlatformId !== owner.platformId || !this.runner.canSendAutomaticResult()) return false
@@ -443,14 +446,10 @@ export class SessionRuntime {
       captureBackgroundTasks: (record, shell) => {
         const target = this.backgroundTaskTarget(shell)
         const owner = { platformId: this.activePlatformId, conversationId: record.conversationId }
-        const ready = (): boolean => {
-          if (!target.available()) return false
-          if (target.transport === 'local') return !this.web2term && !this.ssh.getState().attached
-          return target.transport === 'web2term' ? Boolean(this.web2term?.alive) : Boolean(this.remoteShell?.alive)
-        }
+        const ready = (): boolean => this.backgroundTargetCurrent(target)
         const settled = this.backgroundTaskResults.capture(owner, ready)
         const registered = this.backgroundTaskResults.capture(owner, ready, 'created')
-        return output => this.backgroundTasks.register(output, record, target, settled, registered)
+        return output => this.backgroundTasks.register(output, record, target, settled, registered, owner)
       },
       onTaskStarted: () => this.embed.startTerminalTask(),
       onTerminalChanged: (state) => {
@@ -538,6 +537,39 @@ export class SessionRuntime {
         }
       }
     }
+    this.restoreBackgroundTasks()
+  }
+
+  /** Save one task; `active` rows (running, or a notification still owed) are never pruned. */
+  private persistBackgroundTask(stored: StoredBackgroundTask): void {
+    const active = !stored.settled || stored.task.deliveryStatus === 'pending' || stored.task.creationDeliveryStatus === 'pending'
+    this.options.store.saveBackgroundTask(this.id, stored.task.id, stored.task.createdAt, JSON.stringify(stored), active)
+  }
+
+  /**
+   * Tasks saved before a restart: running ones are observed again, and a notification that
+   * had not reached the AI is queued once more for its original conversation. A task that
+   * settles from here on sends its result as usual.
+   */
+  private restoreBackgroundTasks(): void {
+    let items: StoredBackgroundTask[] = []
+    try { items = this.options.store.listBackgroundTaskPayloads(this.id).flatMap(raw => parseStoredBackgroundTask(raw) ?? []) }
+    catch (error) { console.warn('[background] restore failed:', error instanceof Error ? error.name : 'Error') }
+    if (!items.length) return
+    const targets = new Map<string, BackgroundTaskTarget>()
+    const targetFor = (stored: StoredBackgroundTask): BackgroundTaskTarget => {
+      let target = targets.get(stored.task.id)
+      if (!target) { target = this.backgroundTargetFrom(stored.target); targets.set(stored.task.id, target) }
+      return target
+    }
+    this.backgroundTasks.restore(items, descriptor => this.backgroundTargetFrom(descriptor),
+      stored => stored.settled ? undefined
+        : this.backgroundTaskResults.capture(stored.owner, () => this.backgroundTargetCurrent(targetFor(stored))))
+    for (const stored of items) {
+      const ready = (): boolean => this.backgroundTargetCurrent(targetFor(stored))
+      if (stored.task.creationDeliveryStatus === 'pending') this.backgroundTaskResults.capture(stored.owner, ready, 'created')({ ...stored.task })
+      if (stored.settled && stored.task.deliveryStatus === 'pending') this.backgroundTaskResults.capture(stored.owner, ready)({ ...stored.task })
+    }
   }
 
   /**
@@ -595,7 +627,7 @@ export class SessionRuntime {
         if (state.conversationId !== entry.conversationId) {
           const previousConversationId = entry.conversationId
           entry.conversationId = state.conversationId
-          if (platform.id === 'deepseek') this.focusChat.context(platform.id, state.conversationId)
+          if (supportsFocusView(platform.id)) this.focusChat.context(platform.id, state.conversationId)
           const createdNewChat = previousConversationId === null && state.conversationId !== null
           // The first send creates its conversation id; keep that task's injection.
           // A real conversation change starts with an unused prompt in every execution mode.
@@ -634,13 +666,13 @@ export class SessionRuntime {
       },
       onUserStarted: (text, files) => {
         const turnId = this.focusChat.begin(platform.id, record().conversationId, text, files)
-        if (platform.id === 'deepseek') writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: record().conversationId },
+        if (supportsFocusView(platform.id)) writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: record().conversationId },
           { event: 'user-started', turnId, inputLength: text.length, attachmentCount: files?.length ?? 0 })
         return turnId
       },
       onUserMessage: (text, attachments, turnId, imageSource) => {
         const discarded = !!turnId && !this.focusChat.ownsTurn(platform.id, turnId)
-        if (platform.id === 'deepseek') writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: record().conversationId },
+        if (supportsFocusView(platform.id)) writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: record().conversationId },
           { event: discarded ? 'user-discarded' : 'user-captured', turnId, imageSource, inputLength: text.length, attachmentCount: attachments.length })
         if (discarded) return
         this.captureConversationMessage(platform.id, 'user', text, null, attachments, turnId)
@@ -653,6 +685,8 @@ export class SessionRuntime {
       onAssistantHistoryMarkdown: (messageId, text) => {
         const conversationId = record().conversationId
         if (conversationId) this.options.store.refreshAssistantMessageMarkdown(conversationId, messageId, text)
+        // The focus view keeps its own copy of each answer; refresh that one too.
+        if (conversationId && supportsFocusView(platform.id)) this.focusChat.refreshAnswer(platform.id, conversationId, messageId, text)
       },
       onInterceptor: (status) => {
         this.captureGoal(status.lastSentText)
@@ -1029,7 +1063,7 @@ export class SessionRuntime {
   }
 
   private ownsFocus(owner: FocusOwner): boolean {
-    return !this.disposed && owner.sessionId === this.id && owner.platformId === 'deepseek' &&
+    return !this.disposed && owner.sessionId === this.id && supportsFocusView(owner.platformId) &&
       this.activePlatformId === owner.platformId && this.embed.getState().conversationId === owner.conversationId
   }
 
@@ -1050,6 +1084,18 @@ export class SessionRuntime {
       generating: page?.generating ?? 'unknown', waiting: page?.waiting === true,
       turns: this.focusChat.turns(owner.platformId, owner.conversationId),
       executions: owner.conversationId ? this.options.store.listExecutions(owner.conversationId) : [] }
+  }
+
+  /** @returns '' once the side chat is open, otherwise the message the focus view shows. */
+  async askFocusSelection(request: FocusSelectionRequest): Promise<string> {
+    if (!this.ownsFocus(request) || !request.conversationId) return '当前会话已切换，请重新选择文字。'
+    const { selectedText, question, answerText, sourceMessageId } = request
+    if (typeof selectedText !== 'string' || typeof question !== 'string' || typeof answerText !== 'string' ||
+        !selectedText.trim() || !question.trim() || selectedText.length > 20000 || question.length > 20000 || answerText.length > 500000 ||
+        (sourceMessageId !== undefined && (typeof sourceMessageId !== 'string' || sourceMessageId.length > 512))) {
+      return '选区已失效，请重新选中文字并输入问题。'
+    }
+    return this.embed.askSelectionFromFocus({ selectedText, question: question.trim(), answerText, sourceMessageId })
   }
 
   async sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome> {
@@ -1098,7 +1144,7 @@ export class SessionRuntime {
     const status = await this.embed.endTask()
     await runner
     if (focusTurnId) this.focusChat.stop(platformId, focusTurnId)
-    if (platformId === 'deepseek') writeFocusDiagnostic({ sessionId: this.id, platformId, conversationId }, { event: 'end-task' })
+    if (supportsFocusView(platformId)) writeFocusDiagnostic({ sessionId: this.id, platformId, conversationId }, { event: 'end-task' })
     return status
   }
 
@@ -1195,7 +1241,7 @@ export class SessionRuntime {
       )
       if (role === 'user') {
         this.focusChat.linkUser(platformId, focusTurnId, savedId)
-        if (platformId === 'deepseek') writeFocusDiagnostic({ sessionId: this.id, platformId, conversationId },
+        if (supportsFocusView(platformId)) writeFocusDiagnostic({ sessionId: this.id, platformId, conversationId },
           { event: 'user-stored', turnId: focusTurnId, messageId: savedId, attachmentCount: attachments.length,
             savedAttachmentCount: savedId ? this.options.store.countMessageAttachments(savedId) : 0 })
       }
@@ -1220,7 +1266,7 @@ export class SessionRuntime {
       )
       if (message.role === 'user') {
         this.focusChat.linkUser(platformId, message.focusTurnId, savedId)
-        if (platformId === 'deepseek') writeFocusDiagnostic({ sessionId: this.id, platformId, conversationId },
+        if (supportsFocusView(platformId)) writeFocusDiagnostic({ sessionId: this.id, platformId, conversationId },
           { event: 'user-stored', turnId: message.focusTurnId, messageId: savedId, attachmentCount: message.attachments.length,
             savedAttachmentCount: savedId ? this.options.store.countMessageAttachments(savedId) : 0 })
       }
@@ -2127,22 +2173,47 @@ export class SessionRuntime {
     this.extraTerminals.disposeAll()
   }
 
+  /** Where the model's shell runs right now, captured before the startup command. */
   private backgroundTaskTarget(shell: ExecutionShell): BackgroundTaskTarget {
     const web2term = this.web2term
     if (shell === web2term && this.options.web2term) {
-      const { connection } = this.options.web2term
-      const binding = { ...web2term.binding, reconnect: false, cwd: '/' }
+      const { agentId, deviceName, backendUrl, userId } = web2term.binding
+      return this.backgroundTargetFrom({ transport: 'web2term', key: web2term.hostId, label: deviceName || agentId,
+        kind: shell.kind, cwd: shell.cwd, web2term: { agentId, deviceName, backendUrl, userId } })
+    }
+    if (shell === this.remoteShell) {
+      const state = this.ssh.getState()
+      return this.backgroundTargetFrom({ transport: 'ssh', key: `ssh:${state.hostId}:${state.target}`,
+        label: state.name || state.target || 'SSH', kind: shell.kind, cwd: shell.cwd,
+        ssh: { hostId: state.hostId, address: state.target } })
+    }
+    return this.backgroundTargetFrom({ transport: 'local', key: 'local', label: '本机', kind: shell.kind, cwd: shell.cwd })
+  }
+
+  /**
+   * A live observer target from its saved description — used for new tasks and, after a
+   * restart, for restored ones. An SSH or Web2Term target is available only while this
+   * session is connected to that same host or device; until then the task reads 状态未知.
+   */
+  private backgroundTargetFrom(descriptor: BackgroundTaskTargetDescriptor): BackgroundTaskTarget {
+    const base = { key: descriptor.key, label: descriptor.label, transport: descriptor.transport, kind: descriptor.kind,
+      cwd: descriptor.cwd, descriptor }
+    const device = descriptor.web2term
+    if (descriptor.transport === 'web2term' && device) {
+      const web2termOptions = this.options.web2term
+      const binding = { ...device, reconnect: false, cwd: '/' }
       const available = (): boolean => {
-        const state = connection.getState()
-        return !this.disposed && state.status === 'connected' && state.agentId === binding.agentId
+        if (this.disposed || !web2termOptions) return false
+        const state = web2termOptions.connection.getState()
+        return state.status === 'connected' && state.agentId === binding.agentId
           && state.auth.status === 'signed-in' && state.auth.backendUrl === binding.backendUrl
           && state.auth.user?.publicId === binding.userId
       }
       return {
-        key: web2term.hostId, label: binding.deviceName || binding.agentId, transport: 'web2term',
-        kind: shell.kind, cwd: shell.cwd, available,
+        ...base, available,
         open: signal => new Promise((resolve, reject) => {
-          const observer = new Web2termShell(binding, connection)
+          if (!web2termOptions) { reject(new Error('任务所属的 Web2Term 设备不属于当前工作区。')); return }
+          const observer = new Web2termShell(binding, web2termOptions.connection)
           let settled = false
           const finish = (error?: Error): void => {
             if (settled) return
@@ -2167,27 +2238,26 @@ export class SessionRuntime {
         })
       }
     }
-    if (shell === this.remoteShell) {
-      const state = this.ssh.getState()
-      const hostId = state.hostId
-      const address = state.target
+    const host = descriptor.ssh
+    if (descriptor.transport === 'ssh' && host) {
       const available = (): boolean => !this.disposed && this.ssh.getState().status === 'connected'
-        && this.ssh.getState().hostId === hostId && this.ssh.getState().target === address
+        && this.ssh.getState().hostId === host.hostId && this.ssh.getState().target === host.address
       return {
-        key: `ssh:${hostId}:${address}`, label: state.name || address || 'SSH', transport: 'ssh',
-        kind: shell.kind, cwd: shell.cwd, available,
+        ...base, available,
         open: async () => {
           if (!available()) throw new Error('任务所属的 SSH 主机已断开。')
           return this.ssh.openExtraShell('', { onOutput: () => {}, onClosed: () => {} })
         }
       }
     }
-    const cwd = shell.cwd
-    return {
-      key: 'local', label: '本机', transport: 'local', kind: shell.kind, cwd,
-      available: () => !this.disposed,
-      open: async () => new ConversationShell({ initialCwd: cwd })
-    }
+    return { ...base, available: () => !this.disposed, open: async () => new ConversationShell({ initialCwd: descriptor.cwd }) }
+  }
+
+  /** Whether the session is on the task's own host, so a notification about it may go out now. */
+  private backgroundTargetCurrent(target: BackgroundTaskTarget): boolean {
+    if (!target.available()) return false
+    if (target.transport === 'local') return !this.web2term && !this.ssh.getState().attached
+    return target.transport === 'web2term' ? Boolean(this.web2term?.alive) : Boolean(this.remoteShell?.alive)
   }
 
   /** Same transport the session terminal pane is showing: web2term, an attached SSH host, or local. */

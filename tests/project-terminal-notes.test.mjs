@@ -38,7 +38,7 @@ const { ConversationStore } = load('../src/main/db.ts', {
 const { SessionRuntime } = load('../src/main/session-runtime.ts', {
   electron: {}, 'mysql2/promise': {}, './mysql-field-value': {}, './command-log': {},
   '../shared/types': types, '../shared/platforms': platforms, '../shared/deepseek-question': {},
-  './file-access': {}, './commands': {}, './extra-terminals': {}, './background-tasks': {}, './background-task-results': {}, './db': {},
+  './file-access': {}, './commands': {}, './extra-terminals': {}, './background-tasks': {}, './background-task-results': {}, '../shared/background-tasks': {}, './db': {},
   './focus-chat': {}, './focus-attachments': {}, './focus-chat-log': {}, '../shared/focus-chat': {},
   './nacos-view': {}, './mysql-table-rows': {}, './mysql-ddl-export': {}, './redis-reader': {},
   './embed': {}, './environment': {}, './shell': {}, './ssh': {}, './web2term-shell': {}, './terminal-notes': notes

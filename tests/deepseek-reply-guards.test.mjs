@@ -47,11 +47,17 @@ class ElementFixture {
     return [{}]
   }
   compareDocumentPosition(other) { return this.position < other.position ? 4 : this.position > other.position ? 2 : 0 }
-  dispatchEvent() { return true }
-  click() { this.clicks += 1 }
+  // One 10px row per document position, so a reported point names exactly one element.
+  getBoundingClientRect() { return { left: 0, top: this.position * 10, width: 10, height: 10 } }
+  scrollIntoView() {}
 
   matches(selector) {
     if (selector.includes(',')) return selector.split(',').some((part) => this.matches(part.trim()))
+    // Child combinator and tag.class: enough for the shipped chart selectors.
+    const child = selector.lastIndexOf(' > ')
+    if (child !== -1) return this.matches(selector.slice(child + 3)) && !!this.parentElement?.matches(selector.slice(0, child))
+    const tagClass = /^(\w+)\.([\w-]+)$/.exec(selector)
+    if (tagClass) return this.tagName.toLowerCase() === tagClass[1] && this.className.split(/\s+/).includes(tagClass[2])
     if (/^[a-z]+$/i.test(selector)) return this.tagName.toLowerCase() === selector.toLowerCase()
     if (/^\.[\w-]+$/.test(selector)) return this.className.split(/\s+/).includes(selector.slice(1))
     const match = /^(\w+)?\[([\w-]+)(?:([*^$]?=)"([^"]*)")?\]$/.exec(selector)
@@ -107,8 +113,13 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
     activeElement: null,
     addEventListener() {},
     querySelectorAll(selector) { refreshPositions(); return body.querySelectorAll(selector) },
-    querySelector(selector) { return this.querySelectorAll(selector)[0] || null }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null },
+    elementFromPoint(_x, y) {
+      refreshPositions()
+      return cover || [body, ...body.descendants()].find((node) => node.position * 10 + 5 === y) || null
+    }
   }
+  let cover = null
   class FakeDate extends Date {
     static now() { return now }
   }
@@ -117,7 +128,6 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
     location: { pathname: '/a/chat/s/offline-fixture' },
     Element: ElementFixture,
     Node: { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_PRECEDING: 2 },
-    MouseEvent: class { constructor(type) { this.type = type } },
     MutationObserver: class {
       constructor(callback) { notifyMutation = callback }
       observe() {}
@@ -125,7 +135,14 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
     getComputedStyle: () => ({ visibility: 'visible' }),
     setTimeout(callback, delay) { const id = ++timerSerial; timers.set(id, { callback, delay }); return id },
     clearTimeout(id) { timers.delete(id) },
-    console: { log(line) { events.push(JSON.parse(line.slice('[cmd-terminal] '.length))) } }
+    console: {
+      log(line) {
+        const event = JSON.parse(line.slice('[cmd-terminal] '.length))
+        events.push(event)
+        // Stand in for the main process: its trusted click lands on whatever is at the point.
+        if (event.reason === 'continue-clicked') document.elementFromPoint(event.x, event.y).clicks += 1
+      }
+    }
   })
   const controller = window.__cmdTerminalInterceptor
   controller.configure({ enabled: true, page })
@@ -133,6 +150,7 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
     controller, events,
     continues: () => events.filter((event) => event.event === 'continue-generation'),
     commands: () => events.filter((event) => event.event === 'command'),
+    cover(element) { cover = element },
     replaceNodes(next) {
       body.childNodes = next
       for (const node of next) node.parentElement = body
@@ -213,6 +231,20 @@ test('history and older turns are never resumed', () => {
   assert.equal(next.continues().length, 0)
 })
 
+test('a covered button is not clicked through whatever covers it, but the reply stays unfinished', () => {
+  const button = continueButton()
+  const overlay = element('div', { class: 'overlay' })
+  const app = fixture([proseTurn('2', '部分回答', button), overlay])
+  app.cover(overlay)
+  app.controller.checkNow()
+  const reported = app.continues()
+  assert.deepEqual(reported.map((event) => [event.reason, event.x]), [['continue-unreachable', undefined]])
+  assert.equal(overlay.clicks, 0)
+  assert.equal(button.clicks, 0)
+  app.tick(250)
+  assert.equal(app.events.some((event) => event.event === 'task-finished'), false)
+})
+
 test('a new reply wait gets a fresh press budget', () => {
   const button = continueButton()
   const app = fixture([proseTurn('2', '部分回答', button)])
@@ -272,4 +304,82 @@ test('a different command in the grown reply, or the same command after a new se
   // A new wait (what a confirmed send does) starts a new reply, even on a recycled row.
   app.controller.checkNow()
   assert.equal(app.commands().length, 3)
+})
+
+test('a ChatGPT chart is saved as its title, data points and caption, not as its SVG text', () => {
+  const chart = element('div', { 'data-testid': 'chatgpt-chart-content-reference' }, [
+    element('section', { 'aria-label': '每日数值' }, [
+      element('div', { role: 'img' }, [element('svg', {}, ['周一周二周三', '0510152025'])]),
+      element('ul', { class: 'sr-only' }, [element('li', {}, '周一: 12'), element('li', {}, '周二: 18'), element('li', {}, '周三: 9')]),
+      element('p', { class: 'line-clamp-2 text-xs' }, '数据来自用户输入')
+    ]),
+    element('button', { 'aria-label': '分享' }, '分享')
+  ])
+  const answer = element('div', { 'data-markdown-text-style': 'assistant-message' }, [
+    element('p', {}, '下面是折线图：'), chart, element('p', {}, '周四最高。')
+  ])
+  const turn = element('div', { 'data-chatgpt-selection-message-id': 'msg-chart' }, [answer])
+  const app = fixture([turn], CHATGPT_PAGE)
+  app.controller.checkNow()
+  app.tick(250)
+  const saved = app.events.find((event) => event.event === 'assistant-message')
+  assert.ok(saved, 'the finished reply is saved')
+  assert.match(saved.text, /> 📊 \*\*每日数值\*\*/)
+  assert.match(saved.text, /> - 周一: 12\n> - 周二: 18\n> - 周三: 9/)
+  assert.match(saved.text, /> 数据来自用户输入/)
+  assert.match(saved.text, /下面是折线图：[\s\S]*周四最高。/)
+  assert.equal(/0510152025|周一周二周三|分享/.test(saved.text), false, 'axis ticks and buttons are not spelled out')
+  // The focus view draws from the machine-readable marker that precedes the quote.
+  const marker = /<!--focus-chart (\{[\s\S]*?\}) -->\n> 📊/.exec(saved.text)
+  assert.ok(marker, 'marker sits directly before its quoted fallback')
+  assert.deepEqual(JSON.parse(marker[1]), {
+    title: '每日数值', caption: '数据来自用户输入', series: [{ name: '数值', unit: '' }],
+    rows: [{ label: '周一', values: [12] }, { label: '周二', values: [18] }, { label: '周三', values: [9] }]
+  })
+})
+
+test('chart data parses multi-series points, and any unparsable point leaves only the quoted list', () => {
+  const chartTurn = (items) => element('div', { 'data-chatgpt-selection-message-id': 'msg-' + items.length }, [
+    element('div', { 'data-markdown-text-style': 'assistant-message' }, [
+      element('div', { 'data-testid': 'chatgpt-chart-content-reference' }, [
+        element('h2', {}, 'CPU 与内存使用率'),
+        element('section', { 'aria-label': '图表' }, [element('ul', { class: 'sr-only' }, items.map((item) => element('li', {}, item)))])
+      ])
+    ])
+  ])
+  const savedFor = (items) => {
+    const app = fixture([chartTurn(items)], CHATGPT_PAGE)
+    app.controller.checkNow()
+    app.tick(250)
+    return app.events.find((event) => event.event === 'assistant-message').text
+  }
+  const good = savedFor(['1: CPU 20%, 内存 50.9%', '2: CPU 25%, 内存 51.1%'])
+  const data = JSON.parse(/<!--focus-chart (\{[\s\S]*?\}) -->/.exec(good)[1])
+  assert.equal(data.title, 'CPU 与内存使用率', 'the card heading wins over the aria-label')
+  assert.deepEqual(data.series, [{ name: 'CPU', unit: '%' }, { name: '内存', unit: '%' }])
+  assert.deepEqual(data.rows[1], { label: '2', values: [25, 51.1] })
+  for (const items of [['周一: 很高', '周二: 18'], ['1: CPU 20%', '2: GPU 25%'], ['只有一个: 1']]) {
+    const text = savedFor(items)
+    assert.equal(text.includes('focus-chart'), false, items.join(' | '))
+    assert.match(text, /> 📊/)
+  }
+})
+
+test('a chart whose only label is a type word ("图表 图表") gets no title of its own', () => {
+  const turn = element('div', { 'data-chatgpt-selection-message-id': 'msg-generic' }, [
+    element('div', { 'data-markdown-text-style': 'assistant-message' }, [
+      element('h2', {}, '周一至周五数据折线图'),
+      element('div', { 'data-testid': 'chatgpt-chart-content-reference' }, [
+        element('section', { 'aria-label': '图表 图表' }, [element('ul', { class: 'sr-only' }, [element('li', {}, '周一: 12'), element('li', {}, '周二: 18')])])
+      ])
+    ])
+  ])
+  const app = fixture([turn], CHATGPT_PAGE)
+  app.controller.checkNow()
+  app.tick(250)
+  const text = app.events.find((event) => event.event === 'assistant-message').text
+  assert.equal(JSON.parse(/<!--focus-chart (\{[\s\S]*?\}) -->/.exec(text)[1]).title, '')
+  assert.match(text, /## 周一至周五数据折线图/)
+  assert.match(text, /> 📊 图表（可在原始视图中交互查看）/)
+  assert.equal(text.includes('图表 图表'), false)
 })

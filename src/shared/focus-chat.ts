@@ -1,6 +1,30 @@
 import type { ExecutionRecord } from './types'
 
 export type ChatView = 'original' | 'local' | 'focus'
+
+/**
+ * The platforms that get the focus view, and how the view names them.
+ *
+ * The ONE switch for the whole feature: the view, its IPC, the turn reducer and the page
+ * reads all ask `supportsFocusView`. A platform belongs here only once its page has measured
+ * focus rules (`PageAdapter.focus` in platforms.ts) — without them the view has nothing to
+ * read — and its uploader, composer and stop control already work in the original view.
+ */
+const FOCUS_PLATFORMS: Readonly<Record<string, { label: string }>> = {
+  deepseek: { label: 'DeepSeek' },
+  chatgpt: { label: 'ChatGPT' }
+}
+export function supportsFocusView(platformId: string): boolean {
+  return Object.prototype.hasOwnProperty.call(FOCUS_PLATFORMS, platformId)
+}
+/** The model's name as the focus view shows it. */
+export function focusPlatformLabel(platformId: string): string {
+  return supportsFocusView(platformId) ? FOCUS_PLATFORMS[platformId].label : platformId
+}
+/** For "专注对话当前支持 …" hints. */
+export function focusPlatformLabels(): string {
+  return Object.values(FOCUS_PLATFORMS).map(platform => platform.label).join('、')
+}
 export type FocusTurnStatus = 'working' | 'answered' | 'stopped'
 /** `superseded`: a newer execution took over before this result was handed back; nothing to do. */
 export type FocusDelivery = 'pending' | 'sent' | 'blocked' | 'failed' | 'superseded'
@@ -79,6 +103,15 @@ export function focusDelivery(record: ExecutionRecord, delivery?: FocusDelivery)
 }
 export type FocusSendOutcome = 'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable' | 'invalid' | 'upload-failed' | 'unsupported-file-type' | 'unknown' | 'cancelled'
 export interface FocusSendRequest extends FocusOwner { text: string; files?: FocusAttachmentInput[] }
+/** A text selection in a focus-view answer, asked about in the side chat. */
+export interface FocusSelectionRequest extends FocusOwner {
+  selectedText: string
+  question: string
+  /** The rendered answer's text, so the selection can be checked against it. */
+  answerText: string
+  /** The capture key of that answer; absent for history rows saved without one. */
+  sourceMessageId?: string
+}
 export function focusOwnerKey(owner: FocusOwner): string {
   return JSON.stringify([owner.sessionId, owner.platformId, owner.conversationId])
 }

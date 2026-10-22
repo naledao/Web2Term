@@ -1,5 +1,6 @@
 import { ToolboxRouter } from './toolbox-router'
 import { TOOLBOX_METHODS } from '../shared/toolbox'
+import { supportsFocusView } from '../shared/focus-chat'
 import type { ToolboxInvocation, ToolboxMethod } from '../shared/toolbox'
 import type { AppApi } from '../shared/types'
 import type { BackgroundTasksState } from '../shared/background-tasks'
@@ -123,6 +124,7 @@ const embedProxyKey = (platformId: string): string => `embedProxy:${platformId}`
 const SETTING_SSH_PROXY = 'sshProxy'
 const SETTING_UPDATE_PROXY = 'updateProxy'
 const SETTING_DEFAULT_PLATFORM = 'defaultPlatformId'
+const SETTING_DEFAULT_CHAT_VIEW = 'defaultChatView'
 const SETTING_USER_AVATAR = 'userAvatarDataUrl'
 const SETTING_USER_AVATAR_SOURCE = 'userAvatarSourceDataUrl'
 const SETTING_USER_AVATAR_POSITION_X = 'userAvatarPositionX'
@@ -142,6 +144,10 @@ function readAvatarScale(value: string | null): number {
   return Number.isFinite(parsed) ? Math.max(1, Math.min(4, parsed)) : 1
 }
 
+function readDefaultChatView(value: string | null): 'original' | 'local' | 'focus' {
+  return value === 'local' || value === 'focus' ? value : 'original'
+}
+
 let managerWindow: BrowserWindow | null = null
 const linuxAgentDownloader = new LinuxAgentDownloader((state) => {
   if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.linuxAgentDownloadChanged, state)
@@ -152,7 +158,7 @@ let store: ConversationStore | null = null
 let backendAuth: BackendAuthService | null = null
 let web2termConnection: Web2termConnection | null = null
 let localMachineId = ''
-let settings: AppSettings = { theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID }
+let settings: AppSettings = { theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: 'original' }
 const runtimes = new Map<string, SessionRuntime>()
 let currentSessionId: string | null = null
 const unseenCompletedTasks = new Map<string, number>()
@@ -1196,7 +1202,8 @@ function registerIpcHandlers(): void {
   const focusRuntime = (event: IpcMainInvokeEvent, owner: unknown): SessionRuntime | null => {
     if (!owner || typeof owner !== 'object') return null
     const value = owner as { sessionId?: unknown; platformId?: unknown; conversationId?: unknown }
-    if (typeof value.sessionId !== 'string' || value.sessionId.length > 128 || value.platformId !== 'deepseek' ||
+    if (typeof value.sessionId !== 'string' || value.sessionId.length > 128 ||
+      typeof value.platformId !== 'string' || !supportsFocusView(value.platformId) ||
       (value.conversationId !== null && (typeof value.conversationId !== 'string' || value.conversationId.length > 512))) return null
     return questionRuntime(event, value.sessionId)
   }
@@ -1206,6 +1213,8 @@ function registerIpcHandlers(): void {
     if (!runtime || typeof request.text !== 'string' || request.text.length > 20000) return 'invalid'
     return runtime.sendFocusMessage(request)
   })
+  ipcMain.handle(IpcChannels.focusChatAsk, (event, request) =>
+    focusRuntime(event, request)?.askFocusSelection(request) ?? '当前会话已切换，请重新选择文字。')
   ipcMain.handle(IpcChannels.questionChatGetState, (event, sessionId: string) => questionRuntime(event, sessionId)?.embed.getQuestionChatState() ?? null)
   ipcMain.handle(IpcChannels.questionChatCreate, (event, sessionId: string, platformId: string) => {
     const runtime = questionRuntime(event, sessionId)
@@ -1610,7 +1619,7 @@ function registerIpcHandlers(): void {
     return runtime.ssh.getState()
   })
 
-  ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { theme: 'light', backendUrl: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID })
+  ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { theme: 'light', backendUrl: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: 'original' })
   ipcMain.handle(IpcChannels.settingsUpdate, async (event, patch: AppSettingsPatch): Promise<AppSettings> => {
     if (!isManagerEvent(event) || !store) return { ...settings }
     // Validate before applying any setting so an invalid URL cannot partly save a patch.
@@ -1664,6 +1673,10 @@ function registerIpcHandlers(): void {
     if (defaultPlatform) {
       settings = { ...settings, defaultPlatformId: defaultPlatform.id }
       store.setSetting(SETTING_DEFAULT_PLATFORM, defaultPlatform.id)
+    }
+    if (patch?.defaultChatView === 'original' || patch?.defaultChatView === 'local' || patch?.defaultChatView === 'focus') {
+      settings = { ...settings, defaultChatView: patch.defaultChatView }
+      store.setSetting(SETTING_DEFAULT_CHAT_VIEW, patch.defaultChatView)
     }
     if (typeof patch?.userAvatarDataUrl === 'string') {
       settings = { ...settings, userAvatarDataUrl: patch.userAvatarDataUrl }
@@ -1832,7 +1845,8 @@ if (!app.requestSingleInstanceLock()) {
       userAvatarPositionX: readAvatarPosition(conversationStore.getSetting(SETTING_USER_AVATAR_POSITION_X)),
       userAvatarPositionY: readAvatarPosition(conversationStore.getSetting(SETTING_USER_AVATAR_POSITION_Y)),
       userAvatarScale: readAvatarScale(conversationStore.getSetting(SETTING_USER_AVATAR_SCALE)),
-      defaultPlatformId: platformById(conversationStore.getSetting(SETTING_DEFAULT_PLATFORM) ?? '')?.id ?? DEFAULT_PLATFORM_ID
+      defaultPlatformId: platformById(conversationStore.getSetting(SETTING_DEFAULT_PLATFORM) ?? '')?.id ?? DEFAULT_PLATFORM_ID,
+      defaultChatView: readDefaultChatView(conversationStore.getSetting(SETTING_DEFAULT_CHAT_VIEW))
     }
     backendAuth = new BackendAuthService(conversationStore, {
       encrypt(value) {

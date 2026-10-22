@@ -8,6 +8,12 @@ import { Script, createContext } from 'node:vm'
 import ts from 'typescript'
 
 const source = readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8')
+// The page reads come from the platform's measured focus rules, as in the app.
+const platformExports = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/platforms.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: platformExports, require: () => ({ isConversationId: () => true }) })
+const { CHATGPT_PAGE, DEEPSEEK_PAGE } = platformExports
 const file = ts.createSourceFile('send-interceptor.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
 function find(predicate, node = file) {
   if (predicate(node)) return node
@@ -42,9 +48,10 @@ function fixture() {
     composerToolbarControls: () => [], queryAllAssistant: () => [], isAssistantTurn: () => true,
     latestReplyNode: nodes => nodes.at(-1), turnKeyOf: node => node.id,
     readReplyText: node => node.body || '', readReplyMarkdown: node => node.markdown || '',
-    extractCommand: () => null
+    extractCommand: () => null, PAGE: DEEPSEEK_PAGE,
+    queryAll: () => [], isVisibleElement: () => true
   })
-  for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply']) context[name] = arrow(name, context)
+  for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'focusRowPosition', 'focusReplyAnchor']) context[name] = arrow(name, context)
   return { context, composer, calls, reports, send: method('sendUser', context), snapshot: method('focusSnapshot', context) }
 }
 
@@ -143,6 +150,82 @@ test('virtualized history cannot replace the current streaming row', () => {
   assert.equal(f.snapshot().reply, null)
 })
 
+test('ChatGPT pins the reply by its message id and reads generation from the measured stop button', () => {
+  const f = fixture()
+  f.context.PAGE = CHATGPT_PAGE
+  const turn = (id, body = '回答') => ({ id, body, markdown: body,
+    getAttribute: name => name === 'data-chatgpt-selection-message-id' ? id : null,
+    querySelector: selector => selector === '[data-markdown-text-style="assistant-message"]' ? {} : null,
+    querySelectorAll: () => [], closest: () => null })
+  f.context.focusReplyBaseline = 'msg-old'
+  f.context.queryAllAssistant = () => [turn('msg-old')]
+  assert.equal(f.snapshot().reply, null, 'the reply before this send is not the answer')
+  f.context.findStopButton = () => ({})
+  f.context.queryAllAssistant = () => [turn('msg-old'), turn('msg-new', '流式中')]
+  const streaming = f.snapshot()
+  assert.equal(streaming.generating, 'active')
+  assert.equal(streaming.reply.sourceMessageId, 'msg-new')
+  // A later, unrelated row cannot take over the pinned reply.
+  f.context.findStopButton = () => null
+  f.context.queryAllAssistant = () => [turn('msg-old'), turn('msg-new', '完成'), turn('msg-other')]
+  const done = f.snapshot()
+  assert.equal(done.generating, 'idle')
+  assert.equal(done.reply.sourceMessageId, 'msg-new')
+  assert.equal(done.reply.answer, '完成')
+  // A turn rendered before ChatGPT assigns its id is not pinned by a content hash.
+  const g = fixture()
+  g.context.PAGE = CHATGPT_PAGE
+  g.context.queryAllAssistant = () => [{ ...turn('hash'), getAttribute: () => null }]
+  assert.equal(g.snapshot().reply, null)
+})
+
+test('ChatGPT activity steps beside the turn become reasoning, while its answer stays the answer', () => {
+  const f = fixture()
+  f.context.PAGE = CHATGPT_PAGE
+  const [scope] = [CHATGPT_PAGE.focus.reasoningScopeSelector]
+  const [stepSelector] = CHATGPT_PAGE.focus.reasoningSelectors
+  const answer = { contains: () => false }
+  const steps = [node(1, '编写监控程序'), node(2, '正在搜索 8 个网站')]
+  const group = { querySelectorAll: selector => selector === stepSelector ? steps : [] }
+  const reply = { id: 'msg-new', body: '最终回答', markdown: '最终回答',
+    getAttribute: name => name === 'data-chatgpt-selection-message-id' ? 'msg-new' : null,
+    querySelector: selector => selector === '[data-markdown-text-style="assistant-message"]' ? answer : null,
+    // The id-bearing turn holds only its answer; the activity block is in the turn group.
+    querySelectorAll: () => [], closest: selector => selector === scope ? group : null }
+  f.context.queryAllAssistant = () => [reply]
+  const result = f.snapshot()
+  assert.deepEqual(Array.from(result.reply.parts, part => [part.kind, part.text]), [['reasoning', '编写监控程序'], ['reasoning', '正在搜索 8 个网站']])
+  assert.equal(result.reply.answer, '最终回答')
+  // The answer itself, matched by a too-broad rule, is never shown twice as reasoning.
+  steps.push(answer)
+  answer.order = 3
+  answer.compareDocumentPosition = node(3).compareDocumentPosition
+  assert.equal(f.snapshot().reply.parts.length, 2)
+})
+
+test('ChatGPT activity is shown while the reply is still working, before its id element exists', () => {
+  const f = fixture()
+  f.context.PAGE = CHATGPT_PAGE
+  const [stepSelector] = CHATGPT_PAGE.focus.reasoningSelectors
+  const previous = { id: 'msg-old', body: '旧回答', markdown: '旧回答',
+    getAttribute: name => name === 'data-chatgpt-selection-message-id' ? 'msg-old' : null,
+    querySelector: () => ({}), querySelectorAll: () => [], closest: () => null }
+  const steps = [node(1, '完善并明确监控方案设置'), node(2, '准备启动任务')]
+  const working = { querySelector: () => null, querySelectorAll: selector => selector === stepSelector ? steps : [] }
+  const finished = { querySelector: selector => selector === '[data-chatgpt-selection-message-id]' ? previous : null, querySelectorAll: () => [] }
+  f.context.focusReplyBaseline = 'msg-old'
+  f.context.queryAllAssistant = () => [previous]
+  f.context.queryAll = () => [finished, working]
+  const result = f.snapshot()
+  assert.deepEqual(Array.from(result.reply.parts, part => part.text), ['完善并明确监控方案设置', '准备启动任务'])
+  assert.equal(result.reply.answer, '')
+  assert.equal(result.reply.sourceMessageId, '', 'no identity is pinned before the id exists')
+  assert.equal(f.context.focusReplyPosition, null)
+  // Until the user's own turn appears, the newest group is the finished one: nothing is shown.
+  f.context.queryAll = () => [finished]
+  assert.equal(f.snapshot().reply, null)
+})
+
 test('measured send and stop icons identify generation; an unknown spinner stays unknown', () => {
   const f = fixture()
   const inspect = shape => {
@@ -152,6 +235,16 @@ test('measured send and stop icons identify generation; an unknown spinner stays
   assert.equal(inspect('M2 4.88C2 3.68009...'), 'active')
   assert.equal(inspect('M8.3125 0.980206...'), 'idle')
   assert.equal(inspect('spinner'), 'unknown')
+})
+
+test('a page without focus rules reads nothing rather than borrowing another site\'s selectors', () => {
+  const f = fixture()
+  f.context.PAGE = { ...DEEPSEEK_PAGE, focus: undefined }
+  f.context.composerToolbarControls = () => [{ matches: () => true, querySelector: () => ({ getAttribute: () => 'M2 4.88C2 3.68009' }) }]
+  f.context.queryAllAssistant = () => [{ id: 'reply', getAttribute: () => '7', querySelector: () => null, querySelectorAll: () => [] }]
+  const result = f.snapshot()
+  assert.equal(result.generating, 'unknown')
+  assert.equal(result.reply, null, 'no row position rule, so no reply can be attributed to this send')
 })
 
 function uploadFixture(text = '阅读附件') {

@@ -25,6 +25,7 @@ import type { ToolKind } from './tool-window-state'
 import ConversationTranscript from './components/ConversationTranscript'
 import FocusChatView from './components/FocusChatView'
 import type { ChatView } from '@shared/focus-chat'
+import { focusPlatformLabels, supportsFocusView } from '@shared/focus-chat'
 import QuestionChatPanel from './components/QuestionChatPanel'
 import type { QuestionChatState } from '@shared/deepseek-question'
 import { supportsSelectionQuestion } from '@shared/deepseek-question'
@@ -133,11 +134,13 @@ function sessionLayoutKey(key: string, sessionId: string): string {
   return `${key}.${sessionId}`
 }
 
-function readChatView(sessionId: string, platformId: string): ChatView {
+function readChatView(sessionId: string, platformId: string, fallback: ChatView = 'original'): ChatView {
   try {
     const view = localStorage.getItem('chat.view.' + sessionId + '.' + platformId)
-    return view === 'local' ? 'local' : view === 'focus' && platformId === 'deepseek' ? 'focus' : 'original'
-  } catch { return 'original' }
+    if (view === 'local' || view === 'original') return view
+    if (view === 'focus') return supportsFocusView(platformId) ? 'focus' : 'original'
+  } catch { /* Storage may be unavailable; the default view still applies. */ }
+  return fallback === 'focus' && !supportsFocusView(platformId) ? 'original' : fallback
 }
 
 function readStoredNumber(key: string, fallback: number): number {
@@ -413,9 +416,14 @@ function ConversationAttachmentImage({ attachment }: { attachment: ConversationA
 export default function App({ sessionId, sessionKind, initialSshDialogOpen = false, platformId = '', theme, globalModalOpen = false, onOpenWeb2termConnection, onThemeChange }: AppProps): JSX.Element {
   const [chatView, setChatView] = useState<ChatView>(() => readChatView(sessionId, platformId))
   const [focusPanelOpen, setFocusPanelOpen] = useState(false)
-  const isFocusView = chatView === 'focus' && platformId === 'deepseek'
+  const isFocusView = chatView === 'focus' && supportsFocusView(platformId)
   const placeholderToggle = chatView === 'local'
-  useEffect(() => { setChatView(readChatView(sessionId, platformId)) }, [sessionId, platformId])
+  // The app-drawn view fading out after a switch (see selectChatView); null when none is.
+  const [leavingView, setLeavingView] = useState<ChatView | null>(null)
+  const leavingTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (leavingTimer.current) clearTimeout(leavingTimer.current) }, [])
+  const showFocusView = isFocusView || (leavingView === 'focus' && supportsFocusView(platformId))
+  const showLocalView = placeholderToggle || leavingView === 'local'
   const [embed, setEmbed] = useState<EmbedState>(INITIAL_EMBED_STATE)
   /*
    * The site this session is actually showing.
@@ -509,6 +517,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setQuestionChatOpen(true)
       setPanelTab('question')
       setPanelCollapsed(false)
+      // The focus view keeps its own panel state; a question asked there must show its chat too.
+      setFocusPanelOpen(true)
     }
     const unsubscribe = window.api.onQuestionChatState((state, ownerId) => {
       if (ownerId !== sessionId || (state && state.platformId !== platformId)) return
@@ -525,6 +535,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance')
   const settingsBodyRef = useRef<HTMLDivElement>(null)
   const [settings, setSettings] = useState<AppSettings | null>(null)
+  // After `settings` is declared: reading it earlier is a TDZ ReferenceError that blanks the window.
+  useEffect(() => {
+    setChatView(readChatView(sessionId, platformId, settings?.defaultChatView ?? 'original'))
+  }, [sessionId, platformId, settings?.defaultChatView])
   const [settingsLoading, setSettingsLoading] = useState(true)
   const [settingsLoadFailed, setSettingsLoadFailed] = useState(false)
   const [settingsError, setSettingsError] = useState('')
@@ -645,6 +659,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [sshProxyDraft, setSshProxyDraft] = useState('')
   const [updateProxyDraft, setUpdateProxyDraft] = useState('')
   const [defaultPlatformDraft, setDefaultPlatformDraft] = useState('')
+  const [defaultChatViewDraft, setDefaultChatViewDraft] = useState<ChatView>('original')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   /** True between clicking download and the first progress event. */
   const [preparingDownload, setPreparingDownload] = useState(false)
@@ -717,7 +732,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     return option && text ? `${option}；补充：${text}` : option || text
   }
   const currentQuestionAnswered = resolveQuestionAnswer(questionPage) !== ''
-  const showQuestionShortcut = Boolean(pendingQuestion && currentQuestion && (questionMinimized || !terminalVisible))
+  // The original view's native page covers the chat area, so there the dialog needs the
+  // terminal panel's space. The focus and local views are drawn by the app: it floats there,
+  // and asking a question must not open the side panel.
+  const questionFloats = isFocusView || placeholderToggle
+  const questionDialogVisible = questionFloats || terminalVisible
+  const showQuestionShortcut = Boolean(pendingQuestion && currentQuestion && (questionMinimized || !questionDialogVisible))
 
   const waiting = useMemo(
     () => executions.filter((record) => RUNNABLE.has(record.status) || canRetryFiles(record)),
@@ -901,6 +921,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       try { window.localStorage.setItem(key, latest) } catch { /* Keep the in-memory guard. */ }
       setBackgroundTasksOpen(true)
       setPanelCollapsed(false)
+      // The focus view keeps its own panel state; a new task must open that panel too.
+      setFocusPanelOpen(true)
       setPanelTab('background')
     }
     const off = window.api.onBackgroundTasksChanged((state, ownerId) => {
@@ -1329,6 +1351,13 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     setAnsweringQuestion(false)
     setCancelingQuestion(false)
     setQuestionMinimized(false)
+    // Over the native page the dialog lives on the terminal tab, so a new question opens it
+    // there, as the 待回答 shortcut does; otherwise it would wait behind a status-bar chip.
+    // Where the dialog floats (`questionFloats`) it is already on screen.
+    if (pendingQuestion && !questionFloats) {
+      setPanelTab('terminal')
+      setPanelCollapsed(false)
+    }
   }, [pendingQuestion?.messageId])
 
   const updateQuestionDraft = useCallback((value: string): void => {
@@ -1803,6 +1832,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         setSshProxyDraft(value.sshProxy)
         setUpdateProxyDraft(value.updateProxy)
         setDefaultPlatformDraft(value.defaultPlatformId)
+        setDefaultChatViewDraft(value.defaultChatView ?? 'original')
         setUserAvatarDraft(value.userAvatarDataUrl)
         setUserAvatarSourceDraft(value.userAvatarSourceDataUrl || value.userAvatarDataUrl)
         setUserAvatarPositionXDraft(value.userAvatarPositionX)
@@ -1854,10 +1884,20 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
 
   const selectChatView = useCallback((view: ChatView) => {
-    if (view === 'focus' && platformId !== 'deepseek') return
+    if (view === 'focus' && !supportsFocusView(platformId)) return
+    /*
+     * The app-drawn view being left fades out over the new one instead of vanishing. The
+     * native page cannot be animated — it paints above the DOM — so it is shown only after
+     * that fade, rather than cutting the old view off mid-frame.
+     */
+    if (chatView !== view && chatView !== 'original') {
+      if (leavingTimer.current) clearTimeout(leavingTimer.current)
+      setLeavingView(chatView)
+      leavingTimer.current = setTimeout(() => { leavingTimer.current = null; setLeavingView(null) }, 160)
+    }
     setChatView(view)
     try { localStorage.setItem('chat.view.' + sessionId + '.' + platformId, view) } catch { /* In-memory preference remains usable. */ }
-  }, [sessionId, platformId])
+  }, [sessionId, platformId, chatView])
 
   /**
    * The embedded page is a NATIVE view: it always paints above the DOM. Regular dialogs hide
@@ -1866,7 +1906,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    */
   const terminalModalOpen = terminalVisible && sshFilesOpen
   const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
-  const nativeEmbedVisible = !placeholderToggle && !isFocusView && chatSurfaceVisible
+  const nativeEmbedVisible = !placeholderToggle && !isFocusView && !leavingView && chatSurfaceVisible
   useEffect(() => {
     window.api.setEmbedVisible(nativeEmbedVisible)
     window.api.setWorkspaceSshDialogOpen(sshDialogOpen)
@@ -2105,6 +2145,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         sshProxy: sshProxyDraft,
         updateProxy: updateProxyDraft,
         defaultPlatformId: defaultPlatformDraft,
+        defaultChatView: defaultChatViewDraft,
         userAvatarDataUrl: avatarDataUrl,
         userAvatarSourceDataUrl: userAvatarSourceDraft,
         userAvatarPositionX: userAvatarPositionXDraft,
@@ -2119,6 +2160,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setSshProxyDraft(next.sshProxy)
       setUpdateProxyDraft(next.updateProxy)
       setDefaultPlatformDraft(next.defaultPlatformId)
+      setDefaultChatViewDraft(next.defaultChatView ?? 'original')
       setUserAvatarDraft(next.userAvatarDataUrl)
       setUserAvatarSourceDraft(next.userAvatarSourceDataUrl || next.userAvatarDataUrl)
       setUserAvatarPositionXDraft(next.userAvatarPositionX)
@@ -2131,7 +2173,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     } finally {
       setSavingSettings(false)
     }
-  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
+  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
 
   /** Drag the shared sidebar's left edge to resize it. */
   const startPanelResize = useCallback(
@@ -2283,12 +2325,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               buttons[next]?.focus()
               buttons[next]?.click()
             }}>
-            {([{ id: 'original', label: '原始' }, { id: 'local', label: '本地对话' }, { id: 'focus', label: '专注对话' }] as const).map(view =>
+            {([{ id: 'original', label: '原始' }, { id: 'focus', label: '专注对话' }, { id: 'local', label: '会话摘要' }] as const).map(view =>
               <button key={view.id} id={'chat-view-tab-' + view.id} type="button" role="tab"
                 aria-selected={view.id === (isFocusView ? 'focus' : placeholderToggle ? 'local' : 'original')}
                 tabIndex={view.id === (isFocusView ? 'focus' : placeholderToggle ? 'local' : 'original') ? 0 : -1}
-                aria-controls="chat-view-panel" disabled={view.id === 'focus' && platformId !== 'deepseek'}
-                title={view.id === 'focus' && platformId !== 'deepseek' ? '专注对话当前支持 DeepSeek' : view.label}
+                aria-controls="chat-view-panel" disabled={view.id === 'focus' && !supportsFocusView(platformId)}
+                title={view.id === 'focus' && !supportsFocusView(platformId) ? `专注对话当前支持 ${focusPlatformLabels()}` : view.label}
                 onClick={() => selectChatView(view.id)}>{view.label}</button>)}
           </div>
           <button
@@ -2311,17 +2353,20 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         */}
         <div className="stage__slot" ref={slotRef} id="chat-view-panel" role="tabpanel"
           aria-labelledby={'chat-view-tab-' + (isFocusView ? 'focus' : placeholderToggle ? 'local' : 'original')}>
-          {isFocusView ? (
+          {showFocusView ? (
+            <div className={'stage__view' + (isFocusView ? '' : ' stage__view--leaving')}>
             <FocusChatView key={transcriptScrollKey} owner={{ sessionId, platformId, conversationId }} theme={theme}
               visible={chatSurfaceVisible} messages={conversationMessages} messagesReady={conversationMessagesReady}
               needsAnswer={!!pendingQuestion}
-              onQuestion={() => { setPanelTab('terminal'); setFocusPanelOpen(true); setQuestionMinimized(false) }}
+              onQuestion={() => setQuestionMinimized(false)}
               onOriginal={() => selectChatView('original')}
               onControl={() => { setPanelTab('control'); setFocusPanelOpen(true) }}
               onRun={runExecution} onSkip={skipExecution} onStop={endTask}
               renderAttachment={attachment => <ConversationAttachmentImage key={attachment.id} attachment={attachment} />} />
-          ) : placeholderToggle ? (
-            <div className="stage__alternate-card" aria-label="本地对话视图">
+            </div>
+          ) : null}
+          {showLocalView ? (
+            <div className={'stage__alternate-card' + (placeholderToggle ? '' : ' stage__alternate-card--leaving')} aria-label="会话摘要视图">
               <ConversationTranscript key={transcriptScrollKey} scrollKey={transcriptScrollKey} ready={conversationMessagesReady}>
                 {!conversationMessagesReady ? (
                   <div className="conversation-transcript__empty">正在加载对话记录…</div>
@@ -2372,14 +2417,15 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                 )}
               </ConversationTranscript>
             </div>
-          ) : (
+          ) : null}
+          {!showFocusView && !showLocalView ? (
             <div className="stage__hint">
               <p className="stage__hint-title">正在加载 {activePlatformHost || '站点'} …</p>
               <p className="stage__hint-sub">
                 若长时间空白，通常是 Cloudflare 人机校验或该网络无法访问 {activePlatformHost || '该站点'}。
               </p>
             </div>
-          )}
+          ) : null}
         </div>
       </main>
 
@@ -2416,6 +2462,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               onAdd={item => {
                 if (item === 'background') {
                   setBackgroundTasksOpen(true)
+                  setFocusPanelOpen(true)
                   setPanelTab('background')
                   setSshPickerOpen(false)
                 } else if (item === 'question') {
@@ -3182,9 +3229,10 @@ ${record.command}`
             title="展开待回答问题"
             aria-label={`展开待回答问题，第 ${questionPage + 1} 题，共 ${questionCount} 题`}
             onClick={() => {
-              setPanelTab('terminal')
-              setPanelCollapsed(false)
-              setFocusPanelOpen(true)
+              if (!questionFloats) {
+                setPanelTab('terminal')
+                setPanelCollapsed(false)
+              }
               setQuestionMinimized(false)
             }}
           >
@@ -3194,7 +3242,7 @@ ${record.command}`
         ) : null}
       </footer>
 
-        {pendingQuestion && currentQuestion && !questionMinimized && terminalVisible ? (
+        {pendingQuestion && currentQuestion && !questionMinimized && questionDialogVisible ? (
           <div className="modal modal--question" role="dialog" aria-modal="false" aria-label="需要你的回答">
               <div className="question-modal">
                 <div className="question-modal__head">
@@ -3539,16 +3587,32 @@ ${record.command}`
                   </div>
                   <div className="settings-appearance-row">
                     <div>
-                      <div className="settings-proxy-row__label">新建对话默认模型</div>
+                      <div className="settings-proxy-row__label">默认模型</div>
                     </div>
                     <select
                       className="settings-theme-select"
                       value={defaultPlatformDraft}
-                      aria-label="新建对话默认模型"
+                      aria-label="默认模型"
                       title="新建对话时打开的模型；已有对话不受影响，对话里仍可随时切换"
                       onChange={(event) => setDefaultPlatformDraft(event.target.value)}
                     >
                       {CHAT_PLATFORMS.map((platform) => <option key={platform.id} value={platform.id}>{platform.label}</option>)}
+                    </select>
+                  </div>
+                  <div className="settings-appearance-row">
+                    <div>
+                      <div className="settings-proxy-row__label">默认对话视图</div>
+                    </div>
+                    <select
+                      className="settings-theme-select"
+                      value={defaultChatViewDraft}
+                      aria-label="默认对话视图"
+                      title={`打开对话时默认展示的视图；只能用于 ${focusPlatformLabels()} 模型的专注对话在其他模型下会回退为原始页面，对话里仍可随时切换`}
+                      onChange={(event) => setDefaultChatViewDraft(event.target.value as ChatView)}
+                    >
+                      <option value="original">原始页面</option>
+                      <option value="local">会话摘要</option>
+                      <option value="focus">专注对话</option>
                     </select>
                   </div>
                 </section>

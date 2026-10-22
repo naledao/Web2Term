@@ -22,7 +22,8 @@ interface FocusDiagnostic {
   imageSource?: 'provided' | 'page'
   outcome?: FocusSendOutcome
 }
-let file: { path: string; bytes: number } | undefined
+// One file per platform: `<platform>-focus-ui-*.log`, as for the other diagnostic logs.
+const files = new Map<string, { path: string; bytes: number }>()
 let serial = 0
 const signatures = new Map<string, string>()
 const identifier = (value: string | null): string | null => value && /^[a-zA-Z0-9_:-]{1,160}$/.test(value) ? value : null
@@ -52,10 +53,14 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
     const now = new Date().toISOString()
     const line = now + ' ' + signature + '\n'
     const bytes = Buffer.byteLength(line)
+    // The platform id becomes part of a file name, so only a plain lowercase word is used.
+    const platform = /^[a-z]{1,32}$/.test(owner.platformId) ? owner.platformId : 'unknown'
+    let file = files.get(platform)
     if (!file || file.bytes + bytes > 2 * 1024 * 1024) {
       const directory = join(tmpdir(), 'gpt-login-diag')
       mkdirSync(directory, { recursive: true })
-      file = { path: join(directory, 'deepseek-focus-ui-' + now.replace(/[:.]/g, '-') + '-' + process.pid + '-' + (++serial) + '.log'), bytes: 0 }
+      file = { path: join(directory, platform + '-focus-ui-' + now.replace(/[:.]/g, '-') + '-' + process.pid + '-' + (++serial) + '.log'), bytes: 0 }
+      files.set(platform, file)
     }
     appendFileSync(file.path, line, 'utf8')
     file.bytes += bytes

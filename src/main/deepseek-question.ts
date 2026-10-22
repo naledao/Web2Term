@@ -97,9 +97,36 @@ export class SelectionQuestion {
     await questionPageCall(this.contents, `window.__cmdTerminalSelectionQuestion?.setStatus(${JSON.stringify(message)},${pending});true`).catch(() => {})
   }
   private async submit(): Promise<void> {
-    if (this.destroyed || this.active || this.parent.isDestroyed()) return
+    await this.open(() => questionPageCall<SelectionQuestionDraft | null>(this.contents, 'window.__cmdTerminalSelectionQuestion?.getSubmission() || null'),
+      (message, pending) => this.status(message, pending))
+  }
+
+  /**
+   * The app's own focus view asks with a draft it built from its rendered answer.
+   *
+   * Same pipeline as a page selection — local transcript, Markdown, side chat — but the
+   * outcome goes back to the caller instead of the page's popup, which the focus view
+   * covers. The draft is bound to the conversation the page shows right now.
+   *
+   * @returns '' once the side chat is open, otherwise the message to show.
+   */
+  async askFromFocus(draft: Omit<SelectionQuestionDraft, 'sourcePath'>): Promise<string> {
+    if (this.active) return '上一个提问仍在整理，请稍候。'
+    const source = selectionQuestionConversation(this.platform.id, this.contents.getURL())
+    if (!source) return '当前页面不是可追问的会话，请等待会话打开后重试。'
+    let failure = ''
+    const opened = await this.open(async () => ({ ...draft, sourcePath: source.path }), async (message, pending) => {
+      if (!pending) failure = message
+    })
+    return opened ? '' : failure || '提问未完成，请重试。'
+  }
+
+  /** @returns true once the side chat for this draft is open. */
+  private async open(readDraft: () => Promise<SelectionQuestionDraft | null>,
+    status: (message: string, pending?: boolean) => Promise<void>): Promise<boolean> {
+    if (this.destroyed || this.active || this.parent.isDestroyed()) return false
     const platformId = this.platform.id
-    if (!supportsSelectionQuestion(platformId)) return
+    if (!supportsSelectionQuestion(platformId)) return false
     const controller = new AbortController()
     this.active = controller
     const timer = setTimeout(() => controller.abort(), 30000)
@@ -107,7 +134,7 @@ export class SelectionQuestion {
     controller.signal.addEventListener('abort', () => { timedOut = this.active === controller }, { once: true })
     try {
       const source = selectionQuestionConversation(platformId, this.contents.getURL())
-      const draft = await questionPageCall<SelectionQuestionDraft | null>(this.contents, 'window.__cmdTerminalSelectionQuestion?.getSubmission() || null')
+      const draft = await readDraft()
       if (!source || !draft || draft.sourcePath !== source.path ||
           !['selectedText', 'question', 'answerText'].every(key => typeof draft[key as keyof SelectionQuestionDraft] === 'string') ||
           !draft.question.trim() || !draft.selectedText.trim() || draft.question.length > 20000 ||
@@ -117,15 +144,15 @@ export class SelectionQuestion {
       }
       const isCurrent = (): boolean => !this.destroyed && this.active === controller && !controller.signal.aborted &&
         !this.contents.isDestroyed() && selectionQuestionConversation(platformId, this.contents.getURL())?.path === source.path
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       writeQuestionLog('QUESTION-SUBMIT', { platformId, selectedLength: draft.selectedText.length, questionLength: draft.question.length })
-      await this.status('正在整理本地对话…', true)
+      await status('正在整理本地对话…', true)
       const context = await this.readContext(source.id)
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       const snapshot = savedQuestionSnapshot(context, source.id, draft, platformId)
       const contextPath = await saveQuestionContextMarkdown(snapshot, controller.signal)
       writeQuestionLog('CONTEXT-SAVED', { platformId, source: 'local-transcript', format: 'markdown', path: contextPath, messageCount: snapshot.messages.length })
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       this.chat?.close()
       this.chat = new QuestionChat(this.parent, this.platform, this.theme(), this.contents.getUserAgent(),
         selectionQuestionPrompt(draft, platformId), draft.selectedText, this.onState, contextPath)
@@ -133,13 +160,15 @@ export class SelectionQuestion {
       // Clear ownership before dismiss() reports a cancellation of the busy UI.
       this.active = null
       await this.contents.executeJavaScript('window.__cmdTerminalSelectionQuestion?.dismiss();true').catch(() => {})
+      return true
     } catch (error) {
-      if (this.destroyed || (controller.signal.aborted && !timedOut)) return
+      if (this.destroyed || (controller.signal.aborted && !timedOut)) return false
       const category = error instanceof DeepSeekQuestionError ? error.category : controller.signal.aborted ? 'timeout' : 'request-failed'
       const path = writeQuestionLog('QUESTION-ERROR', { platformId, category })
       const message = controller.signal.aborted ? '整理本地对话超时，请按 Enter 重试。' : error instanceof DeepSeekQuestionError
         ? error.message : '读取或保存本地对话失败，请按 Enter 重试。'
-      await this.status(`${message}${path ? '\n日志：' + path : ''}`)
+      await status(`${message}${path ? '\n日志：' + path : ''}`)
+      return false
     } finally {
       clearTimeout(timer)
       if (this.active === controller) this.active = null

@@ -6,9 +6,10 @@ import selectionQuestionCss from './injected/selection-question.css?raw'
 import { SelectionQuestion } from './deepseek-question'
 import { writeQuestionLog } from './question-chat-page'
 import { supportsSelectionQuestion } from '../shared/deepseek-question'
-import type { QuestionChatAction, QuestionChatState } from '../shared/deepseek-question'
+import type { QuestionChatAction, QuestionChatState, SelectionQuestionDraft } from '../shared/deepseek-question'
 import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
 import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo } from '../shared/focus-chat'
+import { supportsFocusView } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
 import { writeRawSendDiagnostic } from './raw-send-log'
 import { writePromptDiagnostic } from './prompt-log'
@@ -706,6 +707,7 @@ export class ChatGptEmbed {
       void this.installInterceptor()
       void this.installTheme()
       void this.installSelectionQuestion()
+      this.keepRenderingWhileHidden()
     })
 
     /*
@@ -889,6 +891,10 @@ export class ChatGptEmbed {
 
   getQuestionChatState(): QuestionChatState | null { return this.selectionQuestion?.getState() ?? null }
   createQuestionChat(): QuestionChatState | null { return this.selectionQuestion?.createChat() ?? null }
+  /** @returns '' once the side chat is open, otherwise the message to show in the focus view. */
+  askSelectionFromFocus(draft: Omit<SelectionQuestionDraft, 'sourcePath'>): Promise<string> {
+    return this.selectionQuestion?.askFromFocus(draft) ?? Promise.resolve('当前页面暂不支持询问 AI，请稍后重试。')
+  }
   setQuestionChatViewport(id: string, bounds: unknown, visible: boolean): void {
     // The owned side chat can remain visible beside an app-owned focus surface.
     // Session hiding still clears owner visibility through setVisible(false).
@@ -1271,13 +1277,21 @@ export class ChatGptEmbed {
    * `busy` means a send/generation is in progress or a user draft exists.
    * `stuck` means the text went in but the page never accepted the submit.
    */
-  async readFocusSnapshot(): Promise<FocusPageSnapshot | null> {
+  /** The focus view acts only on its own platform's site, never a page that navigated elsewhere. */
+  private focusPage(): Electron.WebContents | null {
     const contents = this.liveContents()
-    if (!contents || this.platform.id !== 'deepseek') return null
+    if (!contents || !supportsFocusView(this.platform.id)) return null
+    try {
+      return new URL(contents.getURL()).origin === new URL(this.platform.homeUrl).origin ? contents : null
+    } catch { return null }
+  }
+
+  async readFocusSnapshot(): Promise<FocusPageSnapshot | null> {
+    const contents = this.focusPage()
+    if (!contents) return null
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       const url = contents.getURL()
-      if (new URL(url).origin !== 'https://chat.deepseek.com') return null
       const raw = await Promise.race([
         contents.executeJavaScript('window.__cmdTerminalInterceptor?.focusSnapshot() ?? null'),
         new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 2500) })
@@ -1296,11 +1310,10 @@ export class ChatGptEmbed {
   }
 
   async sendFocusUser(text: string): Promise<FocusSendOutcome> {
-    const contents = this.liveContents()
-    if (!contents || this.platform.id !== 'deepseek') return 'unavailable'
+    const contents = this.focusPage()
+    if (!contents) return 'unavailable'
     try {
       const url = new URL(contents.getURL())
-      if (url.origin !== 'https://chat.deepseek.com') return 'unavailable'
       const result = await contents.executeJavaScript(
         'window.__cmdTerminalInterceptor?.sendUser(' + JSON.stringify(text) + ', ' + JSON.stringify(url.pathname) + ') ?? "unavailable"'
       )
@@ -1310,12 +1323,11 @@ export class ChatGptEmbed {
 
   async sendFocusFiles(text: string, files: PreparedAttachment[], token: string, current: () => boolean, signal: AbortSignal,
     images: ConversationImageAttachmentInput[] = []): Promise<FocusSendOutcome> {
-    const contents = this.liveContents()
-    if (!contents || this.platform.id !== 'deepseek') return 'unavailable'
+    const contents = this.focusPage()
+    if (!contents) return 'unavailable'
     try {
-      if (new URL(contents.getURL()).origin !== 'https://chat.deepseek.com') return 'unavailable'
       this.focusSendImages.set(token, images)
-      return await sendPageFiles(contents, 'deepseek', files, token, current, signal, { userText: text, allowNewConversation: true })
+      return await sendPageFiles(contents, this.platform.id, files, token, current, signal, { userText: text, allowNewConversation: true })
     } catch { return 'upload-failed' }
     finally { this.focusSendImages.delete(token) }
   }
@@ -1550,6 +1562,11 @@ export class ChatGptEmbed {
     switch (payload.event) {
       case 'installed':
         this.interceptor.installed = true
+        break
+      case 'continue-generation':
+        // The page measured the button; only a trusted input event actually presses it.
+        if (payload.reason === 'continue-clicked') this.clickAt(payload.x, payload.y)
+        console.info(`[embed:${this.platform.id}] interceptor ${JSON.stringify(payload)}`)
         break
       case 'configured':
         this.interceptor.installed = true
@@ -1827,6 +1844,17 @@ export class ChatGptEmbed {
     this.handlers.onInterceptor(this.getInterceptorStatus())
   }
 
+  /** A real left click at a viewport CSS-pixel point; input events are in DIPs, hence the zoom. */
+  private clickAt(x: unknown, y: unknown): void {
+    const contents = this.liveContents()
+    if (!contents || typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) return
+    const zoom = contents.getZoomFactor()
+    const point = { x: Math.round(x * zoom), y: Math.round(y * zoom) }
+    contents.sendInputEvent({ type: 'mouseMove', ...point })
+    contents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 })
+    contents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 })
+  }
+
   private liveContents(): Electron.WebContents | null {
     const view = this.view
     if (!view || view.webContents.isDestroyed()) return null
@@ -1878,6 +1906,28 @@ export class ChatGptEmbed {
     void this.scrapeConversations().then((conversations) => {
       if (conversations.length > 0) this.handlers.onSynced(conversations)
     })
+  }
+
+  /**
+   * Keep a page that is created or loaded HIDDEN rendering, as it would if it were shown.
+   *
+   * The `backgroundThrottling: false` webPreference only sets Electron's `disable_hidden_`
+   * on each new widget, which blocks FUTURE hides; a widget that starts hidden stays hidden,
+   * and a page that never renders runs no frames, ResizeObserver or requestAnimationFrame.
+   * DeepSeek's virtual list then renders no rows: measured 2026-10-22 with the focus view as
+   * the startup view, the reply log read only `no-turns`, the title never arrived and every
+   * focus-view send was refused — until one switch to the original view showed the page,
+   * after which `disable_hidden_` kept it rendering.
+   *
+   * The RUNTIME `setBackgroundThrottling(false)` additionally moves a hidden widget to
+   * hidden-but-painting (electron/electron#52844, in 44.0.0-beta.5+). It has no
+   * same-value early return, and a navigation can create a new hidden widget, so it is
+   * applied on every load. Nothing appears on screen: the view itself stays hidden.
+   */
+  private keepRenderingWhileHidden(): void {
+    const contents = this.liveContents()
+    if (!contents) return
+    try { contents.setBackgroundThrottling(false) } catch { /* a closing page needs nothing */ }
   }
 
   private applyBounds(): void {

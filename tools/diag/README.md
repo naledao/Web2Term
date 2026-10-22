@@ -1458,6 +1458,26 @@ else entirely.
 - Text is replaced with `«text»` in the dumped markup and long attribute values are
   truncated — the goal is the shape, not the user's conversation.
 
+## chatgpt-reasoning-probe.cjs
+
+User-run capture of where ChatGPT's "已思考 N 秒 / Thought for Ns" block sits relative to
+the measured turn (`data-chatgpt-selection-message-id`) and answer
+(`data-markdown-text-style="assistant-message"`) elements, while streaming, expanded and
+collapsed. Its result fills `CHATGPT_PAGE.focus.reasoningSelectors`, which is empty until
+then. Steps, log fields and data limits: [chatgpt-reasoning-probe.md](chatgpt-reasoning-probe.md).
+
+```powershell
+.\node_modules\electron\dist\electron.exe .\tools\diag\chatgpt-reasoning-probe.cjs
+```
+
+Log: `%TEMP%\gpt-login-diag\chatgpt-reasoning-<timestamp>-<pid>.log`. Read-only; the user
+chats and clicks. Only fixed-format captions are logged verbatim; all other text is a length.
+
+The same run also records smart components inside the answer (charts and other large svg,
+canvas, iframe, figure or role=img/figure content): their top-level block, svg size and
+element counts, iframe host, list/table counts and visually hidden text, plus a redacted
+markup tree. This is for the focus view, which currently spells such a chart out as text.
+
 ## claude-dom-probe.js
 
 **The run that answers: what does `claude.ai` actually look like, from scratch?**

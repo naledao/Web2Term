@@ -43,7 +43,7 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
     'node:os': { homedir: forbidden }, './commands': {}, './db': {}, './nacos-view': {},
     './mysql-table-rows': {}, './redis-reader': {}, './embed': {}, './environment': environment,
     './shell': { resolvePowerShell: () => 'powershell.exe' }, './ssh': {}, './web2term-shell': {}, './terminal-notes': {},
-    './background-tasks': {}, './background-task-results': {}, './extra-terminals': {}, 'node:fs/promises': {}, '../shared/deepseek-question': {}
+    './background-tasks': {}, './background-task-results': {}, '../shared/background-tasks': {}, './extra-terminals': {}, 'node:fs/promises': {}, '../shared/deepseek-question': {}
   }, desktop)
   const runtime = Object.create(SessionRuntime.prototype)
   const prompts = new Map()

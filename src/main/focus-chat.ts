@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { FocusTurn, FocusSegment, FocusPageSnapshot, FocusDelivery, FocusAttachmentInfo } from '../shared/focus-chat'
-import { cleanFocusAnswer, cleanFocusUserText } from '../shared/focus-chat'
+import { cleanFocusAnswer, cleanFocusUserText, supportsFocusView } from '../shared/focus-chat'
 
 interface FocusStore {
   listFocusTurns(sessionId: string, platformId: string, conversationId: string): FocusTurn[]
@@ -13,6 +13,8 @@ interface Entry {
   cycle: number
   dirty: boolean
   lastSave: number
+  /** The newest turn that was still working when this entry was restored, until the task shows it is alive. */
+  resumable: string | null
 }
 export class FocusChat {
   private readonly entries = new Map<string, Entry>()
@@ -27,14 +29,16 @@ export class FocusChat {
     } else {
       const turns = conversationId ? this.store.listFocusTurns(this.sessionId, platformId, conversationId) : []
       // Restored work is history. Never claim a previous process is still working.
+      const last = turns.at(-1)
+      const resumable = last?.status === 'working' ? last.id : null
       for (const turn of turns) if (turn.status === 'working') turn.status = 'stopped'
-      entry = { conversationId, turns, current: null, cycle: 0, dirty: false, lastSave: 0 }
+      entry = { conversationId, turns, current: null, cycle: 0, dirty: false, lastSave: 0, resumable }
     }
     this.entries.set(platformId, entry)
     return entry
   }
   begin(platformId: string, conversationId: string | null, text: string, files: FocusAttachmentInfo[] = []): string | undefined {
-    if (platformId !== 'deepseek') return undefined
+    if (!supportsFocusView(platformId)) return undefined
     const entry = this.context(platformId, conversationId)
     this.stop(platformId)
     const turn: FocusTurn = { id: randomUUID(), userMessageId: null, userText: cleanFocusUserText(text), createdAt: Date.now(),
@@ -42,6 +46,7 @@ export class FocusChat {
       updatedAt: Date.now(), status: 'working', segments: [], executionIds: [], executionCycles: {}, deliveries: {} }
     entry.turns.push(turn)
     entry.current = turn.id
+    entry.resumable = null
     entry.cycle = 0
     entry.dirty = true
     this.persist(platformId, entry, true)
@@ -70,6 +75,27 @@ export class FocusChat {
     const entry = this.entries.get(platformId)
     const turn = entry?.turns.find(item => item.id === entry.current)
     return entry && turn ? { entry, turn } : null
+  }
+  /**
+   * The current turn, or the restored one the task has just shown is still running.
+   *
+   * An app restart restores a working turn as stopped and forgets it as current, while the
+   * page's task carries on (a 继续生成, the next command, a result sent back). Without this
+   * every later event is dropped and the turn reads 已停止 while the loop is visibly running.
+   * Only live task events call it, and only the newest turn qualifies; a turn the user ended
+   * keeps `current` and stays stopped.
+   */
+  private live(platformId: string): { entry: Entry; turn: FocusTurn } | null {
+    const current = this.current(platformId)
+    if (current) return current
+    const entry = this.entries.get(platformId)
+    const turn = entry?.turns.at(-1)
+    if (!entry || !turn || turn.id !== entry.resumable) return null
+    entry.current = turn.id
+    entry.resumable = null
+    entry.cycle = Math.max(-1, ...turn.segments.map(segment => segment.cycle)) + 1
+    turn.status = 'working'
+    return { entry, turn }
   }
   private segment(entry: Entry, turn: FocusTurn): FocusSegment {
     let segment = turn.segments.find(item => item.cycle === entry.cycle)
@@ -109,7 +135,7 @@ export class FocusChat {
     this.persist(platformId, entry)
   }
   settled(platformId: string, messageId: string, text: string): void {
-    const current = this.current(platformId)
+    const current = this.live(platformId)
     if (!current || current.turn.status === 'stopped') return
     const { entry, turn } = current
     const segment = this.segment(entry, turn)
@@ -122,9 +148,31 @@ export class FocusChat {
     entry.dirty = true
     this.persist(platformId, entry, true)
   }
+  /**
+   * Re-read text for an answer already saved in a turn — the page re-rendered its history and
+   * the Markdown conversion has since improved (a ChatGPT chart saved as spelled-out SVG text
+   * before charts were understood). Only a settled prose answer is replaced; a command
+   * segment's empty answer stays empty, and nothing else about the turn changes.
+   */
+  refreshAnswer(platformId: string, conversationId: string, messageId: string, text: string): void {
+    const entry = this.context(platformId, conversationId)
+    const answer = cleanFocusAnswer(text)
+    if (!answer.trim()) return
+    let changed = false
+    for (const turn of entry.turns) {
+      for (const segment of turn.segments) {
+        if (segment.sourceMessageId !== messageId || !segment.settled || !segment.answer || segment.answer === answer) continue
+        segment.answer = answer
+        changed = true
+      }
+    }
+    if (!changed) return
+    entry.dirty = true
+    this.persist(platformId, entry, true)
+  }
   command(platformId: string, messageId: string, live: boolean): void {
-    const current = this.current(platformId)
-    if (!current || !live || current.turn.status === 'stopped') return
+    const current = live ? this.live(platformId) : null
+    if (!current || current.turn.status === 'stopped') return
     const { entry, turn } = current
     if (!turn.executionIds.includes(messageId)) {
       turn.executionIds.push(messageId)
@@ -143,7 +191,7 @@ export class FocusChat {
     this.persist(platformId, entry, true)
   }
   rawSent(platformId: string): void {
-    const current = this.current(platformId)
+    const current = this.live(platformId)
     if (!current || current.turn.status === 'stopped') return
     current.entry.cycle++
     current.turn.status = 'working'

@@ -324,3 +324,92 @@ test('sample frames reject malformed/oversized data and safely quote task paths'
   const windows = f.exports.backgroundSampleCommand({ ...task, logPath: "C:\\中文\\it's.log" }, 'windows')
   assert.ok(windows.includes("'C:\\中文\\it''s.log'"))
 })
+
+const descriptor = { transport: 'ssh', key: 'ssh:machine-a', label: '主机 A', kind: 'posix', cwd: '/project', ssh: { hostId: 'machine-a', address: 'a.example' } }
+const owner = { platformId: 'deepseek', conversationId: 'conversation-a' }
+const plain = value => JSON.parse(JSON.stringify(value))
+function persisted(t, f) {
+  const saved = []
+  const manager = new f.exports.BackgroundTasks(() => {}, stored => saved.push(plain(stored)))
+  t.after(() => manager.dispose())
+  return { manager, saved, latest: () => saved.at(-1) }
+}
+
+test('a registered task is saved with its target, owner and start identity; logs only once it has ended', async t => {
+  const f = fixture(t)
+  const { manager, saved, latest } = persisted(t, f)
+  f.pending.push(sample({ stdout: log('running output\n') }))
+  assert.equal(manager.register(registration(), record, { ...f.target, descriptor }, () => {}, undefined, owner), 1)
+  await flush()
+  assert.ok(saved.length >= 2, 'saved on registration and again when its status changed')
+  assert.deepEqual(latest().target, descriptor)
+  assert.deepEqual(latest().owner, owner)
+  assert.equal(latest().messageId, 'start-a')
+  assert.equal(latest().identity, 'process-start-a')
+  assert.equal(latest().settled, false)
+  assert.equal(latest().task.status, 'running')
+  assert.equal(latest().task.output, '', 'a running task re-reads its log files after a restart')
+  f.pending.push(sample({ alive: false, exitCode: 0, stdout: log('done\n', 'v2') }))
+  await f.tick()
+  f.pending.push(sample({ alive: false, exitCode: 0, stdout: log('final\n', 'v3') }))
+  await f.tick()
+  assert.equal(latest().settled, true)
+  assert.equal(latest().task.output, 'final\n', 'an ended task keeps the output its result notification carries')
+  // A target without a descriptor (or a task without an owner) is never persisted.
+  const count = saved.length
+  f.pending.push(sample())
+  assert.equal(manager.register(registration({ pid: 222 }), { ...record, messageId: 'other' }, f.target, () => {}), 1)
+  await flush()
+  assert.equal(saved.length, count)
+})
+
+test('restored tasks: a running one is observed again, an ended one is history, a reused PID is not the task', async t => {
+  const f = fixture(t)
+  const settledTasks = []
+  const base = (overrides = {}) => ({
+    id: 'task-1', name: '开发服务', pid: 12345, transport: 'ssh', targetLabel: '主机 A', conversationId: 'conversation-a',
+    command: 'start service', logPath: '/tmp/service.log', stderrPath: null, exitCodePath: null, status: 'running', exitCode: null,
+    createdAt: 1, checkedAt: 1, message: '', output: '', errorOutput: '', outputTruncated: false, errorOutputTruncated: false, ...overrides
+  })
+  const stored = [
+    { task: base(), target: descriptor, messageId: 'start-a', identity: 'process-start-a', settled: false, owner },
+    { task: base({ id: 'task-2', pid: 333, logPath: '/tmp/old.log', status: 'completed', exitCode: 0, output: 'old output\n', deliveryStatus: 'sent' }),
+      target: descriptor, messageId: 'start-b', identity: 'x', settled: true, owner }
+  ]
+  for (const item of stored) assert.ok(protocol.parseStoredBackgroundTask(JSON.stringify(item)), 'the stored shape parses back')
+  const targets = []
+  f.pending.push(sample({ identity: 'another-process' }))
+  f.manager.restore(stored, d => { targets.push(d); return f.target }, item => item.settled ? undefined : task => settledTasks.push(task))
+  assert.deepEqual(plain(targets), [descriptor, descriptor])
+  const before = f.manager.getState().tasks
+  assert.equal(before[0].status, 'checking')
+  assert.equal(before[1].status, 'completed')
+  assert.equal(before[1].output, 'old output\n')
+  await flush()
+  assert.equal(f.calls.commands.length, 1, 'only the running task is sampled')
+  assert.equal(f.manager.getState().tasks[0].status, 'exited')
+  assert.match(f.manager.getState().tasks[0].message, /复用/)
+  f.pending.push(sample({ identity: 'another-process' }))
+  await f.tick()
+  assert.equal(settledTasks.length, 1, 'it settles once and its result goes out as usual')
+  // Restoring the same rows again does not duplicate them.
+  f.manager.restore(stored, () => f.target, () => undefined)
+  assert.equal(f.manager.getState().tasks.length, 2)
+})
+
+test('stored rows that do not describe a usable task are rejected', () => {
+  const good = { task: { id: 't', name: 'n', pid: 2, transport: 'local', targetLabel: '本机', conversationId: 'c', command: 'x', logPath: '/l',
+    stderrPath: null, exitCodePath: null, status: 'running', exitCode: null, createdAt: 1, checkedAt: null, message: '', output: '', errorOutput: '',
+    outputTruncated: false, errorOutputTruncated: false }, target: { transport: 'local', key: 'local', label: '本机', kind: 'windows', cwd: 'C:\' },
+    messageId: 'm', identity: '', settled: false, owner: { platformId: 'chatgpt', conversationId: 'c' } }
+  assert.ok(protocol.parseStoredBackgroundTask(JSON.stringify(good)))
+  for (const bad of [
+    'not json', '{}',
+    { ...good, owner: { platformId: 'chatgpt', conversationId: '' } },
+    { ...good, target: { ...good.target, transport: 'ssh' } },
+    { ...good, task: { ...good.task, transport: 'ssh' } },
+    { ...good, task: { ...good.task, status: 'weird' } },
+    { ...good, task: { ...good.task, deliveryStatus: 'maybe' } },
+    { ...good, settled: 'yes' }
+  ]) assert.equal(protocol.parseStoredBackgroundTask(typeof bad === 'string' ? bad : JSON.stringify(bad)), null)
+})

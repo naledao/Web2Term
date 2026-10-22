@@ -248,6 +248,42 @@ test('missing local history displays an actionable error without exporting or op
   fixture.controller.destroy()
 })
 
+test('a focus-view selection opens the same sidebar without the page popup or a page gesture', async () => {
+  const fixture = controllerFixture()
+  try {
+    const { sourcePath: _path, ...draft } = selection
+    const pageCall = fixture.wc.executeJavaScript
+    let pageDraftReads = 0
+    fixture.wc.executeJavaScript = source => { if (source.includes('getSubmission()')) pageDraftReads++; return pageCall(source) }
+    const asked = fixture.controller.askFromFocus(draft)
+    await flush()
+    assert.equal(fixture.readCalls(), 1)
+    assert.equal(await fixture.controller.askFromFocus(draft), '上一个提问仍在整理，请稍候。', 'one export at a time')
+    fixture.resolve()
+    assert.equal(await asked, '')
+    assert.equal(fixture.chats.length, 1)
+    assert.ok(fixture.chats[0][4].includes(selection.question))
+    assert.equal(fixture.chats[0][5], selection.selectedText)
+    assert.equal(fixture.snapshots[0].messages.length, 4, 'the same local snapshot as a page selection')
+    assert.equal(pageDraftReads, 0, 'the page draft is never read')
+    assert.equal(fixture.statuses.some(source => source.includes('setStatus')), false, 'progress is not written into the covered page popup')
+  } finally { fixture.controller.destroy() }
+})
+
+test('a focus-view question returns the error to its caller and opens nothing', async () => {
+  const fixture = controllerFixture(null)
+  try {
+    const { sourcePath: _path, ...draft } = selection
+    const asked = fixture.controller.askFromFocus(draft)
+    await flush(); fixture.resolve()
+    assert.ok((await asked).includes('未找到当前会话的本地对话数据'))
+    assert.equal(fixture.chats.length, 0)
+    fixture.wc.url = 'https://chat.deepseek.com/'
+    assert.ok((await fixture.controller.askFromFocus(draft)).includes('不是可追问的会话'))
+    assert.equal(fixture.readCalls(), 1)
+  } finally { fixture.controller.destroy() }
+})
+
 test('closing selection or changing the source conversation prevents a late sidebar chat', async () => {
   for (const variant of ['cancel', 'navigate']) {
     const fixture = controllerFixture()

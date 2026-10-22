@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { posix, win32 } from 'node:path'
 import { parseBackgroundTaskRegistrations } from '../shared/background-tasks'
-import type { BackgroundTask, BackgroundTaskDeliveryStatus, BackgroundTaskNotificationKind, BackgroundTasksState } from '../shared/background-tasks'
+import type {
+  BackgroundTask, BackgroundTaskDeliveryStatus, BackgroundTaskNotificationKind, BackgroundTasksState,
+  BackgroundTaskTargetDescriptor, StoredBackgroundTask
+} from '../shared/background-tasks'
 import type { EnvironmentKind, ExecutionRecord } from '../shared/types'
 import type { ExecutionShell } from './shell'
 
@@ -18,7 +21,11 @@ export interface BackgroundTaskTarget {
   cwd: string
   available: () => boolean
   open: (signal: AbortSignal) => Promise<ExecutionShell>
+  /** Where the target is, so a restart can rebuild it. Without one the task is not persisted. */
+  descriptor?: BackgroundTaskTargetDescriptor
 }
+
+export type BackgroundTaskOwner = StoredBackgroundTask['owner']
 
 interface LogSample {
   data: string | null
@@ -45,6 +52,8 @@ interface Entry {
   finalRead: boolean
   settled: boolean
   onSettled?: (task: BackgroundTask) => void
+  messageId: string
+  owner?: BackgroundTaskOwner
 }
 
 const quotePosix = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`
@@ -144,15 +153,38 @@ export class BackgroundTasks {
   private disposed = false
   private readonly abort = new AbortController()
 
-  constructor(private readonly onChanged: (state: BackgroundTasksState) => void) {}
+  constructor(private readonly onChanged: (state: BackgroundTasksState) => void,
+    private readonly persist?: (stored: StoredBackgroundTask) => void) {}
 
   getState(): BackgroundTasksState {
     return { tasks: [...this.entries.values()].map(entry => ({ ...entry.task })) }
   }
 
+  /**
+   * Bring back tasks saved before a restart. A task that was running is observed again
+   * (its saved start identity still guards against a reused PID); one that had ended is
+   * shown as history. `onSettled` supplies the completion hook, as `register` takes one.
+   */
+  restore(items: StoredBackgroundTask[], target: (descriptor: BackgroundTaskTargetDescriptor) => BackgroundTaskTarget,
+    onSettled: (stored: StoredBackgroundTask) => ((task: BackgroundTask) => void) | undefined): void {
+    if (this.disposed) return
+    let resumed = false
+    for (const stored of items) {
+      const key = JSON.stringify([stored.target.key, stored.messageId, stored.task.pid, stored.task.logPath])
+      if (this.entries.has(key)) continue
+      const task: BackgroundTask = stored.settled ? { ...stored.task }
+        : { ...stored.task, status: 'checking', message: '软件重启后正在恢复观察…', output: '', errorOutput: '' }
+      this.entries.set(key, { task, target: target(stored.target), identity: stored.identity, stdoutStamp: '', stderrStamp: '',
+        finalRead: false, settled: stored.settled, onSettled: onSettled(stored), messageId: stored.messageId, owner: stored.owner })
+      resumed ||= !stored.settled
+    }
+    this.onChanged(this.getState())
+    if (resumed) void this.poll()
+  }
+
   register(output: string, record: Pick<ExecutionRecord, 'messageId' | 'conversationId' | 'command'>,
     target: BackgroundTaskTarget, onSettled?: (task: BackgroundTask) => void,
-    onRegistered?: (task: BackgroundTask) => void): number {
+    onRegistered?: (task: BackgroundTask) => void, owner?: BackgroundTaskOwner): number {
     if (this.disposed) return 0
     let count = 0
     for (const registration of parseBackgroundTaskRegistrations(output)) {
@@ -172,7 +204,10 @@ export class BackgroundTasks {
         createdAt: Date.now(), checkedAt: null, message: '正在读取进程状态和日志…',
         output: '', errorOutput: '', outputTruncated: false, errorOutputTruncated: false
       }
-      this.entries.set(key, { task, target, identity: '', stdoutStamp: '', stderrStamp: '', finalRead: false, settled: false, onSettled })
+      const entry: Entry = { task, target, identity: '', stdoutStamp: '', stderrStamp: '', finalRead: false, settled: false, onSettled,
+        messageId: record.messageId, owner }
+      this.entries.set(key, entry)
+      this.save(entry)
       count += 1
       try { onRegistered?.({ ...task }) }
       catch (error) { console.warn('[background] registration callback failed:', error instanceof Error ? error.name : 'Error') }
@@ -198,7 +233,24 @@ export class BackgroundTasks {
       entry.task.deliveryStatus = status
       entry.task.deliveryMessage = message
     }
+    this.save(entry)
     this.onChanged(this.getState())
+  }
+
+  /**
+   * Write the task's restorable state. A running task is saved without its log tails —
+   * they are re-read from the files after a restart; an ended one keeps its final output,
+   * which a pending result notification still has to carry.
+   */
+  private save(entry: Entry): void {
+    if (!this.persist || this.disposed || !entry.target.descriptor || !entry.owner) return
+    const task = entry.settled ? { ...entry.task } : { ...entry.task, output: '', errorOutput: '' }
+    try {
+      this.persist({ task, target: entry.target.descriptor, messageId: entry.messageId, identity: entry.identity,
+        settled: entry.settled, owner: entry.owner })
+    } catch (error) {
+      console.warn('[background] persist failed:', error instanceof Error ? error.name : 'Error')
+    }
   }
 
   dispose(): void {
@@ -237,6 +289,16 @@ export class BackgroundTasks {
   }
 
   private async sample(entry: Entry): Promise<void> {
+    const before = JSON.stringify([entry.task.status, entry.task.exitCode, entry.identity, entry.settled])
+    try {
+      await this.sampleOnce(entry)
+    } finally {
+      // Status, identity and settlement are what a restart needs; log tails are not.
+      if (JSON.stringify([entry.task.status, entry.task.exitCode, entry.identity, entry.settled]) !== before) this.save(entry)
+    }
+  }
+
+  private async sampleOnce(entry: Entry): Promise<void> {
     const { task, target } = entry
     try {
       if (!target.available()) {
