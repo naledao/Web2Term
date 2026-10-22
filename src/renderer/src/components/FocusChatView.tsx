@@ -25,6 +25,19 @@ interface Props {
   onStop(): Promise<void>
   renderAttachment(attachment: ConversationAttachment): ReactNode
 }
+/** The expanded process scrolls on its own; a working turn keeps its newest step in view unless the user scrolled up. */
+function ProcessScroll(props: { follow: boolean; children: ReactNode }): JSX.Element {
+  const ref = useRef<HTMLDivElement>(null)
+  const pinned = useRef(true)
+  useEffect(() => {
+    const element = ref.current
+    if (props.follow && pinned.current && element) element.scrollTop = element.scrollHeight
+  })
+  return <div className="focus-process__body" ref={ref} onScroll={event => {
+    const element = event.currentTarget
+    pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24
+  }}>{props.children}</div>
+}
 const labels: Record<string, string> = {
   pending: '等待确认', blocked: '等待确认', running: '正在执行', done: '执行完成',
   failed: '执行失败', timeout: '执行超时', interrupted: '已中断', skipped: '已跳过'
@@ -273,6 +286,7 @@ export default function FocusChatView(props: Props): JSX.Element {
       <div className="focus-assistant">
         <div className="focus-assistant__head"><img src={deepseekIcon} alt="" /><span>DeepSeek</span></div>
         <details className="focus-process"><summary><span className={turn.status === 'working' ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{turn.status === 'working' ? '' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <span className="focus-process__hint">查看过程</span> : null}</summary>
+          <ProcessScroll follow={turn.status === 'working'}>
           {turn.segments.map(segment => <div className="focus-process__cycle" key={segment.cycle}>
             {segment.parts.map((part, index) => part.kind === 'reasoning' ? <details className="focus-reasoning" key={index}><summary>思考过程</summary><Markdown text={part.text} theme={theme} /></details> :
               <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
@@ -281,6 +295,7 @@ export default function FocusChatView(props: Props): JSX.Element {
           </div>)}
           {executions.filter(record => turn.executionCycles?.[record.messageId] === undefined && !attention.includes(record)).map(record => renderExecution(record, deliveryOf(record)))}
           {!hasProcess ? <p className="focus-chat__muted">{turn.status === 'working' ? '正在等待页面更新。' : '本轮没有额外执行步骤。'}</p> : null}
+          </ProcessScroll>
         </details>
         {attention.map(record => renderExecution(record, deliveryOf(record), true))}
         {turn.notice === 'parse-failed' ? <div className="focus-chat__error" role="alert">模型返回的指令暂时无法识别，任务仍在等待。<button type="button" onClick={props.onControl}>查看执行控制</button></div> : null}
