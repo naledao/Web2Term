@@ -62,6 +62,8 @@ import type {
 } from '../shared/types'
 import { CommandRunner } from './commands'
 import { ExtraTerminals } from './extra-terminals'
+import { BackgroundTasks } from './background-tasks'
+import type { BackgroundTaskTarget } from './background-tasks'
 import type { ExtraTerminalTarget } from './extra-terminals'
 import { ConversationStore } from './db'
 import { normalizeNacosUrl } from './nacos-view'
@@ -71,7 +73,8 @@ import { RedisReader, normalizeRedisDraft } from './redis-reader'
 import { ChatGptEmbed } from './embed'
 import type { EmbedHandlers } from './embed'
 import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseWindowsEnvironment } from './environment'
-import { resolvePowerShell } from './shell'
+import { ConversationShell, resolvePowerShell } from './shell'
+import type { ExecutionShell } from './shell'
 import { SshManager } from './ssh'
 import type { RemoteShell } from './remote-shell'
 import { Web2termShell } from './web2term-shell'
@@ -264,6 +267,7 @@ export class SessionRuntime {
   readonly createdAt: number
   readonly runner: CommandRunner
   readonly ssh: SshManager
+  readonly backgroundTasks = new BackgroundTasks(state => this.send(IpcChannels.backgroundTasksChanged, state))
   /** User-opened terminals beside the model's; each takes the transport and directory it has right now. */
   readonly extraTerminals = new ExtraTerminals({
     target: () => this.extraTerminalTarget(),
@@ -409,6 +413,10 @@ export class SessionRuntime {
       onRemoteLine: (line) => { if (!this.web2term) this.ssh.pushModelLine(line) },
       onRemoteOutput: (chunk) => { if (!this.web2term) this.ssh.pushModelOutput(chunk) },
       onExecutionChanged: (records) => this.send(IpcChannels.executionChanged, records),
+      captureBackgroundTasks: (record, shell) => {
+        const target = this.backgroundTaskTarget(shell)
+        return output => this.backgroundTasks.register(output, record, target)
+      },
       onTaskStarted: () => this.embed.startTerminalTask(),
       onTerminalChanged: (state) => {
         this.send(IpcChannels.terminalChanged, state)
@@ -1953,6 +1961,7 @@ export class SessionRuntime {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.backgroundTasks.dispose()
     this.redisReader.dispose()
     this.web2term?.dispose()
     this.active = false
@@ -1969,6 +1978,69 @@ export class SessionRuntime {
     this.remoteShell = null
     this.runner.disposeAll()
     this.extraTerminals.disposeAll()
+  }
+
+  private backgroundTaskTarget(shell: ExecutionShell): BackgroundTaskTarget {
+    const web2term = this.web2term
+    if (shell === web2term && this.options.web2term) {
+      const { connection } = this.options.web2term
+      const binding = { ...web2term.binding, reconnect: false, cwd: '/' }
+      const available = (): boolean => {
+        const state = connection.getState()
+        return !this.disposed && state.status === 'connected' && state.agentId === binding.agentId
+          && state.auth.status === 'signed-in' && state.auth.backendUrl === binding.backendUrl
+          && state.auth.user?.publicId === binding.userId
+      }
+      return {
+        key: web2term.hostId, label: binding.deviceName || binding.agentId, transport: 'web2term',
+        kind: shell.kind, cwd: shell.cwd, available,
+        open: signal => new Promise((resolve, reject) => {
+          const observer = new Web2termShell(binding, connection)
+          let settled = false
+          const finish = (error?: Error): void => {
+            if (settled) return
+            settled = true
+            clearTimeout(timeout)
+            signal.removeEventListener('abort', cancelled)
+            observer.onReady = () => {}
+            observer.onChanged = () => {}
+            observer.onClosed = () => {}
+            if (error) { observer.dispose(); reject(error) } else resolve(observer)
+          }
+          const cancelled = (): void => finish(new Error('后台任务观察已关闭。'))
+          const timeout = setTimeout(() => finish(new Error('设备后台监控终端打开超时。')), 25000)
+          observer.onReady = () => finish()
+          observer.onChanged = () => {
+            if (observer.transport.status === 'error') finish(new Error(observer.transport.message))
+          }
+          observer.onClosed = () => finish(new Error('设备后台监控终端已断开。'))
+          signal.addEventListener('abort', cancelled, { once: true })
+          if (signal.aborted || !available()) cancelled()
+          else observer.activate()
+        })
+      }
+    }
+    if (shell === this.remoteShell) {
+      const state = this.ssh.getState()
+      const hostId = state.hostId
+      const address = state.target
+      const available = (): boolean => !this.disposed && this.ssh.getState().status === 'connected'
+        && this.ssh.getState().hostId === hostId && this.ssh.getState().target === address
+      return {
+        key: `ssh:${hostId}:${address}`, label: state.name || address || 'SSH', transport: 'ssh',
+        kind: shell.kind, cwd: shell.cwd, available,
+        open: async () => {
+          if (!available()) throw new Error('任务所属的 SSH 主机已断开。')
+          return this.ssh.openExtraShell('', { onOutput: () => {}, onClosed: () => {} })
+        }
+      }
+    }
+    const cwd = shell.cwd
+    return {
+      key: 'local', label: '本机', transport: 'local', kind: shell.kind, cwd,
+      available: () => !this.disposed,
+      open: async () => new ConversationShell({ initialCwd: cwd })
+    }
   }
 
   /** Same transport the session terminal pane is showing: web2term, an attached SSH host, or local. */
@@ -2039,7 +2111,7 @@ export class SessionRuntime {
   private send(channel: string, payload: unknown): void {
     const window = this.window
     if (!this.active || !window || window.isDestroyed()) return
-    if (channel === IpcChannels.mysqlConnChanged || channel === IpcChannels.redisConnChanged || channel === IpcChannels.nacosConnChanged || channel === IpcChannels.questionChatState) {
+    if (channel === IpcChannels.mysqlConnChanged || channel === IpcChannels.redisConnChanged || channel === IpcChannels.nacosConnChanged || channel === IpcChannels.questionChatState || channel === IpcChannels.backgroundTasksChanged) {
       window.webContents.send(channel, payload, this.id)
     } else {
       window.webContents.send(channel, payload)

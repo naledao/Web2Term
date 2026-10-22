@@ -137,7 +137,7 @@ function controllerFixture(local = savedContext(), { platformId = 'deepseek', dr
   wc.session = { fetch() { throw new Error('No provider history or share requests are allowed') } }
   let resolveContext
   let readCalls = 0
-  const chats = [], snapshots = [], diagnostics = []
+  const chats = [], snapshots = [], diagnostics = [], instances = [], states = []
   const dependencies = {
     'node:crypto': { randomUUID }, '../shared/deepseek-question': shared,
     './question-chat-page': {
@@ -146,18 +146,64 @@ function controllerFixture(local = savedContext(), { platformId = 'deepseek', dr
     },
     '../shared/deepseek-context-markdown': markdown,
     './deepseek-context-markdown': { saveQuestionContextMarkdown: async snapshot => { snapshots.push(snapshot); return `/synthetic-export/${snapshot.platformId}-context.md` } },
-    './question-chat': { QuestionChat: class { constructor(...args) { chats.push(args) } close() {} setOwnerVisible() {} } }
+    './question-chat': { QuestionChat: class {
+      constructor(...args) { this.id = randomUUID(); this.args = args; this.closed = false; chats.push(args); instances.push(this); args[6](this.getState()) }
+      getState() { return this.closed ? null : { id: this.id, platformId: this.args[1].id, selectedText: this.args[5], contextPath: this.args[7], status: '', error: false } }
+      close() { if (this.closed) return; this.closed = true; this.args[6](null) }
+      action(action) { if (action === 'close') this.close() }
+      setOwnerVisible(visible) { this.visible = visible }
+    } }
   }
   const { DeepSeekQuestion } = load('../src/main/deepseek-question.ts', dependencies)
-  const controller = new DeepSeekQuestion(wc, { isDestroyed: () => false }, { id: platformId }, () => 'light', () => {},
+  const controller = new DeepSeekQuestion(wc, { isDestroyed: () => false }, { id: platformId }, () => 'light', state => states.push(state),
     requestedId => { assert.equal(requestedId, id); readCalls++; return new Promise(resolve => { resolveContext = resolve }) })
   const enter = () => {
     wc.emit('before-input-event', {}, { type: 'keyDown', key: 'Enter' })
     wc.emit('console-message', { frame: wc.mainFrame, message: controller.reportTag + JSON.stringify({ event: 'question-submit' }) })
   }
-  return { controller, wc, enter, chats, snapshots, statuses, diagnostics, readCalls: () => readCalls, resolve: () => resolveContext(local) }
+  return { controller, wc, enter, chats, snapshots, statuses, diagnostics, instances, states, readCalls: () => readCalls, resolve: () => resolveContext(local) }
 }
 const flush = async () => { for (let index = 0; index < 12; index++) await Promise.resolve() }
+
+test('the add-menu creates a new blank sidebar and releases the previous instance each time', () => {
+  const fixture = controllerFixture()
+  try {
+    const first = fixture.controller.createChat()
+    const second = fixture.controller.createChat()
+    assert.notEqual(first.id, second.id)
+    assert.equal(fixture.instances.length, 2)
+    assert.equal(fixture.instances[0].closed, true)
+    assert.equal(fixture.instances[1].closed, false)
+    assert.equal(fixture.instances[1].visible, true)
+    assert.equal(fixture.controller.getState().id, second.id)
+    assert.equal(second.selectedText, '')
+    assert.equal(second.contextPath, '')
+    assert.equal(fixture.chats[1][4], '', 'a blank sidebar must not reuse an old prompt')
+    assert.equal(fixture.readCalls(), 0, 'manual creation must not export the source conversation')
+    assert.equal(fixture.snapshots.length, 0)
+    fixture.controller.action(first.id, 'close')
+    assert.equal(fixture.controller.getState().id, second.id, 'late actions from the old tab cannot close the new one')
+    fixture.controller.action(second.id, 'close')
+    assert.equal(fixture.controller.getState(), null)
+    assert.equal(fixture.instances[1].closed, true)
+  } finally { fixture.controller.destroy() }
+})
+
+test('creating a blank chat invalidates a pending selection export instead of resurrecting that older chat', async () => {
+  const fixture = controllerFixture()
+  try {
+    fixture.enter()
+    await flush()
+    assert.equal(fixture.readCalls(), 1)
+    const fresh = fixture.controller.createChat()
+    fixture.resolve()
+    await flush()
+    assert.equal(fixture.instances.length, 1)
+    assert.equal(fixture.controller.getState().id, fresh.id)
+    assert.equal(fixture.snapshots.length, 0)
+    assert.equal(fixture.chats[0][4], '')
+  } finally { fixture.controller.destroy() }
+})
 
 test('selection UI diagnostics keep only allowlisted metadata and never authorize a submit', async () => {
   const fixture = controllerFixture()
@@ -229,6 +275,62 @@ test('native sidebar bounds reject malformed rectangles and clamp to the owning 
 })
 
 for (const platformId of ['deepseek', 'chatgpt', 'gemini', 'claude']) {
+test(`${platformId} manual sidebar starts on a fresh home page without old context or automatic messages`, async () => {
+  const views = [], loaded = [], sent = [], copied = [], states = []
+  let readyChecks = 0
+  class FakeView {
+    constructor(options) {
+      this.options = options
+      const contents = new EventEmitter()
+      contents.setUserAgent = () => {}; contents.setWindowOpenHandler = () => {}
+      contents.loadURL = async url => { loaded.push(url) }
+      contents.getURL = () => fixtureHomes[platformId]
+      contents.isDestroyed = () => Boolean(contents.destroyed)
+      contents.close = () => { contents.destroyed = true }
+      this.webContents = contents
+      views.push(this)
+    }
+    setBackgroundColor() {}
+    setBounds() {}
+    setVisible() {}
+  }
+  const parent = new EventEmitter()
+  parent.isDestroyed = () => false; parent.getContentSize = () => [1400, 900]
+  parent.contentView = { addChildView() {}, removeChildView() {} }
+  const { QuestionChat } = load('../src/main/question-chat.ts', {
+    electron: { WebContentsView: FakeView, clipboard: { writeText: value => copied.push(value) }, shell: {} },
+    'node:crypto': { randomUUID }, '../shared/deepseek-question': shared,
+    './injected/question-chat-sender.js?raw': { default: '' }, './injected/theme.js?raw': { default: '' },
+    './question-chat-page': { questionPageCall: async (_contents, script) => {
+      if (script.includes('__questionChatReady')) readyChecks++
+      return { composer: true, uploadReady: true, hasHistory: true }
+    }, writeQuestionLog() {} },
+    './question-chat-send': { sendQuestionChatAttachment: async (...args) => { sent.push(args); return 'ok' } }
+  }, { setInterval() { assert.fail('blank chats do not poll for automatic sending') }, clearInterval() {} })
+  const partition = `synthetic-${platformId}`
+  const chat = new QuestionChat(parent, { id: platformId, label: fixtureLabels[platformId], homeUrl: fixtureHomes[platformId], partition,
+    page: { composerKind: 'textarea', composerSelectors: [], sendButtonSelectors: [], messageSelectors: [], assistantSelectors: [] } },
+  'light', 'Synthetic Chrome', '', '', state => states.push(state), '')
+  try {
+    assert.equal(loaded[0], fixtureHomes[platformId])
+    assert.equal(views[0].options.webPreferences.partition, partition, 'reuse login state, never the old web view')
+    assert.equal(chat.getState().selectedText, '')
+    assert.equal(chat.getState().contextPath, '')
+    chat.setOwnerVisible(true)
+    chat.setViewport({ x: 1000, y: 200, width: 400, height: 700 }, true)
+    views[0].webContents.emit('dom-ready')
+    await flush()
+    await chat.checkReady()
+    chat.action('copy-prompt')
+    assert.equal(readyChecks, 0)
+    assert.equal(sent.length, 0)
+    assert.equal(copied.length, 0)
+    assert.equal(chat.getState().status, '')
+  } finally { chat.close() }
+  assert.equal(states.at(-1), null)
+  assert.equal(views[0].webContents.destroyed, true)
+})
+
 test(`${platformId} sidebar sends its Markdown once, preserves on folding and disposes once`, async () => {
   const homeUrl = fixtureHomes[platformId]
   const views = [], added = [], removed = [], states = [], copied = []

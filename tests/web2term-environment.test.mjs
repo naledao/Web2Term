@@ -23,7 +23,8 @@ function load(relative, dependencies = {}, desktop = 'win32') {
   return exports
 }
 const files = load('../src/shared/file-requests.ts')
-const types = load('../src/shared/types.ts', { './file-requests': files })
+const backgroundTasks = load('../src/shared/background-tasks.ts')
+const types = load('../src/shared/types.ts', { './file-requests': files, './background-tasks': backgroundTasks })
 const platforms = load('../src/shared/platforms.ts', { './types': types })
 const REPORT = 'OSCAP=Ubuntu 26.04.1 LTS|OSVER=7.0.0-38-generic|ARCH=x86_64|SHELLP=/usr/bin/bash|SHELLV=GNU bash, version 5.3.9|CWD=/home/fixture'
 const result = (output, patch = {}) => ({ output, exitCode: 0, rejected: false, interrupted: false,
@@ -40,7 +41,8 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
     '../shared/types': types, '../shared/platforms': platforms, './file-access': {},
     'node:os': { homedir: forbidden }, './commands': {}, './db': {}, './nacos-view': {},
     './mysql-table-rows': {}, './redis-reader': {}, './embed': {}, './environment': environment,
-    './shell': { resolvePowerShell: () => 'powershell.exe' }, './ssh': {}, './web2term-shell': {}, './terminal-notes': {}
+    './shell': { resolvePowerShell: () => 'powershell.exe' }, './ssh': {}, './web2term-shell': {}, './terminal-notes': {},
+    './background-tasks': {}, './extra-terminals': {}, 'node:fs/promises': {}, '../shared/deepseek-question': {}
   }, desktop)
   const runtime = Object.create(SessionRuntime.prototype)
   const prompts = new Map()

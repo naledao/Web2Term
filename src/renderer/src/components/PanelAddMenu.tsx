@@ -4,12 +4,13 @@ import { Popover } from '@base-ui/react/popover'
 import './TerminalActionsMenu.css'
 import './PanelAddMenu.css'
 
-export type PanelAddItem = 'terminal'
+export type PanelAddItem = 'terminal' | 'background' | 'question'
 
 /** The + beside the right panel's tabs: opens a menu of tabs that can be added. */
-export default function PanelAddMenu({ containerRef, visible, onOpenChange, onAdd }: {
+export default function PanelAddMenu({ containerRef, visible, questionChatAvailable, onOpenChange, onAdd }: {
   containerRef: RefObject<HTMLElement | null>
   visible: boolean
+  questionChatAvailable: boolean
   onOpenChange: (open: boolean) => void
   onAdd: (item: PanelAddItem) => void
 }): JSX.Element {
@@ -42,6 +43,25 @@ export default function PanelAddMenu({ containerRef, visible, onOpenChange, onAd
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="18" rx="3" /><path d="M7 9l3 3-3 3M13 15h4" /></svg>
             </span>
             <span className="terminal-actions__label">终端</span>
+          </button>
+          <button type="button" className="terminal-actions__item" onClick={() => {
+            setOpen(false)
+            onAdd('background')
+          }}>
+            <span className="terminal-actions__icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M7 9h4M7 13h3M15 10v6m-2-2 2 2 2-2" /></svg>
+            </span>
+            <span className="terminal-actions__label">后台任务</span>
+          </button>
+          <button type="button" className="terminal-actions__item" disabled={!questionChatAvailable}
+            title={questionChatAvailable ? '新建侧边聊天' : '当前平台不支持侧边聊天'} onClick={() => {
+              setOpen(false)
+              onAdd('question')
+            }}>
+            <span className="terminal-actions__icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 4h16v12H9l-5 4V4z" /><path d="M8 8h8M8 12h5" /></svg>
+            </span>
+            <span className="terminal-actions__label">侧边聊天</span>
           </button>
         </Popover.Popup>
       </Popover.Positioner>

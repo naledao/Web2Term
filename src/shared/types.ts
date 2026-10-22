@@ -1,5 +1,7 @@
 import type { ToolboxInvocation } from './toolbox'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
+import { BACKGROUND_TASK_MARKER } from './background-tasks'
+import type { BackgroundTasksState } from './background-tasks'
 /**
  * Types shared between the Electron main process, the preload bridge and the
  * React renderer. Keep this module free of runtime dependencies on `electron`
@@ -18,6 +20,7 @@ export const IpcChannels = {
   embedGetState: 'embed:get-state',
   embedState: 'embed:state',
   questionChatGetState: 'question-chat:get-state',
+  questionChatCreate: 'question-chat:create',
   questionChatState: 'question-chat:state',
   questionChatViewport: 'question-chat:viewport',
   questionChatAction: 'question-chat:action',
@@ -114,6 +117,8 @@ export const IpcChannels = {
   extraTerminalInterrupt: 'extra-terminals:interrupt',
   extraTerminalClose: 'extra-terminals:close',
   extraTerminalsChanged: 'extra-terminals:changed',
+  backgroundTasksGet: 'background-tasks:get',
+  backgroundTasksChanged: 'background-tasks:changed',
   terminalNotesGet: 'terminal-notes:get',
   terminalNotesSet: 'terminal-notes:set',
   terminalNotesChanged: 'terminal-notes:changed',
@@ -837,6 +842,9 @@ const OUTPUT_FORMAT_SECTION = [
 const LONG_TASK_SECTION = [
   '【长任务与后台监控】',
   '预计 >2 分钟、持续输出、等待外部事件，或须跨终端运行的任务：先启动不依赖当前终端生命周期的后台任务，记录 PID/任务名、日志路径、完成/失败标记；stdout/stderr 必须落盘。',
+  `后台进程启动成功后，启动命令必须另起一行打印 ${BACKGROUND_TASK_MARKER} 后紧跟一个紧凑 JSON，格式示例：{"pid":12345,"name":"任务名称","log_path":"标准输出或合并日志的绝对路径","stderr_path":"单独错误日志的绝对路径","exit_code_path":"退出码文件的绝对路径"}。12345 仅为格式示例，必须替换成实际取得的 PID。stderr_path 仅在错误输出单独落盘时提供；exit_code_path 可选，任务结束时向该文件写入整数退出码。`,
+  '登记信息由启动命令在执行后打印，不能提前猜 PID，也不能只在聊天文字里描述；打印的是实际后台任务的 PID，不是当前终端 Shell 的 PID。每次启动使用唯一日志和退出码文件，日志统一 UTF-8。Windows 用 Start-Process -WindowStyle Hidden -PassThru 获取 PID，stdout/stderr 重定向到不同日志文件；POSIX 用脱离终端的进程并从 $! 获取实际 PID。启动命令打印登记信息后立即返回，不要在启动命令里等待任务结束。',
+  '软件会自动将登记的任务加入右侧「＋ → 后台任务」，独立读取日志供用户查看；后台启动成功不等于任务已完成。',
   '启动只执行一次；之后用只读、可重复、有界命令按 10–30 秒（重任务 30–60 秒）间隔检查进程、退出状态、标记和新增日志。可在单次命令中使用一次有界的 Start-Sleep/sleep；禁止 busy-loop、无限循环和无输出重启。',
   '仍在运行则继续按间隔监控；完成、失败、超时或进程消失即停止，并报告状态、日志、产物和验证结果。仅需 stdin/TTY 的明确交互任务可前台运行。'
 ].join('\n')
@@ -2149,6 +2157,7 @@ export interface AppApi {
   /** Subscribe to embed state; returns an unsubscribe function. */
   onEmbedState(listener: (state: EmbedState) => void): () => void
   getQuestionChatState(sessionId: string): Promise<QuestionChatState | null>
+  createQuestionChat(sessionId: string, platformId: string): Promise<QuestionChatState | null>
   onQuestionChatState(listener: (state: QuestionChatState | null, sessionId: string) => void): () => void
   setQuestionChatViewport(sessionId: string, chatId: string, bounds: EmbedBounds, visible: boolean): void
   questionChatAction(sessionId: string, chatId: string, action: QuestionChatAction): void
@@ -2315,6 +2324,8 @@ export interface AppApi {
   interruptExtraTerminal(id: string): Promise<void>
   closeExtraTerminal(id: string): Promise<ExtraTerminalsState>
   onExtraTerminalsChanged(listener: (state: ExtraTerminalsState) => void): () => void
+  getBackgroundTasks(sessionId: string): Promise<BackgroundTasksState>
+  onBackgroundTasksChanged(listener: (state: BackgroundTasksState, sessionId: string) => void): () => void
 
   /**
    * The note attached to whichever machine the terminal is driving right now.

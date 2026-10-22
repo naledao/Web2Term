@@ -884,6 +884,7 @@ export class ChatGptEmbed {
   }
 
   getQuestionChatState(): QuestionChatState | null { return this.selectionQuestion?.getState() ?? null }
+  createQuestionChat(): QuestionChatState | null { return this.selectionQuestion?.createChat() ?? null }
   setQuestionChatViewport(id: string, bounds: unknown, visible: boolean): void { this.selectionQuestion?.setViewport(id, bounds, visible) }
   questionChatAction(id: string, action: QuestionChatAction): void { this.selectionQuestion?.action(id, action) }
 

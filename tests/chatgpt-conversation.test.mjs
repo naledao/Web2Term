@@ -22,7 +22,8 @@ function load(relative, dependencies) {
   return exports
 }
 const fileRequests = load('../src/shared/file-requests.ts', {})
-const types = load('../src/shared/types.ts', { './file-requests': fileRequests })
+const backgroundTasks = load('../src/shared/background-tasks.ts', {})
+const types = load('../src/shared/types.ts', { './file-requests': fileRequests, './background-tasks': backgroundTasks })
 const { CHATGPT_PLATFORM } = load('../src/shared/platforms.ts', { './types': types })
 const id = '6ad1b11e-bec4-83e8-be6f-24834af50921'
 

@@ -2,6 +2,7 @@ import { ToolboxRouter } from './toolbox-router'
 import { TOOLBOX_METHODS } from '../shared/toolbox'
 import type { ToolboxInvocation, ToolboxMethod } from '../shared/toolbox'
 import type { AppApi } from '../shared/types'
+import type { BackgroundTasksState } from '../shared/background-tasks'
 import { join, posix } from 'node:path'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -1175,6 +1176,11 @@ function registerIpcHandlers(): void {
     return runtime?.id === sessionId ? runtime : null
   }
   ipcMain.handle(IpcChannels.questionChatGetState, (event, sessionId: string) => questionRuntime(event, sessionId)?.embed.getQuestionChatState() ?? null)
+  ipcMain.handle(IpcChannels.questionChatCreate, (event, sessionId: string, platformId: string) => {
+    const runtime = questionRuntime(event, sessionId)
+    if (!runtime || runtime.activePlatform.id !== platformId) return null
+    return runtime.embed.createQuestionChat()
+  })
   ipcMain.on(IpcChannels.questionChatViewport, (event, sessionId: string, chatId: string, bounds: unknown, visible: boolean) => {
     questionRuntime(event, sessionId)?.embed.setQuestionChatViewport(chatId, bounds, visible === true)
   })
@@ -1441,6 +1447,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.terminalSetSendDelay, (event, seconds: number): TerminalState => runtimeForEvent(event)?.setTerminalSendDelay(Number(seconds ?? 0)) ?? FALLBACK_TERMINAL_STATE)
   ipcMain.handle(IpcChannels.extraTerminalsGet, (event): ExtraTerminalsState =>
     runtimeForEvent(event)?.extraTerminals.getState() ?? { terminals: [] })
+  ipcMain.handle(IpcChannels.backgroundTasksGet, (event, sessionId: string): BackgroundTasksState => {
+    const runtime = runtimeForEvent(event)
+    return runtime?.id === sessionId ? runtime.backgroundTasks.getState() : { tasks: [] }
+  })
   ipcMain.handle(IpcChannels.extraTerminalCreate, (event): { state: ExtraTerminalsState; id: string } | null =>
     runtimeForEvent(event)?.extraTerminals.create() ?? null)
   ipcMain.handle(IpcChannels.extraTerminalInput, (event, id: string, text: string): void => {

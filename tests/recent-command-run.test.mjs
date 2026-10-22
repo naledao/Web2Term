@@ -63,6 +63,7 @@ function fixture(t, options = {}) {
       if (id === 'node:crypto') return crypto
       if (id === './shell') return { ConversationShell: FakeShell, IDLE_TIMEOUT_MS: 300000, MAX_RUNTIME_MS: 1800000 }
       if (id === '../shared/file-requests') return { parseReadFilesRequest: () => assert.fail('no file request expected') }
+      if (id === '../shared/background-tasks') return { BACKGROUND_TASK_MARKER: '__W2T_BACKGROUND_TASK__' }
       assert.fail(`unexpected dependency: ${id}`)
     }
   })
@@ -87,6 +88,7 @@ function fixture(t, options = {}) {
     terminalModeEnabled: () => terminalMode,
     remoteShell: () => remoteShell,
     onTaskStarted: () => events.push('task-started'),
+    captureBackgroundTasks: options.captureBackgroundTasks,
     onTaskCompleted() {}, onExecutionChanged() {}, onTerminalChanged() {},
     onRemoteLine() {}, onRemoteOutput() {},
     async sendRawToPage(text) { events.push('send'); sent.push(text); return options.delivery ?? 'ok' }
@@ -104,6 +106,31 @@ function fixture(t, options = {}) {
     }
   }
 }
+
+test('captures background task ownership before execution and registers raw results after a conversation switch', async t => {
+  let finish
+  const captured = []
+  const registrations = []
+  const f = fixture(t, {
+    pending: new Promise(resolve => { finish = resolve }),
+    captureBackgroundTasks(record, shell) {
+      captured.push({ conversationId: record.conversationId, shell })
+      return output => { registrations.push(output); return 1 }
+    }
+  })
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'ok')
+  await new Promise(setImmediate)
+  assert.equal(captured.length, 1)
+  assert.equal(captured[0].conversationId, 'chat-a')
+  assert.equal(captured[0].shell, f.calls[0].shell)
+  assert.equal(registrations.length, 0)
+  f.switchConversation('chat-b')
+  const output = 'x'.repeat(12000) + '\n__W2T_BACKGROUND_TASK__{"pid":12345,"name":"后台任务","log_path":"C:\\\\logs\\\\task.log"}'
+  finish({ output, exitCode: 0, cwd: 'C:\\current-workspace', timedOut: false, interrupted: false, sessionLost: false })
+  await f.settled()
+  assert.equal(registrations[0], output, 'registration must receive untruncated actual output')
+  assert.equal(f.sent.length, 0, 'a different conversation must not receive the old result')
+})
 
 for (const mode of ['manual', 'auto']) {
   test(`executes in the current terminal then returns command and fresh result in ${mode} mode`, async (t) => {

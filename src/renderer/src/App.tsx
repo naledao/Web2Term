@@ -15,6 +15,7 @@ import TerminalActionsMenu from './components/TerminalActionsMenu'
 import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
 import ExtraTerminalPane from './components/ExtraTerminalPane'
+import BackgroundTasksPane from './components/BackgroundTasksPane'
 import PanelAddMenu from './components/PanelAddMenu'
 import type { TerminalActionId } from './components/TerminalActionsMenu'
 import type { ToolKind } from './tool-window-state'
@@ -77,7 +78,7 @@ const PANEL_DEFAULT_WIDTH = 400
 const PANEL_MAX_RESERVE = 520
 
 /** `extra:<id>` is a terminal the user added from the + menu. */
-type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question' | `extra:${string}`
+type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question' | 'background' | `extra:${string}`
 
 const SETTINGS_SECTIONS = [
   { id: 'appearance', label: '外观' },
@@ -112,6 +113,7 @@ function SettingsSectionIcon({ section }: { section: SettingsSection }): JSX.Ele
 const STORAGE_PANEL_WIDTH = 'layout.panelWidth'
 const STORAGE_PANEL_COLLAPSED = 'layout.panelCollapsed'
 const STORAGE_PANEL_TAB = 'layout.panelTab'
+const STORAGE_BACKGROUND_TASKS_OPEN = 'layout.backgroundTasksOpen'
 
 function sessionLayoutKey(key: string, sessionId: string): string {
   return `${key}.${sessionId}`
@@ -425,11 +427,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     readStoredNumber(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), readStoredNumber(STORAGE_PANEL_WIDTH, PANEL_DEFAULT_WIDTH))
   ))
   const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), false))
+  const [backgroundTasksOpen, setBackgroundTasksOpen] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_BACKGROUND_TASKS_OPEN, sessionId), false))
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     try {
       const stored = window.localStorage.getItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId))
       // An added terminal outlives a session switch but not a restart; checked once the list loads.
-      return stored === 'terminal' || stored === 'toolbox' || stored?.startsWith('extra:') ? stored as PanelTab : 'control'
+      return stored === 'terminal' || stored === 'toolbox' || (stored === 'background' && backgroundTasksOpen) || stored?.startsWith('extra:') ? stored as PanelTab : 'control'
     } catch {
       return 'control'
     }
@@ -438,36 +441,56 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [extraTerminals, setExtraTerminals] = useState<ExtraTerminal[] | null>(null)
   const [panelAddMenuOpen, setPanelAddMenuOpen] = useState(false)
   const [questionChat, setQuestionChat] = useState<QuestionChatState | null>(null)
+  const [questionChatOpen, setQuestionChatOpen] = useState(false)
+  const [questionChatCreating, setQuestionChatCreating] = useState(false)
+  const [questionChatCreateError, setQuestionChatCreateError] = useState('')
+  const questionChatKnownId = useRef('')
+  const questionChatDismissedId = useRef('')
+  const questionChatRequest = useRef(0)
+  const questionChatCreatingRef = useRef(false)
 
   useEffect(() => {
     let alive = true
     let revision = 0
-    let openedId = ''
+    const request = ++questionChatRequest.current
+    questionChatKnownId.current = ''
+    questionChatDismissedId.current = ''
+    questionChatCreatingRef.current = false
     setQuestionChat(null)
+    setQuestionChatOpen(false)
+    setQuestionChatCreating(false)
+    setQuestionChatCreateError('')
     setPanelTab(current => current === 'question' ? 'control' : current)
-    const accept = (state: QuestionChatState | null): void => {
+    const accept = (state: QuestionChatState | null, openNewChat = false): void => {
       if (!alive || !supportsSelectionQuestion(platformId) || (state && state.platformId !== platformId)) return
+      if (state && state.id === questionChatDismissedId.current) return
       setQuestionChat(state)
       if (!state) {
-        openedId = ''
-        setPanelTab(current => current === 'question' ? 'control' : current)
+        if (questionChatKnownId.current && !questionChatCreatingRef.current) {
+          setQuestionChatOpen(false)
+          setPanelTab(current => current === 'question' ? 'control' : current)
+        }
+        questionChatKnownId.current = ''
         return
       }
-      if (state.id === openedId) return
-      openedId = state.id
+      setQuestionChatCreateError('')
+      if (state.id === questionChatKnownId.current) return
+      questionChatKnownId.current = state.id
+      // New chats open their tab; restored snapshots do not steal the active tab.
+      if (!openNewChat) return
+      setQuestionChatOpen(true)
       setPanelTab('question')
       setPanelCollapsed(false)
-      setPanelWidth(previous => Math.min(Math.max(previous, 480), Math.max(PANEL_MIN_WIDTH, window.innerWidth - PANEL_MAX_RESERVE)))
     }
     const unsubscribe = window.api.onQuestionChatState((state, ownerId) => {
       if (ownerId !== sessionId || (state && state.platformId !== platformId)) return
       revision++
-      accept(state)
+      accept(state, true)
     })
     void window.api.getQuestionChatState(sessionId).then(state => {
-      if (revision === 0) accept(state)
+      if (revision === 0 && questionChatRequest.current === request) accept(state)
     }).catch(() => {})
-    return () => { alive = false; unsubscribe() }
+    return () => { alive = false; questionChatRequest.current += 1; unsubscribe() }
   }, [sessionId, platformId])
   const [switchingPlatform, setSwitchingPlatform] = useState(false)
   const [placeholderToggle, setPlaceholderToggle] = useState(false)
@@ -645,10 +668,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), String(panelWidth))
       window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), panelCollapsed ? '1' : '0')
       window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId), panelTab)
+      window.localStorage.setItem(sessionLayoutKey(STORAGE_BACKGROUND_TASKS_OPEN, sessionId), backgroundTasksOpen ? '1' : '0')
     } catch {
       /* storage unavailable; the sizes just will not persist */
     }
-  }, [sessionId, panelWidth, panelCollapsed, panelTab])
+  }, [sessionId, panelWidth, panelCollapsed, panelTab, backgroundTasksOpen])
 
   const conversationId = embed.conversationId
   const transcriptScrollKey = conversationScrollKey(sessionId, platformId, conversationId)
@@ -868,7 +892,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     const left = tab.offsetLeft - strip.offsetLeft
     if (left < strip.scrollLeft) strip.scrollLeft = left
     else if (left + tab.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = left + tab.offsetWidth - strip.clientWidth
-  }, [panelTab, extraTerminals, panelCollapsed])
+  }, [panelTab, extraTerminals, panelCollapsed, backgroundTasksOpen, questionChatOpen])
 
   const addExtraTerminal = useCallback(async (): Promise<void> => {
     const created = await window.api.createExtraTerminal()
@@ -877,6 +901,36 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     setPanelTab(`extra:${created.id}`)
     setSshPickerOpen(false)
   }, [])
+
+  const createSideChat = useCallback(async (): Promise<void> => {
+    if (questionChatCreatingRef.current || !supportsSelectionQuestion(platformId)) return
+    questionChatCreatingRef.current = true
+    const request = ++questionChatRequest.current
+    questionChatDismissedId.current = questionChatKnownId.current
+    questionChatKnownId.current = ''
+    setQuestionChat(null)
+    setQuestionChatCreating(true)
+    setQuestionChatCreateError('')
+    setQuestionChatOpen(true)
+    setPanelTab('question')
+    setSshPickerOpen(false)
+    try {
+      const state = await window.api.createQuestionChat(sessionId, platformId)
+      if (request !== questionChatRequest.current) return
+      if (!state || state.platformId !== platformId) throw new Error('当前平台页面尚未就绪，请稍后重试。')
+      // A newer selection request may have already replaced this blank chat.
+      if (questionChatKnownId.current && questionChatKnownId.current !== state.id) return
+      questionChatKnownId.current = state.id
+      setQuestionChat(previous => previous?.id === state.id ? previous : state)
+    } catch (error) {
+      if (request === questionChatRequest.current) setQuestionChatCreateError(error instanceof Error ? error.message : '侧边聊天新建失败，请重试。')
+    } finally {
+      if (request === questionChatRequest.current) {
+        questionChatCreatingRef.current = false
+        setQuestionChatCreating(false)
+      }
+    }
+  }, [sessionId, platformId])
 
   const closeExtraTerminal = useCallback(async (id: string): Promise<void> => {
     const state = await window.api.closeExtraTerminal(id)
@@ -2288,10 +2342,31 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                 setPanelTab('toolbox')
                 setSshPickerOpen(false)
               }}>工具箱</button>
-              {questionChat ? <button type="button" className="panel__tab" aria-pressed={panelTab === 'question'} onClick={() => {
-                setPanelTab('question')
-                setSshPickerOpen(false)
-              }}>侧边聊天</button> : null}
+              {questionChatOpen ? <span className="panel__tab panel__tab--closable" data-active={panelTab === 'question'}>
+                <button type="button" className="panel__tab-label" aria-pressed={panelTab === 'question'} onClick={() => {
+                  setPanelTab('question')
+                  setSshPickerOpen(false)
+                }}>侧边聊天</button>
+                <button type="button" className="panel__tab-close" disabled={questionChatCreating} title="关闭侧边聊天" aria-label="关闭侧边聊天页签" onClick={() => {
+                  questionChatDismissedId.current = questionChat?.id ?? questionChatKnownId.current
+                  questionChatKnownId.current = ''
+                  questionChatRequest.current += 1
+                  if (questionChat) window.api.questionChatAction(sessionId, questionChat.id, 'close')
+                  setQuestionChat(null)
+                  setQuestionChatOpen(false)
+                  setPanelTab(current => current === 'question' ? 'control' : current)
+                }}>×</button>
+              </span> : null}
+              {backgroundTasksOpen ? <span className="panel__tab panel__tab--closable" data-active={panelTab === 'background'}>
+                <button type="button" className="panel__tab-label" aria-pressed={panelTab === 'background'} onClick={() => {
+                  setPanelTab('background')
+                  setSshPickerOpen(false)
+                }}>后台任务</button>
+                <button type="button" className="panel__tab-close" title="关闭后台任务页签（任务继续运行）" aria-label="关闭后台任务页签" onClick={() => {
+                  setBackgroundTasksOpen(false)
+                  setPanelTab(current => current === 'background' ? 'terminal' : current)
+                }}>×</button>
+              </span> : null}
               {(extraTerminals ?? []).map((item) => (
                 <span key={item.id} className="panel__tab panel__tab--closable" data-active={panelTab === `extra:${item.id}`}>
                   <button type="button" className="panel__tab-label" aria-pressed={panelTab === `extra:${item.id}`} onClick={() => {
@@ -2308,8 +2383,17 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             <PanelAddMenu
               containerRef={panelRef}
               visible={!(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
+              questionChatAvailable={supportsSelectionQuestion(platformId)}
               onOpenChange={setPanelAddMenuOpen}
-              onAdd={() => void addExtraTerminal()}
+              onAdd={item => {
+                if (item === 'background') {
+                  setBackgroundTasksOpen(true)
+                  setPanelTab('background')
+                  setSshPickerOpen(false)
+                } else if (item === 'question') {
+                  void createSideChat()
+                } else void addExtraTerminal()
+              }}
             />
           )}
           <span className="panel__spacer" />
@@ -2538,12 +2622,22 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           <ToolboxPanel gitDisabled={web2termActive} gitCwd={gitCwd} onOpen={openTool} />
         </div>
 
-        {questionChat ? (
-          <div className="panel__view" hidden={panelTab !== 'question'}>
+        {questionChatOpen || questionChat ? (
+          <div className="panel__view" hidden={!questionChatOpen || panelTab !== 'question'}>
             {/* The chat is a native view over this area; it would paint over the + menu. */}
-            <QuestionChatPanel sessionId={sessionId} state={questionChat} visible={panelTab === 'question' && !panelCollapsed && nativeEmbedVisible && !panelAddMenuOpen} />
+            {questionChat ? <QuestionChatPanel key={questionChat.id} sessionId={sessionId} state={questionChat} visible={questionChatOpen && panelTab === 'question' && !panelCollapsed && nativeEmbedVisible && !panelAddMenuOpen} /> : (
+              <section className="question-chat-sidebar question-chat-sidebar--empty" aria-label="侧边聊天">
+                <strong>{questionChatCreateError ? '侧边聊天暂未打开' : '正在新建侧边聊天…'}</strong>
+                {questionChatCreateError ? <>
+                  <p role="alert">{questionChatCreateError}</p>
+                  <button type="button" disabled={questionChatCreating} onClick={() => void createSideChat()}>重试</button>
+                </> : <p>正在打开新的 {activePlatformLabel || 'AI'} 聊天。</p>}
+              </section>
+            )}
           </div>
         ) : null}
+
+        {backgroundTasksOpen ? <BackgroundTasksPane sessionId={sessionId} visible={panelTab === 'background' && !panelCollapsed} /> : null}
 
         {(extraTerminals ?? []).map((item) => (
           <ExtraTerminalPane key={item.id} sessionId={sessionId} terminal={item} visible={panelTab === `extra:${item.id}` && !panelCollapsed} />

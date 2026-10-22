@@ -42,10 +42,12 @@
 .question-chat-sidebar button:hover:not(:disabled) { background: var(--accent-soft); }
 .question-chat-sidebar button:disabled { color: var(--question-sidebar-muted); cursor: default; opacity: .65; }
 .question-chat-sidebar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.question-chat-sidebar .question-chat-sidebar__close { padding: 4px; width: 28px; flex: none; }
 .question-chat-sidebar__actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .question-chat-sidebar__status { margin: 10px 0 0; font-size: 12px; color: var(--question-sidebar-muted); overflow-wrap: anywhere; user-select: text; }
 .question-chat-sidebar__status--error { color: var(--question-sidebar-error); }
 .question-chat-sidebar__slot { flex: 1; min-height: 0; min-width: 0; border-top: 1px solid var(--border); background: var(--bg-elevated); }
 .question-chat-sidebar__slot > p { margin: 24px 12px; text-align: center; color: var(--question-sidebar-muted); }
+.question-chat-sidebar--empty { justify-content: center; gap: 12px; padding: 24px; }
+.question-chat-sidebar--empty strong { font-size: 14px; }
+.question-chat-sidebar--empty p { margin: 0; color: var(--question-sidebar-muted); font-size: 12px; line-height: 1.8; }
 .workspace[data-theme='dark'] .question-chat-sidebar { --question-sidebar-muted: #a0a0a0; --question-sidebar-error: #ffada5; }

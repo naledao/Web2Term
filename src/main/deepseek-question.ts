@@ -64,9 +64,27 @@ export class SelectionQuestion {
   cancel(): void { const previous = this.active; this.active = null; previous?.abort() }
   setTheme(theme: AppTheme): void { this.chat?.setTheme(theme) }
   getState(): QuestionChatState | null { return this.chat?.getState() ?? null }
+  createChat(): QuestionChatState | null {
+    if (this.destroyed || this.contents.isDestroyed() || this.parent.isDestroyed() || !supportsSelectionQuestion(this.platform.id)) return null
+    this.cancel()
+    this.nativeEnterAt = 0
+    const previous = this.chat
+    this.chat = null
+    previous?.close()
+    this.chat = new QuestionChat(this.parent, this.platform, this.theme(), this.contents.getUserAgent(),
+      '', '', this.onState, '')
+    this.chat.setOwnerVisible(this.visible)
+    void this.contents.executeJavaScript('window.__cmdTerminalSelectionQuestion?.dismiss();true').catch(() => {})
+    return this.chat.getState()
+  }
   setVisible(visible: boolean): void { this.visible = visible; this.chat?.setOwnerVisible(visible) }
   setViewport(id: string, bounds: unknown, visible: boolean): void { if (this.chat?.id === id) this.chat.setViewport(bounds, visible) }
-  action(id: string, action: QuestionChatAction): void { if (this.chat?.id === id) this.chat.action(action) }
+  action(id: string, action: QuestionChatAction): void {
+    const chat = this.chat
+    if (chat?.id !== id) return
+    if (action === 'close') this.chat = null
+    chat.action(action)
+  }
   destroy(): void {
     if (this.destroyed) return
     this.destroyed = true

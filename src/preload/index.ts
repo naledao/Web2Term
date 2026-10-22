@@ -1,4 +1,5 @@
 import type { ToolboxInvocation } from '../shared/toolbox'
+import type { BackgroundTasksState } from '../shared/background-tasks'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { IpcChannels } from '../shared/types'
@@ -179,6 +180,7 @@ const api: AppApi = {
   getEmbedState: (): Promise<EmbedState> => ipcRenderer.invoke(IpcChannels.embedGetState),
 
   getQuestionChatState: (sessionId: string): Promise<QuestionChatState | null> => ipcRenderer.invoke(IpcChannels.questionChatGetState, sessionId),
+  createQuestionChat: (sessionId: string, platformId: string): Promise<QuestionChatState | null> => ipcRenderer.invoke(IpcChannels.questionChatCreate, sessionId, platformId),
   onQuestionChatState: (listener: (state: QuestionChatState | null, sessionId: string) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, state: QuestionChatState | null, sessionId: string): void => listener(state, sessionId)
     ipcRenderer.on(IpcChannels.questionChatState, handler)
@@ -442,6 +444,12 @@ removeConversation: (id: string): Promise<Conversation[]> =>
     }
   },
   getExtraTerminals: (): Promise<ExtraTerminalsState> => ipcRenderer.invoke(IpcChannels.extraTerminalsGet),
+  getBackgroundTasks: (sessionId: string): Promise<BackgroundTasksState> => ipcRenderer.invoke(IpcChannels.backgroundTasksGet, sessionId),
+  onBackgroundTasksChanged: (listener: (state: BackgroundTasksState, sessionId: string) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: BackgroundTasksState, sessionId: string): void => listener(state, sessionId)
+    ipcRenderer.on(IpcChannels.backgroundTasksChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.backgroundTasksChanged, handler)
+  },
   createExtraTerminal: (): Promise<{ state: ExtraTerminalsState; id: string } | null> =>
     ipcRenderer.invoke(IpcChannels.extraTerminalCreate),
   sendExtraTerminalInput: (id: string, text: string): Promise<void> =>

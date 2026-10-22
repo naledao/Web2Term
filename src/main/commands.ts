@@ -18,6 +18,7 @@ import type { FileReadContext, FileSendOutcome, StoredFileReadRequest } from '..
 import type { PreparedFileResult } from './file-access'
 import type { ParsedAction, ParsedReadFiles } from '../shared/types'
 import type { CommandDiagnostic } from './command-log'
+import { BACKGROUND_TASK_MARKER } from '../shared/background-tasks'
 
 /**
  * Commands that get a loud warning line. They still RUN in auto mode — this is an
@@ -161,6 +162,8 @@ export interface CommandRunnerDeps {
   /** Mirror streamed remote output the same way. */
   onRemoteOutput: (chunk: string) => void
   onExecutionChanged: (records: ExecutionRecord[]) => void
+  /** Freeze the startup command's machine before awaiting its result. */
+  captureBackgroundTasks?: (record: ExecutionRecord, shell: ExecutionShell) => (output: string) => number
   onTerminalChanged: (state: TerminalState) => void
   /** A user-triggered history replay starts a task before its terminal result is sent. */
   onTaskStarted?: () => void
@@ -890,6 +893,7 @@ export class CommandRunner {
     this.appendLine({ kind: 'command', text: record.command })
     this.broadcastExecutions(conversationId)
 
+    const registerBackgroundTasks = this.deps.captureBackgroundTasks?.(record, shell)
     const result = await this.runOnShell(shell, record.command, record.timeoutSeconds)
     this.diagnostic({
       event: 'finished', messageId, ownerConversationId: conversationId, exitCode: result.exitCode,
@@ -897,6 +901,18 @@ export class CommandRunner {
       timedOut: Boolean(result.timedOut), sessionLost: result.sessionLost === true
     })
     if (this.disposed) return
+
+    if (!result.rejected && registerBackgroundTasks) {
+      try {
+        const count = registerBackgroundTasks(result.output)
+        if (count > 0) this.appendLine({ kind: 'notice', text: `已登记 ${count} 个后台任务，可从右侧「＋ → 后台任务」查看输出。` })
+        else if (result.output.split(/\r?\n/).some(line => line.startsWith(BACKGROUND_TASK_MARKER))) {
+          this.appendLine({ kind: 'notice', text: '后台任务登记信息无效或已登记，请检查真实 PID、任务名和日志绝对路径。' })
+        }
+      } catch (error) {
+        this.appendLine({ kind: 'error', text: `后台任务登记失败：${error instanceof Error ? error.message : String(error)}` })
+      }
+    }
 
     this.deps.store.finishExecution(messageId, {
       status: result.rejected

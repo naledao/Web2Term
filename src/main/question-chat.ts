@@ -81,16 +81,24 @@ export class QuestionChat {
       try { if (['https:', 'http:'].includes(new URL(url).protocol)) void shell.openExternal(url).catch(() => {}) } catch { /* Invalid link. */ }
       return { action: 'deny' }
     })
-    contents.on('dom-ready', () => { void this.installTheme(); void this.checkReady() })
+    contents.on('dom-ready', () => {
+      void this.installTheme()
+      if (this.prompt && this.contextPath) void this.checkReady()
+      else if (!this.closed) this.status('', false)
+    })
     contents.on('did-fail-load', (_event, code, _description, _url, isMain) => {
-      if (isMain && code !== -3) this.fail('page-load', `${platform.label} 加载失败（${code}）。可复制提问，待页面恢复后手动发送。`)
+      if (isMain && code !== -3) this.fail('page-load', this.contextPath
+        ? `${platform.label} 加载失败（${code}）。可复制提问，待页面恢复后手动发送。`
+        : `${platform.label} 加载失败（${code}），请检查网络后重新新建侧边聊天。`)
     })
-    contents.on('render-process-gone', () => this.fail('renderer-gone', `${platform.label} 页面进程已退出，请关闭追问后重新提问。`))
+    contents.on('render-process-gone', () => this.fail('renderer-gone', `${platform.label} 页面进程已退出，请从右侧「＋」重新新建侧边聊天。`))
     void contents.loadURL(platform.homeUrl).catch(() => {
-      if (!this.closed) this.fail('page-load', `${platform.label} 未能打开。请检查网络，或复制提问后手动发送。`)
+      if (!this.closed) this.fail('page-load', this.contextPath
+        ? `${platform.label} 未能打开。请检查网络，或复制提问后手动发送。`
+        : `${platform.label} 未能打开，请检查网络后重新新建侧边聊天。`)
     })
-    this.timer = setInterval(() => { void this.checkReady() }, 500)
-    writeQuestionLog('CHAT-OPEN', { platformId: platform.id, presentation: 'sidebar', terminalInterceptor: false })
+    if (this.prompt && this.contextPath) this.timer = setInterval(() => { void this.checkReady() }, 500)
+    writeQuestionLog('CHAT-OPEN', { platformId: platform.id, presentation: 'sidebar', mode: this.contextPath ? 'selection' : 'blank', terminalInterceptor: false })
     this.onState(this.getState())
   }
 
@@ -118,7 +126,7 @@ export class QuestionChat {
   action(action: QuestionChatAction): void {
     if (this.closed) return
     if (action === 'close') this.close()
-    if (action === 'copy-prompt') { clipboard.writeText(this.prompt); this.status('提问已复制。手动发送时，请同时附上本地 Markdown。', false) }
+    if (action === 'copy-prompt' && this.prompt) { clipboard.writeText(this.prompt); this.status('提问已复制。手动发送时，请同时附上本地 Markdown。', false) }
     if (action === 'open-context' && this.contextPath) {
       void shell.openPath(this.contextPath).then(error => {
         if (error && !this.closed) this.status('无法打开 Markdown，请用“定位文件”查看保存位置。', true)
@@ -154,7 +162,7 @@ export class QuestionChat {
     void this.installTheme()
   }
   private async checkReady(): Promise<void> {
-    if (this.closed || this.attempted || this.checking || !this.ownerVisible || !this.viewportVisible) return
+    if (!this.prompt || !this.contextPath || this.closed || this.attempted || this.checking || !this.ownerVisible || !this.viewportVisible) return
     if (Date.now() - this.startedAt > 90000) {
       this.fail('ready-timeout', `尚未准备好发送。请完成 ${this.platform.label} 登录，再手动上传本地 Markdown 并粘贴提问。`); return
     }
