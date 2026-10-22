@@ -105,6 +105,7 @@ export default function FocusChatView(props: Props): JSX.Element {
   const sendCancelled = useRef(false)
   const [error, setError] = useState('')
   const [actionId, setActionId] = useState<string | null>(null)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
   const alive = useRef(true)
   const composing = useRef(false)
   const draftRef = useRef(draft)
@@ -254,8 +255,8 @@ export default function FocusChatView(props: Props): JSX.Element {
     catch { if (alive.current) setError('操作尚未确认，请打开执行控制查看记录。') }
     finally { if (alive.current) setActionId(null) }
   }
-  const copy = async (text: string): Promise<void> => {
-    try { await navigator.clipboard.writeText(cleanFocusAnswer(text)) }
+  const copy = async (id: string, text: string): Promise<void> => {
+    try { await navigator.clipboard.writeText(cleanFocusAnswer(text)); setCopiedId(id); setTimeout(() => { if (alive.current) setCopiedId(current => current === id ? null : current) }, 2000) }
     catch { setError('复制失败，可以选择正文手动复制。') }
   }
   const renderExecution = (record: ExecutionRecord, delivery?: FocusDelivery, actionable = false): JSX.Element => (
@@ -301,7 +302,7 @@ export default function FocusChatView(props: Props): JSX.Element {
         {attention.map(record => renderExecution(record, deliveryOf(record), true))}
         {turn.notice === 'parse-failed' ? <div className="focus-chat__error" role="alert">模型返回的指令暂时无法识别，任务仍在等待。<button type="button" onClick={props.onControl}>查看执行控制</button></div> : null}
         {answer ? <div className="focus-answer"><Markdown text={answer} theme={theme} /></div> : null}
-        {answer && turn.status !== 'working' ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(answer)}>复制回答</button></div> : null}
+        {answer && turn.status !== 'working' ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(turn.id, answer)}>{copiedId === turn.id ? '已复制' : '复制回答'}</button></div> : null}
       </div>
     </article>
   }
@@ -320,7 +321,7 @@ export default function FocusChatView(props: Props): JSX.Element {
           </article>)}
         {unlinkedAttention.map(record => renderExecution(record, focusDelivery(record), true))}
       </ConversationTranscript>,
-  [state, messages, messagesReady, theme, ownerKey, actionId, props.renderAttachment, props.onControl, props.onRun, props.onSkip])
+  [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, props.renderAttachment, props.onControl, props.onRun, props.onSkip])
   return <section className="focus-chat" aria-label="专注对话" data-theme={theme}>
     <header className="focus-chat__header"><span><img className="focus-chat__brand-icon" src={deepseekIcon} alt="DeepSeek" /></span></header>
     <div className="focus-chat__transcript">
