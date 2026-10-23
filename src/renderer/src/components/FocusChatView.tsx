@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, JSX, ReactNode, RefObject, SyntheticEvent } from 'react'
 import MDEditor from '@uiw/react-md-editor'
 import ConversationTranscript from './ConversationTranscript'
@@ -36,15 +36,43 @@ interface Props {
 /** The expanded process scrolls on its own; a working turn keeps its newest step in view unless the user scrolled up. */
 function ProcessScroll(props: { follow: boolean; children: ReactNode }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
-  useEffect(() => {
+  const follow = useRef(props.follow)
+  const syncRef = useRef<(() => void) | null>(null)
+  useLayoutEffect(() => {
     const element = ref.current
-    if (props.follow && pinned.current && element) element.scrollTop = element.scrollHeight
+    const content = contentRef.current
+    if (!element || !content) return
+    const sync = (): void => {
+      // A closed <details> has no viewport; retain the user's follow preference until it opens.
+      if (follow.current && pinned.current && element.clientHeight > 0) element.scrollTop = element.scrollHeight
+    }
+    syncRef.current = sync
+    const observer = new ResizeObserver(sync)
+    observer.observe(element)
+    // The viewport stops growing at max-height, but new cards and late markdown still grow this wrapper.
+    observer.observe(content)
+    const details = element.closest('details.focus-process')
+    details?.addEventListener('toggle', sync)
+    sync()
+    return () => {
+      observer.disconnect()
+      details?.removeEventListener('toggle', sync)
+      syncRef.current = null
+    }
+  }, [])
+  useLayoutEffect(() => {
+    // Keep the final update in view when a working turn changes to completed.
+    if (props.follow) follow.current = true
+    syncRef.current?.()
+    follow.current = props.follow
   })
   return <div className="focus-process__body" ref={ref} onScroll={event => {
     const element = event.currentTarget
+    if (element.clientHeight === 0) return
     pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24
-  }}>{props.children}</div>
+  }}><div className="focus-process__content" ref={contentRef}>{props.children}</div></div>
 }
 function ProcessHint(): JSX.Element {
   return <span className="focus-process__hint">查看过程
@@ -141,7 +169,7 @@ const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: 
     : <FocusChart key={index} data={block} />)}</>
 })
 
-interface AskContext { range: Range; answer: HTMLElement; text: string; answerText: string; sourceMessageId: string }
+interface AskContext { range: Range; answer: HTMLElement; text: string; answerText: string; sourceMessageId: string; backward: boolean }
 /**
  * 询问 AI for a selection inside a focus-view answer — the page's own popup cannot appear
  * here, because this view covers the page. Only text inside ONE answer counts (marked with
@@ -153,7 +181,7 @@ function SelectionAsk({ owner, root }: { owner: FocusOwner; root: RefObject<HTML
   const [context, setContext] = useState<AskContext | null>(null)
   const [question, setQuestion] = useState('')
   const [status, setStatus] = useState<{ text: string; pending: boolean } | null>(null)
-  const [place, setPlace] = useState<{ left: number; top: number } | null>(null)
+  const [place, setPlace] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null)
   const panel = useRef<HTMLElement>(null)
   const composing = useRef(false)
   const contextRef = useRef<AskContext | null>(null)
@@ -164,22 +192,41 @@ function SelectionAsk({ owner, root }: { owner: FocusOwner; root: RefObject<HTML
     const current = contextRef.current
     if (!current) return
     if (!current.answer.isConnected) { close(); return }
-    const view = root.current?.getBoundingClientRect()
+    const host = root.current
+    if (!host) return
+    const view = host.getBoundingClientRect()
+    const viewport = window.visualViewport
+    const minX = Math.max(view.left, viewport?.offsetLeft ?? 0) + 12
+    const minY = Math.max(view.top, viewport?.offsetTop ?? 0) + 12
+    const right = Math.min(view.right, (viewport?.offsetLeft ?? 0) + (viewport?.width ?? window.innerWidth)) - 12
+    const bottom = Math.min(view.bottom, (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight)) - 12
+    const width = Math.min(360, right - minX)
+    const maxHeight = bottom - minY
+    if (width < 120 || maxHeight < 80) { close(); return }
     const rects = [...current.range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0 &&
-      (!view || (rect.bottom > view.top && rect.top < view.bottom)))
-    const anchor = rects.at(-1)
-    const height = panel.current?.offsetHeight ?? 180
-    const width = Math.min(360, window.innerWidth - 24)
+      rect.bottom > view.top && rect.top < view.bottom && rect.right > view.left && rect.left < view.right)
+    const anchor = current.backward ? rects[0] : rects.at(-1)
+    const height = Math.min(panel.current?.offsetHeight ?? 180, maxHeight)
+    const maxX = Math.max(minX, right - width)
+    const maxY = Math.max(minY, bottom - height)
+    const updatePlace = (left: number, top: number): void => {
+      // Range rectangles use viewport coordinates; the panel is absolute inside the transcript.
+      const next = { left: Math.round(Math.max(minX, Math.min(left, maxX)) - view.left),
+        top: Math.round(Math.max(minY, Math.min(top, maxY)) - view.top), width, maxHeight }
+      setPlace(previous => previous?.left === next.left && previous.top === next.top &&
+        previous.width === next.width && previous.maxHeight === next.maxHeight ? previous : next)
+    }
     if (!anchor) {
       // A draft stays where it is while its author scrolls; an untouched one goes away.
       if (!question && panel.current && !panel.current.contains(document.activeElement)) close()
+      else if (panel.current) {
+        const previous = panel.current.getBoundingClientRect()
+        updatePlace(previous.left, previous.top)
+      }
       return
     }
     const below = anchor.bottom + 10
-    const top = Math.round(Math.max(12, Math.min(below + height + 12 <= window.innerHeight ? below : anchor.top - height - 10, window.innerHeight - height - 12)))
-    const left = Math.round(Math.max(12, Math.min(anchor.left, window.innerWidth - width - 12)))
-    // Runs after every render; an unchanged place must not render again.
-    setPlace(previous => previous?.left === left && previous.top === top ? previous : { left, top })
+    updatePlace(anchor.left, below + height <= bottom ? below : anchor.top - height - 10)
   }
 
   useEffect(() => {
@@ -195,9 +242,12 @@ function SelectionAsk({ owner, root }: { owner: FocusOwner; root: RefObject<HTML
       const text = selection.toString().trim()
       if (!answer || answer !== answerOf(range.endContainer) || !host.contains(answer) || !text) return
       const current = contextRef.current
-      if (current && current.answer === answer && current.text === text) return
+      if (current && current.answer === answer && current.text === text &&
+        current.range.startContainer === range.startContainer && current.range.startOffset === range.startOffset &&
+        current.range.endContainer === range.endContainer && current.range.endOffset === range.endOffset) return
       setContext({ range: range.cloneRange(), answer, text, answerText: answer.innerText,
-        sourceMessageId: answer.dataset.questionAnswer ?? '' })
+        sourceMessageId: answer.dataset.questionAnswer ?? '',
+        backward: selection.focusNode === range.startContainer && selection.focusOffset === range.startOffset })
       setQuestion('')
       setStatus(null)
     }
@@ -217,13 +267,24 @@ function SelectionAsk({ owner, root }: { owner: FocusOwner; root: RefObject<HTML
     }
   })
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!context) return
     position()
     const reposition = (): void => position()
+    const observer = new ResizeObserver(reposition)
+    if (panel.current) observer.observe(panel.current)
+    if (root.current) observer.observe(root.current)
     window.addEventListener('scroll', reposition, true)
     window.addEventListener('resize', reposition)
-    return () => { window.removeEventListener('scroll', reposition, true); window.removeEventListener('resize', reposition) }
+    window.visualViewport?.addEventListener('resize', reposition)
+    window.visualViewport?.addEventListener('scroll', reposition)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('scroll', reposition, true)
+      window.removeEventListener('resize', reposition)
+      window.visualViewport?.removeEventListener('resize', reposition)
+      window.visualViewport?.removeEventListener('scroll', reposition)
+    }
   })
 
   const submit = async (): Promise<void> => {
@@ -263,7 +324,7 @@ function SelectionAsk({ owner, root }: { owner: FocusOwner; root: RefObject<HTML
 
   if (!context) return null
   return <section className="focus-ask" ref={panel} role="dialog" aria-modal="false" aria-labelledby="focus-ask-title" aria-busy={status?.pending === true}
-    style={place ? { left: place.left, top: place.top } : { visibility: 'hidden' }}>
+    style={place ?? { visibility: 'hidden' }}>
     <div className="focus-ask__head">
       <span className="focus-ask__title" id="focus-ask-title">
         <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 14.5 2.75 17v-4.25a6.75 6.75 0 1 1 3 2.25H5Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" /><path d="M6.75 8h6.5M6.75 11h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
@@ -581,8 +642,8 @@ export default function FocusChatView(props: Props): JSX.Element {
     </header>
     <div className="focus-chat__transcript" ref={transcriptRef}>
       {transcript}
+      <SelectionAsk owner={owner} root={transcriptRef} />
     </div>
-    <SelectionAsk owner={owner} root={transcriptRef} />
     <div className="focus-chat__bottom">
       {props.needsAnswer ? <div className="focus-chat__notice" role="status">{modelLabel} 需要你的回答，任务正在等待。<button type="button" onClick={props.onQuestion}>回答问题</button></div> : null}
       {!ready ? <div className="focus-chat__notice">网页尚未就绪。<button type="button" onClick={props.onOriginal}>切回原始视图完成登录或检查页面</button></div> : null}

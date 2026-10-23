@@ -3,6 +3,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Filemanager, Willow } from '@svar-ui/react-filemanager'
 import MDEditor from '@uiw/react-md-editor'
 import { Menu } from '@base-ui/react/menu'
+import { Dialog } from '@base-ui/react/dialog'
 import AvatarEditor from 'react-avatar-editor'
 import type { AvatarEditorRef } from 'react-avatar-editor'
 import SshDirectoryPicker from './components/SshDirectoryPicker'
@@ -652,6 +653,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    */
   const sshLive = sshActive && (ssh?.status === 'connected' || ssh?.status === 'connecting')
   const slotRef = useRef<HTMLDivElement>(null)
+  const [appContainer, setAppContainer] = useState<HTMLDivElement | null>(null)
   const userAvatarInputRef = useRef<HTMLInputElement>(null)
   const userAvatarEditorRef = useRef<AvatarEditorRef>(null)
   /** Keep terminal popovers inside the sidebar, away from the native chat view. */
@@ -2164,7 +2166,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }
 
   return (
-    <div className={'app' + (panelCollapsed ? ' app--panel-collapsed' : '') + (isFocusView ? ' app--focus' : '')} style={{ '--panel-width': `${panelWidth}px` } as CSSProperties}>
+    <div ref={setAppContainer} className={'app' + (panelCollapsed ? ' app--panel-collapsed' : '') + (isFocusView ? ' app--focus' : '')} style={{ '--panel-width': `${panelWidth}px` } as CSSProperties}>
       <header className="topbar">
         <div className="brand">
           <span className="brand__mark" aria-hidden="true">
@@ -3828,11 +3830,19 @@ ${record.command}`
           </div>
         </div>
       ) : null}
-      {sshDialogOpen ? (
-        <AppPopover
+      {sshDialogOpen && appContainer ? (
+        <Dialog.Root open disablePointerDismissal={sshBusy} onOpenChange={(open, details) => {
+          if (open) return
+          if (sshBusy) { details.cancel(); return }
+          setSshDialogOpen(false)
+        }}>
+        <Dialog.Portal container={appContainer}>
+        <Dialog.Popup
           className="modal ssh-connect-overlay"
           aria-label="SSH 连接"
-         onClose={() => setSshDialogOpen(false)} busy={sshBusy}>
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !sshBusy) setSshDialogOpen(false)
+          }}>
           <div className="ssh-connect-modal">
             <div className="ssh-connect__head">
               <span className="ssh-connect__title">SSH 连接</span>
@@ -3847,7 +3857,7 @@ ${record.command}`
                   断开当前连接
                 </button>
               ) : null}
-              <button type="button" className="ssh-connect__close" aria-label="关闭" onClick={() => setSshDialogOpen(false)}>×</button>
+              <Dialog.Close type="button" className="ssh-connect__close" aria-label="关闭" disabled={sshBusy}>×</Dialog.Close>
             </div>
 
             <div className="ssh-connect__content">
@@ -3942,7 +3952,7 @@ ${record.command}`
                 </div>
 
                 <div className="ssh-connect__foot">
-                  <button type="button" className="ssh-connect__cancel" onClick={() => setSshDialogOpen(false)}>取消</button>
+                  <Dialog.Close type="button" className="ssh-connect__cancel" disabled={sshBusy}>取消</Dialog.Close>
                   <button type="submit" className="ssh-connect__submit" disabled={sshBusy || sshDraft.host.trim() === '' || sshDraft.username.trim() === ''}>
                     {sshBusy ? '连接中…' : '连接'}
                   </button>
@@ -3950,7 +3960,9 @@ ${record.command}`
               </form>
             </div>
           </div>
-        </AppPopover>
+        </Dialog.Popup>
+        </Dialog.Portal>
+        </Dialog.Root>
       ) : null}
       {commandPreview !== null ? (
         <Suspense fallback={

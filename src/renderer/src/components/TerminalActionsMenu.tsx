@@ -22,10 +22,11 @@ interface TerminalActionsMenuProps {
 }
 
 type MenuPage = 'main' | 'connection'
-type IconName = 'more' | 'stop' | 'reset' | 'connection' | 'folder' | 'edit' | 'upload'
+type IconName = 'down' | 'stop' | 'reset' | 'connection' | 'folder' | 'edit' | 'upload'
   | 'files' | 'back' | 'next' | 'close'
 
-const ICON_PATHS: Record<Exclude<IconName, 'more'>, string> = {
+const ICON_PATHS: Record<IconName, string> = {
+  down: 'm6 9 6 6 6-6',
   stop: 'M5 5h14v14H5z',
   reset: 'M3 11a9 9 0 1 1 2.6 7M3 4v7h7',
   connection: 'M7 3v4m10-4v4M5 7h14v4a7 7 0 0 1-14 0V7zm7 11v3',
@@ -40,7 +41,7 @@ const ICON_PATHS: Record<Exclude<IconName, 'more'>, string> = {
 
 function ActionIcon({ name }: { name: IconName }): JSX.Element {
   return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    {name === 'more' ? <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></> : <path d={ICON_PATHS[name]} />}
+    <path d={ICON_PATHS[name]} />
   </svg>
 }
 
@@ -114,7 +115,8 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
     setOpen(nextOpen)
   }}>
     <Popover.Trigger ref={triggerRef} className="terminal-actions__trigger" title="终端操作" aria-label="终端操作">
-      <ActionIcon name="more" />
+      <span>终端操作</span>
+      <span className="terminal-actions__trigger-chevron"><ActionIcon name="down" /></span>
     </Popover.Trigger>
     <Popover.Portal container={containerRef} className="terminal-actions__portal">
       <Popover.Positioner positionMethod="fixed" side="bottom" align="end" sideOffset={8} collisionPadding={8}
