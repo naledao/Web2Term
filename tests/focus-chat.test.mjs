@@ -41,6 +41,39 @@ const page = (id, answer, parts = []) => ({ path: '/a/chat/s/chat-1', ready: tru
   waiting: true, generating: 'active', reply: { sourceMessageId: id, answer, parts } })
 const onlyTurn = chat => chat.turns('deepseek', 'chat-1')[0]
 
+test('unexecuted malformed requests are persisted outside the shell queue with actionable recovery state', () => {
+  const { chat, store } = fixture()
+  chat.begin('deepseek', 'chat-1', '登录 GitHub')
+  const failure = { messageId: 'bad-1', text: '{"command":"gh auth login","background":"true"}', parseErrorCode: 'invalid-background' }
+  chat.parseFailed('deepseek', failure)
+  chat.parseFailed('deepseek', failure)
+  assert.equal(onlyTurn(chat).status, 'blocked')
+  assert.equal(onlyTurn(chat).executionIds.length, 0)
+  assert.equal(onlyTurn(chat).parseFailures.length, 1)
+  const recovery = { messageId: 'bad-1', token: 1, generation: 0, status: 'sent', message: 'Waiting for corrected request' }
+  chat.commandRecovery('deepseek', recovery)
+  assert.equal(onlyTurn(chat).status, 'working')
+  assert.equal(onlyTurn(chat).commandRecovery.status, 'sent')
+  const restored = new FocusChat('workspace-1', store)
+  const turn = onlyTurn(restored)
+  assert.equal(turn.parseFailures[0].text, failure.text)
+  assert.equal(turn.commandRecovery.status, 'blocked')
+  assert.equal(turn.executionIds.length, 0)
+})
+
+test('valid corrected commands clear recovery notices while retaining the unexecuted request history', () => {
+  const { chat } = fixture()
+  chat.begin('deepseek', 'chat-1', '登录 GitHub')
+  chat.parseFailed('deepseek', { messageId: 'bad-1', text: 'bad request', parseErrorCode: 'invalid-json' })
+  chat.commandRecovery('deepseek', { messageId: 'bad-1', token: 1, generation: 0, status: 'failed', message: 'Correction failed' })
+  assert.equal(onlyTurn(chat).status, 'blocked')
+  chat.command('deepseek', 'correct-1', true)
+  assert.equal(onlyTurn(chat).notice, undefined)
+  assert.equal(onlyTurn(chat).commandRecovery, undefined)
+  assert.equal(onlyTurn(chat).parseFailures.length, 1)
+  assert.deepEqual([...onlyTurn(chat).executionIds], ['correct-1'])
+})
+
 test('hides only an explicit injected prefix and preserves genuine user wording', () => {
   assert.equal(shared.cleanFocusUserText('SYSTEM\u0000\u0001真正的问题\n第二行'), '真正的问题\n第二行')
   assert.equal(shared.cleanFocusUserText('上一条命令执行结果是什么意思？'), '上一条命令执行结果是什么意思？')

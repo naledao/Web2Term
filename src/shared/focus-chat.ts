@@ -1,4 +1,4 @@
-import type { ExecutionRecord } from './types'
+import type { CommandRecoveryState, ExecutionRecord } from './types'
 
 export type ChatView = 'original' | 'local' | 'focus'
 
@@ -25,7 +25,7 @@ export function focusPlatformLabel(platformId: string): string {
 export function focusPlatformLabels(): string {
   return Object.values(FOCUS_PLATFORMS).map(platform => platform.label).join('、')
 }
-export type FocusTurnStatus = 'working' | 'answered' | 'stopped'
+export type FocusTurnStatus = 'working' | 'answered' | 'stopped' | 'blocked'
 /** `superseded`: a newer execution took over before this result was handed back; nothing to do. */
 export type FocusDelivery = 'pending' | 'sent' | 'blocked' | 'failed' | 'superseded'
 export const FOCUS_MAX_FILES = 3
@@ -72,6 +72,9 @@ export interface FocusTurn {
   executionCycles: Record<string, number>
   deliveries: Record<string, FocusDelivery>
   notice?: 'parse-failed'
+  commandRecovery?: CommandRecoveryState
+  /** Unexecuted protocol requests; never added to the shell execution queue. */
+  parseFailures?: { messageId: string; text: string; code: string; createdAt: number }[]
 }
 export interface FocusOwner {
   sessionId: string

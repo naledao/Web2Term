@@ -127,7 +127,7 @@ function sameConsole(view: NacosViewState, url: string): boolean {
  */
 export default function NacosDialog({ open, theme, onClose }: NacosDialogProps): ReactElement | null {
   const api = useToolApi()
-  const { visible, active } = useToolSurface()
+  const { active } = useToolSurface()
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -222,15 +222,6 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
 
   // Minimize only hides the native view. Destroy it when this tool really closes.
   useEffect(() => () => { void api.closeNacosView().catch(() => {}) }, [api])
-
-  useEffect(() => {
-    if (!visible) return
-    const keydown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !event.defaultPrevented && !pendingDelete) onClose()
-    }
-    window.addEventListener('keydown', keydown)
-    return () => window.removeEventListener('keydown', keydown)
-  }, [visible, onClose, pendingDelete])
 
   const addTab = useCallback((): void => {
     newTabRef.current += 1
@@ -387,8 +378,6 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
   return (
     <div
       className={theme === 'dark' ? 'modal modal--nacos nacos-page--dark' : 'modal modal--nacos'}
-      role="dialog"
-      aria-modal="true"
       aria-label="Nacos 连接"
     >
       <div className="nacos-page">
@@ -507,7 +496,7 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
                 <p className="nacos-page__empty-sub">从左侧选择已保存的连接，或点“添加连接”填写新的地址。</p>
               </div>
             ) : activeTab.kind === 'console' ? (
-              <NacosConsoleView tab={activeTab} />
+              <NacosConsoleView tab={activeTab} blocked={pendingDelete !== null} />
             ) : (
               <div className="nacos-page__card">
                 <div className="nacos-page__card-head">
@@ -601,7 +590,7 @@ export default function NacosDialog({ open, theme, onClose }: NacosDialogProps):
  * rectangle shared by the whole dialog, so it must be measured only while a console page is
  * on screen — and hidden the moment this page goes away, which is what unmounting does here.
  */
-function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
+function NacosConsoleView({ tab, blocked }: { tab: ConsoleTab; blocked: boolean }): ReactElement {
   const api = useToolApi()
   const { visible } = useToolSurface()
   const slotRef = useRef<HTMLDivElement>(null)
@@ -614,7 +603,7 @@ function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
 
   useEffect(() => {
     const element = slotRef.current
-    if (!visible || !element) {
+    if (!visible || blocked || !element) {
       api.setNacosVisible(false)
       return
     }
@@ -642,7 +631,7 @@ function NacosConsoleView({ tab }: { tab: ConsoleTab }): ReactElement {
       api.setNacosVisible(false)
       api.setNacosBounds({ x: 0, y: 0, width: 0, height: 0 })
     }
-  }, [visible, api])
+  }, [visible, blocked, api])
 
   return (
     <div className="nacos-page__console">

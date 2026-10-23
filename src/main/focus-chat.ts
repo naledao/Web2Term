@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { FocusTurn, FocusSegment, FocusPageSnapshot, FocusDelivery, FocusAttachmentInfo } from '../shared/focus-chat'
+import type { CommandRecoveryState, InterceptorPageEvent } from '../shared/types'
 import { cleanFocusAnswer, cleanFocusUserText, supportsFocusView } from '../shared/focus-chat'
 
 interface FocusStore {
@@ -30,8 +31,13 @@ export class FocusChat {
       const turns = conversationId ? this.store.listFocusTurns(this.sessionId, platformId, conversationId) : []
       // Restored work is history. Never claim a previous process is still working.
       const last = turns.at(-1)
-      const resumable = last?.status === 'working' ? last.id : null
-      for (const turn of turns) if (turn.status === 'working') turn.status = 'stopped'
+      const resumable = last && ['working', 'blocked'].includes(last.status) ? last.id : null
+      for (const turn of turns) {
+        if (turn.status === 'working') turn.status = 'stopped'
+        if (turn.commandRecovery && ['pending', 'sent'].includes(turn.commandRecovery.status)) {
+          turn.commandRecovery = { ...turn.commandRecovery, status: 'blocked', message: '之前的指令格式恢复已中断，请在原始视图核对后继续。' }
+        }
+      }
       entry = { conversationId, turns, current: null, cycle: 0, dirty: false, lastSave: 0, resumable }
     }
     this.entries.set(platformId, entry)
@@ -64,10 +70,28 @@ export class FocusChat {
   ownsTurn(platformId: string, turnId: string): boolean {
     return this.entries.get(platformId)?.turns.some(turn => turn.id === turnId) === true
   }
-  parseFailed(platformId: string): void {
-    const current = this.current(platformId)
+  parseFailed(platformId: string, failure?: InterceptorPageEvent): void {
+    const current = failure?.live === true ? this.live(platformId) : this.current(platformId)
     if (!current || current.turn.status === 'stopped') return
     current.turn.notice = 'parse-failed'
+    current.turn.status = 'blocked'
+    if (failure?.messageId) {
+      const failures = current.turn.parseFailures ??= []
+      if (!failures.some(item => item.messageId === failure.messageId)) failures.push({
+        messageId: failure.messageId, text: (failure.text ?? '').slice(0, 20000),
+        code: failure.parseErrorCode ?? 'invalid-json', createdAt: Date.now()
+      })
+      current.turn.parseFailures = failures.slice(-10)
+    }
+    current.entry.dirty = true
+    this.persist(platformId, current.entry, true)
+  }
+  commandRecovery(platformId: string, recovery: CommandRecoveryState): void {
+    const current = this.current(platformId)
+    if (!current || current.turn.status === 'stopped') return
+    current.turn.commandRecovery = { ...recovery }
+    current.turn.notice = 'parse-failed'
+    current.turn.status = recovery.status === 'pending' || recovery.status === 'sent' ? 'working' : 'blocked'
     current.entry.dirty = true
     this.persist(platformId, current.entry, true)
   }
@@ -143,6 +167,7 @@ export class FocusChat {
     segment.answer = cleanFocusAnswer(text)
     segment.settled = true
     delete turn.notice
+    delete turn.commandRecovery
     turn.status = 'answered'
     turn.updatedAt = Date.now()
     entry.dirty = true
@@ -185,6 +210,7 @@ export class FocusChat {
     segment.answer = ''
     segment.settled = true
     delete turn.notice
+    delete turn.commandRecovery
     turn.status = 'working'
     turn.updatedAt = Date.now()
     entry.dirty = true
@@ -211,7 +237,7 @@ export class FocusChat {
   }
   stop(platformId: string, expectedTurnId?: string): void {
     const current = this.current(platformId)
-    if (!current || current.turn.status !== 'working' || (expectedTurnId && current.turn.id !== expectedTurnId)) return
+    if (!current || !['working', 'blocked'].includes(current.turn.status) || (expectedTurnId && current.turn.id !== expectedTurnId)) return
     current.turn.status = 'stopped'
     current.turn.updatedAt = Date.now()
     current.entry.dirty = true

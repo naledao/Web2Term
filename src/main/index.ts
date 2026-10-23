@@ -1,6 +1,7 @@
 import { ToolboxRouter } from './toolbox-router'
 import { TOOLBOX_METHODS } from '../shared/toolbox'
 import { supportsFocusView } from '../shared/focus-chat'
+import type { FocusOwner } from '../shared/focus-chat'
 import type { ToolboxInvocation, ToolboxMethod } from '../shared/toolbox'
 import type { AppApi } from '../shared/types'
 import type { BackgroundTasksState } from '../shared/background-tasks'
@@ -17,6 +18,11 @@ import {
   isConversationId
 } from '../shared/types'
 import { readGitDiff, readGitLog } from './git'
+import { getGithubCliState, logoutGithubCli } from './github-cli'
+import { getGithubRepositoryPage } from './github-repositories'
+import { cloneGithubRepository } from './github-clone'
+import { validGithubCloneRequest } from '../shared/github'
+import type { GithubCloneRequest, GithubCloneResult } from '../shared/github'
 import { registerPdfAssetHandler, registerPdfAssetScheme } from './pdf-assets'
 import { sshWorkingDirectory } from '../shared/ssh-directory'
 import { nodeFallback } from './environment'
@@ -1010,6 +1016,59 @@ function registerIpcHandlers(): void {
   const fromManager = (event: IpcMainEvent | IpcMainInvokeEvent): boolean =>
     managerWindow !== null && !managerWindow.isDestroyed() && event.sender === managerWindow.webContents
 
+  const requireGithubSender = (event: IpcMainInvokeEvent): void => {
+    if (!fromManager(event) || event.senderFrame !== event.sender.mainFrame) throw new Error('请求不是来自应用主窗口。')
+  }
+  ipcMain.handle(IpcChannels.githubCliGetState, (event) => {
+    requireGithubSender(event)
+    return getGithubCliState()
+  })
+  ipcMain.handle(IpcChannels.githubCliOpenInstall, async (event) => {
+    requireGithubSender(event)
+    await shell.openExternal('https://cli.github.com/')
+  })
+  ipcMain.handle(IpcChannels.githubCliLogout, (event, account: string) => {
+    requireGithubSender(event)
+    return logoutGithubCli(account)
+  })
+  ipcMain.handle(IpcChannels.githubLoginTask, (event, owner) => {
+    requireGithubSender(event)
+    if (!owner || typeof owner !== 'object' || typeof owner.sessionId !== 'string' || owner.sessionId.length > 128 ||
+      typeof owner.platformId !== 'string' || !CHAT_PLATFORMS.some(platform => platform.id === owner.platformId) ||
+      (owner.conversationId !== null && (typeof owner.conversationId !== 'string' || owner.conversationId.length > 512))) {
+      return { status: 'blocked', message: '当前对话无效，请重新选择会话。' }
+    }
+    const runtime = runtimeForEvent(event)
+    return runtime && runtime.id === owner.sessionId ? runtime.requestGithubLogin(owner)
+      : { status: 'blocked', message: '当前会话已切换，请重新操作。' }
+  })
+  ipcMain.handle(IpcChannels.githubRepositoriesPage, (event, request) => {
+    requireGithubSender(event)
+    return getGithubRepositoryPage(request)
+  })
+  ipcMain.handle(IpcChannels.githubRepositoryClone, (event, request: GithubCloneRequest): Promise<GithubCloneResult> | GithubCloneResult => {
+    requireGithubSender(event)
+    if (!validGithubCloneRequest(request)) return { status: 'error', directory: null, message: '仓库克隆请求无效。' }
+    const runtime = runtimeForEvent(event)
+    if (!runtime || runtime.id !== request.sessionId) return { status: 'error', directory: null, message: '原会话已切换，请重新操作。' }
+    return cloneGithubRepository(request, {
+      cwd: runtime.runner.getLocalWorkingDirectory(),
+      current: () => runtimeForEvent(event) === runtime && runtimes.get(request.sessionId) === runtime,
+      onProgress: progress => {
+        if (!event.sender.isDestroyed() && fromManager(event)) {
+          event.sender.send(IpcChannels.githubRepositoryCloneProgress, { ...request, progress })
+        }
+      },
+      chooseDirectory: async defaultPath => {
+        const window = runtime.window
+        if (!window || window.isDestroyed()) return null
+        const selection = await dialog.showOpenDialog(window, { title: `克隆 ${request.fullName}`,
+          defaultPath, buttonLabel: '克隆到此目录', properties: ['openDirectory', 'createDirectory'] })
+        return selection.canceled ? null : selection.filePaths[0] ?? null
+      }
+    })
+  })
+
   const toolbox = new ToolboxRouter<SessionRuntime>((id) => runtimes.get(id))
   const tool = <K extends ToolboxMethod>(method: K, handler: (runtime: SessionRuntime, ...args: Parameters<AppApi[K]>) => unknown): void => {
     toolbox.register(method, handler)
@@ -1366,6 +1425,11 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.interceptorEndTask, async (event): Promise<InterceptorStatus> => {
     const runtime = runtimeForEvent(event)
     return runtime ? await runtime.endTask() : FALLBACK_INTERCEPTOR_STATE
+  })
+  ipcMain.handle(IpcChannels.commandRecoveryRetry, async (event, owner: FocusOwner, token: number): Promise<string> => {
+    if (!owner || typeof owner.sessionId !== 'string' || typeof owner.platformId !== 'string' ||
+      !(owner.conversationId === null || typeof owner.conversationId === 'string')) return 'stale'
+    return Number.isSafeInteger(token) ? runtimeForEvent(event)?.retryCommandRecovery(owner, token) ?? 'stale' : 'stale'
   })
 
   ipcMain.handle(IpcChannels.automationGetState, (event): AutomationState => runtimeForEvent(event)?.runner.getAutomation() ?? FALLBACK_AUTOMATION)

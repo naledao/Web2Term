@@ -16,6 +16,19 @@ function directory(t) {
 }
 const records = (path) => readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line.slice(line.indexOf(' ') + 1)))
 
+test('command parsing and recovery retain only bounded diagnostic metadata', () => {
+  const value = replyDiagnosticMetadata('deepseek', { event: 'parse-failed', live: true,
+    commandSource: 'rendered', parseErrorCode: 'invalid-json', parseErrorField: 'command', parseErrorOffset: 14,
+    parseFailureToken: 2, recoveryStatus: 'pending', text: 'private command', lastObject: 'private candidate' }, context)
+  assert.equal(value.commandSource, 'rendered')
+  assert.equal(value.parseErrorCode, 'invalid-json')
+  assert.equal(value.parseErrorOffset, 14)
+  assert.equal(value.parseFailureToken, 2)
+  assert.equal(value.recoveryStatus, 'pending')
+  assert.ok(!JSON.stringify(value).includes('private'))
+  assert.equal(replyDiagnosticMetadata('deepseek', { event: 'command-recovery', recoveryStatus: 'sent' }, context).recoveryStatus, 'sent')
+})
+
 test('scan metadata preserves correlation and waiting/generation evidence', () => {
   const value = replyDiagnosticMetadata('claude', {
     ...payload, awaitingReplyBefore: true, replyStreamingState: 'true',

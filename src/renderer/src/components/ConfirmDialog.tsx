@@ -1,6 +1,9 @@
 import { useToolSurface } from './ToolSurfaceContext'
-﻿import { useEffect } from 'react'
+import { useRef } from 'react'
+import { Popover } from '@base-ui/react/popover'
+import AppPopover from './AppPopover'
 import type { ReactElement, ReactNode } from 'react'
+import './ConfirmPopover.css'
 
 export interface ConfirmDialogItem {
   icon: ReactNode
@@ -29,7 +32,6 @@ export default function ConfirmDialog({
   open,
   title,
   description,
-  icon = '!',
   confirmLabel = '确认',
   cancelLabel = '取消',
   busy = false,
@@ -41,50 +43,37 @@ export default function ConfirmDialog({
   onCancel
 }: ConfirmDialogProps): ReactElement | null {
   const { visible } = useToolSurface()
-  useEffect(() => {
-    if (!open || !visible || busy || !dismissOnEscape) return
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onCancel()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, visible, busy, dismissOnEscape, onCancel])
+  const cancelButton = useRef<HTMLButtonElement>(null)
 
   if (!open) return null
 
   return (
-    <div
-      className="confirm-dialog"
-      role="dialog"
-      aria-modal="true"
+    <AppPopover
+      className="confirm-popover"
       aria-label={title}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy && dismissOnBackdrop) onCancel()
-      }}
+      open={visible} keepMounted busy={busy} onClose={onCancel}
+      dismissOnOutside={dismissOnBackdrop} dismissOnEscape={dismissOnEscape} initialFocus={cancelButton}
     >
-      <div className="confirm-dialog__box">
-        <button type="button" className="confirm-dialog__close" aria-label="关闭" disabled={busy} onClick={onCancel}>×</button>
-        <div className={danger ? 'confirm-dialog__icon confirm-dialog__icon--danger' : 'confirm-dialog__icon'}>{icon}</div>
-        <h2 className="confirm-dialog__title">{title}</h2>
-        {description ? <p className="confirm-dialog__description">{description}</p> : null}
+      <div className="confirm-popover__body">
+        <Popover.Title className="confirm-popover__title">{title}</Popover.Title>
+        {description ? <Popover.Description className="confirm-popover__description">{description}</Popover.Description> : null}
         {items.length > 0 ? (
-          <div className="confirm-dialog__items">
+          <dl className="confirm-popover__details">
             {items.map((item, index) => (
-              <div className="confirm-dialog__item" key={`${item.label}-${index}`}>
-                <span className="confirm-dialog__item-icon">{item.icon}</span>
-                <span className="confirm-dialog__item-label">{item.label}</span>
-                <span className={`confirm-dialog__badge confirm-dialog__badge--${item.tone ?? 'neutral'}`}>{item.value}</span>
+              <div className="confirm-popover__detail" key={`${item.label}-${index}`}>
+                <dt>{item.label}</dt>
+                <dd data-tone={item.tone ?? 'neutral'}>{item.value}</dd>
               </div>
             ))}
-          </div>
+          </dl>
         ) : null}
-        <div className="confirm-dialog__foot">
-          <button type="button" className="confirm-dialog__cancel" disabled={busy} onClick={onCancel}>{cancelLabel}</button>
-          <button type="button" className={danger ? 'confirm-dialog__confirm confirm-dialog__confirm--danger' : 'confirm-dialog__confirm'} disabled={busy} onClick={onConfirm}>
+        <div className="confirm-popover__actions">
+          <button ref={cancelButton} type="button" className="confirm-popover__cancel" disabled={busy} onClick={onCancel}>{cancelLabel}</button>
+          <button type="button" className="confirm-popover__confirm" data-danger={danger} disabled={busy} onClick={onConfirm}>
             {busy ? '处理中…' : confirmLabel}
           </button>
         </div>
       </div>
-    </div>
+    </AppPopover>
   )
 }

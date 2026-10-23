@@ -1,18 +1,8 @@
+import AppPopover from './AppPopover'
 import { useEffect, useRef, useState } from 'react'
-import type { KeyboardEvent, ReactElement } from 'react'
+import type { ReactElement } from 'react'
 import type { WorkspaceProject } from '@shared/types'
 import './WorkspaceProjectDialog.css'
-
-export function containWorkspaceDialogFocus(event: KeyboardEvent<HTMLElement>): void {
-  if (event.key !== 'Tab') return
-  const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])')]
-    .filter(element => element.getClientRects().length > 0)
-  const first = controls[0]
-  const last = controls.at(-1)
-  if (!first) { event.preventDefault(); return }
-  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
-  if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
-}
 
 export default function WorkspaceProjectDialog({ project, onClose, onSaved }: {
   project: WorkspaceProject | null; onClose(): void; onSaved(project: WorkspaceProject): void
@@ -45,9 +35,7 @@ export default function WorkspaceProjectDialog({ project, onClose, onSaved }: {
     } catch (cause) { if (mounted.current) setError(cause instanceof Error ? cause.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '') : '保存项目失败，请重试。') }
     finally { busy.current = false; if (mounted.current) setSaving(false) }
   }
-  return <div className="modal workspace-project-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-project-heading"
-    onMouseDown={event => { if (event.target === event.currentTarget && !busy.current) onClose() }}
-    onKeyDown={event => { containWorkspaceDialogFocus(event); if (event.key === 'Escape' && !busy.current) { event.stopPropagation(); onClose() } }}>
+  return <AppPopover className="modal workspace-project-dialog" aria-labelledby="workspace-project-heading" onClose={onClose} busy={saving || choosing}>
     <form className="workspace-project-dialog__box" onSubmit={event => { event.preventDefault(); void save() }}>
       <div className="workspace-project-dialog__heading"><h2 id="workspace-project-heading">{project ? '编辑项目' : '新建项目'}</h2>
         <button type="button" aria-label="关闭" disabled={saving || choosing} onClick={onClose}>×</button></div>
@@ -62,5 +50,5 @@ export default function WorkspaceProjectDialog({ project, onClose, onSaved }: {
       <div className="workspace-project-dialog__footer"><button type="button" disabled={saving || choosing} onClick={onClose}>取消</button>
         <button type="submit" className="is-primary" disabled={!name.trim() || saving || choosing}>{saving ? '保存中…' : project ? '保存' : '创建项目'}</button></div>
     </form>
-  </div>
+  </AppPopover>
 }

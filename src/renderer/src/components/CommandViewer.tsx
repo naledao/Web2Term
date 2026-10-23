@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { Dialog } from '@base-ui/react/dialog'
+import { Popover } from '@base-ui/react/popover'
+import AppPopover from './AppPopover'
 import CodeMirror, { EditorState, EditorView, oneDarkTheme } from '@uiw/react-codemirror'
 import type { BasicSetupOptions, ReactCodeMirrorRef } from '@uiw/react-codemirror'
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/language'
@@ -78,49 +79,44 @@ export default function CommandViewer({ command, description, language, theme, o
   ], [language, theme, wrapLines])
 
   return (
-    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose() }}>
-      <Dialog.Portal>
-        <Dialog.Backdrop className="command-viewer__backdrop" />
-        <Dialog.Popup
-          className="command-viewer"
-          data-theme={theme}
-          initialFocus={() => editorRef.current?.view?.contentDOM ?? true}
-        >
-          <header className="command-viewer__head">
-            <div className="command-viewer__heading">
-              <Dialog.Title className="command-viewer__title">完整指令</Dialog.Title>
-              <span className="command-viewer__language">{language === 'powershell' ? 'PowerShell' : 'Shell / zsh / bash'}</span>
-            </div>
-            <div className="command-viewer__tools">
-              {copyState === 'failed' ? <span className="command-viewer__error" role="alert">复制失败，请重试。</span> : null}
-              <button type="button" className="command-viewer__button" onClick={async () => {
-                try {
-                  // Preserve the original instruction, including whitespace and line endings.
-                  await navigator.clipboard.writeText(command)
-                  setCopyState('copied')
-                } catch { setCopyState('failed') }
-              }}>{copyState === 'copied' ? '已复制' : '复制指令'}</button>
-              <button type="button" className="command-viewer__button" aria-pressed={wrapLines}
-                onClick={() => setWrapLines((current) => !current)}>自动换行</button>
-              <Dialog.Close className="command-viewer__button" title="关闭弹窗（Esc）">关闭</Dialog.Close>
-            </div>
-          </header>
-          {description !== '' ? <Dialog.Description className="command-viewer__description">{description}</Dialog.Description> : null}
-          <div className="command-viewer__body">
-            <CodeMirror
-              ref={editorRef}
-              value={command}
-              theme={theme === 'dark' ? oneDarkTheme : 'light'}
-              height="100%"
-              extensions={extensions}
-              basicSetup={VIEWER_SETUP}
-              readOnly
-              editable={false}
-              indentWithTab={false}
-            />
-          </div>
-        </Dialog.Popup>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <AppPopover onClose={onClose} aria-label="完整指令"
+      className="command-viewer"
+      data-theme={theme}
+      initialFocus={() => editorRef.current?.view?.contentDOM ?? true}
+    >
+      <header className="command-viewer__head">
+        <div className="command-viewer__heading">
+          <Popover.Title className="command-viewer__title">完整指令</Popover.Title>
+          <span className="command-viewer__language">{language === 'powershell' ? 'PowerShell' : 'Shell / zsh / bash'}</span>
+        </div>
+        <div className="command-viewer__tools">
+          {copyState === 'failed' ? <span className="command-viewer__error" role="alert">复制失败，请重试。</span> : null}
+          <button type="button" className="command-viewer__button" onClick={async () => {
+            try {
+              // Preserve the original instruction, including whitespace and line endings.
+              await navigator.clipboard.writeText(command)
+              setCopyState('copied')
+            } catch { setCopyState('failed') }
+          }}>{copyState === 'copied' ? '已复制' : '复制指令'}</button>
+          <button type="button" className="command-viewer__button" aria-pressed={wrapLines}
+            onClick={() => setWrapLines((current) => !current)}>自动换行</button>
+          <Popover.Close className="command-viewer__button" title="关闭（Esc）">关闭</Popover.Close>
+        </div>
+      </header>
+      {description !== '' ? <Popover.Description className="command-viewer__description">{description}</Popover.Description> : null}
+      <div className="command-viewer__body">
+        <CodeMirror
+          ref={editorRef}
+          value={command}
+          theme={theme === 'dark' ? oneDarkTheme : 'light'}
+          height="100%"
+          extensions={extensions}
+          basicSetup={VIEWER_SETUP}
+          readOnly
+          editable={false}
+          indentWithTab={false}
+        />
+      </div>
+    </AppPopover>
   )
 }

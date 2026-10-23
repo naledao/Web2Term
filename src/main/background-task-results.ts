@@ -44,6 +44,8 @@ export function buildBackgroundTaskCreated(task: BackgroundTask): string {
     '【后台任务已创建】', `任务: ${task.name}`, `PID: ${task.pid}`, `日志: ${task.logPath}`,
     ...(task.stderrPath ? [`错误日志: ${task.stderrPath}`] : []),
     ...(task.exitCodePath ? [`退出码文件: ${task.exitCodePath}`] : []), '',
+    ...(task.output ? ['启动标准输出:', logExcerpt(task.output), ''] : []),
+    ...(task.errorOutput ? ['启动错误输出（stderr，有内容不代表任务失败）:', logExcerpt(task.errorOutput), ''] : []),
     '软件已登记此任务并接管监控。这条消息仅确认创建成功，不代表任务已完成。',
     '请简短确认后等待软件自动发送【后台任务执行结果】；不要发命令轮询、重复启动或报告【任务完成】。'
   ].join('\n')

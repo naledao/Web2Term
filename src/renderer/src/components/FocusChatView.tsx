@@ -1,5 +1,5 @@
+import AppPopover from './AppPopover'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
 import type { FormEvent, JSX, ReactNode, RefObject, SyntheticEvent } from 'react'
 import MDEditor from '@uiw/react-md-editor'
 import ConversationTranscript from './ConversationTranscript'
@@ -23,6 +23,8 @@ interface Props {
   messages: ConversationMessage[]
   messagesReady: boolean
   needsAnswer: boolean
+  newChatDisabled: boolean
+  onNewChat(): void
   onQuestion(): void
   onOriginal(): void
   onControl(): void
@@ -43,6 +45,11 @@ function ProcessScroll(props: { follow: boolean; children: ReactNode }): JSX.Ele
     const element = event.currentTarget
     pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24
   }}>{props.children}</div>
+}
+function ProcessHint(): JSX.Element {
+  return <span className="focus-process__hint">查看过程
+    <svg className="focus-process__chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="m6 4 4 4-4 4" /></svg>
+  </span>
 }
 const labels: Record<string, string> = {
   pending: '等待确认', blocked: '等待确认', running: '正在执行', done: '执行完成',
@@ -73,26 +80,16 @@ function FilePreview({ file }: { file: File }): JSX.Element {
     setSource(url)
     return () => URL.revokeObjectURL(url)
   }, [file, image])
-  useEffect(() => {
-    if (!open) return
-    const close = (event: KeyboardEvent): void => { if (event.key === 'Escape') setOpen(false) }
-    document.addEventListener('keydown', close)
-    return () => document.removeEventListener('keydown', close)
-  }, [open])
   if (!image || !source) return <span className="focus-draft-file__icon" aria-hidden="true">📎</span>
   // Same dialog as sent conversation images, so a draft previews exactly like a sent one.
   return <>
     <button type="button" className="focus-draft-file__thumb" onClick={() => setOpen(true)} aria-label={'预览图片 ' + file.name} title="点击查看大图">
       <img src={source} alt={file.name} />
     </button>
-    {open ? createPortal(
-      <div className="conversation-attachment-preview" role="dialog" aria-modal="true" aria-label="图片预览"
-        onClick={() => setOpen(false)} onWheel={event => event.stopPropagation()}>
+    {open ? (<AppPopover className="conversation-attachment-preview" aria-label="图片预览" onWheel={event => event.stopPropagation()} onClose={() => setOpen(false)}>
         <button type="button" className="conversation-attachment-preview__close" aria-label="关闭图片预览" title="关闭" onClick={() => setOpen(false)}>×</button>
         <img className="conversation-attachment-preview__image" src={source} alt={file.name} onClick={event => event.stopPropagation()} />
-      </div>,
-      document.body
-    ) : null}
+      </AppPopover>) : null}
   </>
 }
 /**
@@ -263,7 +260,8 @@ function SelectionAsk({ owner, root }: { owner: FocusOwner; root: RefObject<HTML
   useEffect(() => {
     if (!context) return
     const escape = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape' || event.isComposing || composing.current) return
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || composing.current ||
+        event.target instanceof Element && event.target.closest('.app-popover')) return
       event.preventDefault()
       close()
     }
@@ -487,6 +485,17 @@ export default function FocusChatView(props: Props): JSX.Element {
     try { await navigator.clipboard.writeText(cleanFocusAnswer(text).replace(CHART_MARKER, '')); setCopiedId(id); setTimeout(() => { if (alive.current) setCopiedId(current => current === id ? null : current) }, 2000) }
     catch { setError('复制失败，可以选择正文手动复制。') }
   }
+  const retryFormat = async (token: number): Promise<void> => {
+    if (actionId) return
+    setActionId('format:' + token)
+    try {
+      const result = await window.api.retryCommandRecovery(props.owner, token)
+      if (result !== 'ok' && alive.current) setError(result === 'stuck'
+        ? '修正请求是否发送成功尚未确认，请先到原始视图核对。'
+        : '修正请求未发送，请处理网页草稿、确认当前会话并恢复自动执行后重试。')
+    } catch { if (alive.current) setError('发送结果未确认，请先到原始视图核对。') }
+    finally { if (alive.current) setActionId(null) }
+  }
   const renderExecution = (record: ExecutionRecord, delivery?: FocusDelivery, actionable = false): JSX.Element => (
     <div className={'focus-execution' + (executionNeedsAction(record, delivery) ? ' focus-execution--attention' : '')} key={record.messageId}>
       <div className="focus-execution__head"><strong>{record.description || (record.kind === 'read_files' ? '读取文件' : '执行命令')}</strong><span>{labels[record.status] || record.status}</span></div>
@@ -501,13 +510,12 @@ export default function FocusChatView(props: Props): JSX.Element {
   const renderTurn = (turn: FocusTurn): JSX.Element => {
     const executions = turn.executionIds.flatMap(id => recordsById.get(id) ? [recordsById.get(id)!] : [])
     const deliveryOf = (record: ExecutionRecord): FocusDelivery | undefined => focusDelivery(record, turn.deliveries[record.messageId])
-    const attention = executions.filter(record => executionNeedsAction(record, deliveryOf(record)))
     const running = executions.some(record => record.status === 'running')
     const pending = executions.some(record => ['pending', 'blocked'].includes(record.status))
     const deliveryPending = executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending')
     const answer = turn.segments.at(-1)?.answer || ''
-    const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0
-    const label = pending ? '等待你确认下一步' : running ? '正在执行命令…' : deliveryPending ? '正在回传执行结果…' :
+    const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.parseFailures?.length
+    const label = turn.commandRecovery ? (turn.status === 'working' ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : deliveryPending ? '正在回传执行结果…' :
       turn.status === 'stopped' ? '已停止 · 已有内容保留' : turn.status === 'working' ? '正在处理…' : '已回复'
     const userMessage = turn.userMessageId ? messagesById.get(turn.userMessageId) : null
     return <article className="focus-turn" data-message-id={turn.id} key={turn.id}>
@@ -515,20 +523,33 @@ export default function FocusChatView(props: Props): JSX.Element {
         {turn.userAttachments?.map((file, index) => <div className="focus-file-sent" key={index}>📎 {file.fileName}<span>{fileSize(file.sizeBytes)}</span></div>)}</div>
       <div className="focus-assistant">
         <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}<span>{modelLabel}</span></div>
-        <details className="focus-process" {...remembered('process:' + turn.id)}><summary><span className={turn.status === 'working' ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{turn.status === 'working' ? '' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <span className="focus-process__hint">查看过程</span> : null}</summary>
+        <details className="focus-process" {...remembered('process:' + turn.id)}><summary><span className={turn.status === 'working' ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{turn.status === 'working' ? '' : turn.status === 'blocked' ? '!' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <ProcessHint /> : null}</summary>
           <ProcessScroll follow={turn.status === 'working'}>
-          {turn.segments.map(segment => <div className="focus-process__cycle" key={segment.cycle}>
-            {segment.parts.map((part, index) => part.kind === 'reasoning' ? <details className="focus-reasoning" key={index} {...remembered('reasoning:' + turn.id + ':' + segment.cycle + ':' + index)}><summary>思考过程</summary><Markdown text={part.text} theme={theme} /></details> :
-              <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
-            {segment !== turn.segments.at(-1) && segment.answer ? <div className="focus-process__commentary"><Markdown text={segment.answer} theme={theme} /></div> : null}
-            {executions.filter(record => turn.executionCycles?.[record.messageId] === segment.cycle && !attention.includes(record)).map(record => renderExecution(record, deliveryOf(record)))}
-          </div>)}
-          {executions.filter(record => turn.executionCycles?.[record.messageId] === undefined && !attention.includes(record)).map(record => renderExecution(record, deliveryOf(record)))}
+          {turn.segments.map(segment => {
+            const segmentExecutions = executions.filter(record => turn.executionCycles?.[record.messageId] === segment.cycle)
+            const commentary = segment !== turn.segments.at(-1) ? segment.answer : ''
+            // Empty cycles have margins and padding too; they must not push the placeholder down.
+            if (!segment.parts.length && !commentary && !segmentExecutions.length) return null
+            return <div className="focus-process__cycle" key={segment.cycle}>
+              {segment.parts.map((part, index) => part.kind === 'reasoning' ? <details className="focus-reasoning" key={index} {...remembered('reasoning:' + turn.id + ':' + segment.cycle + ':' + index)}><summary>思考过程</summary><Markdown text={part.text} theme={theme} /></details> :
+                <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
+              {commentary ? <div className="focus-process__commentary"><Markdown text={commentary} theme={theme} /></div> : null}
+              {segmentExecutions.map(record => renderExecution(record, deliveryOf(record), true))}
+            </div>
+          })}
+          {executions.filter(record => !turn.segments.some(segment => segment.cycle === turn.executionCycles?.[record.messageId])).map(record => renderExecution(record, deliveryOf(record), true))}
+          {turn.parseFailures?.map(failure => <details className="focus-execution" key={'parse:' + failure.messageId}>
+            <summary>指令格式错误 · 未执行</summary><pre>{failure.text}</pre>
+          </details>)}
           {!hasProcess ? <p className="focus-chat__muted focus-process__empty">{turn.status === 'working' ? '正在思考…' : '本轮没有额外执行步骤。'}</p> : null}
           </ProcessScroll>
         </details>
-        {attention.map(record => renderExecution(record, deliveryOf(record), true))}
-        {turn.notice === 'parse-failed' ? <div className="focus-chat__error" role="alert">模型返回的指令暂时无法识别，任务仍在等待。<button type="button" onClick={props.onControl}>查看执行控制</button></div> : null}
+        {turn.notice === 'parse-failed' ? <div className="focus-chat__error" role="alert">
+          {turn.commandRecovery?.message || '指令格式无效，本条请求未执行。'}
+          {turn.commandRecovery && ['blocked', 'failed'].includes(turn.commandRecovery.status) && turn === state?.turns.at(-1)
+            ? <button type="button" disabled={!!actionId} onClick={() => void retryFormat(turn.commandRecovery!.token)}>重试修正</button> : null}
+          <button type="button" onClick={props.onControl}>查看执行控制</button>
+        </div> : null}
         {answer ? <div className="focus-answer" data-question-answer={turn.segments.at(-1)?.sourceMessageId ?? ''}><Markdown text={answer} theme={theme} /></div> : null}
         {answer && turn.status !== 'working' ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(turn.id, answer)}>{copiedId === turn.id ? '已复制' : '复制回答'}</button></div> : null}
       </div>
@@ -541,17 +562,31 @@ export default function FocusChatView(props: Props): JSX.Element {
    */
   const transcript = useMemo(() =>
       <ConversationTranscript scrollKey={'focus:' + ownerKey} ready={messagesReady && state !== null}>
-        {entries.length === 0 ? <div className="focus-chat__empty">{modelIcon ? <img src={modelIcon} alt="" /> : null}<h2>从一个目标开始</h2><p>描述你想完成的任务，处理过程会归入同一轮对话。</p></div> : entries.map(entry => entry.turn ? renderTurn(entry.turn) :
+        {entries.length === 0 ? <div className="focus-chat__empty">{modelIcon ? <img src={modelIcon} alt="" /> : null}<h2>从一个目标开始</h2><p>说说你想解决的问题，一起找到下一步。</p></div> : entries.map(entry => entry.turn ? renderTurn(entry.turn) :
           <article className={'focus-history focus-history--' + entry.message!.role} data-message-id={entry.message!.id} key={entry.message!.id}>
             {entry.message!.role === 'assistant' ? <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}{modelLabel}</div> : null}
             {entry.message!.attachments.map(props.renderAttachment)}
             {entry.message!.role === 'assistant' ? <div data-question-answer={entry.message!.sourceMessageId ?? ''}><Markdown text={entry.message!.content} theme={theme} /></div> : <p>{cleanFocusUserText(entry.message!.content)}</p>}
           </article>)}
-        {unlinkedAttention.map(record => renderExecution(record, focusDelivery(record), true))}
+        {unlinkedAttention.length > 0 ? <details className="focus-process" {...remembered('unlinked-process')}>
+          <summary>其他执行记录 · {unlinkedAttention.length}<ProcessHint /></summary>
+          <ProcessScroll follow={working}>
+            {unlinkedAttention.map(record => renderExecution(record, focusDelivery(record), true))}
+          </ProcessScroll>
+        </details> : null}
       </ConversationTranscript>,
-  [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, props.renderAttachment, props.onControl, props.onRun, props.onSkip])
+  [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, working, props.renderAttachment, props.onControl, props.onRun, props.onSkip])
   return <section className="focus-chat" aria-label="专注对话" data-theme={theme}>
-    <header className="focus-chat__header"><span>{modelIcon ? <img className="focus-chat__brand-icon" src={modelIcon} alt={modelLabel} /> : <strong>{modelLabel}</strong>}</span></header>
+    <header className="focus-chat__header">
+      <span>{modelIcon ? <img className="focus-chat__brand-icon" src={modelIcon} alt={modelLabel} /> : <strong>{modelLabel}</strong>}</span>
+      <button type="button" className="focus-chat__new-chat" aria-label="新建对话" title="新建对话"
+        disabled={props.newChatDisabled || working || sending || stopping} onClick={props.onNewChat}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+          <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+          <path d="M18.375 2.625a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4Z" />
+        </svg>
+      </button>
+    </header>
     <div className="focus-chat__transcript" ref={transcriptRef}>
       {transcript}
     </div>

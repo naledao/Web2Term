@@ -27,6 +27,7 @@ import type {
   EmbedState,
   InterceptorPageEvent,
   InterceptorStatus,
+  CommandRecoveryState,
   TerminalPromptParts,
   PendingQuestionItem,
   ParsedAction,
@@ -441,7 +442,8 @@ export interface EmbedHandlers {
    * Surfaced on purpose: dropping it silently is indistinguishable from the app
    * being broken, which is exactly how the unescaped-quote bug stayed hidden.
    */
-  onParseFailed(text: string): void
+  onParseFailed(payload: InterceptorPageEvent): void
+  onCommandRecovery?(recovery: CommandRecoveryState): void
 }
 
 export class ChatGptEmbed {
@@ -1134,6 +1136,7 @@ export class ChatGptEmbed {
 
   /** Mark the current task finished and publish the interceptor state. */
   completeTask(): InterceptorStatus {
+    this.interceptor.commandRecovery = null
     this.resetTaskPrompt()
     this.interceptor.pendingQuestion = null
     if (this.interceptor.taskStartedAt !== null && this.interceptor.taskFinishedAt === null) {
@@ -1145,6 +1148,7 @@ export class ChatGptEmbed {
   }
   /** A completed task or a different conversation needs a fresh prompt on its next send. */
   resetTaskPrompt(): void {
+    this.interceptor.commandRecovery = null
     this.taskPromptInjected = false
     this.taskPromptGeneration += 1
     // Only update the prompt boundary: a fast next user send may already be awaiting
@@ -1310,15 +1314,24 @@ export class ChatGptEmbed {
   }
 
   async sendFocusUser(text: string): Promise<FocusSendOutcome> {
-    const contents = this.focusPage()
+    if (!supportsFocusView(this.platform.id)) return 'unavailable'
+    return this.sendUserTask(text)
+  }
+
+  /** Sidebar user tasks share the confirmed send path on every supported platform. */
+  async sendUserTask(text: string): Promise<FocusSendOutcome> {
+    const contents = this.liveContents()
     if (!contents) return 'unavailable'
+    let attempted = false
     try {
       const url = new URL(contents.getURL())
+      if (url.origin !== new URL(this.platform.homeUrl).origin) return 'unavailable'
+      attempted = true
       const result = await contents.executeJavaScript(
         'window.__cmdTerminalInterceptor?.sendUser(' + JSON.stringify(text) + ', ' + JSON.stringify(url.pathname) + ') ?? "unavailable"'
       )
       return ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed', 'unavailable', 'invalid'].includes(result) ? result : 'unavailable'
-    } catch { return 'unavailable' }
+    } catch { return attempted ? 'stuck' : 'unavailable' }
   }
 
   async sendFocusFiles(text: string, files: PreparedAttachment[], token: string, current: () => boolean, signal: AbortSignal,
@@ -1361,6 +1374,45 @@ export class ChatGptEmbed {
       console.warn('[embed] sendRaw failed:', (error as Error).message)
       return 'no-composer'
     }
+  }
+
+  /** Page-side token, generation and path checks pin this to one unexecuted reply. */
+  async recoverCommand(allowSend: boolean, manual = false): Promise<string> {
+    const recovery = this.interceptor.commandRecovery
+    const contents = this.liveContents()
+    if (!recovery || !contents) return 'stale'
+    const stillPending = (): boolean => {
+      const current = this.interceptor.commandRecovery
+      return current?.token === recovery.token && current.generation === recovery.generation &&
+        current.messageId === recovery.messageId && current.status === 'pending'
+    }
+    try {
+      const result = String(await contents.executeJavaScript(
+        `window.__cmdTerminalInterceptor?.recoverCommand(${recovery.token}, ${recovery.generation}, ${allowSend}, ${manual}, ${JSON.stringify(recovery.messageId)}) ?? 'stale'`))
+      if (stillPending()) {
+        const status = result === 'ok' ? 'sent' : result === 'limit' ? 'failed'
+          : ['busy', 'no-composer', 'stale'].includes(result) ? 'blocked' : 'uncertain'
+        this.setCommandRecovery({ ...recovery, status })
+      }
+      return result
+    } catch {
+      if (stillPending()) {
+        this.setCommandRecovery({ ...recovery, status: 'uncertain' })
+      }
+      return 'stuck'
+    }
+  }
+
+  private setCommandRecovery(recovery: Omit<CommandRecoveryState, 'message'> & { message?: string }): void {
+    const messages: Record<CommandRecoveryState['status'], string> = {
+      pending: '指令未执行，正在请求 AI 修正格式…', sent: '已通知 AI 修正指令，等待新回复…',
+      blocked: '指令未执行。请处理网页草稿或恢复自动执行后重试修正。',
+      failed: '修正后的指令仍无法识别，已停止自动重试。',
+      uncertain: '修正请求是否发送成功尚未确认，请先在原始视图核对。'
+    }
+    this.interceptor.commandRecovery = { ...recovery, message: messages[recovery.status] }
+    this.handlers.onCommandRecovery?.(this.interceptor.commandRecovery)
+    this.handlers.onInterceptor(this.getInterceptorStatus())
   }
 
   async sendFileResult(result: PreparedFileResult, token: string, current: () => boolean, signal: AbortSignal): Promise<FileSendOutcome> {
@@ -1658,6 +1710,7 @@ export class ChatGptEmbed {
           this.interceptor.taskStartedAt = Date.now()
         }
         this.interceptor.taskFinishedAt = null
+        this.interceptor.commandRecovery = null
         break
       case 'question':
         {
@@ -1736,6 +1789,7 @@ export class ChatGptEmbed {
         }
         break
       case 'command':
+        if (payload.live === true) this.interceptor.commandRecovery = null
         console.info(
           `[embed:${this.platform.id}] command detected live=${payload.live === true} ` +
             JSON.stringify({
@@ -1749,6 +1803,7 @@ export class ChatGptEmbed {
           this.handlers.onCommand({
             messageId: payload.messageId,
             command: payload.command,
+            background: payload.background === true,
             description: payload.description ?? '',
             timeoutSeconds: Number(payload.timeoutSeconds ?? 120),
             rawJson: typeof payload.rawJson === 'string' ? payload.rawJson : undefined,
@@ -1764,9 +1819,23 @@ export class ChatGptEmbed {
         break
       }
       case 'parse-failed':
+        if (payload.live === true && payload.taskPromptGeneration !== this.taskPromptGeneration) break
         console.warn(`[embed:${this.platform.id}] parse-failed ${JSON.stringify(payload)}`)
-        this.handlers.onParseFailed(payload.text ?? '')
+        if (payload.live === true && payload.messageId && Number.isSafeInteger(payload.parseFailureToken) &&
+          payload.taskPromptGeneration === this.taskPromptGeneration) {
+          this.setCommandRecovery({ messageId: payload.messageId, token: payload.parseFailureToken!,
+            generation: payload.taskPromptGeneration!, status: payload.recoveryStatus === 'failed' ? 'failed' : 'pending' })
+        }
+        this.handlers.onParseFailed(payload)
         break
+      case 'command-recovery': {
+        const current = this.interceptor.commandRecovery
+        if (current && current.token === payload.parseFailureToken && current.generation === payload.taskPromptGeneration &&
+          current.messageId === payload.messageId && ['pending', 'sent', 'blocked', 'failed', 'uncertain'].includes(payload.recoveryStatus ?? '')) {
+          this.setCommandRecovery({ ...current, status: payload.recoveryStatus! })
+        }
+        break
+      }
       case 'raw-busy': {
         const logPath = writeRawSendDiagnostic(this.platform.id, payload)
         console.warn(`[embed:${this.platform.id}] raw send blocked; log: ${logPath ?? 'unavailable'}`)

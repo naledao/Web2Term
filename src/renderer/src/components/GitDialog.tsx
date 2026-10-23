@@ -1,4 +1,4 @@
-import { useToolApi, useToolSurface, ToolMinimizeButton } from './ToolSurfaceContext'
+import { useToolApi, ToolMinimizeButton } from './ToolSurfaceContext'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { AppTheme, GitLogEntry, GitLogResult } from '../../../shared/types'
@@ -119,7 +119,6 @@ function CommitIcon({ message }: { message: string }): ReactElement {
 
 export default function GitDialog({ open, cwd, theme, onClose }: GitDialogProps): ReactElement | null {
   const api = useToolApi()
-  const { visible } = useToolSurface()
   const [log, setLog] = useState<GitLogResult>(EMPTY)
   const [loading, setLoading] = useState(true)
   const [copied, setCopied] = useState(false)
@@ -198,15 +197,6 @@ export default function GitDialog({ open, cwd, theme, onClose }: GitDialogProps)
     })
   }, [open, cwd, view, loading])
 
-  useEffect(() => {
-    if (!visible) return
-    const keydown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !event.defaultPrevented) onClose()
-    }
-    window.addEventListener('keydown', keydown)
-    return () => window.removeEventListener('keydown', keydown)
-  }, [visible, onClose])
-
   const rows = useMemo(() => computeRows(log.entries), [log.entries])
   const laneCount = useMemo(
     () => rows.reduce((widest, row) => Math.max(widest, row.lane + 1), 1),
@@ -229,8 +219,6 @@ export default function GitDialog({ open, cwd, theme, onClose }: GitDialogProps)
   return (
     <div
       className={theme === 'dark' ? 'confirm-dialog git-dialog git-dialog--dark' : 'confirm-dialog git-dialog'}
-      role="dialog"
-      aria-modal="true"
       aria-label="Git 管理"
     >
       <div className="confirm-dialog__box git-dialog__box">

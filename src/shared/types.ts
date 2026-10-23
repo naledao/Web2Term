@@ -1,6 +1,7 @@
 import type { ToolboxInvocation } from './toolbox'
 import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusSendOutcome, FocusAttachmentInfo } from './focus-chat'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
+import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
 import { BACKGROUND_TASK_MARKER } from './background-tasks'
 import type { BackgroundTasksState } from './background-tasks'
 /**
@@ -14,6 +15,13 @@ import { MAX_READ_FILES } from './file-requests'
 export const IpcChannels = {
   toolboxInvoke: 'toolbox:invoke',
   getAppInfo: 'app:get-info',
+  githubCliGetState: 'github-cli:get-state',
+  githubCliOpenInstall: 'github-cli:open-install',
+  githubCliLogout: 'github-cli:logout',
+  githubLoginTask: 'github-cli:login-task',
+  githubRepositoriesPage: 'github-repositories:page',
+  githubRepositoryClone: 'github-repositories:clone',
+  githubRepositoryCloneProgress: 'github-repositories:clone-progress',
   embedSetBounds: 'embed:set-bounds',
   embedSetVisible: 'embed:set-visible',
   embedCommand: 'embed:command',
@@ -66,6 +74,7 @@ export const IpcChannels = {
   interceptorAnswerQuestion: 'interceptor:answer-question',
   interceptorCancelQuestion: 'interceptor:cancel-question',
   interceptorEndTask: 'interceptor:end-task',
+  commandRecoveryRetry: 'interceptor:retry-command-recovery',
   interceptorEvent: 'interceptor:event',
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
@@ -844,29 +853,18 @@ const OUTPUT_FORMAT_SECTION = [
 ].join('\n')
 
 /**
- * Guidance for work that outlives one terminal command. The runner only knows
- * about one command at a time, so the model must create the durable background
- * process first. Software observes it and returns the final result, rather
- * than asking the model to spend turns polling.
+ * The background flag is an executable API: software owns startup, registration,
+ * logs and exit codes. The old output marker remains a compatibility protocol.
  */
 const backgroundTaskToolPrompt = [
   '【工具：background_task】',
-  '通过 command JSON 启动脱离当前终端的后台进程，stdout/stderr 以 UTF-8 写入本次独立日志。',
-  `启动成功后，命令输出一整行：\`${BACKGROUND_TASK_MARKER}\` 紧接紧凑 JSON；标记与 JSON 之间不换行，不带代码围栏。对象结构：`,
-  '',
+  '需要后台执行时，在 command JSON 中设置 background:true。command 直接填写实际任务命令，description 填任务名称；软件负责启动独立进程、取得 PID、创建独立日志和退出码文件，并登记监控。',
   '```json',
-  '{',
-  '  "pid": 12345,',
-  '  "name": "任务名称",',
-  '  "log_path": "标准输出或合并日志绝对路径",',
-  '  "stderr_path": "错误日志绝对路径",',
-  '  "exit_code_path": "退出码文件绝对路径"',
-  '}',
+  '{"command":"实际任务命令","description":"任务名称","background":true,"timeout_seconds":30}',
   '```',
-  '',
-  'pid 必须为本次真实后台进程 PID（12345 仅为示例）；路径均为任务机器上的绝对路径。stderr_path 仅在错误输出单独落盘时提供；有限任务应使用独立 exit_code_path，结束时写入真实整数退出码。',
-  'Windows 用 Start-Process -WindowStyle Hidden -PassThru 取得 PID，stdout/stderr 分开重定向；POSIX 从脱离终端进程的 $! 取得 PID。',
-  '打印登记行后立即返回。软件先发送【后台任务已创建】，结束后发送【后台任务执行结果】。收到创建通知只简短确认并等待，不轮询、sleep、重复启动或报告【任务完成】；无退出码不算成功，持续服务退出后才回传。'
+  '此入口支持当前本机、SSH 和 web2term 终端。后台任务 stdin 关闭，不支持 TTY 交互。不要再套 Start-Process、nohup 或 & 来脱离软件创建的任务进程；不要自己创建登记行、日志、退出码文件或读取运行中的日志。timeout_seconds 仅约束启动（最多 30 秒），任务生命周期由软件监控。',
+  '软件先发送【后台任务已创建】，携带 PID、日志路径和已取得的启动输出（stdout 与 stderr）；任务结束后发送【后台任务执行结果】。收到创建通知后根据启动信息引导用户并等待，不轮询、sleep、重复启动或提前报告【任务完成】。',
+  `兼容历史指令：已有启动脚本输出的 ${BACKGROUND_TASK_MARKER} 登记行仍会被识别；新任务使用 background:true。`
 ].join('\n')
 
 /** Keep terminal mode from turning every kind of request into a shell command. */
@@ -1171,6 +1169,7 @@ export function buildTerminalPromptParts(env: EnvironmentInfo, toolPrompt = ''):
 
 /** Aggregated interceptor state kept by the main process. */
 export interface InterceptorStatus extends TerminalPromptParts {
+  commandRecovery?: CommandRecoveryState | null
   enabled: boolean
   /** This workspace session may append its system and tool prompts to user sends. */
   promptInjectionEnabled: boolean
@@ -1184,6 +1183,14 @@ export interface InterceptorStatus extends TerminalPromptParts {
   taskFinishedAt: number | null
   /** A live clarification request waiting for the user's answers. */
   pendingQuestion: PendingQuestion | null
+}
+
+export interface CommandRecoveryState {
+  messageId: string
+  token: number
+  generation: number
+  status: 'pending' | 'sent' | 'blocked' | 'failed' | 'uncertain'
+  message: string
 }
 
 /** One item in a clarification request lifted out of a live assistant reply. */
@@ -1245,6 +1252,7 @@ export interface InterceptorPageEvent {
     | 'command'
     | 'read-files'
     | 'parse-failed'
+    | 'command-recovery'
     | 'scan'
     | 'reply-state'
     | 'reply-watchdog'
@@ -1289,6 +1297,7 @@ export interface InterceptorPageEvent {
   /** Present on `command` events. */
   messageId?: string
   command?: string
+  background?: boolean
   files?: import('./file-requests').ReadFileSpec[]
   description?: string
   /** Present on `question` events. */
@@ -1380,6 +1389,13 @@ export interface InterceptorPageEvent {
   textLength?: number
   objectCount?: number
   lastObject?: string | null
+  commandSource?: 'code' | 'rendered'
+  parseErrorCode?: string
+  parseErrorField?: string
+  parseErrorOffset?: number
+  parseRepair?: 'windows-path'
+  parseFailureToken?: number
+  recoveryStatus?: CommandRecoveryState['status']
   /** Present on `scan`/`not-assistant-turn`: the selectors that failed to match. */
   wanted?: string[]
   selectors?: string[]
@@ -1512,6 +1528,8 @@ export interface ExecutionRecord {
   conversationId: string
   command: string
   kind: 'command' | 'read_files'
+  /** Software-managed background startup rather than foreground shell execution. */
+  background?: boolean
   fileRequest: import('./file-requests').StoredFileReadRequest | null
   deliveryStatus: import('./file-requests').FileDeliveryStatus | null
   description: string
@@ -1530,6 +1548,7 @@ export interface ExecutionRecord {
 export interface ParsedCommand {
   messageId: string
   command: string
+  background?: boolean
   description: string
   /** Absolute runtime limit selected for this command, in seconds. */
   timeoutSeconds: number
@@ -2130,6 +2149,14 @@ export interface NacosSaveResult extends NacosConnectionsState {
 export interface AppApi {
   invokeToolbox(request: ToolboxInvocation): Promise<unknown>
   getAppInfo(): Promise<AppInfo>
+  /** Check the local desktop's GitHub CLI installation and active github.com account. */
+  getGithubCliState(): Promise<GithubCliState>
+  openGithubCliInstall(): Promise<void>
+  logoutGithubCli(account: string): Promise<GithubLogoutResult>
+  requestGithubLogin(owner: FocusOwner): Promise<GithubLoginTaskResult>
+  getGithubRepositoryPage(request: GithubRepositoryRequest): Promise<GithubRepositoryPage>
+  cloneGithubRepository(request: GithubCloneRequest): Promise<GithubCloneResult>
+  onGithubCloneProgress(listener: (event: GithubCloneProgressEvent) => void): () => void
   /** Read only the requested part of the repository; omitted mode reads all. */
   getGitLog(cwd: string, mode?: GitReadMode): Promise<GitLogResult>
   /** Read the unified diff of one changed path. */
@@ -2265,6 +2292,7 @@ export interface AppApi {
   cancelQuestion(messageId: string): Promise<InterceptorStatus>
   /** Stop the current model/terminal loop and mark the task as manually ended. */
   endTask(): Promise<InterceptorStatus>
+  retryCommandRecovery(owner: FocusOwner, token: number): Promise<string>
   onInterceptorEvent(listener: (status: InterceptorStatus) => void): () => void
 
   /** Persisted app settings, including the web2term backend address. */

@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS executions (
   conversation_id TEXT NOT NULL,
   command         TEXT NOT NULL,
   kind            TEXT NOT NULL DEFAULT 'command',
+  background      INTEGER NOT NULL DEFAULT 0,
   file_request    TEXT,
   delivery_status TEXT,
   description     TEXT NOT NULL DEFAULT '',
@@ -334,6 +335,7 @@ interface ExecutionRow {
   message_id: string
   conversation_id: string
   command: string
+  background: number
   kind: string
   file_request: string | null
   delivery_status: string | null
@@ -380,6 +382,7 @@ function toExecutionRecord(row: ExecutionRow): ExecutionRecord {
     messageId: row.message_id,
     conversationId: row.conversation_id,
     command: row.command,
+    background: row.background === 1,
     kind: row.kind === 'read_files' ? 'read_files' : 'command',
     fileRequest,
     deliveryStatus: row.delivery_status as FileDeliveryStatus | null,
@@ -499,7 +502,7 @@ export class ConversationStore {
     if (!executionColumns.some((column) => column.name === 'timeout_seconds')) {
       this.db.exec('ALTER TABLE executions ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT 120')
     }
-    for (const [name, definition] of [['kind', "TEXT NOT NULL DEFAULT 'command'"], ['file_request', 'TEXT'], ['delivery_status', 'TEXT']]) {
+    for (const [name, definition] of [['kind', "TEXT NOT NULL DEFAULT 'command'"], ['file_request', 'TEXT'], ['delivery_status', 'TEXT'], ['background', 'INTEGER NOT NULL DEFAULT 0']]) {
       if (!executionColumns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE executions ADD COLUMN ${name} ${definition}`)
     }
     const conversationColumns = this.db
@@ -840,6 +843,7 @@ export class ConversationStore {
     messageId: string
     conversationId: string
     command: string
+    background?: boolean
     fileRequest?: StoredFileReadRequest
     description: string
     timeoutSeconds: number
@@ -854,8 +858,8 @@ export class ConversationStore {
     this.db
       .prepare(
         `INSERT INTO executions
-           (message_id, conversation_id, command, description, timeout_seconds, status, output, created_at, kind, file_request, delivery_status)
-         VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)`
+           (message_id, conversation_id, command, description, timeout_seconds, status, output, created_at, kind, file_request, delivery_status, background)
+         VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)`
       )
       .run(
         record.messageId,
@@ -867,7 +871,8 @@ export class ConversationStore {
         record.createdAt,
         record.fileRequest ? 'read_files' : 'command',
         record.fileRequest ? JSON.stringify(record.fileRequest) : null,
-        record.fileRequest ? 'pending' : null
+        record.fileRequest ? 'pending' : null,
+        record.background === true ? 1 : 0
       )
     return true
   }
@@ -905,8 +910,14 @@ export class ConversationStore {
         const turn = JSON.parse(row.payload) as FocusTurn
         if (!turn || typeof turn.id !== 'string' || typeof turn.userText !== 'string' ||
           !Number.isFinite(turn.createdAt) || !Array.isArray(turn.segments) || !Array.isArray(turn.executionIds) ||
-          !turn.deliveries || !['working', 'answered', 'stopped'].includes(turn.status)) return []
+          !turn.deliveries || !['working', 'answered', 'stopped', 'blocked'].includes(turn.status)) return []
         if (turn.userMessageId !== null && typeof turn.userMessageId !== 'string') return []
+        if (turn.parseFailures !== undefined && (!Array.isArray(turn.parseFailures) || turn.parseFailures.length > 10 ||
+          turn.parseFailures.some(item => !item || typeof item.messageId !== 'string' || typeof item.text !== 'string' ||
+            item.text.length > 20000 || typeof item.code !== 'string' || !Number.isFinite(item.createdAt)))) return []
+        if (turn.commandRecovery && (typeof turn.commandRecovery.messageId !== 'string' || typeof turn.commandRecovery.message !== 'string' ||
+          !Number.isSafeInteger(turn.commandRecovery.token) || !Number.isSafeInteger(turn.commandRecovery.generation) ||
+          !['pending', 'sent', 'blocked', 'failed', 'uncertain'].includes(turn.commandRecovery.status))) return []
         if (turn.userAttachments !== undefined && (!Array.isArray(turn.userAttachments) || turn.userAttachments.length > 3 ||
           turn.userAttachments.some(file => !file || typeof file.fileName !== 'string' || typeof file.mimeType !== 'string' ||
             !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes < 1))) return []

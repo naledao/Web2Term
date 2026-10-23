@@ -82,15 +82,14 @@ export function ToolWindowsHost({ sessionId, theme, blocked }: { sessionId: stri
 }
 
 function ToolWindow({ entry, active, visible, theme, container }: {
-  entry: ToolWindowEntry; active: boolean; visible: boolean; theme: AppTheme
-  container: RefObject<HTMLDivElement | null>
+  entry: ToolWindowEntry; active: boolean; visible: boolean; theme: AppTheme; container: RefObject<HTMLDivElement | null>
 }) {
   const { minimize, close } = useToolWindows()
   const onClose = useCallback(() => close(entry.id), [close, entry.id])
   const onMinimize = useCallback(() => minimize(entry.id), [minimize, entry.id])
   const surface = useMemo(() => ({ sessionId: entry.sessionId, visible, active, minimize: onMinimize }), [entry.sessionId, visible, active, onMinimize])
   return <ToolSurfaceContext.Provider value={surface}>
-    <Dialog.Root open={visible} disablePointerDismissal onOpenChange={(_open, details) => { details.cancel(); details.allowPropagation() }}>
+    <Dialog.Root open={visible} disablePointerDismissal onOpenChange={(next) => { if (!next) onClose() }}>
       <Dialog.Portal container={container} keepMounted>
         <Dialog.Popup className="tool-window__surface" aria-label={TOOL_LABELS[entry.kind]} finalFocus={false}>
           {entry.kind === 'git' ? <GitDialog open cwd={entry.cwd} theme={theme} onClose={onClose} /> : null}

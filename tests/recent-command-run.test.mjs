@@ -93,6 +93,7 @@ function fixture(t, options = {}) {
     remoteShell: () => remoteShell,
     onTaskStarted: () => events.push('task-started'),
     captureBackgroundTasks: options.captureBackgroundTasks,
+    startBackgroundTask: options.startBackgroundTask,
     onTaskCompleted() {}, onExecutionChanged() {}, onTerminalChanged() {},
     onRemoteLine() {}, onRemoteOutput() {},
     async sendRawToPage(text) { events.push('send'); sent.push(text); return options.delivery ?? 'ok' }
@@ -110,6 +111,21 @@ function fixture(t, options = {}) {
     }
   }
 }
+
+test('background history replay keeps its execution mode and goes through the software launcher', async t => {
+  const starts = []
+  const f = fixture(t, { original: { background: true }, startBackgroundTask: async (record, shell, run) => {
+    starts.push({ record, shell })
+    return { result: await run('software-generated launcher'), registered: 1 }
+  } })
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'ok')
+  await f.settled()
+  assert.equal(starts.length, 1)
+  assert.equal(starts[0].record.background, true)
+  assert.equal(f.calls[0].command, 'software-generated launcher')
+  assert.equal(f.calls[0].timeoutMs, 30000)
+  assert.equal(f.sent.length, 0, 'the background notification queue owns creation and completion')
+})
 
 test('captures background task ownership before execution and registers raw results after a conversation switch', async t => {
   let finish

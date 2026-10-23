@@ -1,5 +1,6 @@
+import AppPopover from './AppPopover'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { KeyboardEvent, ReactElement } from 'react'
+import type { ReactElement } from 'react'
 import { EMPTY_WEB2TERM_CONNECTION } from '@shared/types'
 import type { Web2termConnectionState, Web2termDevice } from '@shared/types'
 import LinuxAgentDownload from './LinuxAgentDownload'
@@ -117,26 +118,8 @@ export default function Web2termDeviceDialog({ onClose, onConnected }: Props): R
     } finally { if (alive.current) setPending(false) }
   }
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      event.stopPropagation()
-      if (!pending) onClose()
-      return
-    }
-    if (event.key !== 'Tab') return
-    const buttons = dialog.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])')
-    if (!buttons?.length) { event.preventDefault(); heading.current?.focus(); return }
-    const first = buttons[0], last = buttons[buttons.length - 1]
-    if (event.shiftKey && (document.activeElement === first || document.activeElement === heading.current)) {
-      event.preventDefault(); last.focus()
-    } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === heading.current)) {
-      event.preventDefault(); first.focus()
-    }
-  }
-
   return (
-    <div className="modal ssh-connect-overlay" role="dialog" aria-modal="true" aria-labelledby="web2term-device-dialog-title" onKeyDown={handleKeyDown} onMouseDown={(event) => { if (!pending && event.target === event.currentTarget) onClose() }}>
+    <AppPopover className="modal ssh-connect-overlay" aria-labelledby="web2term-device-dialog-title" onClose={onClose} busy={pending}>
       <div ref={dialog} className="ssh-connect-modal web2term-device-dialog">
         <header className="ssh-connect__head web2term-device-dialog__head">
           <h2 ref={heading} id="web2term-device-dialog-title" className="ssh-connect__title" tabIndex={-1}>我的设备{current.phase === 'ready' ? <span>（{current.devices.length}）</span> : null}</h2>
@@ -162,6 +145,6 @@ export default function Web2termDeviceDialog({ onClose, onConnected }: Props): R
           ) : null}
         </section>
       </div>
-    </div>
+    </AppPopover>
   )
 }

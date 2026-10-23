@@ -1,3 +1,4 @@
+import AppPopover from './AppPopover'
 import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { AppTheme, SshPdfPreviewData } from '@shared/types'
@@ -36,12 +37,6 @@ export default function PdfPreviewDialog({ target, theme, onClose }: Props) {
   const failViewer = useCallback((message: string) => setError(message), [])
 
   useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    closeButton.current?.focus()
-    return () => { if (previous?.isConnected) previous.focus({ preventScroll: true }) }
-  }, [])
-
-  useEffect(() => {
     let cancelled = false
     const requestId = crypto.randomUUID()
     setLoading(true)
@@ -71,7 +66,7 @@ export default function PdfPreviewDialog({ target, theme, onClose }: Props) {
   }
 
   return (
-    <div className={`pdf-preview${theme === 'dark' ? ' pdf-preview--dark' : ''}`} role="dialog" aria-modal="true" aria-label={`PDF 预览：${target.name}`}>
+    <AppPopover className={`pdf-preview${theme === 'dark' ? ' pdf-preview--dark' : ''}`} aria-label={`PDF 预览：${target.name}`} onClose={onClose} initialFocus={closeButton}>
       <div className="pdf-preview__box">
         <header className="pdf-preview__head">
           <span className="pdf-preview__badge">PDF</span>
@@ -98,6 +93,6 @@ export default function PdfPreviewDialog({ target, theme, onClose }: Props) {
           ) : null}
         </div>
       </div>
-    </div>
+    </AppPopover>
   )
 }

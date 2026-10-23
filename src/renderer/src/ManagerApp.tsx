@@ -216,15 +216,10 @@ export default function ManagerApp(): ReactElement {
       <ConfirmDialog
         open={pendingDestroy !== null}
         title={`销毁“${pendingDestroy?.title || '会话'}”？`}
-        description="此操作会立即结束该会话的运行环境，请确认是否继续。"
-        icon="!"
+        description="将结束终端和 SSH 连接，网页对话保留。"
         danger
         busy={destroying !== null}
-        confirmLabel="确认销毁"
-        items={[
-          { icon: '▣', label: '终端进程和 SSH 连接', value: '立即结束', tone: 'danger' },
-          { icon: '◉', label: 'ChatGPT 对话历史', value: '保留', tone: 'success' }
-        ]}
+        confirmLabel="销毁"
         onCancel={() => setPendingDestroy(null)}
         onConfirm={() => { if (pendingDestroy) void destroySession(pendingDestroy) }}
       />    </main>

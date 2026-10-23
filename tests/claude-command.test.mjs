@@ -95,6 +95,7 @@ function fixture(nodes, page = CLAUDE_PAGE) {
   let observationOptions
   const body = element('body', {}, nodes)
   const window = {}
+  const location = { pathname: '/chat/offline-fixture' }
   const refreshPositions = () => {
     ;[body, ...body.descendants()].forEach((node, index) => { node.position = index })
   }
@@ -107,7 +108,7 @@ function fixture(nodes, page = CLAUDE_PAGE) {
   }
   new Script(interceptorSource).runInNewContext({
     window, document,
-    location: { pathname: '/chat/offline-fixture' },
+    location,
     Element: ElementFixture,
     Node: { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_PRECEDING: 2 },
     MutationObserver: class {
@@ -123,6 +124,7 @@ function fixture(nodes, page = CLAUDE_PAGE) {
   controller.configure({ enabled: true, page })
   return {
     controller, events,
+    navigate(path) { location.pathname = path },
     observation: () => observationOptions,
     commands: () => events.filter((event) => event.event === 'command'),
     replaceNodes(next) {
@@ -160,6 +162,181 @@ test('Claude code-only JSON is detected without its usual answer font class', ()
   assert.equal(app.commands()[0].live, true)
   app.scan()
   assert.equal(app.commands().length, 1, 'repeated DOM scans must not report the command again')
+})
+
+test('background commands retain their execution mode through the actual page parser', () => {
+  const payload = JSON.stringify({ command: 'gh auth login --hostname github.com --web', description: '登录', background: true, timeout_seconds: 30 })
+  const reply = element('div', { 'data-testid': 'assistant-message', class: 'group/message-row' }, [element('pre', {}, [element('code', {}, payload)])])
+  const app = fixture([reply])
+  app.controller.checkNow()
+  assert.equal(app.commands().length, 1)
+  assert.equal(app.commands()[0].background, true)
+})
+
+test('invalid background flags never fall through to a foreground command', () => {
+  for (const background of ['true', 1, null]) {
+    const payload = JSON.stringify({ command: 'gh auth login --web', description: '登录', background })
+    const reply = element('div', { 'data-testid': 'assistant-message' }, [element('pre', {}, [element('code', {}, payload)])])
+    const app = fixture([reply])
+    app.controller.checkNow()
+    assert.equal(app.commands().length, 0)
+  }
+})
+
+const slash = String.fromCharCode(92)
+const rawPathReply = (command, background = true) => JSON.stringify({ command, description: '登录', background, timeout_seconds: 30 })
+  .split(slash + slash).join(slash)
+const protocolReply = payload => element('div', { 'data-testid': 'assistant-message' }, payload)
+
+test('the screenshot Windows login request recovers its entire path and stays in background mode exactly once', () => {
+  const path = ['C:', 'Users', '24196', 'AppData', 'Local', 'Programs', 'GitHub CLI', 'bin', 'gh.exe'].join(slash)
+  const command = "& '" + path + "' auth login --hostname github.com --web --skip-ssh-key"
+  const app = fixture([protocolReply(rawPathReply(command))])
+  app.controller.checkNow()
+  assert.equal(app.commands().length, 1)
+  assert.equal(app.commands()[0].command, command)
+  assert.equal(app.commands()[0].background, true)
+  assert.equal(app.commands()[0].parseRepair, 'windows-path')
+  assert.equal(JSON.parse(app.commands()[0].rawJson).command, command)
+  app.scan()
+  assert.equal(app.commands().length, 1)
+})
+
+test('path recovery preserves bin, temp, new and UNC separators without decoding them as controls', () => {
+  for (const path of [
+    ['C:', 'Users', 'runner', 'bin', 'temp', 'new', 'gh.exe'].join(slash),
+    slash + slash + ['server', 'share', 'bin', 'temp', 'new', 'gh.exe'].join(slash)
+  ]) {
+    const command = "& '" + path + "' auth login --web"
+    const app = fixture([protocolReply(rawPathReply(command))])
+    app.controller.checkNow()
+    assert.equal(app.commands()[0].command, command)
+    assert.equal(app.commands()[0].background, true)
+    assert.equal(app.commands()[0].command.includes(String.fromCharCode(9)), false)
+    assert.equal(app.commands()[0].command.includes(String.fromCharCode(10)), false)
+  }
+})
+
+test('strict JSON and multiline commands retain their original contents', () => {
+  const command = "& '" + ['C:', 'Users', 'temp', 'gh.exe'].join(slash) + "' --version\nWrite-Output ',}'"
+  const app = fixture([protocolReply(JSON.stringify({ command, background: true }))])
+  app.controller.checkNow()
+  assert.equal(app.commands()[0].command, command)
+  assert.equal(app.commands()[0].parseRepair, undefined)
+})
+
+test('foreground requests share the same literal-path preservation and reject decoded path controls', () => {
+  const path = ['C:', 'Users', 'runner', 'bin', 'temp', 'new', 'tool.exe'].join(slash)
+  const command = "& '" + path + "' --version"
+  const app = fixture([protocolReply(rawPathReply(command, false))])
+  app.controller.checkNow()
+  assert.equal(app.commands()[0].command, command)
+  assert.equal(app.commands()[0].background, false)
+  const controls = fixture([protocolReply(rawPathReply("& 'C:" + slash + 'temp' + slash + "new.exe'", false))])
+  controls.controller.checkNow()
+  assert.equal(controls.commands().length, 0)
+})
+
+test('code text takes priority over Markdown display text without including reasoning', () => {
+  const command = "& '" + ['C:', 'Users', 'runner', 'gh.exe'].join(slash) + "' auth login --web"
+  const payload = JSON.stringify({ command, background: true })
+  const pre = element('pre', {}, [element('code', {}, payload)])
+  const reply = element('div', { 'data-testid': 'assistant-message' }, [pre])
+  const displayed = rawPathReply(command)
+  Object.defineProperty(pre, 'innerText', { get: () => displayed })
+  Object.defineProperty(reply, 'innerText', { get: () => displayed })
+  const app = fixture([reply])
+  app.controller.checkNow()
+  assert.equal(app.commands()[0].command, command)
+  assert.equal(app.commands()[0].commandSource, 'code')
+  assert.equal(app.commands()[0].parseRepair, undefined)
+})
+
+test('duplicate flags, mixed path escaping and an invalid final request never run an older command', () => {
+  const mixed = "& 'C:" + slash + "Users" + slash + slash + "runner" + slash + "gh.exe' auth login"
+  for (const payload of [
+    '{"command":"gh auth login","background":true,"background":false}',
+    JSON.stringify({ command: mixed, background: true }).split(slash + slash + 'Users').join(slash + 'Users'),
+    commandJson('old-command') + '\n{"command":"gh auth login","background":"true"}',
+    commandJson('old-command') + '\n{"command":"gh auth login","background":true',
+    '{"command":"Write-Host "oops"","back' + slash + 'u0067round":true}'
+  ]) {
+    const app = fixture([protocolReply(payload)])
+    app.controller.checkNow()
+    assert.equal(app.commands().length, 0)
+    assert.equal(app.controller.status().awaitingReplySince, 0)
+    assert.ok(app.events.some(event => event.event === 'parse-failed' && event.live))
+  }
+})
+
+test('a malformed later prose request cannot be hidden by a valid earlier code block', () => {
+  for (const tail of ['{"command":"gh auth login","background":"true"}', '{"background":true,"command"']) {
+    const reply = element('div', { 'data-testid': 'assistant-message' }, [
+      element('pre', {}, [element('code', {}, commandJson('old-command'))]), tail
+    ])
+    const app = fixture([reply])
+    app.controller.checkNow()
+    assert.equal(app.commands().length, 0)
+  }
+})
+
+test('format recovery is bound to one unexecuted reply and automatically sends at most once per error chain', async () => {
+  const app = fixture([protocolReply('{"command":"gh auth login","background":"true"}')])
+  const sent = []
+  app.controller.sendRaw = async (text, draft, options) => {
+    assert.equal(draft, null)
+    assert.equal(options.requireIdle, true)
+    assert.equal(options.path, '/chat/offline-fixture')
+    sent.push(text)
+    return 'ok'
+  }
+  app.controller.checkNow()
+  const failure = app.controller.status().failedCommand
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true), 'ok')
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true), 'stale')
+  assert.equal(sent.length, 1)
+  assert.match(sent[0], /未执行/)
+  assert.match(sent[0], /保留原命令意图和 background/)
+  app.replaceNodes([protocolReply('{"command":"gh auth login --web","background":1}')])
+  app.controller.checkNow()
+  const second = app.controller.status().failedCommand
+  assert.equal(await app.controller.recoverCommand(second.token, second.generation, true), 'limit')
+  assert.equal(sent.length, 1)
+  assert.equal(await app.controller.recoverCommand(second.token, second.generation, true, true), 'ok')
+  assert.equal(sent.length, 2, 'only an explicit manual retry can start another correction')
+})
+
+test('paused or draft-blocked recovery stays retryable while uncertain submission is never resubmitted', async () => {
+  const app = fixture([protocolReply('{"command":"gh auth login","background":null}')])
+  let calls = 0
+  app.controller.sendRaw = async () => { calls++; return 'busy' }
+  app.controller.checkNow()
+  const failure = app.controller.status().failedCommand
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, false), 'busy')
+  assert.equal(calls, 0)
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true, true), 'busy')
+  assert.equal(app.controller.status().failedCommand.status, 'blocked')
+  app.controller.sendRaw = async () => { calls++; throw new Error('channel lost') }
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true, true), 'stuck')
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true, true), 'stale')
+  assert.equal(calls, 2)
+})
+
+test('history, changed route, changed generation and stopped tasks cannot send format feedback', async () => {
+  for (const change of ['history', 'route', 'generation', 'stop']) {
+    const app = fixture([protocolReply('{"command":"gh auth login","background":"true"}')])
+    let calls = 0
+    app.controller.sendRaw = async () => { calls++; return 'ok' }
+    if (change === 'history') { app.controller.armBaseline(); app.scan() }
+    else app.controller.checkNow()
+    const failure = app.controller.status().failedCommand
+    if (change === 'route') app.navigate('/chat/another')
+    if (change === 'stop') app.controller.endTask()
+    const result = await app.controller.recoverCommand(failure?.token ?? 1,
+      (failure?.generation ?? 0) + (change === 'generation' ? 1 : 0), true)
+    assert.equal(result, 'stale')
+    assert.equal(calls, 0)
+  }
 })
 
 test('the preferred answer container still excludes surrounding command-shaped text', () => {

@@ -1,4 +1,4 @@
-import { createPortal } from 'react-dom'
+import AppPopover from './components/AppPopover'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Filemanager, Willow } from '@svar-ui/react-filemanager'
 import MDEditor from '@uiw/react-md-editor'
@@ -16,6 +16,7 @@ import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
 import ExtraTerminalPane from './components/ExtraTerminalPane'
 import BackgroundTasksPane from './components/BackgroundTasksPane'
+import GithubRepositoriesPane from './components/GithubRepositoriesPane'
 import type { BackgroundTasksState } from '@shared/background-tasks'
 import PanelAddMenu from './components/PanelAddMenu'
 import PanelTabs from './components/PanelTabs'
@@ -84,7 +85,7 @@ const PANEL_DEFAULT_WIDTH = 400
 const PANEL_MAX_RESERVE = 520
 
 /** `extra:<id>` is a terminal the user added from the + menu. */
-type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question' | 'background' | `extra:${string}`
+type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question' | 'background' | 'github' | `extra:${string}`
 
 function adjacentPanelTab(ids: PanelTab[], removed: PanelTab, remaining = ids.filter(id => id !== removed)): PanelTab {
   const index = ids.indexOf(removed)
@@ -128,6 +129,7 @@ const STORAGE_PANEL_WIDTH = 'layout.panelWidth'
 const STORAGE_PANEL_COLLAPSED = 'layout.panelCollapsed'
 const STORAGE_PANEL_TAB = 'layout.panelTab'
 const STORAGE_BACKGROUND_TASKS_OPEN = 'layout.backgroundTasksOpen'
+const STORAGE_GITHUB_REPOSITORIES_OPEN = 'layout.githubRepositoriesOpen'
 const STORAGE_BACKGROUND_TASK_LATEST = 'layout.backgroundTaskLatest'
 
 function sessionLayoutKey(key: string, sessionId: string): string {
@@ -357,15 +359,6 @@ function ConversationAttachmentImage({ attachment }: { attachment: ConversationA
     }
   }, [attachment.id])
 
-  useEffect(() => {
-    if (!previewOpen) return
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setPreviewOpen(false)
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [previewOpen])
-
   if (!src) return null
   return (
     <>
@@ -383,15 +376,11 @@ function ConversationAttachmentImage({ attachment }: { attachment: ConversationA
           loading="lazy"
         />
       </button>
-      {previewOpen ? createPortal(
-        <div
+      {previewOpen ? (<AppPopover
           className="conversation-attachment-preview"
-          role="dialog"
-          aria-modal="true"
           aria-label="图片预览"
-          onClick={() => setPreviewOpen(false)}
           onWheel={(event) => event.stopPropagation()}
-        >
+         onClose={() => setPreviewOpen(false)}>
           <button
             type="button"
             className="conversation-attachment-preview__close"
@@ -407,15 +396,12 @@ function ConversationAttachmentImage({ attachment }: { attachment: ConversationA
             alt={attachment.fileName || 'Image attachment'}
             onClick={(event) => event.stopPropagation()}
           />
-        </div>,
-        document.body
-      ) : null}
+        </AppPopover>) : null}
     </>
   )
 }
 export default function App({ sessionId, sessionKind, initialSshDialogOpen = false, platformId = '', theme, globalModalOpen = false, onOpenWeb2termConnection, onThemeChange }: AppProps): JSX.Element {
   const [chatView, setChatView] = useState<ChatView>(() => readChatView(sessionId, platformId))
-  const [focusPanelOpen, setFocusPanelOpen] = useState(false)
   const isFocusView = chatView === 'focus' && supportsFocusView(platformId)
   const placeholderToggle = chatView === 'local'
   // The app-drawn view fading out after a switch (see selectChatView); null when none is.
@@ -460,19 +446,21 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     PANEL_MIN_WIDTH,
     readStoredNumber(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), readStoredNumber(STORAGE_PANEL_WIDTH, PANEL_DEFAULT_WIDTH))
   ))
+  // All chat views share the same sidebar layout within this session.
   const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), false))
-  const effectivePanelCollapsed = isFocusView ? !focusPanelOpen : panelCollapsed
   const [backgroundTasksOpen, setBackgroundTasksOpen] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_BACKGROUND_TASKS_OPEN, sessionId), false))
+  const [githubRepositoriesOpen, setGithubRepositoriesOpen] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_GITHUB_REPOSITORIES_OPEN, sessionId), false))
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     try {
       const stored = window.localStorage.getItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId))
       // An added terminal outlives a session switch but not a restart; checked once the list loads.
-      return stored === 'terminal' || stored === 'toolbox' || (stored === 'background' && backgroundTasksOpen) || stored?.startsWith('extra:') ? stored as PanelTab : 'control'
+      return stored === 'terminal' || stored === 'toolbox' || (stored === 'background' && backgroundTasksOpen)
+        || (stored === 'github' && githubRepositoriesOpen) || stored?.startsWith('extra:') ? stored as PanelTab : 'control'
     } catch {
       return 'control'
     }
   })
-  const terminalVisible = panelTab === 'terminal' && !effectivePanelCollapsed
+  const terminalVisible = panelTab === 'terminal' && !panelCollapsed
   const [extraTerminals, setExtraTerminals] = useState<ExtraTerminal[] | null>(null)
   const [panelAddMenuOpen, setPanelAddMenuOpen] = useState(false)
   const [panelTabListOpen, setPanelTabListOpen] = useState(false)
@@ -517,8 +505,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setQuestionChatOpen(true)
       setPanelTab('question')
       setPanelCollapsed(false)
-      // The focus view keeps its own panel state; a question asked there must show its chat too.
-      setFocusPanelOpen(true)
     }
     const unsubscribe = window.api.onQuestionChatState((state, ownerId) => {
       if (ownerId !== sessionId || (state && state.platformId !== platformId)) return
@@ -619,7 +605,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [sshDialogOpen, setSshDialogOpen] = useState(initialSshDialogOpen)
   const [sshAdvancedOpen, setSshAdvancedOpen] = useState(true)
   /** The quick host list, shown inside the terminal pane. */
-  const [sshPickerOpen, setSshPickerOpen] = useState(false)
   const [sshBusy, setSshBusy] = useState(false)
   const [sshUploading, setSshUploading] = useState(false)
   const [sshFilesOpen, setSshFilesOpen] = useState(false)
@@ -708,10 +693,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), panelCollapsed ? '1' : '0')
       window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId), panelTab)
       window.localStorage.setItem(sessionLayoutKey(STORAGE_BACKGROUND_TASKS_OPEN, sessionId), backgroundTasksOpen ? '1' : '0')
+      window.localStorage.setItem(sessionLayoutKey(STORAGE_GITHUB_REPOSITORIES_OPEN, sessionId), githubRepositoriesOpen ? '1' : '0')
     } catch {
       /* storage unavailable; the sizes just will not persist */
     }
-  }, [sessionId, panelWidth, panelCollapsed, panelTab, backgroundTasksOpen])
+  }, [sessionId, panelWidth, panelCollapsed, panelTab, backgroundTasksOpen, githubRepositoriesOpen])
 
   const conversationId = embed.conversationId
   const transcriptScrollKey = conversationScrollKey(sessionId, platformId, conversationId)
@@ -921,8 +907,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       try { window.localStorage.setItem(key, latest) } catch { /* Keep the in-memory guard. */ }
       setBackgroundTasksOpen(true)
       setPanelCollapsed(false)
-      // The focus view keeps its own panel state; a new task must open that panel too.
-      setFocusPanelOpen(true)
       setPanelTab('background')
     }
     const off = window.api.onBackgroundTasksChanged((state, ownerId) => {
@@ -944,9 +928,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     ]
     if (questionChatOpen) items.push({ id: 'question', title: '侧边聊天', closable: true, closeDisabled: questionChatCreating })
     if (backgroundTasksOpen) items.push({ id: 'background', title: '后台任务', closable: true, closeTitle: '关闭后台任务页签（任务继续运行）' })
+    if (githubRepositoriesOpen) items.push({ id: 'github', title: 'GitHub 仓库管理', closable: true })
     for (const item of extraTerminals ?? []) items.push({ id: `extra:${item.id}`, title: item.title, closable: true })
     return items
-  }, [questionChatOpen, questionChatCreating, backgroundTasksOpen, extraTerminals])
+  }, [questionChatOpen, questionChatCreating, backgroundTasksOpen, githubRepositoriesOpen, extraTerminals])
   const panelTabIds = useMemo(() => panelTabs.map(item => item.id), [panelTabs])
   const panelTabIdsRef = useRef(panelTabIds)
   panelTabIdsRef.current = panelTabIds
@@ -966,7 +951,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     if (!created) return
     setExtraTerminals(created.state.terminals)
     setPanelTab(`extra:${created.id}`)
-    setSshPickerOpen(false)
   }, [])
 
   const createSideChat = useCallback(async (): Promise<void> => {
@@ -980,7 +964,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     setQuestionChatCreateError('')
     setQuestionChatOpen(true)
     setPanelTab('question')
-    setSshPickerOpen(false)
     try {
       const state = await window.api.createQuestionChat(sessionId, platformId)
       if (request !== questionChatRequest.current) return
@@ -1024,6 +1007,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setQuestionChat(null)
       setQuestionChatOpen(false)
     } else if (id === 'background') setBackgroundTasksOpen(false)
+    else if (id === 'github') setGithubRepositoriesOpen(false)
     else return
     const next = adjacentPanelTab(panelTabIdsRef.current, id)
     setPanelTab(current => current === id ? next : current)
@@ -1503,7 +1487,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    */
   const switchSshHost = useCallback(
     async (host: SshHost): Promise<void> => {
-      setSshPickerOpen(false)
       // Already here: reconnecting would drop a working session for nothing.
       if (sshLive && ssh?.hostId === host.id) return
 
@@ -1989,7 +1972,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     if (settingsBodyRef.current) settingsBodyRef.current.scrollTop = 0
   }, [settingsOpen, settingsSection])
 
-  // Escape closes the dialog, like every other dialog on the platform.
   useEffect(() => {
     if (!settingsOpen) return
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -2077,46 +2059,20 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
     matches[index].node.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }, [clearPromptHighlights])
-  // Escape closes the injected-prompt viewer; Ctrl/Cmd+F opens its local find field.
+  // Ctrl/Cmd+F opens the prompt's local find field; the popover handles dismissal.
   useEffect(() => {
     if (!promptOpen) return
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented) return
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
         event.preventDefault()
         setPromptSearchOpen(true)
         return
       }
-      if (event.key === 'Escape') {
-        if (promptSearchOpen) {
-          setPromptSearchOpen(false)
-          setPromptSearch('')
-          promptMatchIndexRef.current = -1
-          clearPromptHighlights()
-        } else {
-          setPromptView(null)
-        }
-      }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [promptOpen, promptSearchOpen])
-
-  // …and dismisses the transient panels that live in the terminal column.
-  useEffect(() => {
-    if (!sshPickerOpen && !sshFilesOpen) return
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return
-      if (pdfPreview) {
-        event.preventDefault()
-        setPdfPreview(null)
-        return
-      }
-      setSshPickerOpen(false)
-      setSshFilesOpen(false)
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [sshPickerOpen, sshFilesOpen, pdfPreview])
+  }, [promptOpen])
 
   const saveSettings = useCallback(async (): Promise<void> => {
     if (savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null) return
@@ -2201,7 +2157,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   )
 
   const handleTerminalAction = (action: TerminalActionId): void => {
-    setSshPickerOpen(false)
     switch (action) {
       case 'interrupt': void interruptTerminal(); break
       case 'reset': void resetTerminal(); break
@@ -2224,12 +2179,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
   const gitCwd = sshActive ? sshCwd : (terminal?.cwd ?? '')
   const openTool = (kind: ToolKind): void => {
-    setSshPickerOpen(false)
     tools.open(sessionId, kind, kind === 'git' ? gitCwd : undefined)
   }
 
   return (
-    <div className={'app' + (effectivePanelCollapsed ? ' app--panel-collapsed' : '') + (isFocusView ? ' app--focus' : '')} style={{ '--panel-width': `${panelWidth}px` } as CSSProperties}>
+    <div className={'app' + (panelCollapsed ? ' app--panel-collapsed' : '') + (isFocusView ? ' app--focus' : '')} style={{ '--panel-width': `${panelWidth}px` } as CSSProperties}>
       <header className="topbar">
         <div className="brand">
           <span className="brand__mark" aria-hidden="true">
@@ -2358,9 +2312,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             <FocusChatView key={transcriptScrollKey} owner={{ sessionId, platformId, conversationId }} theme={theme}
               visible={chatSurfaceVisible} messages={conversationMessages} messagesReady={conversationMessagesReady}
               needsAnswer={!!pendingQuestion}
+              newChatDisabled={taskRunning || embed.isLoading || switchingPlatform}
+              onNewChat={() => window.api.sendEmbedCommand('home')}
               onQuestion={() => setQuestionMinimized(false)}
               onOriginal={() => selectChatView('original')}
-              onControl={() => { setPanelTab('control'); setFocusPanelOpen(true) }}
+              onControl={() => { setPanelTab('control'); setPanelCollapsed(false) }}
               onRun={runExecution} onSkip={skipExecution} onStop={endTask}
               renderAttachment={attachment => <ConversationAttachmentImage key={attachment.id} attachment={attachment} />} />
             </div>
@@ -2429,8 +2385,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         </div>
       </main>
 
-      <aside ref={panelRef} className={effectivePanelCollapsed ? 'panel panel--collapsed' : 'panel'}>
-        {effectivePanelCollapsed ? null : (
+      <aside ref={panelRef} className={panelCollapsed ? 'panel panel--collapsed' : 'panel'}>
+        {panelCollapsed ? null : (
           <div
             className="panel__resizer"
             role="separator"
@@ -2440,7 +2396,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           />
         )}
         <div className="panel__collapse-head">
-          {effectivePanelCollapsed ? null : (
+          {panelCollapsed ? null : (
             <PanelTabs
               items={panelTabs}
               active={panelTab}
@@ -2448,11 +2404,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               visible={!(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
               open={panelTabListOpen}
               onOpenChange={open => { setPanelTabListOpen(open); if (open) setPanelAddMenuOpen(false) }}
-              onSelect={id => { setPanelTab(id); if (id !== 'terminal') setSshPickerOpen(false) }}
+              onSelect={id => { setPanelTab(id) }}
               onClose={closePanelTab}
             />
           )}
-          {effectivePanelCollapsed ? null : (
+          {panelCollapsed ? null : (
             <PanelAddMenu
               containerRef={panelRef}
               visible={!(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
@@ -2462,9 +2418,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               onAdd={item => {
                 if (item === 'background') {
                   setBackgroundTasksOpen(true)
-                  setFocusPanelOpen(true)
+                  setPanelCollapsed(false)
                   setPanelTab('background')
-                  setSshPickerOpen(false)
+                } else if (item === 'github') {
+                  setGithubRepositoriesOpen(true)
+                  setPanelCollapsed(false)
+                  setPanelTab('github')
                 } else if (item === 'question') {
                   void createSideChat()
                 } else void addExtraTerminal()
@@ -2474,17 +2433,15 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           <button
             type="button"
             className="panel__sync panel__collapse-button"
-            title={effectivePanelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
-            aria-label={effectivePanelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
+            title={panelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
+            aria-label={panelCollapsed ? '展开右侧栏' : '折叠右侧栏'}
             onClick={() => {
-              if (isFocusView) setFocusPanelOpen(value => !value)
-              else setPanelCollapsed((value) => !value)
+              setPanelCollapsed((value) => !value)
               setPanelAddMenuOpen(false)
               setPanelTabListOpen(false)
-              setSshPickerOpen(false)
             }}
           >
-            {effectivePanelCollapsed ? '«' : '»'}
+            {panelCollapsed ? '«' : '»'}
           </button>
         </div>
         <div className="panel__view panel__view--control" hidden={panelTab !== 'control'}>
@@ -2603,11 +2560,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           </div>
 
           {recentCommandOpen ? (
-            <div
+            <AppPopover
               className="recent-command-picker"
-              role="dialog"
               aria-label="选择历史指令"
-            >
+             onClose={() => setRecentCommandOpen(false)}>
               <div className="recent-command-picker__header">
                 <div>
                   <strong>选择历史指令</strong>
@@ -2643,7 +2599,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                 </div>
               )}
               {recentCommandError ? <p className="recent-command-picker__error" role="alert">{recentCommandError}</p> : null}
-            </div>
+            </AppPopover>
           ) : null}
 
           <div className="terminal__stats">
@@ -2702,7 +2658,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         {questionChatOpen || questionChat ? (
           <div className="panel__view" hidden={!questionChatOpen || panelTab !== 'question'}>
             {/* Native chat would otherwise paint over either header popup. */}
-            {questionChat ? <QuestionChatPanel key={questionChat.id} sessionId={sessionId} state={questionChat} visible={questionChatOpen && panelTab === 'question' && !effectivePanelCollapsed && chatSurfaceVisible && !panelAddMenuOpen && !panelTabListOpen} /> : (
+            {questionChat ? <QuestionChatPanel key={questionChat.id} sessionId={sessionId} state={questionChat} visible={questionChatOpen && panelTab === 'question' && !panelCollapsed && chatSurfaceVisible && !panelAddMenuOpen && !panelTabListOpen} /> : (
               <section className="question-chat-sidebar question-chat-sidebar--empty" aria-label="侧边聊天">
                 <strong>{questionChatCreateError ? '侧边聊天暂未打开' : '正在新建侧边聊天…'}</strong>
                 {questionChatCreateError ? <>
@@ -2714,10 +2670,17 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           </div>
         ) : null}
 
-        {backgroundTasksOpen ? <BackgroundTasksPane sessionId={sessionId} visible={panelTab === 'background' && !effectivePanelCollapsed} /> : null}
+        {backgroundTasksOpen ? <BackgroundTasksPane sessionId={sessionId} visible={panelTab === 'background' && !panelCollapsed} /> : null}
+
+        {githubRepositoriesOpen ? <GithubRepositoriesPane visible={panelTab === 'github' && !panelCollapsed}
+          owner={{ sessionId, platformId, conversationId }} taskRunning={taskRunning} commandRecovery={interceptor?.commandRecovery}
+          loginDisabledReason={remoteTerminal ? '请先将当前终端切回本机'
+            : switchingPlatform || embed.isLoading ? '等待当前 AI 页面加载完成'
+              : !interceptor?.installed || !interceptor.enabled || !interceptor.promptInjectionEnabled ? '请先启用当前对话的终端模式和提示词注入'
+                : taskRunning ? '请等待当前 AI 任务结束后再登录' : null} /> : null}
 
         {(extraTerminals ?? []).map((item) => (
-          <ExtraTerminalPane key={item.id} sessionId={sessionId} terminal={item} visible={panelTab === `extra:${item.id}` && !effectivePanelCollapsed} />
+          <ExtraTerminalPane key={item.id} sessionId={sessionId} terminal={item} visible={panelTab === `extra:${item.id}` && !panelCollapsed} />
         ))}
 
       <section ref={toolboxPaneRef} className="terminal-pane panel__view" hidden={panelTab !== 'terminal'} aria-label="终端">
@@ -2795,14 +2758,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           />
         </div>
         {sshActive && sshFilesOpen ? (
-          <div
+          <AppPopover
             ref={sshFilesModalRef}
             className="modal modal--ssh-files"
-            role="dialog"
-            aria-modal="true"
             aria-label="远程文件"
             inert={pdfPreview !== null}
-          >
+           onClose={() => setSshFilesOpen(false)}>
             <div className="ssh-files-modal">
               <div className="ssh-files-modal__head">
                 <div className="ssh-files-modal__heading">
@@ -2989,7 +2950,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                 </div>
               </div>
             </div>
-          </div>
+          </AppPopover>
         ) : null}
           <>
             {/*
@@ -3012,7 +2973,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                   >
                     {currentExecution.description || '（模型没有给出说明）'}
                   </span>
-                  <span className="current__code">{currentExecution.kind === 'read_files' ? '文件读取' : `超时 ${currentExecution.timeoutSeconds}s`}</span>
+                  <span className="current__code">{currentExecution.kind === 'read_files' ? '文件读取' : currentExecution.background ? '后台任务 · 软件监控' : `超时 ${currentExecution.timeoutSeconds}s`}</span>
                   {currentExecution.exitCode !== null ? (
                     <span className="current__code">退出码 {currentExecution.exitCode}</span>
                   ) : null}
@@ -3243,7 +3204,7 @@ ${record.command}`
       </footer>
 
         {pendingQuestion && currentQuestion && !questionMinimized && questionDialogVisible ? (
-          <div className="modal modal--question" role="dialog" aria-modal="false" aria-label="需要你的回答">
+          <AppPopover className="modal modal--question" aria-label="需要你的回答" onClose={() => setQuestionMinimized(true)} busy={questionBusy}>
               <div className="question-modal">
                 <div className="question-modal__head">
                   <span className="question-modal__icon" aria-hidden="true">?</span>
@@ -3328,20 +3289,25 @@ ${record.command}`
                   </button>
                 </div>
               </div>
-          </div>
+          </AppPopover>
         ) : null}
 
         {/* Separate injected-prompt sections, using the same Markdown viewer. */}
         {promptOpen ? (
-          <div
+          <AppPopover
             className="modal modal--prompt"
-            role="dialog"
-            aria-modal="true"
             aria-label={promptTitle}
-            onMouseDown={(event) => {
-              if (event.target === event.currentTarget) setPromptView(null)
+            onKeyDownCapture={event => {
+              if (event.key === 'Escape' && promptSearchOpen) {
+                event.preventDefault()
+                event.stopPropagation()
+                setPromptSearchOpen(false)
+                setPromptSearch('')
+                promptMatchIndexRef.current = -1
+                clearPromptHighlights()
+              }
             }}
-          >
+            onClose={() => setPromptView(null)}>
             <div className="prompt-modal" data-color-mode={theme}>
               <div className="prompt-modal__head">
                 <span className="prompt-modal__icon" aria-hidden="true">
@@ -3416,7 +3382,7 @@ ${record.command}`
               </div>
               {promptSource ? <div className="prompt-modal__scroll-hint" aria-hidden="true"><span>↓</span> 滚动查看更多</div> : null}
             </div>
-          </div>
+          </AppPopover>
         ) : null}      {settingsOpen ? (
         <div
           className="modal modal--settings"
@@ -3883,15 +3849,10 @@ ${record.command}`
         </div>
       ) : null}
       {sshDialogOpen ? (
-        <div
+        <AppPopover
           className="modal ssh-connect-overlay"
-          role="dialog"
-          aria-modal="true"
           aria-label="SSH 连接"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setSshDialogOpen(false)
-          }}
-        >
+         onClose={() => setSshDialogOpen(false)} busy={sshBusy}>
           <div className="ssh-connect-modal">
             <div className="ssh-connect__head">
               <span className="ssh-connect__title">SSH 连接</span>
@@ -4009,20 +3970,17 @@ ${record.command}`
               </form>
             </div>
           </div>
-        </div>
+        </AppPopover>
       ) : null}
       {commandPreview !== null ? (
         <Suspense fallback={
-          <>
-          <div className="command-viewer__backdrop" onClick={() => setCommandPreview(null)} aria-hidden="true" />
-          <div className="command-viewer" data-theme={theme} role="dialog" aria-modal="true" aria-label="完整指令">
+          <AppPopover className="command-viewer" data-theme={theme} aria-label="完整指令" onClose={() => setCommandPreview(null)}>
             <header className="command-viewer__head">
               <h2 className="command-viewer__title">完整指令</h2>
               <button type="button" className="command-viewer__button" onClick={() => setCommandPreview(null)}>关闭</button>
             </header>
             <p className="command-viewer__loading" role="status">正在加载指令查看器…</p>
-          </div>
-          </>
+          </AppPopover>
         }>
           <CommandViewer
             command={commandPreview.command}

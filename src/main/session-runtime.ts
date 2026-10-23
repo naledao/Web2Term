@@ -64,6 +64,7 @@ import type {
 import { CommandRunner } from './commands'
 import { ExtraTerminals } from './extra-terminals'
 import { BackgroundTasks } from './background-tasks'
+import { backgroundLaunchPlan, startManagedBackground } from './background-launch'
 import { BackgroundTaskResults } from './background-task-results'
 import type { BackgroundTaskTarget } from './background-tasks'
 import { parseStoredBackgroundTask } from '../shared/background-tasks'
@@ -79,6 +80,9 @@ import { FocusChat } from './focus-chat'
 import { stageFocusAttachments } from './focus-attachments'
 import { supportsFocusView, validFocusFiles } from '../shared/focus-chat'
 import { writeFocusDiagnostic } from './focus-chat-log'
+import { getGithubCliState } from './github-cli'
+import { dispatchGithubLoginTask } from './github-login-task'
+import type { GithubLoginTaskResult } from '../shared/github'
 import type { FocusChatState, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusSendOutcome } from '../shared/focus-chat'
 import type { EmbedHandlers } from './embed'
 import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseWindowsEnvironment } from './environment'
@@ -451,6 +455,16 @@ export class SessionRuntime {
         const registered = this.backgroundTaskResults.capture(owner, ready, 'created')
         return output => this.backgroundTasks.register(output, record, target, settled, registered, owner)
       },
+      startBackgroundTask: async (record, shell, run) => {
+        const target = this.backgroundTaskTarget(shell)
+        const owner = { platformId: this.activePlatformId, conversationId: record.conversationId }
+        const ready = (): boolean => this.backgroundTargetCurrent(target)
+        const settled = this.backgroundTaskResults.capture(owner, ready)
+        const created = this.backgroundTaskResults.capture(owner, ready, 'created')
+        const plan = backgroundLaunchPlan(record.command, record.description, shell.kind, shell.cwd)
+        return startManagedBackground(plan, run, registration =>
+          this.backgroundTasks.registerTasks([registration], record, target, settled, created, owner, true))
+      },
       onTaskStarted: () => this.embed.startTerminalTask(),
       onTerminalChanged: (state) => {
         this.send(IpcChannels.terminalChanged, state)
@@ -756,10 +770,14 @@ export class SessionRuntime {
         this.handleDetectedCommand(command)
         this.focusChat.command(platform.id, command.messageId, command.live)
       },
-      onParseFailed: (text) => {
-        if (isActive()) this.focusChat.parseFailed(platform.id)
-        console.warn(`[session] reply did not parse as a command ${JSON.stringify({ text })}`)
-        if (isActive()) this.runner.noteParseFailure(text)
+      onParseFailed: (payload) => {
+        if (!isActive()) return
+        if (payload.live !== false) this.focusChat.parseFailed(platform.id, payload)
+        this.runner.noteParseFailure(payload.text ?? '')
+        if (payload.live === true) void record().embed?.recoverCommand(this.active && this.runner.canSendAutomaticResult())
+      },
+      onCommandRecovery: recovery => {
+        if (isActive()) this.focusChat.commandRecovery(platform.id, recovery)
       }
     }
   }
@@ -1096,6 +1114,38 @@ export class SessionRuntime {
       return '选区已失效，请重新选中文字并输入问题。'
     }
     return this.embed.askSelectionFromFocus({ selectedText, question: question.trim(), answerText, sourceMessageId })
+  }
+
+  async requestGithubLogin(owner: FocusOwner): Promise<GithubLoginTaskResult> {
+    if (this.focusSending) return { status: 'blocked', message: '当前正在发送消息，请稍后重试。' }
+    this.focusSending = true
+    const controller = new AbortController()
+    this.focusUploadAbort = controller
+    try {
+      return await dispatchGithubLoginTask({
+        blockedReason: () => {
+          if (controller.signal.aborted) return '登录任务发送已取消。'
+          if (this.disposed || !this.active || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId ||
+            owner.conversationId !== this.embed.getState().conversationId) return '当前会话已切换，请在当前 AI 对话中重新操作。'
+          if (this.web2term || this.ssh.getState().attached) return 'GitHub 仓库管理使用本机账号，请先将当前终端切回本机。'
+          const status = this.embed.getInterceptorStatus()
+          if (!status.installed || !status.enabled || !status.promptInjectionEnabled) return '请先启用当前对话的终端模式和提示词注入，再让 AI 协助登录。'
+          if (status.taskStartedAt !== null && status.taskFinishedAt === null) return '当前 AI 正在处理任务，请结束后再试。'
+          return null
+        },
+        inspect: getGithubCliState,
+        send: text => this.embed.sendUserTask(text)
+      })
+    } finally {
+      if (this.focusUploadAbort === controller) this.focusUploadAbort = null
+      this.focusSending = false
+    }
+  }
+
+  async retryCommandRecovery(owner: FocusOwner, token: number): Promise<string> {
+    if (this.disposed || !this.active || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId ||
+      owner.conversationId !== this.embed.getState().conversationId || this.embed.getInterceptorStatus().commandRecovery?.token !== token) return 'stale'
+    return this.embed.recoverCommand(this.runner.canSendAutomaticResult(), true)
   }
 
   async sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome> {

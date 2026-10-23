@@ -149,15 +149,6 @@ export default function RedisDialog({ open, theme, onClose }: {
     return () => { cancelled = true; unsubscribe() }
   }, [open, active, applyState])
 
-  useEffect(() => {
-    if (!open || !visible) return
-    const keydown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !event.defaultPrevented && !pendingDelete) onClose()
-    }
-    window.addEventListener('keydown', keydown)
-    return () => window.removeEventListener('keydown', keydown)
-  }, [open, visible, onClose, pendingDelete])
-
   const loadKeys = useCallback(async (tab: ConnectionTab, append = false): Promise<void> => {
     const request = ++requestRef.current
     const search = append ? tab.appliedSearch : tab.search.trim()
@@ -264,7 +255,7 @@ export default function RedisDialog({ open, theme, onClose }: {
   }
 
   if (!open) return null
-  return <div className="modal modal--mysql" role="dialog" aria-modal="true" aria-label="Redis 连接">
+  return <div className="modal modal--mysql" aria-label="Redis 连接">
     <div className="mysql-page redis-page" data-theme={theme}>
       <header className="mysql-page__head">
         <button type="button" className="mysql-page__add" disabled={loading || state === null} onClick={() => {

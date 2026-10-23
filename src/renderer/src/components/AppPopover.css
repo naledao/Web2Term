@@ -1,0 +1,45 @@
+.app-popover-portal { display: contents; }
+.app-popover-positioner { z-index: 1200; max-width: calc(100vw - 24px); outline: none; }
+
+/* Remove former viewport overlays while retaining each form's content layout. */
+.app-popover.app-popover,
+.workspace[data-theme='dark'] .app-popover.app-popover {
+  position: relative !important;
+  inset: auto !important;
+  display: flex !important;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  width: max-content;
+  max-width: min(var(--available-width), calc(100vw - 24px)) !important;
+  max-height: min(var(--available-height), calc(100dvh - 24px)) !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: var(--app-popover-background, transparent) !important;
+  backdrop-filter: none !important;
+  transform: none !important;
+  border-radius: 12px;
+  box-shadow: 0 10px 36px #17253d26;
+  outline: none;
+  pointer-events: auto;
+  overscroll-behavior: contain;
+}
+.app-popover.app-popover[data-closed],
+.workspace[data-theme='dark'] .app-popover.app-popover[data-closed] { display: none !important; }
+.workspace[data-theme='dark'] .app-popover { box-shadow: 0 10px 36px #0006; }
+.app-popover > :is(.modal__box, .new-session-modal__box, .transfer-modal__box, .workspace-project-dialog__box, .ssh-connect-modal, .ssh-files-modal, .question-modal, .prompt-modal, .confirm-dialog__box, .pdf-preview__box, .mysql-page__create-dialog, .mysql-page__cell-dialog) {
+  min-width: 0;
+  min-height: 0;
+  max-width: 100% !important;
+  max-height: min(var(--available-height), calc(100dvh - 24px)) !important;
+  margin: 0 !important;
+  border-radius: 12px;
+  box-shadow: none;
+}
+.app-popover > :is(.workspace-project-dialog__box, .new-session-modal__box, .confirm-dialog__box) { overflow-y: auto; }
+.app-popover.command-viewer { --app-popover-background: var(--command-surface); width: min(1100px, calc(100vw - 24px)); height: min(760px, var(--available-height)); }
+.app-popover.pdf-preview { width: min(1400px, calc(100vw - 24px)); height: min(880px, var(--available-height)); }
+.app-popover.conversation-attachment-preview { --app-popover-background: var(--bg-elevated); width: min(880px, calc(100vw - 24px)); padding: 36px 12px 12px !important; border: 1px solid var(--border); cursor: default; }
+.app-popover .conversation-attachment-preview__image { max-width: 100%; max-height: max(80px, calc(var(--available-height) - 52px)); object-fit: contain; }
+.app-popover .conversation-attachment-preview__close { top: 6px; right: 8px; width: 28px; height: 28px; color: var(--text); background: transparent; }
+.app-popover.recent-command-picker { --app-popover-background: var(--bg-elevated); width: 360px; padding: 12px !important; overflow-y: auto; }

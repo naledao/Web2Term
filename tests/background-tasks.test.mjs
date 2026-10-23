@@ -33,7 +33,9 @@ const flush = () => new Promise(resolve => setImmediate(resolve))
 
 function fixture(t) {
   const timers = new Set()
+  let clock = Date.now()
   const exports = load('../src/main/background-tasks.ts', { '../shared/background-tasks': protocol }, {
+    Date: class extends Date { static now() { return clock } },
     setTimeout(callback) { const timer = { callback }; timers.add(timer); return timer },
     clearTimeout(timer) { timers.delete(timer) }
   })
@@ -64,9 +66,51 @@ function fixture(t) {
   return {
     manager, target, pending, calls, pushes, timers, exports,
     setAvailable(value) { available = value },
+    advance(ms) { clock += ms },
     async tick() { const callbacks = [...timers]; timers.clear(); for (const timer of callbacks) timer.callback(); await flush() }
   }
 }
+
+test('software registration survives an occupied log and includes later stderr in its creation notification', async t => {
+  const f = fixture(t), created = []
+  const item = protocol.parseBackgroundTaskRegistrations(registration())[0]
+  f.pending.push(new Error('log file is being used by another process'))
+  assert.equal(f.manager.registerTasks([item], record, f.target, undefined, task => created.push(task), undefined, true), 1)
+  await flush()
+  assert.equal(f.manager.getState().tasks.length, 1, 'log access failure must not remove the registered task')
+  assert.equal(created.length, 0)
+  f.pending.push(sample({ stdout: log(''), stderr: log('First copy your one-time code: TEST-CODE\nOpen this URL: https://github.com/login/device') }))
+  await f.tick()
+  assert.equal(created.length, 1)
+  assert.match(created[0].errorOutput, /TEST-CODE/)
+  assert.equal(created[0].status, 'running')
+})
+
+test('silent software tasks get creation confirmation after the bounded startup wait', async t => {
+  const f = fixture(t), created = []
+  const item = protocol.parseBackgroundTaskRegistrations(registration())[0]
+  f.pending.push(sample({ stdout: log('\n'), stderr: log('') }))
+  f.manager.registerTasks([item], record, f.target, undefined, task => created.push(task), undefined, true)
+  await flush()
+  assert.equal(created.length, 0, 'an initial blank stderr/stdout line is not authorization information')
+  f.advance(16000)
+  f.pending.push(sample({ stdout: log(''), stderr: log('') }))
+  await f.tick()
+  assert.equal(created.length, 1)
+})
+
+test('a fast software task publishes creation before its final result even without startup output', async t => {
+  const f = fixture(t), notifications = []
+  const item = protocol.parseBackgroundTaskRegistrations(registration())[0]
+  f.pending.push(sample({ alive: false, exitCode: 7, stdout: log(''), stderr: log('') }))
+  f.manager.registerTasks([item], record, f.target, task => notifications.push(['finished', task]),
+    task => notifications.push(['created', task]), undefined, true)
+  await flush()
+  f.pending.push(sample({ alive: false, exitCode: 7, stdout: log(''), stderr: log('') }))
+  await f.tick()
+  assert.deepEqual(notifications.map(([kind]) => kind), ['created', 'finished'])
+  assert.equal(notifications[1][1].exitCode, 7)
+})
 
 test('only explicit complete output lines register; ordinary prose, fabricated JSON and partial lines do not', () => {
   const result = protocol.parseBackgroundTaskRegistrations([

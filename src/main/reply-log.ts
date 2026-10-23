@@ -17,14 +17,14 @@ export interface ReplyDiagnosticContext {
 const events = new Set([
   'installed', 'configured', 'sent', 'sent-raw', 'scan', 'reply-state', 'question',
   'question-cleared', 'command', 'read-files', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
-  'continue-generation'
+  'continue-generation', 'command-recovery'
 ])
 const reasons = new Set([
   'no-turns', 'no-visible-turns', 'not-assistant-turn', 'no-key', 'already-handled', 'question-still-generating',
   'question-not-live', 'invalid-question', 'invalid-read-files', 'no-command', 'still-generating',
   'terminal-mode-off', 'result-sent', 'user-sent', 'question-detected', 'non-command-reply',
   'history-baseline', 'manual-resume', 'file-send-submitted', 'configured-baseline', 'task-ended',
-  'continue-clicked', 'continue-unreachable', 'continue-limit', 'duplicate-command'
+  'continue-clicked', 'continue-unreachable', 'continue-limit', 'duplicate-command', 'command-format-error'
 ])
 
 function identifier(value: unknown): string | null {
@@ -53,7 +53,7 @@ export function replyDiagnosticMetadata(
     'taskPromptGeneration', 'assistantTurnCount', 'hiddenTurnCount', 'replyTextLength', 'codeBlockCount', 'textLength', 'objectCount',
     'selectedNodeTextLength', 'replyTextContentLength', 'visibleAssistantTurnCount', 'lastVisibleReplyTextLength',
     'lastVisibleReplyCodeBlockCount', 'visibleAnswerMarkerCount', 'visibleAnswerTextLength',
-    'visibleAnswerCodeBlockCount', 'visibleCodeBlockCount', 'lastScanAgeMs', 'lastMutationAgeMs', 'attempt'
+    'visibleAnswerCodeBlockCount', 'visibleCodeBlockCount', 'lastScanAgeMs', 'lastMutationAgeMs', 'attempt', 'parseErrorOffset', 'parseFailureToken'
   ] as const) {
     const value = payload[key]
     if (Number.isSafeInteger(value) && Number(value) >= 0) details[key] = Number(value)
@@ -73,6 +73,11 @@ export function replyDiagnosticMetadata(
     if (payload[key] === null) details[key] = null
   }
   if (['true', 'false', 'missing', 'unknown'].includes(payload.replyStreamingState ?? '')) details.replyStreamingState = payload.replyStreamingState!
+  if (['code', 'rendered'].includes(payload.commandSource ?? '')) details.commandSource = payload.commandSource!
+  if (['invalid-json', 'invalid-background', 'invalid-command', 'duplicate-field'].includes(payload.parseErrorCode ?? '')) details.parseErrorCode = payload.parseErrorCode!
+  if (['command', 'description', 'background', 'timeout_seconds'].includes(payload.parseErrorField ?? '')) details.parseErrorField = payload.parseErrorField!
+  if (payload.parseRepair === 'windows-path') details.parseRepair = payload.parseRepair
+  if (['pending', 'sent', 'blocked', 'failed', 'uncertain'].includes(payload.recoveryStatus ?? '')) details.recoveryStatus = payload.recoveryStatus!
   if (typeof context.questionAccepted === 'boolean') details.questionAccepted = context.questionAccepted
   if (typeof payload.command === 'string') details.commandLength = payload.command.length
   if (typeof payload.text === 'string' && details.textLength === undefined) details.textLength = payload.text.length

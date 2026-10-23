@@ -1,5 +1,6 @@
 import type { ToolboxInvocation } from '../shared/toolbox'
 import type { BackgroundTasksState } from '../shared/background-tasks'
+import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from '../shared/github'
 import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusSendOutcome } from '../shared/focus-chat'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
@@ -92,6 +93,17 @@ import type {
  */
 const api: AppApi = {
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke(IpcChannels.getAppInfo),
+  getGithubCliState: (): Promise<GithubCliState> => ipcRenderer.invoke(IpcChannels.githubCliGetState),
+  openGithubCliInstall: (): Promise<void> => ipcRenderer.invoke(IpcChannels.githubCliOpenInstall),
+  logoutGithubCli: (account: string): Promise<GithubLogoutResult> => ipcRenderer.invoke(IpcChannels.githubCliLogout, account),
+  requestGithubLogin: (owner: FocusOwner): Promise<GithubLoginTaskResult> => ipcRenderer.invoke(IpcChannels.githubLoginTask, owner),
+  getGithubRepositoryPage: (request: GithubRepositoryRequest): Promise<GithubRepositoryPage> => ipcRenderer.invoke(IpcChannels.githubRepositoriesPage, request),
+  cloneGithubRepository: (request: GithubCloneRequest): Promise<GithubCloneResult> => ipcRenderer.invoke(IpcChannels.githubRepositoryClone, request),
+  onGithubCloneProgress: (listener: (event: GithubCloneProgressEvent) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, progress: GithubCloneProgressEvent): void => listener(progress)
+    ipcRenderer.on(IpcChannels.githubRepositoryCloneProgress, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.githubRepositoryCloneProgress, handler)
+  },
 
   invokeToolbox: (request: ToolboxInvocation): Promise<unknown> => ipcRenderer.invoke(IpcChannels.toolboxInvoke, request),
 
@@ -260,6 +272,7 @@ removeConversation: (id: string): Promise<Conversation[]> =>
     ipcRenderer.invoke(IpcChannels.interceptorCancelQuestion, messageId),
 
   endTask: (): Promise<InterceptorStatus> => ipcRenderer.invoke(IpcChannels.interceptorEndTask),
+  retryCommandRecovery: (owner: FocusOwner, token: number): Promise<string> => ipcRenderer.invoke(IpcChannels.commandRecoveryRetry, owner, token),
 
   onInterceptorEvent: (listener: (status: InterceptorStatus) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, status: InterceptorStatus): void => listener(status)

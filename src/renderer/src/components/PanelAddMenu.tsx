@@ -1,10 +1,11 @@
 import { useEffect } from 'react'
 import type { JSX, RefObject } from 'react'
 import { Popover } from '@base-ui/react/popover'
+import GitHubIcon from './GitHubIcon'
 import './TerminalActionsMenu.css'
 import './PanelAddMenu.css'
 
-export type PanelAddItem = 'terminal' | 'background' | 'question'
+export type PanelAddItem = 'terminal' | 'background' | 'question' | 'github'
 
 /** The + beside the right panel's tabs: opens a menu of tabs that can be added. */
 export default function PanelAddMenu({ containerRef, visible, open, questionChatAvailable, onOpenChange, onAdd }: {
@@ -48,6 +49,15 @@ export default function PanelAddMenu({ containerRef, visible, open, questionChat
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M7 9h4M7 13h3M15 10v6m-2-2 2 2 2-2" /></svg>
             </span>
             <span className="terminal-actions__label">后台任务</span>
+          </button>
+          <button type="button" className="terminal-actions__item" onClick={() => {
+            onOpenChange(false)
+            onAdd('github')
+          }}>
+            <span className="terminal-actions__icon">
+              <GitHubIcon />
+            </span>
+            <span className="terminal-actions__label">GitHub 仓库管理</span>
           </button>
           <button type="button" className="terminal-actions__item" disabled={!questionChatAvailable}
             title={questionChatAvailable ? '新建侧边聊天' : '当前平台不支持侧边聊天'} onClick={() => {

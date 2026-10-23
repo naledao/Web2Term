@@ -173,13 +173,17 @@
     /** Only this draft may be replaced when retrying a failed dialog submission. */
     answerDraft: null,
     /** Dedupe for the "looked like a command but would not parse" report. */
-    lastUnparsedMessageId: null
+    lastUnparsedMessageId: null,
+    failedCommand: null,
+    commandRecoveryUsed: false
   }
 
   let taskPromptConfigured = false
   const resetTaskPrompt = () => {
     state.taskPromptGeneration += 1
     state.taskPromptInjected = false
+    state.failedCommand = null
+    state.commandRecoveryUsed = false
   }
 
   /** User-image batches stay page-side until main explicitly asks for their bytes. */
@@ -193,7 +197,7 @@
   const replyDiagnosticEvents = new Set([
     'installed', 'configured', 'sent', 'sent-raw', 'scan', 'reply-state', 'question',
     'question-cleared', 'command', 'read-files', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
-    'continue-generation'
+    'continue-generation', 'command-recovery'
   ])
   const replyScanEvents = new Set(['scan', 'question', 'command', 'read-files', 'parse-failed', 'task-finished'])
   let replyScanSnapshot = {}
@@ -342,6 +346,21 @@
   }
 
   const readReplyText = (node) => String(replyRootOf(node)?.innerText || '')
+
+  // Code preserves JSON escapes; prose has already passed through Markdown.
+  // Read only the final-answer root, never the turn's reasoning or citations.
+  const readCommandText = (node) => {
+    const root = replyRootOf(node)
+    const rendered = readReplyText(node)
+    const blocks = root ? [...root.querySelectorAll('pre')] : []
+    const block = blocks.findLast(item => /"command"\s*:/.test(String(item.textContent || '')))
+    const visible = String(block?.innerText || '')
+    const position = visible ? rendered.lastIndexOf(visible) : -1
+    // Do not let an earlier code block hide a later malformed prose request.
+    return block && position >= 0 && !/"(?:command|background)"/.test(rendered.slice(position + visible.length))
+      ? { text: String((block.querySelector('code') || block).textContent || ''), source: 'code' }
+      : { text: rendered, source: 'rendered' }
+  }
 
   /**
    * A chart as Markdown: its title, its accessible data points and its caption. Walking its
@@ -1506,6 +1525,8 @@
         if (!isRaw) {
           if (sendContext.promptInjected) state.taskPromptInjected = true
           draftRejected = false
+          state.failedCommand = null
+          state.commandRecoveryUsed = false
         }
         // Once a message actually goes out, the next assistant turn is ours.
         setReplyWaiting(Date.now(), isRaw ? 'result-sent' : 'user-sent')
@@ -1981,7 +2002,7 @@
    * Brace counting is string-aware so braces inside quoted values do not
    * throw it off.
    */
-  const balancedObjects = (text) => {
+  const balancedObjects = (text, includeIncomplete = false) => {
     const found = []
     let start = -1
     let depth = 0
@@ -2013,6 +2034,7 @@
         }
       }
     }
+    if (includeIncomplete && start >= 0 && depth > 0) found.push(text.slice(start))
     return found
   }
 
@@ -2106,9 +2128,17 @@
     return Math.min(Math.max(Math.floor(seconds), 1), 1800)
   }
 
+  const hasBackgroundField = (candidate) => [...candidate.matchAll(/"(?:[^"\\]|\\.)*"\s*:/g)].some(match => {
+    try { return JSON.parse(match[0].slice(0, match[0].lastIndexOf(':')).trim()) === 'background' }
+    catch { return false }
+  })
   const lenientCommand = (candidate) => {
+    if (hasBackgroundField(candidate)) return null
+    const paths = escapeLiteralWindowsPaths(candidate)
+    if (paths.ambiguous) return null
+    candidate = paths.repaired
     const command = readJsonishString(candidate, 'command')
-    if (command === null) return null
+    if (command === null || invalidCommandControls(command)) return null
     const description = readJsonishString(candidate, 'description')
     const timeoutMatch = candidate.match(/"timeout_seconds"\s*:\s*(\d+)/)
     return {
@@ -2119,41 +2149,158 @@
     }
   }
 
-  const toCommand = (candidate) => {
-    for (const attempt of [candidate, repairJson(candidate)]) {
-      let parsed
-      try {
-        parsed = JSON.parse(attempt)
-      } catch (_) {
-        continue
-      }
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
-      if (typeof parsed.command !== 'string') continue
-      return {
-        command: parsed.command.trim(),
-        description: typeof parsed.description === 'string' ? parsed.description.trim() : '',
-        timeoutSeconds: normalizeTimeoutSeconds(parsed.timeout_seconds, parsed.command),
-        rawJson: attempt
-      }
-    }
-
-    // Both strict attempts failed — read the fields textually rather than
-    // throwing the command away.
-    return lenientCommand(candidate)
+  let commandParseIssue = null
+  const commandIssue = (code, field = '', offset = 0) => {
+    commandParseIssue = { parseErrorCode: code, parseErrorField: field, parseErrorOffset: offset }
+    return null
   }
 
-  /** Take the LAST valid command object — "只运行最后一个命令". */
+  // Tokenize the envelope before decoding values. Regex field extraction cannot
+  // distinguish a top-level flag from the word "background" inside shell text.
+  const commandEnvelope = (candidate) => {
+    let i = 0
+    const fields = new Map()
+    const space = () => { while (/\s/.test(candidate[i] || '') && i < candidate.length) i++ }
+    const string = () => {
+      const start = i++
+      while (i < candidate.length) {
+        const ch = candidate[i++]
+        if (ch === '\\') { i++; continue }
+        if (ch === '"') return candidate.slice(start, i)
+      }
+      throw new Error('invalid-json')
+    }
+    try {
+      space()
+      if (candidate[i++] !== '{') return null
+      space()
+      while (candidate[i] !== '}') {
+        if (candidate[i] !== '"') throw new Error('invalid-json')
+        const key = JSON.parse(string())
+        if (fields.has(key)) return commandIssue('duplicate-field', key, i)
+        space()
+        if (candidate[i++] !== ':') throw new Error('invalid-json')
+        space()
+        const start = i
+        if (candidate[i] === '"') string()
+        else {
+          let depth = 0
+          while (i < candidate.length) {
+            const ch = candidate[i]
+            if (ch === '"') { string(); continue }
+            if (depth === 0 && (ch === ',' || ch === '}')) break
+            if (ch === '{' || ch === '[') depth++
+            if (ch === '}' || ch === ']') depth--
+            if (depth < 0) throw new Error('invalid-json')
+            i++
+          }
+        }
+        fields.set(key, { raw: candidate.slice(start, i).trim(), offset: start })
+        space()
+        if (candidate[i] !== ',') break
+        i++
+        space()
+        // A trailing envelope comma is harmless; never alter string contents.
+        if (candidate[i] === '}') break
+      }
+      if (candidate[i++] !== '}') throw new Error('invalid-json')
+      space()
+      if (i !== candidate.length) throw new Error('invalid-json')
+      return fields
+    } catch { return commandIssue('invalid-json', '', i) }
+  }
+
+  // Narrow recovery: an entire single-quoted Windows absolute path in a shell
+  // command, with consistently literal separators. Mixed escaping or unknown
+  // boundaries stay invalid. Decode JSON elsewhere normally (including \n).
+  const invalidJsonEscape = (text) => {
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] !== '\\') continue
+      const next = text[++i]
+      if ('"\\/bfnrt'.includes(next ?? '\u0000')) continue
+      if (next === 'u' && /^[\da-fA-F]{4}$/.test(text.slice(i + 1, i + 5))) { i += 4; continue }
+      return true
+    }
+    return false
+  }
+  const invalidCommandControls = (command) => /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(command) ||
+    [...command.matchAll(/'(?:[A-Za-z]:|\\\\)[^']*'/g)].some(match => /[\u0000-\u001f]/.test(match[0]))
+  const escapeLiteralWindowsPaths = (raw) => {
+    let changed = false
+    let ambiguous = false
+    const repaired = raw.replace(/'(?:[A-Za-z]:\\|\\\\)[^'"\r\n]*'/g, (path, offset) => {
+      if (raw[offset - 1] === "'" || raw[offset + path.length] === "'") {
+        ambiguous ||= invalidJsonEscape(path)
+        return path
+      }
+      const body = path.slice(1, -1)
+      const separators = body.startsWith('\\\\') ? body.slice(2) : body
+      if (!invalidJsonEscape(body)) return path
+      if (/\\{2,}/.test(separators)) { ambiguous = true; return path }
+      changed = true
+      return path.replace(/\\/g, '\\\\')
+    })
+    return { repaired, changed, ambiguous }
+  }
+  const recoverWindowsString = (raw) => {
+    const { repaired, changed, ambiguous } = escapeLiteralWindowsPaths(raw)
+    if (!changed || ambiguous) return null
+    try { return JSON.parse(repaired) } catch { return null }
+  }
+
+  const toCommand = (candidate) => {
+    const fields = commandEnvelope(candidate)
+    if (!fields) {
+      // Keep the historical foreground quote fallback, but never use it for a
+      // flag-bearing or duplicate-field envelope whose execution mode is unclear.
+      if (commandParseIssue?.parseErrorCode === 'duplicate-field' || hasBackgroundField(candidate)) return null
+      const legacy = lenientCommand(candidate)
+      if (legacy) commandParseIssue = null
+      return legacy
+    }
+    const parsed = Object.create(null)
+    let repaired = false
+    for (const [key, field] of fields) {
+      try { parsed[key] = JSON.parse(field.raw) }
+      catch {
+        const value = key === 'command' ? recoverWindowsString(field.raw) : null
+        if (value === null) return commandIssue('invalid-json', key, field.offset)
+        parsed[key] = value
+        repaired = true
+      }
+    }
+    if (typeof parsed.command !== 'string') return commandIssue('invalid-command', 'command')
+    if ('background' in parsed && typeof parsed.background !== 'boolean') return commandIssue('invalid-background', 'background')
+    if (parsed.background === true && !parsed.command.trim()) return commandIssue('invalid-command', 'command')
+    if (invalidCommandControls(parsed.command)) return commandIssue('invalid-command', 'command')
+    commandParseIssue = null
+    return {
+      command: parsed.command.trim(),
+      ...(parsed.background === true ? { background: true } : {}),
+      description: typeof parsed.description === 'string' ? parsed.description.trim() : '',
+      timeoutSeconds: normalizeTimeoutSeconds(parsed.timeout_seconds, parsed.command),
+      rawJson: JSON.stringify(parsed),
+      ...(repaired ? { parseRepair: 'windows-path' } : {})
+    }
+  }
+
+  /** Only the last command-shaped request may run; an invalid one never replays an older one. */
   const extractCommand = (rawText) => {
+    commandParseIssue = null
     const text = String(rawText || '')
     if (!text) return null
 
     // Drop markdown code fences but keep their contents.
-    const cleaned = text.replace(/```[a-zA-Z0-9_-]*/g, '\n')
-    const candidates = balancedObjects(cleaned)
+    const cleaned = text.replace(/^\s*```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```\s*$/, '$1')
+    const candidates = balancedObjects(cleaned, true)
 
     for (let i = candidates.length - 1; i >= 0; i -= 1) {
-      const parsed = toCommand(candidates[i])
-      if (parsed) return parsed
+      if (!/"command"\s*:/.test(candidates[i])) {
+        if (hasBackgroundField(candidates[i]) || /"command"\s*$/.test(candidates[i])) return commandIssue('invalid-json')
+        continue
+      }
+      // A malformed last request must not replay an earlier request in this answer.
+      return toCommand(candidates[i])
     }
 
     /*
@@ -2165,10 +2312,32 @@
      */
     const starts = [...cleaned.matchAll(/\{\s*"command"\s*:/g)].map((match) => match.index ?? -1).filter((index) => index >= 0)
     for (let i = starts.length - 1; i >= 0; i -= 1) {
+      if (hasBackgroundField(cleaned.slice(starts[i]))) return commandIssue('invalid-json')
       const parsed = lenientCommand(cleaned.slice(starts[i]))
-      if (parsed) return parsed
+      if (parsed) { commandParseIssue = null; return parsed }
     }
     return null
+  }
+
+  // Different page instances must not reuse a pending recovery token after reload.
+  let commandFailureSerial = Math.floor(Math.random() * 0x100000000) * 100000
+  const commandParseFailed = (node, messageId, input) => {
+    if (state.lastUnparsedMessageId === messageId) return
+    state.lastUnparsedMessageId = messageId
+    const live = state.enabled && state.awaitingReplySince !== 0 && !state.replyActionDetected
+    const attempts = balancedObjects(input.text)
+    const issue = commandParseIssue || { parseErrorCode: 'invalid-json', parseErrorField: '', parseErrorOffset: 0 }
+    const failure = { messageId, token: ++commandFailureSerial, generation: state.taskPromptGeneration,
+      path: location.pathname, ...issue, status: state.commandRecoveryUsed ? 'failed' : 'pending' }
+    if (live) {
+      state.failedCommand = failure
+      // The model has finished this reply. It is no longer generating a command.
+      setReplyWaiting(0, 'command-format-error', messageId)
+    }
+    report({ event: 'parse-failed', messageId, live, ...issue, commandSource: input.source,
+      parseFailureToken: failure.token, recoveryStatus: failure.status,
+      text: input.text.slice(0, 20000), textLength: input.text.length, objectCount: attempts.length,
+      lastObject: attempts.at(-1)?.slice(0, 1200) ?? null })
   }
 
   const looksLikeReadFilesReply = (text) => /"type"\s*:\s*"read_files"/.test(String(text || ''))
@@ -2593,7 +2762,8 @@
       return
     }
     if (state.pendingQuestion) return
-    const parsed = extractCommand(text)
+    const commandInput = readCommandText(node)
+    const parsed = extractCommand(commandInput.text)
 
     // Nothing runnable yet. Deliberately do NOT mark it handled and do NOT
     // consume the awaiting flag: ChatGPT renders the assistant turn — and keeps
@@ -2605,17 +2775,7 @@
       // Leaving it unhandled lets a later DOM mutation retry the parser; the DB guard prevents
       // the same class of leak if the page reports the turn by another route.
       if (looksLikeCommandReply(text)) {
-        if (state.lastUnparsedMessageId !== messageId) {
-          state.lastUnparsedMessageId = messageId
-          const attempts = balancedObjects(text.replace(/```[a-zA-Z0-9_-]*/g, '\n'))
-          report({
-            event: 'parse-failed',
-            text: text.slice(0, 2000),
-            textLength: text.length,
-            objectCount: attempts.length,
-            lastObject: attempts.length > 0 ? attempts[attempts.length - 1].slice(0, 1200) : null
-          })
-        }
+        commandParseFailed(node, messageId, commandInput)
         return
       }
       // Only complain about a reply that is actually FINISHED. An unbalanced brace
@@ -2627,7 +2787,6 @@
       const finished = opens > 0 && opens === closes
 
       if (finished && state.lastUnparsedMessageId !== messageId && /"command"\s*:/.test(text)) {
-        state.lastUnparsedMessageId = messageId
         /*
          * The WHOLE reply, not the first 300 characters.
          *
@@ -2637,15 +2796,7 @@
          * plus the object that was extracted to feed it. Both are cheap, and 300 characters did
          * not even reach the end of the `command` value.
          */
-        const attempts = balancedObjects(text.replace(/```[a-zA-Z0-9_-]*/g, '\n'))
-        report({
-          event: 'parse-failed',
-          text: text.slice(0, 2000),
-          textLength: text.length,
-          objectCount: attempts.length,
-          // The candidate the parser actually worked on: `extractCommand` tries them last-first.
-          lastObject: attempts.length > 0 ? attempts[attempts.length - 1].slice(0, 1200) : null
-        })
+        commandParseFailed(node, messageId, commandInput)
         return
       }
 
@@ -2733,23 +2884,30 @@
     const position = PAGE.fileTurnPositionAttr ? node.getAttribute(PAGE.fileTurnPositionAttr) : null
     if (live && lastLiveCommand && lastLiveCommand.since === state.awaitingReplySince &&
         (lastLiveCommand.node === node || (position && lastLiveCommand.position === position)) &&
-        lastLiveCommand.command === parsed.command && lastLiveCommand.description === parsed.description) {
+        lastLiveCommand.command === parsed.command && lastLiveCommand.description === parsed.description &&
+        lastLiveCommand.background === (parsed.background === true)) {
       state.lastCommandMessageId = messageId
       noteScan(messageId, 'duplicate-command')
       return
     }
     if (live) {
       lastLiveCommand = {
-        since: state.awaitingReplySince, node, position, command: parsed.command, description: parsed.description
+        since: state.awaitingReplySince, node, position, command: parsed.command, description: parsed.description,
+        background: parsed.background === true
       }
     }
     state.lastCommandMessageId = messageId
     state.replyActionDetected = true
+    state.failedCommand = null
+    state.commandRecoveryUsed = false
 
     report({
       event: 'command',
       messageId,
       command: parsed.command,
+      background: parsed.background === true,
+      commandSource: commandInput.source,
+      parseRepair: parsed.parseRepair,
       description: parsed.description,
       timeoutSeconds: parsed.timeoutSeconds,
       rawJson: parsed.rawJson,
@@ -2792,6 +2950,8 @@
     state.lastCommandMessageId = null
     state.pendingQuestion = null
     state.answerDraft = null
+    state.failedCommand = null
+    state.commandRecoveryUsed = false
     return true
   }
 
@@ -2803,9 +2963,11 @@
    * in auto mode the command it finds should run.
    */
   const checkNow = () => {
+    if (state.failedCommand?.status === 'uncertain') return false
     if (settleTimer) clearTimeout(settleTimer)
     settleTimer = null
     state.lastCommandMessageId = null
+    state.lastUnparsedMessageId = null
     setReplyWaiting(Date.now(), 'manual-resume')
     state.taskActive = true
     checkForCommand()
@@ -3588,6 +3750,8 @@
         if (config.taskPromptGeneration > state.taskPromptGeneration) {
           state.programmatic = false
           draftRejected = false
+          state.failedCommand = null
+          state.commandRecoveryUsed = false
         }
         state.taskPromptGeneration = config.taskPromptGeneration
         state.taskPromptInjected = config.taskPromptInjected === true
@@ -3614,6 +3778,8 @@
         state.lastCommandMessageId = null
         state.pendingQuestion = null
         state.answerDraft = null
+        state.failedCommand = null
+        state.commandRecoveryUsed = false
       }
       report({
         event: 'configured',
@@ -3822,6 +3988,39 @@
         waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply }
     },
 
+    async recoverCommand(token, generation, allowSend, manual = false, expectedMessageId = null) {
+      const failure = state.failedCommand
+      if (!failure || failure.token !== token || failure.generation !== generation ||
+        generation !== state.taskPromptGeneration || failure.path !== location.pathname ||
+        !state.enabled || !state.taskActive || state.awaitingReplySince !== 0 ||
+        lastAssistantId() !== failure.messageId || (expectedMessageId !== null && expectedMessageId !== failure.messageId)) return 'stale'
+      const publish = (status) => {
+        if (state.failedCommand !== failure || state.taskPromptGeneration !== generation || failure.path !== location.pathname) return
+        failure.status = status
+        report({ event: 'command-recovery', messageId: failure.messageId, parseFailureToken: token, recoveryStatus: status })
+      }
+      if (failure.status === 'uncertain' || failure.status === 'sent' || failure.sending) return 'stale'
+      if (!allowSend) { publish('blocked'); return 'busy' }
+      if (state.commandRecoveryUsed && !manual) { publish('failed'); return 'limit' }
+      const labels = { 'invalid-background': 'background 必须为布尔值 true 或 false',
+        'duplicate-field': '存在重复字段', 'invalid-command': 'command 字段无效',
+        'invalid-json': 'JSON 格式或字符串转义无效' }
+      const text = ['【指令格式错误：未执行】', labels[failure.parseErrorCode] || '指令格式无效',
+        '本条请求没有启动进程。请仅重新提交最后一条请求的完整合法 JSON，保留原命令意图和 background 执行属性。',
+        '使用 json 代码块，Windows 路径中的反斜杠必须正确转义。不要改为前台执行，不要报告任务完成。'].join('\n')
+      failure.sending = true
+      state.commandRecoveryUsed = true
+      // Consume exactly this failed reply so a DOM redraw cannot resubmit it.
+      state.lastCommandMessageId = failure.messageId
+      publish('pending')
+      let outcome
+      try { outcome = await window[STATE_KEY].sendRaw(text, null, { requireIdle: true, path: failure.path, generation }) }
+      catch { outcome = 'stuck' }
+      failure.sending = false
+      publish(outcome === 'ok' ? 'sent' : outcome === 'stuck' || outcome === 'insert-failed' ? 'uncertain' : 'blocked')
+      return outcome
+    },
+
     sendRaw(text, ownedDraft = null, options = null) {
       const element = getComposer()
       if (!element) return Promise.resolve('no-composer')
@@ -3832,6 +4031,7 @@
         return Promise.resolve('busy')
       }
       if (state.programmatic) return blocked('programmatic-send')
+      if (options?.generation !== undefined && options.generation !== state.taskPromptGeneration) return blocked('task-changed')
       if (options?.path !== undefined && options.path !== location.pathname) return blocked('conversation-changed')
       if (options?.requireIdle && ((state.awaitingReplySince !== 0 && !state.replyActionDetected) || state.pendingQuestion)) return blocked('awaiting-reply')
       if (findStopButton()) return blocked('model-generating', { stopButtonFound: true })

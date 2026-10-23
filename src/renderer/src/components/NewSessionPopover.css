@@ -1,0 +1,53 @@
+.app-popover.new-chat-picker,
+.workspace[data-theme='dark'] .app-popover.new-chat-picker {
+  width: 320px;
+  border-radius: 10px;
+}
+
+.new-chat-picker__body {
+  min-width: 0;
+  min-height: 0;
+  max-height: inherit;
+  padding: 8px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.new-chat-picker__header { display: flex; align-items: center; gap: 12px; padding: 5px 4px 6px 8px; }
+.new-chat-picker__title { flex: 1; min-width: 0; margin: 0; font-size: 14px; font-weight: 600; line-height: 20px; }
+.new-chat-picker__options { display: flex; flex-direction: column; gap: 2px; }
+
+.new-chat-picker__option {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 54px;
+  padding: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.new-chat-picker__option > svg { color: var(--text-muted); }
+.new-chat-picker__label { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.new-chat-picker__label strong { font-size: 13px; font-weight: 500; line-height: 18px; }
+.new-chat-picker__label small { color: var(--text-muted); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
+.new-chat-picker__option:hover:not(:disabled), .new-chat-picker__option:focus-visible { background: var(--accent-soft); }
+.new-chat-picker__option:hover:not(:disabled) > svg, .new-chat-picker__option:focus-visible > svg { color: var(--accent); }
+.new-chat-picker__option:focus-visible, .new-chat-picker__close:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.new-chat-picker__option:disabled, .new-chat-picker__close:disabled { opacity: .55; cursor: wait; }
+.new-chat-picker__close { display: grid; place-items: center; flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.new-chat-picker__close:hover:not(:disabled) { background: var(--accent-soft); color: var(--text); }
+.new-chat-picker__status, .new-chat-picker__error { margin: 8px 8px 4px; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.new-chat-picker__status { color: var(--text-muted); }
+.new-chat-picker__error { color: var(--danger); }

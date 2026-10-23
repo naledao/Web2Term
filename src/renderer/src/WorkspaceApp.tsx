@@ -1,13 +1,15 @@
+import AppPopover from './components/AppPopover'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import type { AppTheme, ManagedSessionSummary, SshTransferTask, UpdateStatus, WorkspaceState, WorkspaceProject } from '../../shared/types'
 import brandIcon from './assets/brand-icon.png'
 import WorkspaceNavigation from './components/WorkspaceNavigation'
-import WorkspaceProjectDialog, { containWorkspaceDialogFocus } from './components/WorkspaceProjectDialog'
+import WorkspaceProjectDialog from './components/WorkspaceProjectDialog'
 import App from './App'
 import { ToolWindowsProvider, ToolWindowsHost } from './components/ToolWindows'
 import Web2termDeviceDialog from './components/Web2termDeviceDialog'
 import ConfirmDialog from './components/ConfirmDialog'
+import NewSessionPopover from './components/NewSessionPopover'
 import './assets/workspace-empty.css'
 
 const INITIAL_WORKSPACE: WorkspaceState = {
@@ -393,15 +395,10 @@ export default function WorkspaceApp(): ReactElement {
       </footer>
 
       {transfersOpen ? (
-        <div
+        <AppPopover
           className="modal transfer-modal"
-          role="dialog"
-          aria-modal="true"
           aria-label="传输任务"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setTransfersOpen(false)
-          }}
-        >
+         onClose={() => setTransfersOpen(false)}>
           <div className="transfer-modal__box">
             <div className="transfer-modal__head">
               <div className="transfer-modal__title">传输任务</div>
@@ -459,7 +456,7 @@ export default function WorkspaceApp(): ReactElement {
               )}
             </div>
           </div>
-        </div>
+        </AppPopover>
       ) : null}
 
       {projectEditor ? <WorkspaceProjectDialog project={projectEditor.project} onClose={() => setProjectEditor(null)}
@@ -467,9 +464,7 @@ export default function WorkspaceApp(): ReactElement {
           setProjects(current => current.some(item => item.id === project.id) ? current.map(item => item.id === project.id ? project : item) : [...current, project])
           setProjectEditor(null)
         }} /> : null}
-      {movingSession ? <div className="modal workspace-project-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-move-heading"
-        onMouseDown={event => { if (event.target === event.currentTarget && !projectBusy) setMovingSession(null) }}
-        onKeyDown={event => { containWorkspaceDialogFocus(event); if (event.key === 'Escape' && !projectBusy) setMovingSession(null) }}>
+      {movingSession ? <AppPopover className="modal workspace-project-dialog" aria-labelledby="workspace-move-heading" onClose={() => setMovingSession(null)} busy={projectBusy}>
         <form className="workspace-project-dialog__box" onSubmit={event => { event.preventDefault(); void moveSession() }}>
           <div className="workspace-project-dialog__heading"><h2 id="workspace-move-heading">移动对话</h2>
             <button type="button" disabled={projectBusy} aria-label="关闭" onClick={() => setMovingSession(null)}>×</button></div>
@@ -480,73 +475,15 @@ export default function WorkspaceApp(): ReactElement {
           <div className="workspace-project-dialog__footer"><button type="button" disabled={projectBusy} onClick={() => setMovingSession(null)}>取消</button>
             <button type="submit" className="is-primary" disabled={projectBusy}>{projectBusy ? '移动中…' : '移动'}</button></div>
         </form>
-      </div> : null}
+      </AppPopover> : null}
       <ConfirmDialog open={pendingProjectDelete !== null} title={`移除项目“${pendingProjectDelete?.name ?? ''}”？`}
         description={navigationError || '项目中的对话会保留，并移到“本电脑”列表。'} icon="!" busy={projectBusy} confirmLabel="移除项目"
         onCancel={() => setPendingProjectDelete(null)} onConfirm={() => void removeProject()} />
 
       {newSessionOpen ? (
-        <div
-          className="modal new-session-modal"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="new-session-heading"
-          onKeyDown={event => {
-            containWorkspaceDialogFocus(event)
-            if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeNewSessionDialog() }
-          }}
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) closeNewSessionDialog()
-          }}
-        >
-          <div className="new-session-modal__box">
-            <div className="new-session-modal__header">
-              <div>
-                <h2 id="new-session-heading">新建对话</h2>
-                <p>{newSessionProject ? `在“${newSessionProject.name}”中创建对话，选择终端模式` : '选择终端模式'}</p>
-              </div>
-              <button type="button" className="new-session-modal__close" disabled={creating} aria-label="关闭" onClick={closeNewSessionDialog}>×</button>
-            </div>
-
-            <div className="new-session-modal__options">
-              <button type="button" autoFocus disabled={creating} className="new-session-modal__option new-session-modal__option--local" onClick={() => void createManagedSession('local')}>
-                <span className="new-session-modal__icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="4" width="14" height="11" rx="1.5"/><path d="M3.5 18h17M8 18h8"/></svg>
-                </span>
-                <span className="new-session-modal__content"><span className="new-session-modal__title-row"><strong>本地</strong></span>
-                  <small>使用当前电脑的终端</small></span>
-                <span className="new-session-modal__arrow" aria-hidden="true">›</span>
-              </button>
-              <button type="button" disabled={creating} className="new-session-modal__option new-session-modal__option--ssh" onClick={() => void createManagedSession('ssh')}>
-                <span className="new-session-modal__icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="4" width="14" height="6" rx="1.5"/><rect x="5" y="14" width="14" height="6" rx="1.5"/><path d="M9 7h.01M9 17h.01M12 7h3M12 17h3"/></svg>
-                </span>
-                <span className="new-session-modal__content">
-                  <span className="new-session-modal__title-row"><strong>SSH</strong><em className="new-session-modal__badge">远程</em></span>
-                  <small>连接远程机器并创建 SSH 工作环境</small>
-                </span>
-                <span className="new-session-modal__arrow" aria-hidden="true">›</span>
-              </button>
-              <button type="button" disabled={creating} className="new-session-modal__option" onClick={event => openWeb2termDeviceDialog(event.currentTarget, { projectId: newSessionProjectId })}>
-                <span className="new-session-modal__icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="3" width="16" height="6" rx="1.5" /><path d="M12 9v5M6 14h12M6 14v3M18 14v3" /><rect x="3" y="17" width="6" height="4" rx="1" /><rect x="15" y="17" width="6" height="4" rx="1" /></svg>
-                </span>
-                <span className="new-session-modal__content">
-                  <span className="new-session-modal__title-row"><strong>web2term</strong></span>
-                  <small>查看当前账号的设备，选择设备连接</small>
-                </span>
-                <span className="new-session-modal__arrow" aria-hidden="true">›</span>
-              </button>
-            </div>
-
-            {navigationError ? <p className="workspace-navigation__error" role="alert">{navigationError}</p> : null}
-
-            <div className="new-session-modal__footer">
-              <span className="new-session-modal__info" aria-hidden="true">i</span>
-              <span>{newSessionProject?.directory ? '本地模式使用项目目录，远程模式使用远程设备的目录。' : '本地模式使用默认目录，远程模式使用远程设备的目录。'}</span>
-            </div>
-          </div>
-        </div>
+        <NewSessionPopover project={newSessionProject} anchor={newSessionTrigger.current} busy={creating} error={navigationError}
+          onClose={closeNewSessionDialog} onCreate={kind => void createManagedSession(kind)}
+          onWeb2term={trigger => openWeb2termDeviceDialog(trigger, { projectId: newSessionProjectId })} />
       ) : null}
       {web2termDeviceDialogOpen ? <Web2termDeviceDialog onClose={closeWeb2termDeviceDialog} onConnected={openWeb2termConnection} /> : null}
       <ConfirmDialog
@@ -565,15 +502,10 @@ export default function WorkspaceApp(): ReactElement {
       <ConfirmDialog
         open={pendingDelete !== null}
         title={`删除“${pendingDelete?.title || '对话'}”？`}
-        description="此操作会立即结束该会话的运行环境，请确认是否继续。"
-        icon="!"
+        description="将结束终端和 SSH 连接，网页对话保留。"
         danger
         busy={deletingId !== null}
-        confirmLabel="确认删除"
-        items={[
-          { icon: '▣', label: '终端进程和 SSH 连接', value: '立即结束', tone: 'danger' },
-          { icon: '◉', label: '网页对话历史', value: '保留', tone: 'success' }
-        ]}
+        confirmLabel="删除"
         onCancel={() => setPendingDelete(null)}
         onConfirm={() => { if (pendingDelete) void deleteSession(pendingDelete) }}
       />

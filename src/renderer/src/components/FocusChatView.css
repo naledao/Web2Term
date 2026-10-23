@@ -9,9 +9,12 @@
 .focus-chat button{font:inherit;cursor:pointer;color:inherit}
 .focus-chat button:disabled{opacity:.45;cursor:default}
 .focus-chat button:focus-visible,.focus-chat summary:focus-visible,.focus-chat a:focus-visible{outline:2px solid var(--fc-accent);outline-offset:3px}
-.focus-chat__header{flex:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px 22px;border-bottom:1px solid var(--fc-border);font-size:14px}
+.focus-chat__header{flex:none;display:flex;align-items:center;gap:10px;padding:13px 22px;border-bottom:1px solid var(--fc-border);font-size:14px}
 .focus-chat__header strong{font-weight:650}
 .focus-chat__header .focus-chat__brand-icon{width:40px;height:40px;object-fit:contain;display:block}
+.focus-chat__new-chat{display:inline-flex;flex:none;align-items:center;justify-content:center;width:36px;height:36px;padding:6px;border:0;border-radius:8px;background:transparent}
+.focus-chat__new-chat svg{display:block;width:24px;height:24px}
+.focus-chat__new-chat:hover:not(:disabled){background:var(--fc-soft)}
 .focus-chat__notice button,.focus-chat__error button{padding:4px 8px;border:1px solid var(--fc-border);border-radius:6px;background:var(--fc-bg);font-size:11px}
 .focus-chat__muted{color:var(--fc-muted)}
 .focus-chat__transcript{position:relative;flex:1;min-height:0;overflow:hidden}
@@ -38,9 +41,9 @@
 .focus-process{margin:10px 0 17px;font-size:13px;color:var(--fc-muted)}
 .focus-process>summary{display:flex;align-items:center;gap:7px;cursor:pointer;list-style:none;padding:4px 0}
 .focus-process>summary::-webkit-details-marker{display:none}
-.focus-process__hint{margin-left:5px;font-size:10px;color:var(--fc-muted)}
-.focus-process__hint::after{content:' ›'}
-.focus-process[open] .focus-process__hint::after{content:' ⌄'}
+.focus-process__hint{display:inline-flex;align-items:center;gap:3px;margin-left:5px;font-size:10px;line-height:1;color:var(--fc-muted);white-space:nowrap}
+.focus-process__chevron{display:block;flex:none;width:10px;height:10px;transform-origin:center}
+.focus-process[open]>summary .focus-process__chevron{transform:rotate(90deg)}
 .focus-process__body{max-height:min(360px,45vh);overflow-y:auto;margin-top:4px;padding:0 8px 6px 2px;border:1px solid var(--fc-border);border-radius:8px;background:var(--fc-soft)}
 .focus-process__cycle{border-left:1px solid var(--fc-border);padding:4px 0 5px 13px;margin:8px 0 0 3px}
 .focus-process__commentary{margin:8px 0}

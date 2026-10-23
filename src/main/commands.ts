@@ -164,6 +164,8 @@ export interface CommandRunnerDeps {
   onExecutionChanged: (records: ExecutionRecord[]) => void
   /** Freeze the startup command's machine before awaiting its result. */
   captureBackgroundTasks?: (record: ExecutionRecord, shell: ExecutionShell) => (output: string) => number
+  /** Software owns the complete background startup; run keeps normal interruption semantics. */
+  startBackgroundTask?: (record: ExecutionRecord, shell: ExecutionShell, run: (command: string) => Promise<ShellResult>) => Promise<{ result: ShellResult; registered: number }>
   onTerminalChanged: (state: TerminalState) => void
   /** A user-triggered history replay starts a task before its terminal result is sent. */
   onTaskStarted?: () => void
@@ -339,7 +341,7 @@ export function executionKeyOf(parsed: ParsedCommand, conversationId: string): s
   const raw = parsed.messageId.trim()
   if (raw !== '') return raw
 
-  const material = `${conversationId}\u0000${parsed.command}\u0000${parsed.description}`
+  const material = `${conversationId}\u0000${parsed.command}\u0000${parsed.description}${parsed.background ? '\u0000background' : ''}`
   let hash = 5381
   for (let i = 0; i < material.length; i += 1) {
     hash = ((hash << 5) + hash + material.charCodeAt(i)) | 0
@@ -348,6 +350,7 @@ export function executionKeyOf(parsed: ParsedCommand, conversationId: string): s
 }
 
 export class CommandRunner {
+  private backgroundStartupOutput = 0
   /**
    * The one local PowerShell/zsh session.
    *
@@ -502,6 +505,8 @@ export class CommandRunner {
    */
   handleDetected(parsed: ParsedAction, conversationIdOverride?: string): boolean {
     if ('type' in parsed) return this.handleReadFiles(parsed, conversationIdOverride)
+    if ((parsed.background !== undefined && typeof parsed.background !== 'boolean') ||
+      (parsed.background && !parsed.command.trim())) { this.noteParseFailure('后台任务参数无效'); return true }
     // Terminal mode off: leave replies alone. Returning true marks the command handled so nothing is deferred.
     if (!this.terminalModeOn()) {
       console.info('[cmd] terminal mode off, detected command ignored')
@@ -522,6 +527,7 @@ export class CommandRunner {
       messageId: key,
       conversationId,
       command: parsed.command,
+      background: parsed.background === true,
       description: parsed.description,
       timeoutSeconds: parsed.timeoutSeconds,
       status: danger ? 'blocked' : 'pending',
@@ -532,7 +538,8 @@ export class CommandRunner {
       this.deps.store.saveRecentCommandJson(
         conversationId,
         key,
-        parsed.rawJson ?? JSON.stringify({ command: parsed.command, description: parsed.description, timeout_seconds: parsed.timeoutSeconds })
+        parsed.rawJson ?? JSON.stringify({ command: parsed.command, description: parsed.description, timeout_seconds: parsed.timeoutSeconds,
+          ...(parsed.background ? { background: true } : {}) })
       )
     }
 
@@ -659,6 +666,7 @@ export class CommandRunner {
       messageId: replayId,
       conversationId,
       command: original.command,
+      background: original.background === true,
       description: original.description,
       timeoutSeconds: original.timeoutSeconds,
       status: 'pending',
@@ -900,8 +908,17 @@ export class CommandRunner {
     this.appendLine({ kind: 'command', text: record.command })
     this.broadcastExecutions(conversationId)
 
-    const registerBackgroundTasks = this.deps.captureBackgroundTasks?.(record, shell)
-    const result = await this.runOnShell(shell, record.command, record.timeoutSeconds)
+    const registerBackgroundTasks = record.background ? undefined : this.deps.captureBackgroundTasks?.(record, shell)
+    const startup = record.background && this.deps.startBackgroundTask
+      ? await this.deps.startBackgroundTask(record, shell, async command => {
+        this.backgroundStartupOutput += 1
+        try { return await this.runOnShell(shell, command, Math.min(record.timeoutSeconds || 30, 30)) }
+        finally { this.backgroundStartupOutput -= 1 }
+      }) : null
+    const result: ShellResult = startup?.result ?? (record.background
+      ? { output: '软件后台任务启动器不可用，任务未启动。', exitCode: 1, cwd: shell.cwd,
+        rejected: true, interrupted: false, sessionLost: false, timedOut: false }
+      : await this.runOnShell(shell, record.command, record.timeoutSeconds))
     this.diagnostic({
       event: 'finished', messageId, ownerConversationId: conversationId, exitCode: result.exitCode,
       rejected: result.rejected === true, interrupted: result.interrupted === true,
@@ -909,7 +926,8 @@ export class CommandRunner {
     })
     if (this.disposed) return
 
-    let backgroundTaskCount = 0
+    let backgroundTaskCount = startup?.registered ?? 0
+    if (record.background) this.appendLine({ kind: backgroundTaskCount > 0 ? 'notice' : 'error', text: result.output })
     if (!result.rejected && registerBackgroundTasks) {
       try {
         const count = registerBackgroundTasks(result.output)
@@ -1081,6 +1099,9 @@ export class CommandRunner {
       ...(transport ? { transport } : {})
     }
   }
+
+  /** Native local pickers must never receive web2term's remote path. */
+  getLocalWorkingDirectory(): string { return this.localShell?.cwd || this.localCwd }
 
   pushRemoteOutput(chunk: string): void { this.appendOutput(chunk) }
   refreshTerminal(message?: string): void {
@@ -1441,6 +1462,8 @@ export class CommandRunner {
 
   /** Streaming output lands in the trailing output line instead of a new one. */
   private appendOutput(chunk: string): void {
+    // Private launcher receipts belong to the software protocol, not the user's transcript.
+    if (this.backgroundStartupOutput > 0) return
     const text = chunk.replace(/\r/g, '')
     if (text === '') return
     const last = this.lines[this.lines.length - 1]

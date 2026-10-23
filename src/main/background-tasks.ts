@@ -5,6 +5,7 @@ import type {
   BackgroundTask, BackgroundTaskDeliveryStatus, BackgroundTaskNotificationKind, BackgroundTasksState,
   BackgroundTaskTargetDescriptor, StoredBackgroundTask
 } from '../shared/background-tasks'
+import type { BackgroundTaskRegistration } from '../shared/background-tasks'
 import type { EnvironmentKind, ExecutionRecord } from '../shared/types'
 import type { ExecutionShell } from './shell'
 
@@ -52,6 +53,8 @@ interface Entry {
   finalRead: boolean
   settled: boolean
   onSettled?: (task: BackgroundTask) => void
+  onCreated?: (task: BackgroundTask) => void
+  creationDeadline?: number
   messageId: string
   owner?: BackgroundTaskOwner
 }
@@ -185,9 +188,16 @@ export class BackgroundTasks {
   register(output: string, record: Pick<ExecutionRecord, 'messageId' | 'conversationId' | 'command'>,
     target: BackgroundTaskTarget, onSettled?: (task: BackgroundTask) => void,
     onRegistered?: (task: BackgroundTask) => void, owner?: BackgroundTaskOwner): number {
+    return this.registerTasks(parseBackgroundTaskRegistrations(output), record, target, onSettled, onRegistered, owner)
+  }
+
+  /** Typed software startup bypasses the model's marker protocol entirely. */
+  registerTasks(registrations: BackgroundTaskRegistration[], record: Pick<ExecutionRecord, 'messageId' | 'conversationId' | 'command'>,
+    target: BackgroundTaskTarget, onSettled?: (task: BackgroundTask) => void,
+    onRegistered?: (task: BackgroundTask) => void, owner?: BackgroundTaskOwner, waitForStartupOutput = false): number {
     if (this.disposed) return 0
     let count = 0
-    for (const registration of parseBackgroundTaskRegistrations(output)) {
+    for (const registration of registrations) {
       const paths = [registration.log_path, registration.stderr_path, registration.exit_code_path].filter((path): path is string => path !== undefined)
       const dialect = target.kind === 'windows' ? win32 : posix
       if (paths.some(path => !dialect.isAbsolute(path))) continue
@@ -206,10 +216,16 @@ export class BackgroundTasks {
       }
       const entry: Entry = { task, target, identity: '', stdoutStamp: '', stderrStamp: '', finalRead: false, settled: false, onSettled,
         messageId: record.messageId, owner }
+      if (waitForStartupOutput && onRegistered) {
+        task.creationDeliveryStatus = 'pending'
+        task.creationDeliveryMessage = '任务已登记，正在收集启动输出。'
+        entry.onCreated = onRegistered
+        entry.creationDeadline = Date.now() + 15000
+      }
       this.entries.set(key, entry)
       this.save(entry)
       count += 1
-      try { onRegistered?.({ ...task }) }
+      try { if (!waitForStartupOutput) onRegistered?.({ ...task }) }
       catch (error) { console.warn('[background] registration callback failed:', error instanceof Error ? error.name : 'Error') }
     }
     if (count) {
@@ -293,9 +309,19 @@ export class BackgroundTasks {
     try {
       await this.sampleOnce(entry)
     } finally {
+      this.publishCreated(entry)
       // Status, identity and settlement are what a restart needs; log tails are not.
       if (JSON.stringify([entry.task.status, entry.task.exitCode, entry.identity, entry.settled]) !== before) this.save(entry)
     }
+  }
+
+  private publishCreated(entry: Entry, force = false): void {
+    if (!entry.onCreated || this.disposed) return
+    if (!force && !entry.task.output.trim() && !entry.task.errorOutput.trim() && Date.now() < (entry.creationDeadline ?? 0)) return
+    const notify = entry.onCreated
+    entry.onCreated = undefined
+    try { notify({ ...entry.task }) }
+    catch (error) { console.warn('[background] creation callback failed:', error instanceof Error ? error.name : 'Error') }
   }
 
   private async sampleOnce(entry: Entry): Promise<void> {
@@ -349,6 +375,7 @@ export class BackgroundTasks {
         entry.settled = entry.finalRead
         entry.finalRead = true
         if (entry.settled) {
+          this.publishCreated(entry, true)
           // Publish only after the final read, including output flushed at exit.
           // Delivery failures must not reopen or rerun a completed task.
           try { entry.onSettled?.({ ...task }) }

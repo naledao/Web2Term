@@ -1,3 +1,4 @@
+import AppPopover from './AppPopover'
 import { useToolApi, useToolSurface, ToolMinimizeButton } from './ToolSurfaceContext'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
@@ -368,6 +369,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
   const sqlRequestRef = useRef(0)
   /** Focused when saving is refused, so the missing field is the one on screen. */
   const databaseRef = useRef<HTMLInputElement>(null)
+  const pageRef = useRef<HTMLDivElement>(null)
   /** Id of the connection whose info was just copied, for the transient 已复制 mark. */
   const [copiedId, setCopiedId] = useState('')
   const copyTimerRef = useRef<number | null>(null)
@@ -402,17 +404,6 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
   useEffect(() => () => {
     if (cellClickTimerRef.current !== null) window.clearTimeout(cellClickTimerRef.current)
   }, [])
-  useEffect(() => {
-    if (cellDetail === null || !visible) return
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        event.stopPropagation()
-        setCellDetail(null)
-      }
-    }
-    window.addEventListener('keydown', onKeyDown, true)
-    return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [cellDetail, visible])
 
   const connections = state?.connections ?? []
   const activeTab = tabs.find((tab) => tab.key === activeKey) ?? null
@@ -479,16 +470,6 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
     if (!open || !active) return
     return api.onMysqlConnectionChanged((next) => setState(next))
   }, [open, active])
-
-  // Escape closes the page, like every other dialog on the platform.
-  useEffect(() => {
-    if (!open || !visible) return
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !event.defaultPrevented && pendingDelete === null && pendingRowDelete === null && pendingTableDrop === null) onClose()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, visible, onClose, pendingDelete, pendingRowDelete, pendingTableDrop])
 
   /**
    * Open a saved connection in its own tab, or bring the tab it already has to the front.
@@ -1107,9 +1088,8 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
   return (
     <div
       className={theme === 'dark' ? 'modal modal--mysql mysql-page--dark' : 'modal modal--mysql'}
-      role="dialog"
-      aria-modal="true"
       aria-label="MySQL 连接"
+      ref={pageRef}
     >
       <div className="mysql-page">
         <header className="mysql-page__head">
@@ -1464,7 +1444,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
                                     <Tooltip.Trigger render={<span tabIndex={0} className="mysql-page__column-trigger" />}>
                                       {column}
                                     </Tooltip.Trigger>
-                                    <Tooltip.Portal>
+                                    <Tooltip.Portal container={pageRef}>
                                       <Tooltip.Positioner side="bottom" align="start" sideOffset={8} className="mysql-page__column-positioner">
                                         <Tooltip.Popup className="mysql-page__column-tooltip" data-theme={theme}>
                                           <strong>{column}</strong>
@@ -1918,12 +1898,10 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
         the connection and where it points before anything is lost.
       */}
       {createTableOpen ? (
-        <div
+        <AppPopover
           className='mysql-page__create-overlay'
-          onMouseDown={(event) => { if (event.target === event.currentTarget && !createTableBusy) setCreateTableOpen(false) }}
-          onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); if (!createTableBusy) setCreateTableOpen(false) } }}
-        >
-          <div className='mysql-page__create-dialog' role='dialog' aria-modal='true' aria-labelledby='mysql-create-table-title'>
+         onClose={() => setCreateTableOpen(false)} busy={createTableBusy} aria-labelledby="mysql-create-table-title">
+          <div className='mysql-page__create-dialog' aria-labelledby='mysql-create-table-title'>
             <div className='mysql-page__create-header'>
               <div>
                 <h3 id='mysql-create-table-title'>创建数据表</h3>
@@ -1955,11 +1933,11 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
               <button type='button' className='mysql-page__btn mysql-page__btn--primary' disabled={createTableBusy || createTableSql.trim() === ''} onClick={() => void submitCreateTable()}>{createTableBusy ? '创建中…' : '执行并创建'}</button>
             </div>
           </div>
-        </div>
+        </AppPopover>
       ) : null}
       {cellDetail !== null ? (
-        <div className="mysql-page__cell-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setCellDetail(null) }}>
-          <section className="mysql-page__cell-dialog" role="dialog" aria-modal="true" aria-labelledby="mysql-cell-dialog-title">
+        <AppPopover className="mysql-page__cell-backdrop" onClose={() => setCellDetail(null)} aria-labelledby="mysql-cell-dialog-title">
+          <section className="mysql-page__cell-dialog" aria-labelledby="mysql-cell-dialog-title">
             <div className="mysql-page__cell-dialog-head">
               <div className="mysql-page__cell-dialog-heading">
                 <span className="mysql-page__cell-dialog-kicker">单元格完整内容</span>
@@ -1985,7 +1963,7 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
               >{cellDetail.copyStatus === 'copied' ? '已复制' : cellDetail.copyStatus === 'error' ? '复制失败，请重试' : '复制全文'}</button>
             </div>
           </section>
-        </div>
+        </AppPopover>
       ) : null}
       <ConfirmDialog
         open={pendingDelete !== null}

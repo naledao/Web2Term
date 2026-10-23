@@ -71,6 +71,18 @@ test('final results are queued and sent once to the captured conversation, inclu
   assert.equal(f.timers.size, 0)
 })
 
+test('creation notifications include startup stdout and stderr without treating stderr as completion', async t => {
+  const f = fixture(t)
+  f.queue.capture(owner, () => true, 'created')(task({ status: 'running', exitCode: null,
+    output: 'startup ready', errorOutput: 'First copy your one-time code: TEST-CODE\nhttps://github.com/login/device' }))
+  await f.tick()
+  assert.equal(f.sends.length, 1)
+  assert.match(f.sends[0].text, /【后台任务已创建】/)
+  assert.match(f.sends[0].text, /startup ready/)
+  assert.match(f.sends[0].text, /TEST-CODE/)
+  assert.doesNotMatch(f.sends[0].text, /结果: 成功|【后台任务执行结果】/)
+})
+
 test('creation confirmation and final result are separate, ordered, and each sent once', async t => {
   const f = fixture(t)
   const created = f.queue.capture(owner, () => true, 'created')
@@ -224,10 +236,12 @@ test('background task protocol lives in tool prompts, including web2term without
     assert.ok(!parts.basePrompt.includes('exit_code_path'))
     assert.ok(parts.toolPrompt.includes('【工具：background_task】'))
     assert.ok(parts.toolPrompt.includes('【工具：read_files】'))
-    assert.ok(parts.toolPrompt.includes('收到创建通知只简短确认并等待'))
+    assert.ok(parts.toolPrompt.includes('收到创建通知后'))
     assert.ok(parts.toolPrompt.includes('【后台任务已创建】'))
     assert.ok(!parts.toolPrompt.includes('按 10–30 秒'))
-    assert.ok(parts.toolPrompt.includes('```json\n{\n  "pid"'))
+    assert.ok(parts.toolPrompt.includes('"background":true'))
+    assert.ok(parts.toolPrompt.includes('软件负责启动独立进程'))
+    assert.ok(!parts.toolPrompt.includes('"pid": 12345'), 'the model no longer owns PID generation')
     assert.ok(parts.prefix.includes(parts.toolPrompt))
   }
   const remote = types.toolPromptForPlatform('deepseek', false)

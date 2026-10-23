@@ -1,0 +1,68 @@
+.app-popover.confirm-popover,
+.workspace[data-theme='dark'] .app-popover.confirm-popover {
+  width: 300px;
+  border-radius: 10px;
+}
+
+.confirm-popover__body {
+  min-width: 0;
+  min-height: 0;
+  max-height: inherit;
+  padding: 16px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.confirm-popover__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.confirm-popover__description {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.confirm-popover__details { margin: 10px 0 0; font-size: 12px; line-height: 1.6; }
+.confirm-popover__detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 10px; padding: 3px 0; }
+.confirm-popover__detail dt { color: var(--text-muted); overflow-wrap: anywhere; }
+.confirm-popover__detail dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.confirm-popover__detail dd[data-tone='danger'] { color: var(--danger); }
+.confirm-popover__detail dd[data-tone='success'] { color: var(--ok); }
+.confirm-popover__actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+
+.app-popover .confirm-popover__actions > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-height: 28px;
+  margin: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.app-popover .confirm-popover__actions > button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.app-popover .confirm-popover__actions > .confirm-popover__confirm { border-color: var(--accent); background: var(--accent); color: #fff; }
+.app-popover .confirm-popover__actions > .confirm-popover__confirm[data-danger='true'] { border-color: var(--danger); background: var(--danger); }
+.app-popover .confirm-popover__actions > .confirm-popover__confirm:hover:not(:disabled) { border-color: var(--accent); background: var(--accent); color: #fff; filter: brightness(1.08); }
+.app-popover .confirm-popover__actions > .confirm-popover__confirm[data-danger='true']:hover:not(:disabled) { border-color: var(--danger); background: var(--danger); }
+.app-popover .confirm-popover__actions > button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.app-popover .confirm-popover__actions > button:disabled { opacity: .55; cursor: default; }

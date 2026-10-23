@@ -1,0 +1,104 @@
+.github-repositories-pane {
+  overflow: hidden;
+}
+
+.github-repositories-pane__empty {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  overflow-y: auto;
+  text-align: center;
+}
+
+.github-repositories-pane__icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.github-repositories-pane__empty h2 {
+  margin: 18px 0 8px;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.github-repositories-pane__empty p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.github-repositories-pane__status,
+.github-repositories-pane__setup {
+  width: 100%;
+  max-width: 400px;
+  overflow-wrap: anywhere;
+}
+
+.github-repositories-pane__checks {
+  margin: 20px 0;
+  padding: 4px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  font-size: 12px;
+  text-align: left;
+}
+
+.github-repositories-pane__checks > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 0;
+}
+
+.github-repositories-pane__checks > div + div { border-top: 1px solid var(--border); }
+.github-repositories-pane__checks dt { flex: none; color: var(--text); }
+.github-repositories-pane__checks dd { margin: 0; text-align: right; color: var(--text-muted); }
+.github-repositories-pane__guide { text-align: left; }
+
+.github-repositories-pane__guide pre {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  font: 12px/1.7 Consolas, monospace;
+}
+
+.github-repositories-pane button {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.github-repositories-pane button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.github-repositories-pane button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.github-repositories-pane button:disabled { opacity: .5; cursor: default; }
+.github-repositories-pane__guide button { margin: 0 6px 8px 0; }
+.github-repositories-pane .github-repositories-pane__login { width:100%;margin:0;background:var(--accent);border-color:var(--accent);color:#fff; }
+.github-repositories-pane .github-repositories-pane__login:hover:not(:disabled) { color:#fff;filter:brightness(1.08); }
+.github-repositories-pane__empty .github-repositories-pane__hint { margin-top: 10px; font-size: 11px; }
+.github-repositories-pane__empty .github-repositories-pane__error { margin-top: 12px; color: var(--danger); }
+.github-repositories-pane__refresh { margin-top: 18px; }
