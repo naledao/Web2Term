@@ -67,4 +67,4 @@ linux:
 publish:
   provider: github
   owner: naledao
-  repo: gpt-web-to-codex-terminal
+  repo: Web2Term

@@ -1,6 +1,6 @@
 # Web2Term
 
-[中文](#中文) · [English](#english) · [下载 / Downloads](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest)
+[中文](#中文) · [English](#english) · [下载 / Downloads](https://github.com/naledao/Web2Term/releases/latest)
 
 ## 中文
 
@@ -17,13 +17,13 @@ Web2Term 把模型网页、项目对话和本机／远程终端放进同一个�
 
 ### 下载与安装
 
-从 [GitHub Releases](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest) 下载：
+从 [GitHub Releases](https://github.com/naledao/Web2Term/releases/latest) 下载：
 
 | 平台 | 文件 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [Web2Term Windows 安装包](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/GPT-Web-to-Codex-Terminal-Setup.exe) | 运行安装程序，可选择安装目录。 |
-| macOS Apple Silicon | [Web2Term macOS DMG](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/GPT-Web-to-Codex-Terminal.dmg) | 打开 DMG，将应用拖入“应用程序”。 |
-| Linux 设备小工具 | [web2term-linux-amd64](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/web2term-linux-amd64) 和 [SHA-256 校验文件](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/web2term-linux-amd64.sha256) | 下载、校验并安装到 Linux 的 `PATH`，见下文。 |
+| Windows x64 | [Web2Term Windows 安装包](https://github.com/naledao/Web2Term/releases/latest/download/GPT-Web-to-Codex-Terminal-Setup.exe) | 运行安装程序，可选择安装目录。 |
+| macOS Apple Silicon | [Web2Term macOS DMG](https://github.com/naledao/Web2Term/releases/latest/download/GPT-Web-to-Codex-Terminal.dmg) | 打开 DMG，将应用拖入“应用程序”。 |
+| Linux 设备小工具 | [web2term-linux-amd64](https://github.com/naledao/Web2Term/releases/latest/download/web2term-linux-amd64) 和 [SHA-256 校验文件](https://github.com/naledao/Web2Term/releases/latest/download/web2term-linux-amd64.sha256) | 下载、校验并安装到 Linux 的 `PATH`，见下文。 |
 
 使用桌面安装包无需另装 Node.js 或 npm；执行 Git、GitHub CLI 或其他外部工具时，仍需在实际执行机器上安装对应程序。
 
@@ -158,8 +158,8 @@ flowchart LR
 在 Linux x86_64 主机上下载并校验：
 
 ```bash
-curl -fLO https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/web2term-linux-amd64
-curl -fLO https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/web2term-linux-amd64.sha256
+curl -fLO https://github.com/naledao/Web2Term/releases/latest/download/web2term-linux-amd64
+curl -fLO https://github.com/naledao/Web2Term/releases/latest/download/web2term-linux-amd64.sha256
 sha256sum -c web2term-linux-amd64.sha256
 sudo install -m 0755 web2term-linux-amd64 /usr/local/bin/web2term
 web2term --help
@@ -301,13 +301,13 @@ The repository contains the Web2Term desktop client and a separate Linux device 
 
 ### Downloads and installation
 
-Download from [GitHub Releases](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest):
+Download from [GitHub Releases](https://github.com/naledao/Web2Term/releases/latest):
 
 | Program | Release target | Download |
 | --- | --- | --- |
-| Web2Term desktop client | Windows x64, NSIS installer | [Web2Term Windows installer](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/GPT-Web-to-Codex-Terminal-Setup.exe) |
-| Web2Term desktop client | macOS Apple Silicon, arm64 DMG | [Web2Term macOS DMG](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/GPT-Web-to-Codex-Terminal.dmg) |
-| Linux device tool | Linux x86_64 / amd64 | [Binary](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/web2term-linux-amd64), [SHA-256 checksum](https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/web2term-linux-amd64.sha256) |
+| Web2Term desktop client | Windows x64, NSIS installer | [Web2Term Windows installer](https://github.com/naledao/Web2Term/releases/latest/download/GPT-Web-to-Codex-Terminal-Setup.exe) |
+| Web2Term desktop client | macOS Apple Silicon, arm64 DMG | [Web2Term macOS DMG](https://github.com/naledao/Web2Term/releases/latest/download/GPT-Web-to-Codex-Terminal.dmg) |
+| Linux device tool | Linux x86_64 / amd64 | [Binary](https://github.com/naledao/Web2Term/releases/latest/download/web2term-linux-amd64), [SHA-256 checksum](https://github.com/naledao/Web2Term/releases/latest/download/web2term-linux-amd64.sha256) |
 
 The desktop installer includes its runtime; Node.js and npm are needed for source development. External programs such as Git and GitHub CLI must be installed on the machine where they run.
 
@@ -364,8 +364,8 @@ The toolbox opens minimizable tool windows:
 Install on Linux x86_64:
 
 ```bash
-curl -fLO https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/web2term-linux-amd64
-curl -fLO https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/web2term-linux-amd64.sha256
+curl -fLO https://github.com/naledao/Web2Term/releases/latest/download/web2term-linux-amd64
+curl -fLO https://github.com/naledao/Web2Term/releases/latest/download/web2term-linux-amd64.sha256
 sha256sum -c web2term-linux-amd64.sha256
 sudo install -m 0755 web2term-linux-amd64 /usr/local/bin/web2term
 ```

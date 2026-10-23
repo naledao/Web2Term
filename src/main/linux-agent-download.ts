@@ -6,7 +6,7 @@ import { updaterSession } from './updater'
 import type { LinuxAgentDownloadState } from '../shared/types'
 
 export const LINUX_AGENT_FILE_NAME = 'web2term-linux-amd64'
-const LINUX_AGENT_URL = `https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/${LINUX_AGENT_FILE_NAME}`
+const LINUX_AGENT_URL = `https://github.com/naledao/Web2Term/releases/latest/download/${LINUX_AGENT_FILE_NAME}`
 
 /**
  * Downloads the web2term Linux tool from the latest GitHub Release.

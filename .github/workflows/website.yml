@@ -41,7 +41,7 @@ jobs:
       - name: Build website
         run: npm run build
         env:
-          SITE_BASE: /gpt-web-to-codex-terminal
+          SITE_BASE: /${{ github.event.repository.name }}
           SITE_URL: https://naledao.github.io
 
       - name: Setup Pages

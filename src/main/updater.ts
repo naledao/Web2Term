@@ -11,8 +11,8 @@ import type { UpdateStatus } from "../shared/types"
  * requests so the configured update proxy behaves consistently.
  */
 const UPDATER_PARTITION = "electron-updater"
-const RELEASE_API_URL = "https://api.github.com/repos/naledao/gpt-web-to-codex-terminal/releases/latest"
-const MAC_DOWNLOAD_URL = "https://github.com/naledao/gpt-web-to-codex-terminal/releases/latest/download/GPT-Web-to-Codex-Terminal.dmg"
+const RELEASE_API_URL = "https://api.github.com/repos/naledao/Web2Term/releases/latest"
+const MAC_DOWNLOAD_URL = "https://github.com/naledao/Web2Term/releases/latest/download/GPT-Web-to-Codex-Terminal.dmg"
 
 let broadcast: (status: UpdateStatus) => void = () => {}
 
