@@ -10,7 +10,9 @@ import { ToolWindowsProvider, ToolWindowsHost } from './components/ToolWindows'
 import Web2termDeviceDialog from './components/Web2termDeviceDialog'
 import ConfirmDialog from './components/ConfirmDialog'
 import NewSessionPopover from './components/NewSessionPopover'
+import Web2termWordmark from './components/Web2termWordmark'
 import './assets/workspace-empty.css'
+import './assets/workspace-brand.css'
 
 const INITIAL_WORKSPACE: WorkspaceState = {
   view: 'manager',
@@ -317,7 +319,7 @@ export default function WorkspaceApp(): ReactElement {
       <nav className="workspace__nav">
         <div className="workspace__brand">
           <span className="workspace__brand-mark" aria-hidden="true"><img src={brandIcon} alt="" /></span>
-          <span className="workspace__brand-text">GPT → Codex</span>
+          <span className="workspace__brand-text workspace__brand-wordmark"><Web2termWordmark /></span>
           <button
             type="button"
             className="workspace__nav-collapse"

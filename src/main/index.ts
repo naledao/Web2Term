@@ -954,6 +954,7 @@ function createManagerWindow(): void {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
+    title: 'Web2Term',
     minWidth: 1040,
     minHeight: 620,
     show: false,

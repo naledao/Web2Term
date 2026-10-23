@@ -1,0 +1,32 @@
+.workspace__brand-wordmark {
+  display: block;
+  flex: 1 1 140px;
+  min-width: 0;
+  max-width: 160px;
+  color: #121b31;
+  line-height: 0;
+}
+
+.workspace__brand-wordmark > svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.workspace__brand-wordmark .web2term-wordmark__signal {
+  stroke: var(--web2term-signal, #e8e2ff);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.workspace[data-theme='dark'] .workspace__brand-wordmark {
+  --web2term-accent: #9b8aff;
+  --web2term-signal: #f7f3ff;
+  color: #f0f2fb;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace__brand-wordmark .web2term-wordmark__signal {
+    display: none;
+  }
+}
