@@ -37,7 +37,7 @@ function fixture() {
     state: { enabled: true, promptInjectionEnabled: true, prefix: 'SYSTEM\n\n', taskPromptInjected: false,
       injectedCount: 0, taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: null },
     USER_TEXT_SENTINEL: '\u0000\u0001', SEND_TIMEOUT_MS: 6000, SEND_BUTTON_GRACE_MS: 500,
-    fileSend: null, focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
+    fileSend: null, focusEditing: null, focusEditExcludedIds: new Set(), focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
     getComposer: () => composer, collapse: text => String(text).replace(/\s+/g, ' ').trim(),
     readComposer: node => node.draft, findStopButton: () => null,
     attachmentSnapshot: () => ({}), draftAttachmentEvidence: () => false, hasDraftImageAttachment: () => false,

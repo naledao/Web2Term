@@ -18,6 +18,8 @@ const FOCUS_PLATFORMS: Readonly<Record<string, { label: string }>> = {
 export function supportsFocusView(platformId: string): boolean {
   return Object.prototype.hasOwnProperty.call(FOCUS_PLATFORMS, platformId)
 }
+/** Editing rules have been measured only for ChatGPT. */
+export function supportsFocusEdit(platformId: string): boolean { return platformId === 'chatgpt' }
 /** The model's name as the focus view shows it. */
 export function focusPlatformLabel(platformId: string): string {
   return supportsFocusView(platformId) ? FOCUS_PLATFORMS[platformId].label : platformId
@@ -72,6 +74,10 @@ export interface FocusTurn {
   executionIds: string[]
   executionCycles: Record<string, number>
   deliveries: Record<string, FocusDelivery>
+  /** Archived locally after a confirmed edit; retained for execution/history records. */
+  supersededBy?: string
+  /** Local transcript rows belonging to branches replaced by this edit. */
+  hiddenMessageIds?: string[]
   notice?: 'parse-failed'
   commandRecovery?: CommandRecoveryState
   /** Unexecuted protocol requests; never added to the shell execution queue. */
@@ -97,6 +103,7 @@ export interface FocusChatState extends FocusOwner {
   waiting: boolean
   turns: FocusTurn[]
   executions: ExecutionRecord[]
+  hiddenMessageIds?: string[]
 }
 /** File delivery has its own persisted lifecycle; shell delivery is recorded by the turn. */
 export function focusDelivery(record: ExecutionRecord, delivery?: FocusDelivery): FocusDelivery | undefined {
@@ -107,6 +114,28 @@ export function focusDelivery(record: ExecutionRecord, delivery?: FocusDelivery)
 }
 export type FocusSendOutcome = 'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable' | 'invalid' | 'upload-failed' | 'unsupported-file-type' | 'unknown' | 'cancelled'
 export interface FocusSendRequest extends FocusOwner { text: string; files?: FocusAttachmentInput[] }
+export interface FocusEditRequest extends FocusOwner { messageId: string; text: string }
+/** Metadata only, produced by the page's edit pipeline; no message or prompt text. */
+export interface FocusEditDiagnostic {
+  stage?: string
+  reason?: string
+  anchored?: boolean
+  submitted?: boolean
+  originalMatches?: boolean
+  draftMatches?: boolean
+  requestBodyReadable?: boolean
+  requestTextMatches?: boolean
+  requestOriginalMatches?: boolean
+  groupCount?: number
+  candidateCount?: number
+  originalLength?: number
+  pageTextLength?: number
+  editorTextLength?: number
+  editorStableReads?: number
+  settleMs?: number
+  requestUserLength?: number
+  requestCount?: number
+}
 /** A text selection in a focus-view answer, asked about in the side chat. */
 export interface FocusSelectionRequest extends FocusOwner {
   selectedText: string

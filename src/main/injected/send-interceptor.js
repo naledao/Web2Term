@@ -204,6 +204,10 @@
   let focusReplyBaseline = null
   let focusBaselinePosition = null
   let focusReplyPosition = null
+  let focusEditing = null
+  // Editing can remove the latest reply and temporarily expose an older one. It must
+  // never be mistaken for the new reply or re-executed as a fresh command.
+  const focusEditExcludedIds = new Set()
   // The focus view's list position (`PAGE.focus.rowPositionAttr`); null on a platform without focus rules.
   const focusRowPosition = (node) => {
     const attribute = PAGE.focus?.rowPositionAttr
@@ -276,10 +280,15 @@
       if (!node || typeof node.closest !== 'function') continue
       for (const selector of PAGE.composerSelectors) {
         const found = node.closest(selector)
-        if (isVisibleElement(found)) return found
+        if (isVisibleElement(found) && !found.closest(PAGE.focus?.edit?.turnSelector || ':not(*)')) return found
       }
     }
-    return queryFirstVisible(PAGE.composerSelectors)
+    for (const selector of PAGE.composerSelectors) {
+      const found = [...document.querySelectorAll(selector)].find(node => isVisibleElement(node) &&
+        !node.closest(PAGE.focus?.edit?.turnSelector || ':not(*)'))
+      if (found) return found
+    }
+    return null
   }
 
   /**
@@ -625,7 +634,10 @@
   // ChatGPT can keep hidden old turns after the active thread in document order.
   // Use the same candidates for scanning and baselines; visibility here does not
   // depend on whether a rendered turn is currently inside the scroll viewport.
-  const replyCandidatesOf = (nodes) => PAGE.ignoreHiddenReplyNodes ? nodes.filter(isVisibleElement) : nodes
+  const replyCandidatesOf = (nodes) => {
+    const candidates = PAGE.ignoreHiddenReplyNodes ? nodes.filter(isVisibleElement) : nodes
+    return focusEditExcludedIds.size ? candidates.filter(node => !focusEditExcludedIds.has(messageIdOf(node))) : candidates
+  }
   const latestReplyNode = (nodes) => {
     const candidates = replyCandidatesOf(nodes)
     // Keep the newest candidate even when it is empty or not yet marked as an
@@ -1745,6 +1757,167 @@
     return text.slice(at + USER_TEXT_SENTINEL.length)
   }
 
+  /** Measured native edit form. Submit ONCE, then require matching request and DOM ids. */
+  const editFocusUser = async (request, expectedPath, diagnostic = {}) => {
+    diagnostic.stage = 'prepare'
+    diagnostic.submitted = false
+    const finish = (outcome, reason) => { diagnostic.reason = reason; return outcome }
+    const rules = PAGE.focus?.edit
+    if (!rules || !request || typeof request.text !== 'string' || !request.text.trim() || request.text.length > 20000 ||
+      typeof request.originalText !== 'string' || !request.originalText.trim() ||
+      typeof request.token !== 'string' || !request.token || request.token.length > 160) return finish('invalid', 'invalid-request')
+    if (location.pathname !== expectedPath) return finish('unavailable', 'conversation-changed')
+    if (focusEditing || state.programmatic || fileSend || state.awaitingReplySince || state.pendingQuestion || findStopButton()) return finish('busy', 'page-busy')
+    const composer = getComposer()
+    if (!composer) return finish('no-composer', 'no-composer')
+    if (collapse(readComposer(composer)) || draftAttachmentEvidence(attachmentSnapshot()) || hasDraftImageAttachment() ||
+      queryAll([rules.editorSelector]).some(isVisibleElement)) return finish('busy', 'native-draft')
+    if (state.enabled && state.promptInjectionEnabled && !state.prefix) return finish('unavailable', 'missing-prefix')
+    diagnostic.stage = 'locate'
+    const groups = () => queryAll([rules.turnSelector]).filter(group => isVisibleElement(group) && group.querySelector(rules.userTextSelector))
+    const originalGroups = groups()
+    const normalized = text => collapse(userTextOf(normalizeLineEndings(text)))
+    const original = normalized(request.originalText)
+    diagnostic.originalLength = original.length
+    diagnostic.groupCount = originalGroups.length
+    const anchor = request.replyMessageId ? queryAllAssistant().find(node => messageIdOf(node) === request.replyMessageId &&
+      isVisibleElement(node.closest(rules.turnSelector))) : null
+    const candidates = anchor ? [anchor.closest(rules.turnSelector)] : originalGroups.filter(group =>
+      normalized(readComposer(group.querySelector(rules.userTextSelector))) === original)
+    diagnostic.anchored = !!anchor
+    diagnostic.candidateCount = candidates.length
+    if (candidates.length !== 1) return finish('unavailable', 'candidate-not-unique')
+    const group = candidates[0]
+    const originalId = group.getAttribute(rules.turnIdAttr)
+    const index = originalGroups.indexOf(group)
+    const originalIds = originalGroups.map(item => item.getAttribute(rules.turnIdAttr))
+    diagnostic.pageTextLength = normalized(readComposer(group.querySelector(rules.userTextSelector))).length
+    if (!originalId || index < 0) return finish('unavailable', 'invalid-position')
+    const edit = rules.buttonSelectors.map(selector => group.querySelector(selector)).find(node => node && !controlDisabled(node))
+    if (!edit) return finish('unavailable', 'edit-button-missing')
+    const token = { token: request.token, generation: state.taskPromptGeneration }
+    const current = () => focusEditing === token && location.pathname === expectedPath && state.taskPromptGeneration === token.generation
+    const pause = () => new Promise(resolve => setTimeout(resolve, 60))
+    let editor = null, submitted = false, confirmed = false
+    focusEditing = token
+    state.programmatic = true
+    const shouldInject = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected
+    const text = normalizeLineEndings(request.text)
+    const payload = shouldInject ? state.prefix + USER_TEXT_SENTINEL + text : text
+    const oldReplies = queryAllAssistant().map(messageIdOf).filter(Boolean)
+    try {
+      diagnostic.stage = 'open'
+      group.scrollIntoView?.({ block: 'center' })
+      pressButton(edit)
+      const openDeadline = Date.now() + 2000
+      while (current() && Date.now() < openDeadline) {
+        editor = group.querySelector(rules.editorSelector)
+        if (editor && isVisibleElement(editor)) break
+        await pause()
+      }
+      if (!current()) return finish('cancelled', 'cancelled')
+      if (!editor || !isVisibleElement(editor)) return finish('no-composer', 'editor-missing')
+      // A long injected prompt is folded in the message bubble (including a 显示更多
+      // caption). Its preview cannot verify the human text. The native editor contains
+      // the complete original; verify it before replacing anything in that editor.
+      diagnostic.stage = 'verify'
+      const originalEditorValue = readComposer(editor)
+      const fullOriginal = normalized(originalEditorValue)
+      diagnostic.editorTextLength = originalEditorValue.length
+      diagnostic.originalMatches = fullOriginal === original || (!!anchor && fullOriginal.endsWith(original))
+      if (!diagnostic.originalMatches) return finish('unavailable', 'original-text-mismatch')
+      diagnostic.stage = 'insert'
+      if (!insertText(editor, payload) || !composerMatches(editor, payload)) return finish('insert-failed', 'insert-failed')
+      // execCommand can update the DOM before ProseMirror's observer and React's submit
+      // closure commit the draft. The unchanged message already has an enabled button;
+      // that button alone is not evidence that the newly inserted text is ready.
+      editor.blur?.()
+      diagnostic.stage = 'submit'
+      let button = null
+      let stableSince = Date.now(), stableEditor = editor
+      diagnostic.editorStableReads = 0
+      const insertedAt = Date.now()
+      const buttonDeadline = Date.now() + 2000
+      while (current() && Date.now() < buttonDeadline) {
+        await pause()
+        if (!current()) break
+        const liveGroup = queryAll([rules.turnSelector]).find(item => item.getAttribute(rules.turnIdAttr) === originalId)
+        editor = liveGroup?.querySelector(rules.editorSelector)
+        diagnostic.draftMatches = !!editor && isVisibleElement(editor) && composerMatches(editor, payload)
+        if (!diagnostic.draftMatches) return finish('insert-failed', 'draft-not-stable')
+        if (editor !== stableEditor) { stableEditor = editor; stableSince = Date.now(); diagnostic.editorStableReads = 0 }
+        diagnostic.editorStableReads++
+        diagnostic.settleMs = Date.now() - insertedAt
+        button = editor.closest('form')?.querySelector(rules.submitSelector)
+        if (Date.now() - stableSince >= 180 && button && isVisibleElement(button) && !controlDisabled(button)) break
+        button = null
+      }
+      if (!current()) return finish('cancelled', 'cancelled')
+      if (!editor.isConnected || !button || controlDisabled(button) || !composerMatches(editor, payload) || findStopButton()) return finish('busy', 'form-not-ready')
+      // Establish the fence before clicking; mutation/settle callbacks may run while the
+      // native page is replacing the old branch and before its new reply exists.
+      for (const id of oldReplies) focusEditExcludedIds.add(id)
+      submitted = true
+      diagnostic.submitted = true
+      token.submitted = true
+      pressButton(button)
+      diagnostic.stage = 'confirm'
+      const deadline = Date.now() + SEND_TIMEOUT_MS
+      while (current() && Date.now() < deadline) {
+        const submission = token.submission
+        if (submission) {
+          for (const key of ['requestBodyReadable', 'requestTextMatches', 'requestOriginalMatches', 'requestUserLength', 'requestCount']) {
+            if (submission[key] !== undefined) diagnostic[key] = submission[key]
+          }
+          if (!submission.requestTextMatches) return finish('stuck', submission.reason)
+        }
+        const nextGroups = groups()
+        const next = nextGroups[index]
+        const newId = next?.getAttribute(rules.turnIdAttr)
+        if (submission?.requestTextMatches && newId === submission.messageId && !originalIds.includes(newId) &&
+          nextGroups.slice(0, index).every((item, offset) => item.getAttribute(rules.turnIdAttr) === originalIds[offset]) &&
+          // The bubble may be folded. Its id must belong to a native request whose
+          // actual body matches the edit, not just any newly generated user message.
+          !next.querySelector(rules.editorSelector)) {
+          focusReplyBaseline = null
+          focusBaselinePosition = null
+          focusReplyPosition = null
+          state.replyActionDetected = false
+          state.failedCommand = null
+          state.commandRecoveryUsed = false
+          state.lastCommandMessageId = null
+          draftRejected = false
+          if (shouldInject) {
+            state.taskPromptInjected = true
+            state.injectedCount++
+            report({ event: 'injected', count: state.injectedCount, prefixLength: state.prefix.length,
+              taskPromptGeneration: token.generation, prefixHead: collapse(state.prefix).slice(0, 220) })
+          }
+          report({ event: 'user-message', text, focusEditToken: request.token })
+          setReplyWaiting(Date.now(), 'user-edited')
+          state.taskActive = true
+          report({ event: 'sent', text: text.slice(0, 400), promptInjected: shouldInject, taskPromptGeneration: token.generation })
+          scheduleScrollToBottom()
+          confirmed = true
+          return finish('ok', 'new-user-confirmed')
+        }
+        await pause()
+      }
+      return current() ? finish('stuck', token.submission ? 'submit-unconfirmed' : 'request-not-observed') : finish('cancelled', 'cancelled')
+    } finally {
+      // Before submit, restore the native message when our own edit could not be prepared.
+      // After submit, leave an uncertain result alone: no automatic retry or cancellation.
+      if (!submitted && current() && editor?.isConnected) {
+        const cancel = [...(editor.closest('form')?.querySelectorAll('button[type="button"]') || [])]
+          .find(node => collapse(node.textContent) === rules.cancelLabel)
+        if (cancel) pressButton(cancel)
+      }
+      if (focusEditing === token) focusEditing = null
+      if (state.taskPromptGeneration === token.generation) state.programmatic = false
+      if (confirmed) scheduleCheck()
+    }
+  }
+
   /** Metadata only; synthetic result sends must not masquerade as user attempts. */
   const noteUserSend = (event, reason, element) => {
     if (!event.isTrusted) return
@@ -2609,6 +2782,7 @@
   const checkForCommand = () => {
     lastReplyScanAt = Date.now()
     replyScanSnapshot = {}
+    if (focusEditing) return
     // Confirm our submitted user turn before accepting a fast next assistant action.
     if (fileSend?.submitted) {
       fileSendStatus(fileSend.token)
@@ -3904,11 +4078,26 @@
       ))
     },
 
+    async editUser(request, expectedPath) {
+      const diagnostic = {}
+      const outcome = await editFocusUser(request, expectedPath, diagnostic)
+      return { outcome, diagnostic }
+    },
+
+    /** Metadata from main's passive observer, scoped to this one outstanding submit. */
+    noteEditSubmission(token, submission) {
+      if (!focusEditing || focusEditing.token !== token || !focusEditing.submitted || !submission ||
+        typeof submission.requestBodyReadable !== 'boolean') return false
+      focusEditing.submission = submission
+      return true
+    },
+
     /** Read-only view data. Never expose user rows, injected prefixes or protocol JSON. */
     focusSnapshot() {
       // Every page-specific read below comes from the platform's measured focus rules.
       const rules = PAGE.focus || { reasoningSelectors: [] }
       const composer = getComposer()
+      if (focusEditing) return { path: location.pathname, ready: !!composer, nativeDraft: false, waiting: true, generating: 'unknown', reply: null }
       let generating = 'unknown'
       if (rules.generatingIcon) {
         const { primaryControlSelector, generatingPrefixes, idlePrefixes } = rules.generatingIcon
@@ -3974,7 +4163,8 @@
         reply = { sourceMessageId: node ? turnKeyOf(node) : '', parts,
           answer: answer && !protocol ? readReplyMarkdown(node).slice(0, 250000) : '' }
       }
-      return { path: location.pathname, ready: !!composer, nativeDraft: !!composer && collapse(readComposer(composer)) !== '',
+      const historyDraft = !!rules.edit && queryAll([rules.edit.editorSelector]).some(isVisibleElement)
+      return { path: location.pathname, ready: !!composer, nativeDraft: historyDraft || (!!composer && collapse(readComposer(composer)) !== ''),
         waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply }
     },
 

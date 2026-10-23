@@ -4890,6 +4890,18 @@ body {
   pointer-events: none;
 }
 
+/* App-rendered chat views have room for a centered dialog; native pages keep it in the sidebar. */
+.modal--question-centered {
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  max-width: none;
+  padding: 24px;
+  background: rgba(15, 23, 42, .32);
+  pointer-events: auto;
+}
+
 .question-modal {
   display: flex;
   flex-direction: column;
@@ -4904,8 +4916,14 @@ body {
   pointer-events: auto;
 }
 
+.modal--question-centered .question-modal {
+  width: min(560px, 100%);
+  max-height: min(760px, 100%);
+}
+
 .question-modal__head {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 14px;
   padding: 22px 24px 18px;
@@ -5065,6 +5083,7 @@ body {
 .question-modal__error { margin: 9px 0 0; color: #d9534f; font-size: 12px; }
 .question-modal__foot {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 10px;
   padding: 15px 24px 18px;
@@ -5094,8 +5113,10 @@ body {
 .question-modal__input:disabled { cursor: default; opacity: .55; }
 
 @media (max-width: 600px) {
+  .modal--question-centered { padding: 12px; }
   .question-modal { width: min(420px, calc(100% - 20px)); max-height: calc(100vh - 70px); }
   .question-modal__head, .question-modal__body, .question-modal__foot { padding-left: 16px; padding-right: 16px; }
+  .question-modal__foot { flex-wrap: wrap; }
   .question-modal__hint { display: none; }
 }
 
@@ -12368,8 +12389,8 @@ body {
   background: rgba(0, 0, 0, .78) !important;
 }
 
-/* The pending-question widget is non-blocking and must never add a page-wide backdrop. */
-.workspace[data-theme='dark'] .modal--question {
+/* Only the sidebar question widget stays non-blocking over the native chat page. */
+.workspace[data-theme='dark'] .modal--question:not(.modal--question-centered) {
   background: transparent !important;
 }
 

@@ -1,10 +1,10 @@
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { FocusOwner, FocusSendOutcome } from '../shared/focus-chat'
+import type { FocusOwner, FocusSendOutcome, FocusEditDiagnostic } from '../shared/focus-chat'
 
-interface FocusDiagnostic {
-  event: 'view-state' | 'send-request' | 'send-outcome' | 'end-task' | 'user-started' | 'user-captured' | 'user-stored' | 'user-discarded'
+interface FocusDiagnostic extends FocusEditDiagnostic {
+  event: 'view-state' | 'send-request' | 'send-outcome' | 'edit-request' | 'edit-page' | 'edit-outcome' | 'end-task' | 'user-started' | 'user-captured' | 'user-stored' | 'user-discarded'
   ready?: boolean
   nativeDraft?: boolean
   waiting?: boolean
@@ -34,10 +34,19 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
     const details: Record<string, string | number | boolean | null> = {
       event: payload.event, sessionId: identifier(owner.sessionId), conversationId: identifier(owner.conversationId)
     }
-    for (const key of ['ready', 'nativeDraft', 'waiting'] as const) if (typeof payload[key] === 'boolean') details[key] = payload[key]!
-    for (const key of ['turnCount', 'executionCount', 'reasoningCount', 'searchCount', 'answerLength', 'inputLength', 'attachmentCount', 'savedAttachmentCount'] as const) {
+    for (const key of ['ready', 'nativeDraft', 'waiting', 'anchored', 'submitted', 'originalMatches', 'draftMatches',
+      'requestBodyReadable', 'requestTextMatches', 'requestOriginalMatches'] as const) if (typeof payload[key] === 'boolean') details[key] = payload[key]!
+    for (const key of ['turnCount', 'executionCount', 'reasoningCount', 'searchCount', 'answerLength', 'inputLength', 'attachmentCount', 'savedAttachmentCount',
+      'groupCount', 'candidateCount', 'originalLength', 'pageTextLength', 'editorTextLength', 'editorStableReads',
+      'settleMs', 'requestUserLength', 'requestCount'] as const) {
       if (Number.isSafeInteger(payload[key]) && Number(payload[key]) >= 0) details[key] = Number(payload[key])
     }
+    if (['prepare', 'locate', 'open', 'verify', 'insert', 'submit', 'request', 'confirm'].includes(payload.stage ?? '')) details.stage = payload.stage!
+    if (['invalid-request', 'conversation-changed', 'page-busy', 'no-composer', 'native-draft', 'missing-prefix', 'candidate-not-unique',
+      'invalid-position', 'edit-button-missing', 'cancelled', 'editor-missing', 'original-text-mismatch', 'insert-failed', 'form-not-ready',
+      'new-user-confirmed', 'submit-unconfirmed', 'page-unavailable', 'rules-missing', 'edit-in-progress', 'api-missing', 'invalid-result',
+      'page-exception', 'ack-missing', 'draft-not-stable', 'request-matched', 'request-original', 'request-mismatch',
+      'request-body-unavailable', 'request-schema-unavailable', 'request-not-observed'].includes(payload.reason ?? '')) details.reason = payload.reason!
     for (const key of ['turnId', 'messageId'] as const) if (payload[key] !== undefined) details[key] = identifier(payload[key] ?? null)
     if (payload.imageSource === 'provided' || payload.imageSource === 'page') details.imageSource = payload.imageSource
     if (['active', 'idle', 'unknown'].includes(payload.generating ?? '')) details.generating = payload.generating!

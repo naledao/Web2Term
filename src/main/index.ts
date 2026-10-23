@@ -1275,6 +1275,12 @@ function registerIpcHandlers(): void {
   })
   ipcMain.handle(IpcChannels.focusChatAsk, (event, request) =>
     focusRuntime(event, request)?.askFocusSelection(request) ?? '当前会话已切换，请重新选择文字。')
+  ipcMain.handle(IpcChannels.focusChatEdit, (event, request) => {
+    const runtime = focusRuntime(event, request)
+    if (!runtime || typeof request.text !== 'string' || request.text.length > 20000 ||
+      typeof request.messageId !== 'string' || request.messageId.length > 512) return 'invalid'
+    return runtime.editFocusMessage(request)
+  })
   ipcMain.handle(IpcChannels.questionChatGetState, (event, sessionId: string) => questionRuntime(event, sessionId)?.embed.getQuestionChatState() ?? null)
   ipcMain.handle(IpcChannels.questionChatCreate, (event, sessionId: string, platformId: string) => {
     const runtime = questionRuntime(event, sessionId)

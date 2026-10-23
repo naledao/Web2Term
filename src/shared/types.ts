@@ -1,5 +1,5 @@
 import type { ToolboxInvocation } from './toolbox'
-import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusSendOutcome, FocusAttachmentInfo } from './focus-chat'
+import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo } from './focus-chat'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
 import { BACKGROUND_TASK_MARKER } from './background-tasks'
@@ -29,6 +29,7 @@ export const IpcChannels = {
   embedGetState: 'embed:get-state',
   focusChatGet: 'focus-chat:get',
   focusChatSend: 'focus-chat:send',
+  focusChatEdit: 'focus-chat:edit',
   focusChatAsk: 'focus-chat:ask',
   embedState: 'embed:state',
   questionChatGetState: 'question-chat:get-state',
@@ -1268,6 +1269,7 @@ export interface InterceptorPageEvent {
   attachmentToken?: string
   focusFiles?: FocusAttachmentInfo[]
   focusSendToken?: string
+  focusEditToken?: string
   /** Capture diagnostics: where the image was found and how many were read. */
   phase?: 'draft' | 'sent-turn'
   enabled?: boolean
@@ -2214,6 +2216,7 @@ export interface AppApi {
   getEmbedState(): Promise<EmbedState>
   getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
   sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome>
+  editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome>
   /** Ask about a focus-view selection in the side chat; '' once it is open, otherwise the message to show. */
   askFocusSelection(request: FocusSelectionRequest): Promise<string>
   /** Subscribe to embed state; returns an unsubscribe function. */

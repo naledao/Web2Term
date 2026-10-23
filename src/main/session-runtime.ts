@@ -83,7 +83,7 @@ import { writeFocusDiagnostic } from './focus-chat-log'
 import { getGithubCliState } from './github-cli'
 import { dispatchGithubLoginTask } from './github-login-task'
 import type { GithubLoginTaskResult } from '../shared/github'
-import type { FocusChatState, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusSendOutcome } from '../shared/focus-chat'
+import type { FocusChatState, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome } from '../shared/focus-chat'
 import type { EmbedHandlers } from './embed'
 import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseWindowsEnvironment } from './environment'
 import { ConversationShell, resolvePowerShell } from './shell'
@@ -368,6 +368,7 @@ export class SessionRuntime {
   private pendingGoal = ''
   private readonly focusChat: FocusChat
   private focusSending = false
+  private focusRevision: { token: string; platformId: string; conversationId: string; turnIds: string[]; messageIds: string[]; acknowledged: boolean } | null = null
   private focusUploadAbort: AbortController | null = null
   /** Clean chat turns waiting for a brand-new conversation to receive its URL/id. */
   private readonly pendingConversationMessages = new Map<
@@ -678,8 +679,18 @@ export class SessionRuntime {
         this.options.store.upsertMany(scraped)
         this.broadcastConversations()
       },
-      onUserStarted: (text, files) => {
-        const turnId = this.focusChat.begin(platform.id, record().conversationId, text, files)
+      onUserStarted: (text, files, editToken) => {
+        const revision = this.focusRevision
+        if (editToken && (!revision || revision.acknowledged || revision.token !== editToken || revision.platformId !== platform.id ||
+          revision.conversationId !== record().conversationId)) return undefined
+        if (editToken && revision) {
+          this.deferredCommands.clear()
+          this.backgroundTaskResults.cancel({ platformId: platform.id, conversationId: revision.conversationId })
+        }
+        const turnId = editToken && revision
+          ? this.focusChat.revise(platform.id, revision.conversationId, text, revision.turnIds, revision.messageIds)
+          : this.focusChat.begin(platform.id, record().conversationId, text, files)
+        if (editToken && revision) revision.acknowledged = true
         if (supportsFocusView(platform.id)) writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: record().conversationId },
           { event: 'user-started', turnId, inputLength: text.length, attachmentCount: files?.length ?? 0 })
         return turnId
@@ -1098,10 +1109,12 @@ export class SessionRuntime {
       answerLength: page?.reply?.answer.length ?? 0,
       reasoningCount: page?.reply?.parts.filter(part => part.kind === 'reasoning').length ?? 0,
       searchCount: page?.reply?.parts.filter(part => part.kind === 'search').length ?? 0 })
+    const archivedExecutions = this.focusChat.supersededExecutionIds(owner.platformId, owner.conversationId)
     return { ...owner, ready: page?.ready === true, nativeDraft: page?.nativeDraft === true,
       generating: page?.generating ?? 'unknown', waiting: page?.waiting === true,
       turns: this.focusChat.turns(owner.platformId, owner.conversationId),
-      executions: owner.conversationId ? this.options.store.listExecutions(owner.conversationId) : [] }
+      hiddenMessageIds: this.focusChat.hiddenMessageIds(owner.platformId, owner.conversationId),
+      executions: owner.conversationId ? this.options.store.listExecutions(owner.conversationId).filter(record => !archivedExecutions.has(record.messageId)) : [] }
   }
 
   /** @returns '' once the side chat is open, otherwise the message the focus view shows. */
@@ -1179,6 +1192,47 @@ export class SessionRuntime {
     } finally {
       await staged?.cleanup().catch(() => {})
       if (this.focusUploadAbort === controller) this.focusUploadAbort = null
+      this.focusSending = false
+    }
+  }
+
+  async editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome> {
+    if (!this.ownsFocus(request) || request.platformId !== 'chatgpt' || !request.conversationId) return 'unavailable'
+    if (typeof request.text !== 'string' || !request.text.trim() || request.text.length > 20000 ||
+      typeof request.messageId !== 'string' || request.messageId.length > 512) return 'invalid'
+    if (this.taskRunning() || this.focusRevision) return 'busy'
+    const hidden = new Set(this.focusChat.hiddenMessageIds(request.platformId, request.conversationId))
+    const messages = this.options.store.listConversationMessages(request.conversationId).filter(message => !hidden.has(message.id))
+    const index = messages.findIndex(message => message.id === request.messageId && message.role === 'user')
+    if (index < 0) return 'unavailable'
+    const message = messages[index]
+    const turns = this.focusChat.turns(request.platformId, request.conversationId)
+    const turnIndex = turns.findIndex(turn => turn.userMessageId === message.id)
+    const turn = turns[turnIndex]
+    // Attachments were not part of the measured edit interaction; retain them untouched.
+    if (message.attachments.length || turn?.userAttachments?.length) return 'unavailable'
+    const nextUserIndex = messages.findIndex((item, offset) => offset > index && item.role === 'user')
+    const replyMessageId = turn?.segments.find(segment => segment.sourceMessageId)?.sourceMessageId || turn?.executionIds[0] ||
+      messages.slice(index + 1, nextUserIndex < 0 ? undefined : nextUserIndex)
+        .find(item => item.role === 'assistant' && item.sourceMessageId)?.sourceMessageId || null
+    const revision = { token: randomUUID(), platformId: request.platformId, conversationId: request.conversationId,
+      turnIds: (turnIndex >= 0 ? turns.slice(turnIndex) : turns.filter(item => item.createdAt >= message.createdAt)).map(item => item.id),
+      messageIds: messages.slice(index).map(item => item.id), acknowledged: false }
+    this.focusSending = true
+    this.focusRevision = revision
+    writeFocusDiagnostic(request, { event: 'edit-request', messageId: request.messageId, inputLength: request.text.length })
+    try {
+      const result = await this.embed.editFocusUser({ token: revision.token, originalText: turn?.userText ?? message.content,
+        text: request.text, replyMessageId }, details => writeFocusDiagnostic(request, { ...details, event: 'edit-page' }))
+      const outcome = result === 'ok' && !revision.acknowledged ? 'stuck' : result
+      if (result === 'ok' && !revision.acknowledged) writeFocusDiagnostic(request, { event: 'edit-page', stage: 'confirm', reason: 'ack-missing' })
+      writeFocusDiagnostic(request, { event: 'edit-outcome', outcome })
+      return outcome
+    } catch {
+      writeFocusDiagnostic(request, { event: 'edit-outcome', outcome: 'stuck' })
+      return 'stuck'
+    } finally {
+      if (this.focusRevision === revision) this.focusRevision = null
       this.focusSending = false
     }
   }

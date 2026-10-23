@@ -213,6 +213,16 @@ export interface PageAdapter {
  * `assistantSelectors`; these are the parts only the focus view uses.
  */
 export interface FocusPageRules {
+  edit?: {
+    turnSelector: string
+    turnIdAttr: string
+    userTextSelector: string
+    buttonSelectors: string[]
+    editorSelector: string
+    submitSelector: string
+    cancelLabel: string
+    submissionPath: string
+  }
   /**
    * Generating vs idle read off the composer's primary action, for a site whose stop control
    * shares the send button's classes (DeepSeek). Absent: the measured `stopButtonSelectors`
@@ -625,6 +635,16 @@ export const CHATGPT_PAGE: PageAdapter = {
     captionSelector: 'p.line-clamp-2'
   },
   focus: {
+    // Measured 2026-10-23, chatgpt-edit-2026-10-23T14-35-02-142Z-644.log:
+    // snapshots 90/92, request 33. The inline editor also matches the main composer.
+    edit: {
+      turnSelector: '[data-turn-key]', turnIdAttr: 'data-turn-key',
+      userTextSelector: '[data-content-search-unit-key$=":user"]',
+      buttonSelectors: ['button[aria-label="编辑消息"]'],
+      editorSelector: '[contenteditable="true"][data-composer-markdown][aria-label="编辑消息"]',
+      submitSelector: 'button[type="submit"]', cancelLabel: '取消',
+      submissionPath: '/backend-api/f/conversation'
+    },
     reasoningScopeSelector: '[data-content-search-turn-key]',
     reasoningSelectors: ['[data-chatgpt-agent-turn-start] ~ :not([data-content-search-unit-key]) [data-markdown-text-style="assistant-message"]']
   },

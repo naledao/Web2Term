@@ -3186,8 +3186,19 @@ ${record.command}`
         ) : null}
       </footer>
 
-        {pendingQuestion && currentQuestion && !questionMinimized && questionDialogVisible ? (
-          <AppPopover className="modal modal--question" aria-label="需要你的回答" onClose={() => setQuestionMinimized(true)} busy={questionBusy}>
+        {pendingQuestion && currentQuestion && !questionMinimized && questionDialogVisible && appContainer ? (
+          <Dialog.Root open modal={questionFloats} disablePointerDismissal onOpenChange={(open, details) => {
+            if (open) return
+            if (questionBusy) { details.cancel(); return }
+            setQuestionMinimized(true)
+          }}>
+            <Dialog.Portal container={appContainer}>
+              <Dialog.Popup
+                className={'modal modal--question' + (questionFloats ? ' modal--question-centered' : '')}
+                aria-label="需要你的回答"
+                onMouseDown={(event) => {
+                  if (event.target === event.currentTarget && !questionBusy) setQuestionMinimized(true)
+                }}>
               <div className="question-modal">
                 <div className="question-modal__head">
                   <span className="question-modal__icon" aria-hidden="true">?</span>
@@ -3272,7 +3283,9 @@ ${record.command}`
                   </button>
                 </div>
               </div>
-          </AppPopover>
+              </Dialog.Popup>
+            </Dialog.Portal>
+          </Dialog.Root>
         ) : null}
 
         {/* Separate injected-prompt sections, using the same Markdown viewer. */}

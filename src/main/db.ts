@@ -912,6 +912,9 @@ export class ConversationStore {
           !Number.isFinite(turn.createdAt) || !Array.isArray(turn.segments) || !Array.isArray(turn.executionIds) ||
           !turn.deliveries || !['working', 'answered', 'stopped', 'blocked'].includes(turn.status)) return []
         if (turn.userMessageId !== null && typeof turn.userMessageId !== 'string') return []
+        if (turn.supersededBy !== undefined && (typeof turn.supersededBy !== 'string' || turn.supersededBy.length > 512)) return []
+        if (turn.hiddenMessageIds !== undefined && (!Array.isArray(turn.hiddenMessageIds) || turn.hiddenMessageIds.length > 100000 ||
+          turn.hiddenMessageIds.some(id => typeof id !== 'string' || id.length > 512))) return []
         if (turn.parseFailures !== undefined && (!Array.isArray(turn.parseFailures) || turn.parseFailures.length > 10 ||
           turn.parseFailures.some(item => !item || typeof item.messageId !== 'string' || typeof item.text !== 'string' ||
             item.text.length > 20000 || typeof item.code !== 'string' || !Number.isFinite(item.createdAt)))) return []

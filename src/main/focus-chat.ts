@@ -68,7 +68,26 @@ export class FocusChat {
     this.persist(platformId, entry, true)
   }
   ownsTurn(platformId: string, turnId: string): boolean {
-    return this.entries.get(platformId)?.turns.some(turn => turn.id === turnId) === true
+    return this.entries.get(platformId)?.turns.some(turn => turn.id === turnId && !turn.supersededBy) === true
+  }
+  /** Called only by the page's confirmed edit acknowledgement, never optimistically. */
+  revise(platformId: string, conversationId: string, text: string, turnIds: string[], messageIds: string[]): string | undefined {
+    const hidden = this.hiddenMessageIds(platformId, conversationId)
+    const id = this.begin(platformId, conversationId, text)
+    const entry = this.entries.get(platformId)
+    if (!id || !entry) return undefined
+    const replaced = new Set(turnIds)
+    for (const turn of entry.turns) if (replaced.has(turn.id)) turn.supersededBy = id
+    entry.turns.find(turn => turn.id === id)!.hiddenMessageIds = [...new Set([...hidden, ...messageIds])]
+    entry.dirty = true
+    this.persist(platformId, entry, true)
+    return id
+  }
+  hiddenMessageIds(platformId: string, conversationId: string | null): string[] {
+    return [...new Set(this.context(platformId, conversationId).turns.flatMap(turn => turn.hiddenMessageIds ?? []))]
+  }
+  supersededExecutionIds(platformId: string, conversationId: string | null): Set<string> {
+    return new Set(this.context(platformId, conversationId).turns.filter(turn => turn.supersededBy).flatMap(turn => turn.executionIds))
   }
   parseFailed(platformId: string, failure?: InterceptorPageEvent): void {
     const current = failure?.live === true ? this.live(platformId) : this.current(platformId)
@@ -246,7 +265,7 @@ export class FocusChat {
   turns(platformId: string, conversationId: string | null): FocusTurn[] {
     const entry = this.context(platformId, conversationId)
     this.persist(platformId, entry)
-    return entry.turns
+    return entry.turns.filter(turn => !turn.supersededBy)
   }
   flush(platformId?: string): void {
     for (const [id, entry] of this.entries) if (!platformId || platformId === id) this.persist(id, entry, true)

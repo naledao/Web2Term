@@ -8,12 +8,13 @@ import { writeQuestionLog } from './question-chat-page'
 import { supportsSelectionQuestion } from '../shared/deepseek-question'
 import type { QuestionChatAction, QuestionChatState, SelectionQuestionDraft } from '../shared/deepseek-question'
 import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
-import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo } from '../shared/focus-chat'
+import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo, FocusEditDiagnostic } from '../shared/focus-chat'
 import { supportsFocusView } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
 import { writeRawSendDiagnostic } from './raw-send-log'
 import { writePromptDiagnostic } from './prompt-log'
 import { writeReplyDiagnostic } from './reply-log'
+import { observeFocusEditRequest } from './focus-edit-request'
 import { parseReadFilesRequest } from '../shared/file-requests'
 import type { FileSendOutcome } from '../shared/file-requests'
 import type { PreparedFileResult, PreparedAttachment } from './file-access'
@@ -414,7 +415,7 @@ export interface EmbedHandlers {
   /** Terminal-mode interceptor changed state. */
   onInterceptor(status: InterceptorStatus): void
   /** Clean user text, with the injected system prefix already removed. */
-  onUserStarted?(text: string, files?: FocusAttachmentInfo[]): string | undefined
+  onUserStarted?(text: string, files?: FocusAttachmentInfo[], editToken?: string): string | undefined
   onUserMessage(text: string, attachments: ConversationImageAttachmentInput[], focusTurnId?: string, imageSource?: 'provided' | 'page'): void
   onRawSent?(): void
   /** An assistant message that belongs in the app's conversation transcript. */
@@ -1318,6 +1319,49 @@ export class ChatGptEmbed {
     return this.sendUserTask(text)
   }
 
+  private focusEditToken: string | null = null
+  async editFocusUser(request: { token: string; originalText: string; text: string; replyMessageId: string | null },
+    diagnose: (details: FocusEditDiagnostic) => void = () => {}): Promise<FocusSendOutcome> {
+    const contents = this.focusPage()
+    if (!contents || !this.platform.page.focus?.edit || this.focusEditToken) {
+      diagnose({ stage: 'prepare', reason: !contents ? 'page-unavailable' : !this.platform.page.focus?.edit ? 'rules-missing' : 'edit-in-progress' })
+      return 'unavailable'
+    }
+    this.focusEditToken = request.token
+    let stopObserving: (() => void) | undefined
+    try {
+      const url = new URL(contents.getURL())
+      const path = url.pathname
+      const conversationId = this.platform.conversationIdFromPath(path)
+      if (!conversationId) return 'unavailable'
+      stopObserving = observeFocusEditRequest(contents, {
+        origin: url.origin, submissionPath: this.platform.page.focus.edit.submissionPath,
+        conversationId, text: request.text, originalText: request.originalText, prefix: this.interceptor.prefix
+      }, submission => {
+        const { messageId: _messageId, ...diagnostic } = submission
+        diagnose({ ...diagnostic, stage: 'request' })
+        if (contents.isDestroyed() || this.focusEditToken !== request.token || contents.getURL() !== url.href) return
+        void contents.executeJavaScript('window.__cmdTerminalInterceptor?.noteEditSubmission(' +
+          JSON.stringify(request.token) + ',' + JSON.stringify(submission) + ')').catch(() => {})
+      })
+      const raw = await contents.executeJavaScript('(async () => {' +
+        'const api = window.__cmdTerminalInterceptor;' +
+        'return typeof api?.editUser === "function" && typeof api?.noteEditSubmission === "function" ? await api.editUser(' + JSON.stringify(request) + ', ' + JSON.stringify(path) + ')' +
+        ': {outcome:"unavailable",diagnostic:{stage:"prepare",reason:"api-missing"}}' +
+        '})()')
+      if (raw?.diagnostic && typeof raw.diagnostic === 'object') diagnose(raw.diagnostic)
+      const result = typeof raw === 'string' ? raw : raw?.outcome
+      if (!['ok', 'busy', 'stuck', 'no-composer', 'insert-failed', 'unavailable', 'invalid', 'cancelled'].includes(result)) {
+        diagnose({ stage: 'prepare', reason: 'invalid-result' })
+      }
+      return ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed', 'unavailable', 'invalid', 'cancelled'].includes(result) ? result : 'unavailable'
+    } catch { diagnose({ stage: 'prepare', reason: 'page-exception' }); return 'stuck' }
+    finally {
+      stopObserving?.()
+      if (this.focusEditToken === request.token) this.focusEditToken = null
+    }
+  }
+
   /** Sidebar user tasks share the confirmed send path on every supported platform. */
   async sendUserTask(text: string): Promise<FocusSendOutcome> {
     const contents = this.liveContents()
@@ -1653,6 +1697,8 @@ export class ChatGptEmbed {
         break
       case 'user-message': {
         const text = typeof payload.text === 'string' ? payload.text : ''
+        const editToken = typeof payload.focusEditToken === 'string' ? payload.focusEditToken : undefined
+        if (editToken && editToken !== this.focusEditToken) break
         const focusSendToken = typeof payload.focusSendToken === 'string' ? payload.focusSendToken : null
         const providedImages = focusSendToken ? this.focusSendImages.get(focusSendToken) : undefined
         // A focus upload acknowledgement must belong to this exact outstanding send.
@@ -1670,7 +1716,8 @@ export class ChatGptEmbed {
           const files = Array.isArray(payload.focusFiles) ? payload.focusFiles.slice(0, 3).filter(file =>
             file && typeof file.fileName === 'string' && file.fileName.length <= 240 &&
             typeof file.mimeType === 'string' && file.mimeType.length <= 160 && Number.isSafeInteger(file.sizeBytes) && file.sizeBytes > 0) : []
-          const turnId = this.handlers.onUserStarted?.(text, files)
+          const turnId = this.handlers.onUserStarted?.(text, files, editToken)
+          if (editToken && !turnId) break
           if (providedImages) {
             this.focusSendImages.delete(focusSendToken!)
             this.handlers.onUserMessage(text, providedImages, turnId, 'provided')
