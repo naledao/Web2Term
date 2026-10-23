@@ -1,6 +1,7 @@
 import type { CommandRecoveryState, ExecutionRecord } from './types'
 
 export type ChatView = 'original' | 'local' | 'focus'
+export const DEFAULT_CHAT_VIEW: ChatView = 'focus'
 
 /**
  * The platforms that get the focus view, and how the view names them.

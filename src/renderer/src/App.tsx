@@ -28,7 +28,7 @@ import type { ToolKind } from './tool-window-state'
 import ConversationTranscript from './components/ConversationTranscript'
 import FocusChatView from './components/FocusChatView'
 import type { ChatView } from '@shared/focus-chat'
-import { focusPlatformLabels, supportsFocusView } from '@shared/focus-chat'
+import { DEFAULT_CHAT_VIEW, focusPlatformLabels, supportsFocusView } from '@shared/focus-chat'
 import QuestionChatPanel from './components/QuestionChatPanel'
 import type { QuestionChatState } from '@shared/deepseek-question'
 import { supportsSelectionQuestion } from '@shared/deepseek-question'
@@ -138,7 +138,7 @@ function sessionLayoutKey(key: string, sessionId: string): string {
   return `${key}.${sessionId}`
 }
 
-function readChatView(sessionId: string, platformId: string, fallback: ChatView = 'original'): ChatView {
+function readChatView(sessionId: string, platformId: string, fallback: ChatView = DEFAULT_CHAT_VIEW): ChatView {
   try {
     const view = localStorage.getItem('chat.view.' + sessionId + '.' + platformId)
     if (view === 'local' || view === 'original') return view
@@ -503,7 +503,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [settings, setSettings] = useState<AppSettings | null>(null)
   // After `settings` is declared: reading it earlier is a TDZ ReferenceError that blanks the window.
   useEffect(() => {
-    setChatView(readChatView(sessionId, platformId, settings?.defaultChatView ?? 'original'))
+    setChatView(readChatView(sessionId, platformId, settings?.defaultChatView ?? DEFAULT_CHAT_VIEW))
   }, [sessionId, platformId, settings?.defaultChatView])
   const [settingsLoading, setSettingsLoading] = useState(true)
   const [settingsLoadFailed, setSettingsLoadFailed] = useState(false)
@@ -626,7 +626,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [sshProxyDraft, setSshProxyDraft] = useState('')
   const [updateProxyDraft, setUpdateProxyDraft] = useState('')
   const [defaultPlatformDraft, setDefaultPlatformDraft] = useState('')
-  const [defaultChatViewDraft, setDefaultChatViewDraft] = useState<ChatView>('original')
+  const [defaultChatViewDraft, setDefaultChatViewDraft] = useState<ChatView>(DEFAULT_CHAT_VIEW)
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   /** True between clicking download and the first progress event. */
   const [preparingDownload, setPreparingDownload] = useState(false)
@@ -1798,7 +1798,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         setSshProxyDraft(value.sshProxy)
         setUpdateProxyDraft(value.updateProxy)
         setDefaultPlatformDraft(value.defaultPlatformId)
-        setDefaultChatViewDraft(value.defaultChatView ?? 'original')
+        setDefaultChatViewDraft(value.defaultChatView ?? DEFAULT_CHAT_VIEW)
         setUserAvatarDraft(value.userAvatarDataUrl)
         setUserAvatarSourceDraft(value.userAvatarSourceDataUrl || value.userAvatarDataUrl)
         setUserAvatarPositionXDraft(value.userAvatarPositionX)
@@ -2099,7 +2099,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setSshProxyDraft(next.sshProxy)
       setUpdateProxyDraft(next.updateProxy)
       setDefaultPlatformDraft(next.defaultPlatformId)
-      setDefaultChatViewDraft(next.defaultChatView ?? 'original')
+      setDefaultChatViewDraft(next.defaultChatView ?? DEFAULT_CHAT_VIEW)
       setUserAvatarDraft(next.userAvatarDataUrl)
       setUserAvatarSourceDraft(next.userAvatarSourceDataUrl || next.userAvatarDataUrl)
       setUserAvatarPositionXDraft(next.userAvatarPositionX)

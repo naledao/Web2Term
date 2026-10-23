@@ -1,6 +1,6 @@
 import { ToolboxRouter } from './toolbox-router'
 import { TOOLBOX_METHODS } from '../shared/toolbox'
-import { supportsFocusView } from '../shared/focus-chat'
+import { DEFAULT_CHAT_VIEW, supportsFocusView } from '../shared/focus-chat'
 import type { FocusOwner } from '../shared/focus-chat'
 import type { ToolboxInvocation, ToolboxMethod } from '../shared/toolbox'
 import type { AppApi } from '../shared/types'
@@ -151,7 +151,7 @@ function readAvatarScale(value: string | null): number {
 }
 
 function readDefaultChatView(value: string | null): 'original' | 'local' | 'focus' {
-  return value === 'local' || value === 'focus' ? value : 'original'
+  return value === 'original' || value === 'local' || value === 'focus' ? value : DEFAULT_CHAT_VIEW
 }
 
 let managerWindow: BrowserWindow | null = null
@@ -164,7 +164,7 @@ let store: ConversationStore | null = null
 let backendAuth: BackendAuthService | null = null
 let web2termConnection: Web2termConnection | null = null
 let localMachineId = ''
-let settings: AppSettings = { theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: 'original' }
+let settings: AppSettings = { theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW }
 const runtimes = new Map<string, SessionRuntime>()
 let currentSessionId: string | null = null
 const unseenCompletedTasks = new Map<string, number>()
@@ -1684,7 +1684,7 @@ function registerIpcHandlers(): void {
     return runtime.ssh.getState()
   })
 
-  ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { theme: 'light', backendUrl: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: 'original' })
+  ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { theme: 'light', backendUrl: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW })
   ipcMain.handle(IpcChannels.settingsUpdate, async (event, patch: AppSettingsPatch): Promise<AppSettings> => {
     if (!isManagerEvent(event) || !store) return { ...settings }
     // Validate before applying any setting so an invalid URL cannot partly save a patch.
