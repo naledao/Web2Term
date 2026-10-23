@@ -7,6 +7,7 @@ import AvatarEditor from 'react-avatar-editor'
 import type { AvatarEditorRef } from 'react-avatar-editor'
 import SshDirectoryPicker from './components/SshDirectoryPicker'
 import PdfPreviewDialog from './components/PdfPreviewDialog'
+import ImagePreviewDialog from './components/ImagePreviewDialog'
 import { useToolWindows, ToolWindowDock } from './components/ToolWindows'
 import type { PdfPreviewTarget } from './components/PdfPreviewDialog'
 import BackendLoginForm from './components/BackendLoginForm'
@@ -345,9 +346,8 @@ interface AppProps {
   onThemeChange: (theme: AppTheme) => void
 }
 
-function ConversationAttachmentImage({ attachment }: { attachment: ConversationAttachment }): JSX.Element | null {
+function ConversationAttachmentImage({ attachment, onPreview }: { attachment: ConversationAttachment; onPreview(source: string, name: string): void }): JSX.Element | null {
   const [src, setSrc] = useState<string | null>(null)
-  const [previewOpen, setPreviewOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -365,7 +365,7 @@ function ConversationAttachmentImage({ attachment }: { attachment: ConversationA
       <button
         type="button"
         className="conversation-message__attachment-trigger"
-        onClick={() => setPreviewOpen(true)}
+        onClick={() => onPreview(src, attachment.fileName)}
         aria-label="预览图片"
         title="点击查看大图"
       >
@@ -376,27 +376,6 @@ function ConversationAttachmentImage({ attachment }: { attachment: ConversationA
           loading="lazy"
         />
       </button>
-      {previewOpen ? (<AppPopover
-          className="conversation-attachment-preview"
-          aria-label="图片预览"
-          onWheel={(event) => event.stopPropagation()}
-         onClose={() => setPreviewOpen(false)}>
-          <button
-            type="button"
-            className="conversation-attachment-preview__close"
-            aria-label="关闭图片预览"
-            title="关闭"
-            onClick={() => setPreviewOpen(false)}
-          >
-            ×
-          </button>
-          <img
-            className="conversation-attachment-preview__image"
-            src={src}
-            alt={attachment.fileName || 'Image attachment'}
-            onClick={(event) => event.stopPropagation()}
-          />
-        </AppPopover>) : null}
     </>
   )
 }
@@ -609,6 +588,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [sshUploading, setSshUploading] = useState(false)
   const [sshFilesOpen, setSshFilesOpen] = useState(false)
   const [pdfPreview, setPdfPreview] = useState<PdfPreviewTarget | null>(null)
+  const [imagePreview, setImagePreview] = useState<{ source: string; name: string } | null>(null)
+  const openImagePreview = useCallback((source: string, name: string): void => setImagePreview({ source, name }), [])
   const sshFilesModalRef = useRef<HTMLDivElement>(null)
   const sshHostIdRef = useRef('')
   sshHostIdRef.current = ssh?.hostId ?? ''
@@ -1888,7 +1869,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * lives in the terminal column and must leave the chat page usable underneath.
    */
   const terminalModalOpen = terminalVisible && sshFilesOpen
-  const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
+  const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
   const nativeEmbedVisible = !placeholderToggle && !isFocusView && !leavingView && chatSurfaceVisible
   useEffect(() => {
     window.api.setEmbedVisible(nativeEmbedVisible)
@@ -2193,7 +2174,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               <path d="M12 3c2.6 2.6 3.9 5.7 3.9 9s-1.3 6.4-3.9 9c-2.6-2.6-3.9-5.7-3.9-9S9.4 5.6 12 3z" />
             </svg>
           </span>
-          <span className="brand__text">Web → Codex Terminal</span>
         </div>
 
         <div className="toolbar">
@@ -2316,9 +2296,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               onNewChat={() => window.api.sendEmbedCommand('home')}
               onQuestion={() => setQuestionMinimized(false)}
               onOriginal={() => selectChatView('original')}
-              onControl={() => { setPanelTab('control'); setPanelCollapsed(false) }}
+              onOpenTerminal={() => { setPanelTab('terminal'); setPanelCollapsed(false) }}
               onRun={runExecution} onSkip={skipExecution} onStop={endTask}
-              renderAttachment={attachment => <ConversationAttachmentImage key={attachment.id} attachment={attachment} />} />
+              onPreviewImage={openImagePreview}
+              renderAttachment={attachment => <ConversationAttachmentImage key={attachment.id} attachment={attachment} onPreview={openImagePreview} />} />
             </div>
           ) : null}
           {showLocalView ? (
@@ -2359,7 +2340,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                           {message.attachments.length > 0 ? (
                             <div className="conversation-message__attachments">
                               {message.attachments.map((attachment) => (
-                                <ConversationAttachmentImage key={attachment.id} attachment={attachment} />
+                                <ConversationAttachmentImage key={attachment.id} attachment={attachment} onPreview={openImagePreview} />
                               ))}
                             </div>
                           ) : null}
@@ -2401,7 +2382,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               items={panelTabs}
               active={panelTab}
               containerRef={panelRef}
-              visible={!(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
+              visible={chatSurfaceVisible}
               open={panelTabListOpen}
               onOpenChange={open => { setPanelTabListOpen(open); if (open) setPanelAddMenuOpen(false) }}
               onSelect={id => { setPanelTab(id) }}
@@ -2411,7 +2392,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           {panelCollapsed ? null : (
             <PanelAddMenu
               containerRef={panelRef}
-              visible={!(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
+              visible={chatSurfaceVisible}
               open={panelAddMenuOpen}
               questionChatAvailable={supportsSelectionQuestion(platformId)}
               onOpenChange={open => { setPanelAddMenuOpen(open); if (open) setPanelTabListOpen(false) }}
@@ -2743,7 +2724,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           <TerminalActionsMenu
             containerRef={toolboxPaneRef}
             triggerRef={terminalSwitchRef}
-            visible={terminalVisible && !(settingsOpen || sshDialogOpen || terminalModalOpen || pdfPreview || globalModalOpen || promptOpen || toolWindowOpen || commandPreviewOpen)}
+            visible={terminalVisible && chatSurfaceVisible}
             mode={sshActive ? 'ssh' : web2termActive ? 'web2term' : 'local'}
             connected={sshActive ? ssh?.status === 'connected' : web2termActive ? Boolean(terminal?.alive) : true}
             resetDisabled={web2termActive
@@ -3397,7 +3378,6 @@ ${record.command}`
             <div className="settings-modal__head">
               <div>
                 <div className="settings-modal__title">设置</div>
-                <div className="settings-modal__subtitle">外观、后端服务、设备、代理和应用设置</div>
               </div>
               <span className="panel__spacer" />
               <button type="button" className="settings-modal__close" aria-label="关闭" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy} onClick={() => setSettingsOpen(false)}>×</button>
@@ -3992,6 +3972,7 @@ ${record.command}`
         </Suspense>
       ) : null}
       {pdfPreview ? <PdfPreviewDialog key={`${pdfPreview.hostId}:${pdfPreview.path}`} target={pdfPreview} theme={settings?.theme ?? 'light'} onClose={() => setPdfPreview(null)} /> : null}
+      {imagePreview ? <ImagePreviewDialog source={imagePreview.source} name={imagePreview.name} onClose={() => setImagePreview(null)} /> : null}
     </div>
   )
 }

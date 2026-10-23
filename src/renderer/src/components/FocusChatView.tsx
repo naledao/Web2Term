@@ -1,4 +1,3 @@
-import AppPopover from './AppPopover'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, JSX, ReactNode, RefObject, SyntheticEvent } from 'react'
 import MDEditor from '@uiw/react-md-editor'
@@ -27,10 +26,11 @@ interface Props {
   onNewChat(): void
   onQuestion(): void
   onOriginal(): void
-  onControl(): void
+  onOpenTerminal(): void
   onRun(messageId: string): Promise<void>
   onSkip(messageId: string): Promise<void>
   onStop(): Promise<void>
+  onPreviewImage(source: string, name: string): void
   renderAttachment(attachment: ConversationAttachment): ReactNode
 }
 /** The expanded process scrolls on its own; a working turn keeps its newest step in view unless the user scrolled up. */
@@ -70,9 +70,8 @@ function saveFileDraft(ownerKey: string, files: DraftFile[]): void {
   else fileDrafts.delete(ownerKey)
   fileDraftListeners.get(ownerKey)?.forEach(listener => listener())
 }
-function FilePreview({ file }: { file: File }): JSX.Element {
+function FilePreview({ file, onPreview }: { file: File; onPreview(source: string, name: string): void }): JSX.Element {
   const [source, setSource] = useState('')
-  const [open, setOpen] = useState(false)
   const image = /^(image\/(png|jpeg|webp|gif|bmp|avif))$/.test(file.type)
   useEffect(() => {
     if (!image) return
@@ -81,16 +80,9 @@ function FilePreview({ file }: { file: File }): JSX.Element {
     return () => URL.revokeObjectURL(url)
   }, [file, image])
   if (!image || !source) return <span className="focus-draft-file__icon" aria-hidden="true">📎</span>
-  // Same dialog as sent conversation images, so a draft previews exactly like a sent one.
-  return <>
-    <button type="button" className="focus-draft-file__thumb" onClick={() => setOpen(true)} aria-label={'预览图片 ' + file.name} title="点击查看大图">
+  return <button type="button" className="focus-draft-file__thumb" onClick={() => onPreview(source, file.name)} aria-label={'预览图片 ' + file.name} title="点击查看大图">
       <img src={source} alt={file.name} />
     </button>
-    {open ? (<AppPopover className="conversation-attachment-preview" aria-label="图片预览" onWheel={event => event.stopPropagation()} onClose={() => setOpen(false)}>
-        <button type="button" className="conversation-attachment-preview__close" aria-label="关闭图片预览" title="关闭" onClick={() => setOpen(false)}>×</button>
-        <img className="conversation-attachment-preview__image" src={source} alt={file.name} onClick={event => event.stopPropagation()} />
-      </AppPopover>) : null}
-  </>
 }
 /**
  * Clipboard text without its leading and trailing blank lines. Web selections spanning
@@ -504,7 +496,7 @@ export default function FocusChatView(props: Props): JSX.Element {
         <div className="focus-execution__meta">{record.startedAt && record.finishedAt ? ((record.finishedAt - record.startedAt) / 1000).toFixed(1) + ' 秒 · ' : ''}{delivery === 'sent' ? '结果已回传' : delivery === 'pending' && record.status === 'done' ? '等待结果回传' : delivery === 'blocked' || delivery === 'failed' ? '结果尚未回传' : delivery === 'superseded' ? '结果未回传：已由后续执行接替' : ''}</div>
       </details>
       {actionable && ['pending', 'blocked'].includes(record.status) ? <div className="focus-chat__actions"><button type="button" disabled={!!actionId} onClick={() => void action(record.messageId)}>{actionId === record.messageId ? '处理中…' : '运行'}</button><button type="button" disabled={!!actionId} onClick={() => void action(record.messageId, true)}>跳过</button></div> : null}
-      {actionable && (delivery === 'blocked' || delivery === 'failed' || ['failed', 'timeout'].includes(record.status)) ? <button type="button" onClick={props.onControl}>打开执行控制</button> : null}
+      {actionable && (delivery === 'blocked' || delivery === 'failed' || ['failed', 'timeout'].includes(record.status)) ? <button type="button" onClick={props.onOpenTerminal}>打开执行控制</button> : null}
     </div>
   )
   const renderTurn = (turn: FocusTurn): JSX.Element => {
@@ -548,7 +540,7 @@ export default function FocusChatView(props: Props): JSX.Element {
           {turn.commandRecovery?.message || '指令格式无效，本条请求未执行。'}
           {turn.commandRecovery && ['blocked', 'failed'].includes(turn.commandRecovery.status) && turn === state?.turns.at(-1)
             ? <button type="button" disabled={!!actionId} onClick={() => void retryFormat(turn.commandRecovery!.token)}>重试修正</button> : null}
-          <button type="button" onClick={props.onControl}>查看执行控制</button>
+          <button type="button" onClick={props.onOpenTerminal}>查看执行控制</button>
         </div> : null}
         {answer ? <div className="focus-answer" data-question-answer={turn.segments.at(-1)?.sourceMessageId ?? ''}><Markdown text={answer} theme={theme} /></div> : null}
         {answer && turn.status !== 'working' ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(turn.id, answer)}>{copiedId === turn.id ? '已复制' : '复制回答'}</button></div> : null}
@@ -575,7 +567,7 @@ export default function FocusChatView(props: Props): JSX.Element {
           </ProcessScroll>
         </details> : null}
       </ConversationTranscript>,
-  [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, working, props.renderAttachment, props.onControl, props.onRun, props.onSkip])
+  [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, working, props.renderAttachment, props.onOpenTerminal, props.onRun, props.onSkip])
   return <section className="focus-chat" aria-label="专注对话" data-theme={theme}>
     <header className="focus-chat__header">
       <span>{modelIcon ? <img className="focus-chat__brand-icon" src={modelIcon} alt={modelLabel} /> : <strong>{modelLabel}</strong>}</span>
@@ -599,7 +591,7 @@ export default function FocusChatView(props: Props): JSX.Element {
       <form className="focus-composer" onSubmit={event => void submit(event)}>
         {draftFiles.length ? <div className="focus-composer__files" aria-label="待发送附件">{draftFiles.map(item =>
           <div className="focus-draft-file" key={item.id}>
-            <FilePreview file={item.file} />
+            <FilePreview file={item.file} onPreview={props.onPreviewImage} />
             <span className="focus-draft-file__name" title={item.file.name}>{item.file.name}<small>{fileSize(item.file.size)} · {sending ? '上传并发送中…' : '待发送'}</small></span>
             <button type="button" disabled={sending} aria-label={'移除附件 ' + item.file.name} onClick={() => removeFile(item.id)}>×</button>
           </div>)}</div> : null}

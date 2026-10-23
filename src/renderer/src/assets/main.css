@@ -5595,7 +5595,6 @@ body {
 
 .workspace:not(.workspace--manager) .brand {
   gap: 8px;
-  min-width: 190px;
   padding: 0 6px;
 }
 
@@ -5760,7 +5759,6 @@ body {
 
 @media (max-width: 1100px) {
   .workspace:not(.workspace--manager) { grid-template-columns: 176px minmax(0, 1fr); }
-  .workspace:not(.workspace--manager) .brand { min-width: 155px; }
 }
 /* Main workspace - comfortable density pass */
 .workspace:not(.workspace--manager) {
@@ -5856,7 +5854,6 @@ body {
 }
 
 .workspace:not(.workspace--manager) .brand {
-  min-width: 214px;
   gap: 10px;
   padding: 0 7px;
 }
@@ -6034,7 +6031,6 @@ body {
 
 @media (max-width: 1250px) {
   .workspace:not(.workspace--manager) { grid-template-columns: 200px minmax(0, 1fr); }
-  .workspace:not(.workspace--manager) .brand { min-width: 170px; }
   .workspace:not(.workspace--manager) .workspace__session { min-height: 52px; }
 }
 /* Main workspace - eye comfort palette */
@@ -7345,7 +7341,6 @@ body {
 
 .workspace:not(.workspace--manager) .brand {
   gap: 9px;
-  min-width: 190px;
   padding: 0 4px;
 }
 

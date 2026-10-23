@@ -686,32 +686,10 @@
     if (fileInputs.some((input) => [...(input.files || [])].some((file) => String(file.type || '').startsWith('image/')))) {
       return true
     }
-    const composer = getComposer()
-    if (!composer) return false
-    // A measured native-card selector lets us stay inside the draft. Walking
-    // beyond that scope can mistake an old conversation image for a new upload.
-    if (PAGE.fileAttachmentCardSelector) {
-      const root = attachmentRoot()
-      return !!root && [...root.querySelectorAll(PAGE.fileDraftCardSelector || PAGE.fileAttachmentCardSelector)].some((card) => !!card.querySelector(PAGE.fileDraftImageSelector || 'img'))
-    }
-    let root = composer
-    for (let depth = 0; depth < 6 && root; depth += 1, root = root.parentElement) {
-      const images = [...root.querySelectorAll('img')]
-      if (images.some((image) => {
-        const src = String(image.currentSrc || image.src || '')
-        const width = Number(image.naturalWidth || image.width || 0)
-        const height = Number(image.naturalHeight || image.height || 0)
-        if (src === '' || width < 40 || height < 40) return false
-        // Same rule as `attachmentDraftImages`: a local upload preview always counts, but a
-        // page image counts only while it is rendered. DeepSeek keeps a hidden 132px static
-        // image near the composer; counting it made every focus-view send return busy.
-        if (/^(blob:|data:)/.test(src)) return true
-        if (!isVisibleElement(image)) return false
-        const rect = image.getBoundingClientRect()
-        return rect.width > 0 && rect.height > 0
-      })) return true
-    }
-    return false
+    // Use the same bounded draft scope as upload readiness and raw-send guards.
+    // An independent ancestor walk can escape into history or a collapsed sidebar.
+    const root = attachmentRoot()
+    return !!root && attachmentDraftImages(root, attachmentDraftCards(root)).length > 0
   }
 
   const beginUserImageCapture = () => {
@@ -3086,10 +3064,15 @@
 
   // Attachment discovery is structural: no guessed attachment card class names.
   // The user-driven attachment probe reports this same snapshot.
-  const attachmentHasMessages = (node) => [
-    ...PAGE.messageSelectors, ...PAGE.assistantReplySelectors,
-    ...(PAGE.fileUserTurnSelector ? [PAGE.fileUserTurnSelector] : [])
-  ].some((selector) => node.matches(selector) || node.querySelector(selector))
+  const attachmentMessageSelectors = () => [
+    ...PAGE.messageSelectors, ...PAGE.assistantSelectors, ...PAGE.assistantReplySelectors,
+    ...(PAGE.fileAssistantSelectors || []),
+    ...(PAGE.fileUserTurnSelector ? [PAGE.fileUserTurnSelector] : []),
+    ...(PAGE.fileUserTurnFallbackSelector ? [PAGE.fileUserTurnFallbackSelector] : [])
+  ]
+  const attachmentHasMessages = (node) => attachmentMessageSelectors()
+    .some((selector) => node.matches(selector) || node.querySelector(selector))
+  const attachmentNavigationSelector = 'nav, aside, [role="navigation"]'
   const attachmentRoot = () => {
     const composer = getComposer()
     if (!composer) return null
@@ -3106,7 +3089,9 @@
       // The 2026-10-06 capture placed the active inputs at depth 8 and their
       // native form at depth 10, beyond the former eight-ancestor limit.
       if (attachmentHasMessages(root)) break
-      // The page shell: a page that has not rendered its message rows yet is bounded by its sidebar.
+      // A collapsed sidebar may contain no conversation links. Its landmark is
+      // still a page boundary, including while hidden chat history is unmounted.
+      if (root.matches(attachmentNavigationSelector) || root.querySelector(attachmentNavigationSelector)) break
       if ((PAGE.conversationLinkSelectors || []).some((selector) => root.querySelector(selector))) break
       if (root.matches('form') || root.querySelectorAll(CONTROL_SELECTOR).length >= 2) candidate = root
     }
@@ -3143,6 +3128,11 @@
     const previewImages = PAGE.fileDraftImageSelector ? cards.flatMap((card) => [...card.querySelectorAll(PAGE.fileDraftImageSelector)])
       : cardSelector ? cards.flatMap(collectImages) : [...root.querySelectorAll('img')]
     return previewImages.filter((img) => {
+      // The outer composer branch can contain navigation or a model picker.
+      // Neither their visible icons nor local avatar URLs are upload previews.
+      if (img.closest(attachmentNavigationSelector) ||
+        (PAGE.fileDraftIgnoreSelector && img.closest(PAGE.fileDraftIgnoreSelector)) ||
+        attachmentMessageSelectors().some((selector) => img.closest(selector))) return false
       const localPreview = /^(blob:|data:)/.test(img.currentSrc || img.src || '')
       if (!localPreview && !(img.naturalWidth >= 40 && img.naturalHeight >= 40)) return false
       // Without a measured card scope, the root can include page decorations.

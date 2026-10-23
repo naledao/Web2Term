@@ -39,7 +39,4 @@
 .app-popover > :is(.workspace-project-dialog__box, .new-session-modal__box, .confirm-dialog__box) { overflow-y: auto; }
 .app-popover.command-viewer { --app-popover-background: var(--command-surface); width: min(1100px, calc(100vw - 24px)); height: min(760px, var(--available-height)); }
 .app-popover.pdf-preview { width: min(1400px, calc(100vw - 24px)); height: min(880px, var(--available-height)); }
-.app-popover.conversation-attachment-preview { --app-popover-background: var(--bg-elevated); width: min(880px, calc(100vw - 24px)); padding: 36px 12px 12px !important; border: 1px solid var(--border); cursor: default; }
-.app-popover .conversation-attachment-preview__image { max-width: 100%; max-height: max(80px, calc(var(--available-height) - 52px)); object-fit: contain; }
-.app-popover .conversation-attachment-preview__close { top: 6px; right: 8px; width: 28px; height: 28px; color: var(--text); background: transparent; }
 .app-popover.recent-command-picker { --app-popover-background: var(--bg-elevated); width: 360px; padding: 12px !important; overflow-y: auto; }

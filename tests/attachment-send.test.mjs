@@ -317,6 +317,79 @@ test('DeepSeek hidden remote decorations do not block Markdown upload or sent co
   }
 })
 
+test('a collapsed sidebar without conversation links cannot supply draft images', () => {
+  for (const [tag, attributes] of [['nav', {}], ['aside', {}], ['div', { role: 'navigation' }]]) {
+    for (const source of ['https://example.test/avatar.png', 'blob:offline-avatar']) {
+      const app = fixture()
+      app.controller.releaseFileSend(token)
+      const avatar = element('img')
+      Object.assign(avatar, { src: source, naturalWidth: 96, naturalHeight: 96 })
+      avatar.getBoundingClientRect = () => ({ width: 32, height: 32 })
+      const sidebar = element(tag, attributes, [element('button', {}, [avatar])])
+      const shell = element('div', {}, [sidebar, element('div', {}, [app.root])])
+      app.body.replaceChildren(shell)
+
+      const snapshot = app.controller.attachmentDiagnostics([])
+      assert.equal(snapshot.rootIsForm, true)
+      assert.equal(snapshot.images, 0)
+      assert.equal(snapshot.inputFiles, 0)
+      assert.equal(app.controller.beginFileSend(`${token}-${tag}-${source}`, requestedFiles), 'ok')
+      assert.equal(app.send.clicks, 0)
+      assert.equal(sidebar.contains(avatar), true, 'navigation must remain untouched')
+    }
+  }
+})
+
+test('the ignored model picker cannot supply draft images even inside the composer root', () => {
+  const app = fixture()
+  app.controller.releaseFileSend(token)
+  const icon = element('img')
+  Object.assign(icon, { src: 'data:image/png;base64,AA==', naturalWidth: 128, naturalHeight: 128 })
+  icon.getBoundingClientRect = () => ({ width: 24, height: 24 })
+  const model = element('button', { 'aria-label': '选择 ChatGPT 模型' }, [icon])
+  app.root.replaceChildren(...app.root.childNodes, model)
+
+  assert.equal(app.controller.attachmentDiagnostics([]).images, 0)
+  assert.equal(app.controller.beginFileSend(`${token}-model-icon`, requestedFiles), 'ok')
+  assert.equal(model.contains(icon), true)
+  assert.equal(app.send.clicks, 0)
+})
+
+test('adapter assistant and fallback user wrappers bound attachment discovery before history', () => {
+  for (const marker of ['assistant', 'user-fallback']) {
+    const page = {
+      messageSelectors: [], assistantSelectors: marker === 'assistant' ? ['[data-fixture-history]'] : [],
+      assistantReplySelectors: [], fileUserTurnSelector: '',
+      fileUserTurnFallbackSelector: marker === 'user-fallback' ? '[data-fixture-history]' : ''
+    }
+    const app = fixture(requestedFiles, page)
+    app.controller.releaseFileSend(token)
+    const image = element('img')
+    Object.assign(image, { src: 'https://example.test/sent.png', naturalWidth: 640, naturalHeight: 480 })
+    image.getBoundingClientRect = () => ({ width: 320, height: 240 })
+    app.body.replaceChildren(element('div', {}, [element('div', { 'data-fixture-history': '' }, [image]), app.root]))
+
+    assert.equal(app.controller.attachmentDiagnostics([]).images, 0)
+    assert.equal(app.controller.beginFileSend(`${token}-${marker}`, requestedFiles), 'ok')
+    assert.equal(app.send.clicks, 0)
+  }
+})
+
+test('an actual image preview button still blocks raw result delivery without touching the draft', async () => {
+  const app = fixture()
+  app.controller.releaseFileSend(token)
+  const image = element('img')
+  Object.assign(image, { src: 'blob:offline-user-preview', naturalWidth: 0, naturalHeight: 0 })
+  image.getClientRects = () => []
+  app.cards.replaceChildren(element('button', {}, [image]))
+
+  assert.equal(app.controller.attachmentDiagnostics([]).images, 1)
+  assert.equal(await app.controller.sendRaw('command result'), 'busy')
+  assert.equal(app.composer.textContent, '')
+  assert.equal(app.cards.contains(image), true)
+  assert.equal(app.send.clicks, 0)
+})
+
 test('visible remote images, hidden local previews and native draft cards still block a new file send', () => {
   for (const mode of ['visible-remote', 'hidden-blob', 'hidden-data', 'hidden-card']) {
     const app = fixture(requestedFiles, mode === 'hidden-card' ? { fileDraftCardSelector: '[data-fixture-card]' } : {})
