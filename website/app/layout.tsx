@@ -1,10 +1,10 @@
 import type { Metadata } from 'next'
 import './globals.css'
-import { assetPath } from './site-config'
+import { assetPath, PRODUCT_NAME } from './site-config'
 
 export const metadata: Metadata = {
-  title: 'GPT Web to Codex Terminal — 让对话抵达终端',
-  description: '支持 Windows 与 macOS Apple Silicon，把 AI 对话、本机 PowerShell / zsh、SSH 与 web2term 远程终端放进同一个桌面工作区，配合 Git、MySQL、Redis 和 Nacos 工具箱完成开发任务。',
+  title: `${PRODUCT_NAME} — 让对话抵达终端`,
+  description: 'Web2Term 支持 Windows 与 macOS Apple Silicon，将四种模型网页、项目对话、本机与远程终端放进同一个工作区，提供专注对话、后台任务、GitHub 仓库管理与数据库工具箱，并配套 Linux 设备工具。',
   icons: {
     icon: assetPath('/brand-icon.png'),
     shortcut: assetPath('/brand-icon.png'),

@@ -1,13 +1,16 @@
 'use client'
 
 import { useState } from 'react'
+import Web2termWordmark from './components/Web2termWordmark'
 import {
   assetPath,
+  PRODUCT_NAME,
   LATEST_RELEASE_URL,
   WINDOWS_DOWNLOAD_URL,
   MACOS_DOWNLOAD_URL,
   MACOS_INSTALLATION_GUIDE_URL,
   LINUX_AGENT_DOWNLOAD_URL,
+  LINUX_AGENT_CHECKSUM_URL,
   WEB2TERM_GUIDE_URL,
   LINUX_AGENT_GUIDE_URL,
 } from './site-config'
@@ -50,19 +53,34 @@ const steps: Step[] = [
 
 const features = [
   {
-    title: '一个工作区，四种模型入口',
-    body: 'ChatGPT、Claude、Gemini 和 DeepSeek 各自保留登录态与对话，不用在浏览器标签之间来回找。',
-    tag: 'MODEL SURFACES',
+    title: '按项目组织对话，共享补充说明',
+    body: '为项目设置本机目录，将相关对话放在一起。项目内共享 Markdown 补充说明，新建本机会话从项目目录开始。',
+    tag: 'PROJECT CONTEXT',
   },
   {
-    title: '本机、SSH、web2term，选择执行环境',
-    body: '本机使用 Windows PowerShell 或 macOS zsh，也可连接 SSH 主机或 web2term 设备。每个会话绑定自己的环境，对话与结果继续留在一起。',
-    tag: 'LOCAL + REMOTE',
+    title: '专注当前任务，也能在侧边追问',
+    body: 'ChatGPT 和 DeepSeek 可切换专注对话，集中查看回答、思考与执行过程。四个平台均支持侧边聊天和选区追问，沿用各自的登录态。',
+    tag: 'FOCUS + SIDE CHAT',
   },
   {
-    title: '手动或自动，你掌握节奏',
-    body: '要逐条确认，就用手动执行；想让任务连续推进，就打开自动模式。暂停、结束、检查上一条都在侧栏里。',
-    tag: 'CONTROL LOOP',
+    title: '让模型读取文件，直接查看原内容',
+    body: '将本机或 SSH 主机上的源码、图片和文档作为完整附件发送。每次最多 3 个文件，单个 20 MiB、合计 25 MiB；Web2Term 设备连接暂未接入。',
+    tag: 'FILE ATTACHMENTS',
+  },
+  {
+    title: '长任务放到后台，结果自动回来',
+    body: '软件负责启动和监控非交互后台任务，保留 PID、日志和退出码，向原对话发送创建通知与最终结果。主终端可以继续工作，关闭任务页签仍保留监控。',
+    tag: 'BACKGROUND TASKS',
+  },
+  {
+    title: '给自己多开一个独立终端',
+    body: '从右侧「＋」新增本机、SSH 或设备终端，手动检查当前环境。它有自己的 Shell，输出不会自动发送给模型；模型终端仍按手动或自动模式推进。',
+    tag: 'PERSONAL TERMINALS',
+  },
+  {
+    title: '浏览 GitHub 仓库，克隆到本机',
+    body: '使用本机 GitHub CLI 账号搜索、筛选和排序仓库，选择目录克隆并查看进度。可让当前 AI 协助登录；此入口需要本机安装 GitHub CLI。',
+    tag: 'GITHUB REPOSITORIES',
   },
 ]
 
@@ -72,16 +90,16 @@ const toolboxTools = [
     name: 'Git 管理',
     summary: '文件差异与提交记录',
     title: '看清改了哪里，也看清怎么改过来。',
-    body: '浏览当前项目的文件改动，切换统一或并排 diff，沿提交图查看分支、标签与历史记录。',
-    scope: 'Git 面板读取本机目录。SSH 与 web2term 远端仓库可在对应终端运行 git 命令。',
+    body: '浏览本机或 SSH 远端项目的文件改动，切换统一或并排 diff，沿提交图查看分支、标签与历史记录。',
+    scope: '面板只读，提交和切换分支通过终端执行。Web2Term 设备连接暂未接入 Git 面板。',
   },
   {
     id: 'mysql',
     name: 'MySQL 连接',
-    summary: '表数据、列注释与 DDL',
+    summary: '数据编辑、SQL 与结构导出',
     title: '从数据库，看到表里的具体数据。',
-    body: '保存连接，浏览数据库和表，查看表数据、列注释与实际执行的 SQL。需要确认结构时，打开 DDL 页查看并复制建表语句。',
-    scope: '当前提供数据与结构查看；表数据按条数上限读取。',
+    body: '保存多个连接，搜索表名与注释，查看数据和 DDL；按主键编辑字段、单条或批量删除记录，创建与删除表、导出表结构，也可执行单条 SQL。',
+    scope: '查询最多展示 200 行。修改直接作用于数据库，展示行数上限不限制写入 SQL 的影响范围。',
   },
   {
     id: 'redis',
@@ -234,12 +252,9 @@ export default function Home() {
       <div className="ambient ambient--right" aria-hidden="true" />
 
       <header className="site-header">
-        <button className="brand" onClick={() => scrollTo('top')} aria-label="回到首页">
+        <button className="brand" onClick={() => scrollTo('top')} aria-label={`${PRODUCT_NAME}，回到首页`}>
           <Mark />
-          <span className="brand-copy">
-            <strong>GPT → Codex</strong>
-            <span>TERMINAL WORKSPACE</span>
-          </span>
+          <span className="brand-wordmark"><Web2termWordmark /></span>
         </button>
         <button className="menu-toggle" onClick={() => setMenuOpen((open) => !open)} aria-expanded={menuOpen} aria-controls="site-navigation" aria-label={menuOpen ? '关闭导航' : '打开导航'}>
           <span />
@@ -249,7 +264,7 @@ export default function Home() {
           <button onClick={() => scrollTo('models')}>AI 平台</button>
           <button onClick={() => scrollTo('workflow')}>工作流</button>
           <button onClick={() => scrollTo('macos')}>macOS</button>
-          <button onClick={() => scrollTo('web2term')}>web2term</button>
+          <button onClick={() => scrollTo('web2term')}>Linux 设备</button>
           <button onClick={() => scrollTo('toolbox')}>工具箱</button>
           <button onClick={() => scrollTo('download')}>下载</button>
           <button className="nav-cta" onClick={() => scrollTo('download')}>
@@ -262,7 +277,7 @@ export default function Home() {
         <div className="hero-copy">
           <p className="hero-overline"><span className="live-dot" /> AI × 本机与远程终端</p>
           <h1>让对话<br /><em>抵达终端。</em></h1>
-          <p className="hero-lede">GPT Web to Codex Terminal 把模型对话与本机、SSH、web2term 设备上的命令执行放进同一个工作区。代码、数据和配置，也有随手可用的工具箱。</p>
+          <p className="hero-lede">{PRODUCT_NAME} 把模型网页、项目对话与本机、SSH、Linux 设备上的命令执行放进同一个工作区。专注当前任务，让后台任务、GitHub 仓库和数据库工具随手可用。</p>
           <div className="hero-actions">
             <a className="button button--primary" href={WINDOWS_DOWNLOAD_URL} download>下载 Windows 版 <DownloadIcon /></a>
             <a className="button button--secondary" href={MACOS_DOWNLOAD_URL} download>下载 macOS 版 <DownloadIcon /></a>
@@ -362,7 +377,7 @@ export default function Home() {
             </li>
             <li>
               <h3>拖入“应用程序”</h3>
-              <p>打开 DMG，将 <strong>GPT Web to Codex Terminal.app</strong> 拖入“应用程序”，然后从这里打开。使用安装包无需另装 Node.js、npm 或 PowerShell。</p>
+              <p>打开 DMG，将 <strong>{PRODUCT_NAME} 桌面应用</strong> 拖入“应用程序”，然后从这里打开。使用安装包无需另装 Node.js、npm 或 PowerShell。</p>
             </li>
             <li>
               <h3>首次打开，按系统提示处理</h3>
@@ -377,15 +392,15 @@ export default function Home() {
       <section className="connections section" id="web2term" aria-labelledby="web2term-title">
         <div className="connections-intro">
           <h2 id="web2term-title">你的 Linux 设备，<br /><span>接进同一段对话。</span></h2>
-          <p>通过 web2term 连接账号下的设备，继续在原来的会话里输入命令、让模型执行并接收结果。设备端提供终端，无需运行 SSH 服务。</p>
+          <p>{PRODUCT_NAME} 桌面客户端与 Linux 小工具主动连接同一后端，登录同一账号后即可选择设备。继续手动输入命令、让模型执行并接收结果，无需设备运行 SSH 服务。</p>
           <p className="connections-platform">Windows / macOS 桌面端 + Linux x86_64 设备工具</p>
           <a className="text-link" href={WEB2TERM_GUIDE_URL} target="_blank" rel="noreferrer">查看桌面连接指南 <ArrowIcon /></a>
           <details className="connection-notes">
             <summary>连接前要知道</summary>
             <ul>
-              <li>同一设备最多同时运行 3 个独立终端。每个会话保留自己的目录、变量和终端历史。</li>
+              <li>同一设备最多同时运行 3 个 PTY，模型终端、附加终端和后台任务观察通道共享名额。每个工作区的手动输入与模型命令共用 Shell。</li>
               <li>当前桌面端共享一条设备连接。切换设备会断开原设备通道，原会话保留历史，可手动重新连接。</li>
-              <li>应用重启后需要手动重新连接。连接失败或断线时，命令不会自动改到本机执行。</li>
+              <li>小工具对可恢复的网络故障自动重连，但原终端 Shell 不恢复；客户端需重新连接并创建终端，命令不会自动改到本机执行。</li>
             </ul>
           </details>
         </div>
@@ -398,15 +413,22 @@ export default function Home() {
           <ol className="connection-steps">
             <li>
               <h3>在设备上安装并启动工具</h3>
-              <p>下载 Linux x86_64 工具，安装到 PATH。配置后端地址并完成邮箱验证码登录，再用同一 Linux 用户启动后台进程。</p>
-              <pre className="connection-commands" aria-label="Linux 设备安装与启动命令"><code>{'sudo install -m 0755 web2term-linux-amd64 /usr/local/bin/web2term\nweb2term set server\nweb2term login\nweb2term run\nweb2term status'}</code></pre>
+              <p>下载 Linux x86_64 工具与校验文件，确认 SHA-256 校验通过后安装到 PATH。配置后端地址并完成邮箱验证码登录，再用同一 Linux 用户启动后台进程。</p>
+              <pre className="connection-commands" aria-label="Linux 设备校验、安装与启动命令"><code>{'sha256sum -c web2term-linux-amd64.sha256 &&\n  sudo install -m 0755 web2term-linux-amd64 /usr/local/bin/web2term\nweb2term set server\nweb2term login\nweb2term run\nweb2term status'}</code></pre>
               <p>当 <code>web2term status</code> 显示设备已在线、服务端已确认心跳时，再到桌面端连接。</p>
-              <div className="connection-actions"><a className="text-link" href={LINUX_AGENT_DOWNLOAD_URL} download>下载 Linux 工具 <DownloadIcon /></a><a className="text-link" href={LINUX_AGENT_GUIDE_URL} target="_blank" rel="noreferrer">工具使用说明 <ArrowIcon /></a></div>
+              <p><code>run</code> 启动后返回，关闭终端或断开 SSH 后仍继续运行；使用 <code>web2term stop</code> 停止。客户端“设置 → web2term 设备”也提供带校验的工具下载。</p>
+              <div className="connection-actions"><a className="text-link" href={LINUX_AGENT_DOWNLOAD_URL} download>下载 Linux 工具 <DownloadIcon /></a><a className="text-link" href={LINUX_AGENT_CHECKSUM_URL} download>SHA-256 校验文件 <DownloadIcon /></a><a className="text-link" href={LINUX_AGENT_GUIDE_URL} target="_blank" rel="noreferrer">工具使用说明 <ArrowIcon /></a></div>
             </li>
             <li><h3>在桌面端登录同一后端与账号</h3><p>打开 <strong>设置 → 后端服务</strong>，填写与设备工具一致的后端地址并登录。</p></li>
-            <li><h3>选择设备，等待终端就绪</h3><p>点击会话栏 <strong>＋ → web2term 连接</strong>，在“我的设备”中选择设备并连接。右侧出现“设备终端已就绪”后，即可直接输入命令或使用模型执行流程。</p></li>
+            <li><h3>选择设备，等待终端就绪</h3><p>点击会话栏 <strong>＋ → web2term</strong>，在“我的设备”中选择在线且已启用的设备。终端就绪后，即可直接输入命令或让模型执行；“设置 → web2term 设备”可修改设备名称。</p></li>
+            <li>
+              <h3>需要开机上线？启用 systemd 自启</h3>
+              <p>在已登录的同一 Linux 用户下执行，工具按需请求 sudo 权限，系统服务仍以原用户运行并沿用设备身份。</p>
+              <pre className="connection-commands" aria-label="Linux systemd 开机自启命令"><code>{'web2term autostart enable\nweb2term autostart status\nweb2term status\nweb2term autostart disable'}</code></pre>
+              <p>不要在 <code>autostart enable</code> 前另加 sudo。首次切换到服务托管会关闭现有终端，需重新连接；<code>stop</code> 保留自启设置，<code>autostart disable</code> 才会关闭后续开机启动。仅支持启用 systemd 的 Linux 主机。</p>
+            </li>
           </ol>
-          <p className="connection-scope">当前桌面通道支持命令执行与结果回传；全屏交互程序、SFTP 文件传输和 Git 文件界面尚未接入。读取文件或操作 Git 可使用终端命令。</p>
+          <p className="connection-scope">设备连接支持命令执行、后台任务与结果回传；文件浏览、上传下载、AI 文件附件读取和 Git 面板暂未接入。读取文件或操作 Git 可使用终端命令。升级小工具时先停止旧进程，替换二进制后再启动。</p>
         </div>
       </section>
 
@@ -416,7 +438,7 @@ export default function Home() {
       </section>
 
       <section className="toolbox section" id="toolbox" aria-labelledby="toolbox-title">
-        <div className="toolbox-heading"><h2 id="toolbox-title">代码、数据、配置，<br /><span>工具箱就在手边。</span></h2><p>从终端顶部打开“工具箱”。检查一次改动、读一张表、查一个缓存键，或打开配置控制台，再回到正在进行的任务。</p></div>
+        <div className="toolbox-heading"><h2 id="toolbox-title">代码、数据、配置，<br /><span>工具箱就在手边。</span></h2><p>从右侧页签打开“工具箱”，在可最小化、恢复的工具窗口中查看改动、编辑表数据、查询缓存或打开配置控制台。GitHub 仓库管理从旁边的“＋”进入。</p></div>
         <div className="toolbox-workbench">
           <div className="toolbox-selector" role="group" aria-label="选择工具箱功能">
             {toolboxTools.map((item) => (
@@ -431,12 +453,12 @@ export default function Home() {
             <p className="toolbox-detail__scope">{tool.scope}</p>
           </div>
         </div>
-        <p className="toolbox-note">MySQL、Redis 与 Nacos 使用各自保存的连接配置，目标地址需可从桌面端访问。它们不会通过 web2term 设备转发。</p>
+        <p className="toolbox-note">MySQL、Redis 与 Nacos 从运行客户端的电脑发起连接，不自动经过 SSH 隧道或 Web2Term 设备。127.0.0.1 指向这台电脑；SSH Git 面板通过远端命令通道读取仓库。</p>
       </section>
 
       <section className="preview section">
-        <div className="preview-heading"><p className="section-mark">A REAL WINDOW</p><h2>不只是把网页<br /><span>放在旁边。</span></h2><p>左侧是会话与终端，中间是模型对话，右侧是执行控制和历史。连接方式与工具箱都从这个工作区进入，围绕同一个任务继续。</p></div>
-        <div className="preview-frame"><div className="preview-frame__top"><span className="preview-dots"><i /><i /><i /></span><span>GPT Web to Codex Terminal</span><span className="preview-shortcut">Windows / workspace</span></div><img src={assetPath('/workspace.png')} alt="GPT Web to Codex Terminal 工作区：会话列表、命令终端、模型对话与执行控制" width="1920" height="1009" loading="lazy" /></div>
+        <div className="preview-heading"><p className="section-mark">A REAL WINDOW</p><h2>围绕一个目标，<br /><span>展开整个工作区。</span></h2><p>左侧按项目组织对话，中间是 ChatGPT 专注对话，右侧集中执行控制与补充说明。终端、工具箱和后台任务都从同一处进入。</p></div>
+        <div className="preview-frame"><div className="preview-frame__top"><span className="preview-dots"><i /><i /><i /></span><span>{PRODUCT_NAME}</span><span className="preview-shortcut">Windows / 专注对话</span></div><img src={assetPath('/workspace.png')} alt="Web2Term 工作区：左侧项目与对话列表，中间 ChatGPT 专注对话，右侧执行控制和 Markdown 补充说明" width="2560" height="1493" loading="lazy" /></div>
       </section>
 
       <section className="download section" id="download">
@@ -456,7 +478,7 @@ export default function Home() {
         <div className="download-terminal"><div className="download-terminal__head"><span>SESSION SETUP</span><span>工作区入口</span></div><dl className="download-environments"><div><dt>本机终端</dt><dd>Windows · PowerShell / macOS · zsh</dd></div><div><dt>远程连接</dt><dd>SSH / web2term</dd></div><div><dt>工具箱</dt><dd>Git / MySQL / Redis / Nacos</dd></div><div><dt>模型</dt><dd>ChatGPT / Claude / Gemini / DeepSeek</dd></div></dl></div>
       </section>
 
-      <footer className="site-footer"><div className="footer-brand"><Mark /><div><strong>GPT → Codex Terminal</strong><span>CONVERSATION, MEET EXECUTION.</span></div></div><div className="footer-links"><button onClick={() => scrollTo('models')}>AI 平台</button><button onClick={() => scrollTo('workflow')}>工作流</button><button onClick={() => scrollTo('macos')}>macOS 安装</button><button onClick={() => scrollTo('web2term')}>web2term</button><button onClick={() => scrollTo('toolbox')}>工具箱</button><button onClick={() => scrollTo('download')}>下载</button><a href={WINDOWS_DOWNLOAD_URL} download>Windows 下载 <ArrowIcon /></a><a href={MACOS_DOWNLOAD_URL} download>macOS 下载 <ArrowIcon /></a></div><span className="footer-note">© 2026 · Built for the next command.</span></footer>
+      <footer className="site-footer"><div className="footer-brand"><Mark /><div><strong>{PRODUCT_NAME}</strong><span>CONVERSATION, MEET EXECUTION.</span></div></div><div className="footer-links"><button onClick={() => scrollTo('models')}>AI 平台</button><button onClick={() => scrollTo('workflow')}>工作流</button><button onClick={() => scrollTo('macos')}>macOS 安装</button><button onClick={() => scrollTo('web2term')}>Linux 设备</button><button onClick={() => scrollTo('toolbox')}>工具箱</button><button onClick={() => scrollTo('download')}>下载</button><a href={WINDOWS_DOWNLOAD_URL} download>Windows 下载 <ArrowIcon /></a><a href={MACOS_DOWNLOAD_URL} download>macOS 下载 <ArrowIcon /></a></div><span className="footer-note">© 2026 · Built for the next command.</span></footer>
     </main>
   )
 }
