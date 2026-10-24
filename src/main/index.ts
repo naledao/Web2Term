@@ -9,6 +9,7 @@ import { join, posix } from 'node:path'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, Tray } from 'electron'
+import { APP_ID, APP_NAME, configureAppIdentity } from './app-identity'
 import { taskbarCountIcon } from './taskbar-badge'
 import { LINUX_AGENT_FILE_NAME, LinuxAgentDownloader } from './linux-agent-download'
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
@@ -81,6 +82,8 @@ import { installAppLog, installNetLog } from './app-log'
 import { EMPTY_NACOS_VIEW_STATE, isQuestionPayload } from '../shared/types'
 import { NacosView } from './nacos-view'
 import { applyUpdateProxy, checkForUpdates, downloadUpdate, getUpdateStatus, installUpdate, setUpdaterBroadcast, startUpdateSchedule } from './updater'
+
+configureAppIdentity()
 
 /*
  * Before anything else, so a failure during startup is itself recorded.
@@ -954,7 +957,7 @@ function createManagerWindow(): void {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
-    title: 'Web2Term',
+    title: APP_NAME,
     minWidth: 1040,
     minHeight: 620,
     show: false,
@@ -1283,6 +1286,10 @@ function registerIpcHandlers(): void {
   })
     ipcMain.handle(IpcChannels.focusChatUiAction, (event, request) =>
       focusRuntime(event, request)?.actOnFocusUi(request) ?? 'unavailable')
+  ipcMain.handle(IpcChannels.focusChatComposerMode, (event, request) =>
+    focusRuntime(event, request)?.setFocusComposerMode(request) ?? 'unavailable')
+  ipcMain.handle(IpcChannels.focusChatModelSettings, (event, request) =>
+    focusRuntime(event, request)?.updateFocusModelSettings(request) ?? { outcome: 'unavailable', settings: null })
   ipcMain.handle(IpcChannels.questionChatGetState, (event, sessionId: string) => questionRuntime(event, sessionId)?.embed.getQuestionChatState() ?? null)
   ipcMain.handle(IpcChannels.questionChatCreate, (event, sessionId: string, platformId: string) => {
     const runtime = questionRuntime(event, sessionId)
@@ -1876,7 +1883,7 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     registerPdfAssetHandler()
-    if (process.platform === 'win32') app.setAppUserModelId('com.example.gptweb2codexterminal')
+    if (process.platform === 'win32') app.setAppUserModelId(APP_ID)
 
     if (appLogFile) {
       console.info(`[app] logging this run to ${appLogFile}`)

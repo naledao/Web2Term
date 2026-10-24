@@ -1,5 +1,5 @@
 import type { ToolboxInvocation } from './toolbox'
-import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo } from './focus-chat'
+import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo, FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from './focus-chat'
 import type { FocusUiRequest } from './focus-smart-ui'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
@@ -32,6 +32,8 @@ export const IpcChannels = {
   focusChatSend: 'focus-chat:send',
   focusChatEdit: 'focus-chat:edit',
   focusChatUiAction: 'focus-chat:ui-action',
+  focusChatComposerMode: 'focus-chat:composer-mode',
+  focusChatModelSettings: 'focus-chat:model-settings',
   focusChatAsk: 'focus-chat:ask',
   embedState: 'embed:state',
   questionChatGetState: 'question-chat:get-state',
@@ -1263,6 +1265,7 @@ export interface InterceptorPageEvent {
     | 'continue-generation'
     /** One pending focus card control asks main to deliver native mouse input. */
     | 'focus-ui-click'
+    | 'focus-model-click'
     | 'sent-raw'
     | 'raw-busy'
     /** Reported by the injected theme script; see src/main/injected/theme.js. */
@@ -1274,6 +1277,7 @@ export interface InterceptorPageEvent {
   focusFiles?: FocusAttachmentInfo[]
   focusSendToken?: string
   focusEditToken?: string
+  focusModelToken?: string
   /** Capture diagnostics: where the image was found and how many were read. */
   phase?: 'draft' | 'sent-turn'
   enabled?: boolean
@@ -2222,6 +2226,8 @@ export interface AppApi {
   sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome>
   editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome>
   actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome>
+  setFocusComposerMode(request: FocusComposerModeRequest): Promise<FocusSendOutcome>
+  updateFocusModelSettings(request: FocusModelSettingsRequest): Promise<FocusModelSettingsResult>
   /** Ask about a focus-view selection in the side chat; '' once it is open, otherwise the message to show. */
   askFocusSelection(request: FocusSelectionRequest): Promise<string>
   /** Subscribe to embed state; returns an unsubscribe function. */

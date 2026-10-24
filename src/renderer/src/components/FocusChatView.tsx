@@ -6,11 +6,13 @@ import FocusChart, { parseFocusChart } from './FocusChart'
 import type { FocusChartData } from './FocusChart'
 import FocusSmartUi, { FocusSmartUiContext } from './FocusSmartUi'
 import FocusLayout from './FocusLayout'
+import FocusComposerModes from './FocusComposerModes'
+import FocusModelSettings from './FocusModelSettings'
 import { parseFocusLayout } from '@shared/focus-layout'
 import type { FocusLayoutData } from '@shared/focus-layout'
 import { parseFocusUi } from '@shared/focus-smart-ui'
 import type { FocusUiAction, FocusUiWidget } from '@shared/focus-smart-ui'
-import type { FocusSendOutcome } from '@shared/focus-chat'
+import type { FocusSendOutcome, FocusComposerModeId, FocusModelSettingKind } from '@shared/focus-chat'
 import deepseekIcon from '../assets/DeepSeek.svg'
 import chatgptIcon from '../assets/ChatGPT.svg'
 // The view's brand icon per focus platform (`FOCUS_PLATFORMS`); a platform without one shows its name.
@@ -439,6 +441,10 @@ export default function FocusChatView(props: Props): JSX.Element {
   const [state, setState] = useState<FocusChatState | null>(null)
   const [draft, setDraft] = useState(() => readDraft(owner))
   const [sending, setSending] = useState(false)
+  const [changingMode, setChangingMode] = useState<FocusComposerModeId | null>(null)
+  const [settingPending, setSettingPending] = useState<FocusModelSettingKind | null>(null)
+  const settingBusy = useRef(false)
+  const modelReadAttempted = useRef(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const readEpoch = useRef(0)
   const [stopping, setStopping] = useState(false)
@@ -496,6 +502,7 @@ export default function FocusChatView(props: Props): JSX.Element {
     const poll = async (): Promise<void> => {
       const epoch = readEpoch.current
       try {
+        if (settingBusy.current) return
         const next = await window.api.getFocusChat(owner)
         if (disposed || epoch !== readEpoch.current || !next || focusOwnerKey(next) !== ownerKey) return
         const signature = JSON.stringify(next)
@@ -540,6 +547,45 @@ export default function FocusChatView(props: Props): JSX.Element {
   const linkedExecutions = new Set(turns.flatMap(turn => turn.executionIds))
   const unlinkedAttention = records.filter(record => !linkedExecutions.has(record.messageId) && executionNeedsAction(record, focusDelivery(record)))
   const ready = state?.ready === true
+  const updateModelSettings = useCallback(async (kind: FocusModelSettingKind, value?: string): Promise<void> => {
+    if (sendLock.current || working || editingId || !ready || !visible) return
+    sendLock.current = true; settingBusy.current = true; readEpoch.current++
+    setSettingPending(kind); setError('')
+    try {
+      const result = await window.api.updateFocusModelSettings({ ...owner, kind, ...(value !== undefined ? { value } : {}) })
+      readEpoch.current++
+      const next = await window.api.getFocusChat(owner)
+      if (!alive.current) return
+      if (next && focusOwnerKey(next) === ownerKey) {
+        const updated = { ...next, modelSettings: result.settings ?? next.modelSettings }
+        lastSnapshot.current = JSON.stringify(updated); setState(updated)
+      }
+      if (result.outcome !== 'ok') setError(result.outcome === 'busy' ? '当前正在处理任务，请稍后切换模型或思考强度。' :
+        kind === 'read' ? '暂时无法读取模型设置，请点击顶部刷新或到原始视图检查。' : '切换结果尚未确认，请到原始视图核对后再发送。')
+    } catch { if (alive.current) setError('暂时无法同步模型设置，请到原始视图检查。') }
+    finally { sendLock.current = false; settingBusy.current = false; if (alive.current) setSettingPending(null) }
+  }, [ownerKey, working, editingId, ready, visible])
+  useEffect(() => {
+    if (owner.platformId !== 'chatgpt' || !visible || !ready || working || editingId || sendLock.current || modelReadAttempted.current) return
+    modelReadAttempted.current = true
+    void updateModelSettings('read')
+  }, [ownerKey, visible, ready, working, editingId, sending, updateModelSettings])
+  const changeMode = async (id: FocusComposerModeId, active: boolean): Promise<void> => {
+    if (sendLock.current || working || editingId || !ready) return
+    sendLock.current = true
+    readEpoch.current++
+    setChangingMode(id); setError('')
+    try {
+      const outcome = await window.api.setFocusComposerMode({ ...owner, id, active })
+      readEpoch.current++
+      const next = await window.api.getFocusChat(owner)
+      if (!alive.current) return
+      if (next && focusOwnerKey(next) === ownerKey) { lastSnapshot.current = JSON.stringify(next); setState(next) }
+      if (outcome !== 'ok') setError(outcome === 'busy' ? '当前正在处理任务，请稍后切换回答模式。' :
+        '开关状态尚未确认，请到原始视图检查后再发送。')
+    } catch { if (alive.current) setError('暂时无法同步开关状态，请到原始视图检查。') }
+    finally { sendLock.current = false; if (alive.current) setChangingMode(null) }
+  }
   const richAnswers = new Map((state?.smartReplies ?? []).map(reply => [reply.sourceMessageId, reply.answer]))
   const actOnUi = useCallback(async (action: FocusUiAction): Promise<FocusSendOutcome> => {
     if (sendLock.current || working || editingId || !ready || state?.nativeDraft) return 'busy'
@@ -646,7 +692,7 @@ export default function FocusChatView(props: Props): JSX.Element {
   }
   const userContent = (messageId: string | null, text: string, attachments: boolean, children?: ReactNode): JSX.Element =>
     <EditableUser text={text} editable={supportsFocusEdit(owner.platformId) && !!owner.conversationId && !!messageId && !!text.trim() && !attachments}
-      open={!!messageId && editingId === messageId} disabled={working || sending || stopping || !ready || !!state?.nativeDraft}
+      open={!!messageId && editingId === messageId} disabled={working || sending || stopping || settingPending !== null || !ready || !!state?.nativeDraft}
       onOpen={() => { if (!sendLock.current && messageId) setEditingId(messageId) }} onClose={() => setEditingId(null)}
       onSend={text => editMessage(messageId!, text)}>{children}</EditableUser>
   const action = async (id: string, skip = false): Promise<void> => {
@@ -754,17 +800,24 @@ export default function FocusChatView(props: Props): JSX.Element {
           </ProcessScroll>
         </details> : null}
       </ConversationTranscript>,
-  [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, working, sending, stopping, editingId, props.renderAttachment, props.onOpenTerminal, props.onRun, props.onSkip])
+  [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, working, sending, stopping, editingId, settingPending, props.renderAttachment, props.onOpenTerminal, props.onRun, props.onSkip])
   return <FocusSmartUiContext.Provider value={smartUiContext}><section className="focus-chat" aria-label="专注对话" data-theme={theme}>
     <header className="focus-chat__header">
       <span>{modelIcon ? <img className="focus-chat__brand-icon" src={modelIcon} alt={modelLabel} /> : <strong>{modelLabel}</strong>}</span>
       <button type="button" className="focus-chat__new-chat" aria-label="新建对话" title="新建对话"
-        disabled={props.newChatDisabled || working || sending || stopping || !!editingId} onClick={props.onNewChat}>
+        disabled={props.newChatDisabled || working || sending || stopping || !!editingId || settingPending !== null} onClick={props.onNewChat}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
           <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
           <path d="M18.375 2.625a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4Z" />
         </svg>
       </button>
+      {owner.platformId === 'deepseek' ? <dl className="focus-chat__model-info" aria-label="DeepSeek 固定模型信息" title="DeepSeek 网页端不提供模型和思考强度切换，此处固定显示。">
+        <dt>当前模型</dt><dd className="focus-chat__model-name">DeepSeek-V4.1-Flash-1017</dd>
+        <dt>思考强度</dt><dd>high</dd>
+      </dl> : null}
+      {owner.platformId === 'chatgpt' ? <FocusModelSettings settings={state?.modelSettings ?? null}
+        disabled={working || sending || stopping || !!editingId || !ready} pending={settingPending}
+        onChange={(kind, value) => { void updateModelSettings(kind, value) }} onRefresh={() => { void updateModelSettings('read') }} /> : null}
     </header>
     <div className="focus-chat__transcript" ref={transcriptRef}>
       {transcript}
@@ -804,9 +857,13 @@ export default function FocusChatView(props: Props): JSX.Element {
           onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}
           onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composing.current && event.keyCode !== 229) { event.preventDefault(); if (!working && !sending && ready) event.currentTarget.form?.requestSubmit() } }} />
         <input ref={fileInput} type="file" multiple hidden onChange={event => { addFiles([...event.currentTarget.files ?? []]); event.currentTarget.value = '' }} />
-        <div className="focus-composer__tools"><button type="button" disabled={sending || !!editingId} onClick={() => fileInput.current?.click()} title="添加附件，也可直接粘贴截图或文件">＋ 附件</button><span>{modelLabel}</span>
+        <div className="focus-composer__tools"><div className="focus-composer__left">
+          <button type="button" className="focus-composer__attachment" disabled={sending || !!editingId || changingMode !== null || settingPending !== null} onClick={() => fileInput.current?.click()} title="添加附件，也可直接粘贴截图或文件">＋ 附件</button>
+          {owner.platformId === 'deepseek' ? <FocusComposerModes modes={state?.composerModes ?? []} disabled={sending || stopping || !!working || !!editingId || !ready}
+            pending={changingMode} onChange={(id, active) => { void changeMode(id, active) }} /> : null}
+        </div><span>{modelLabel}</span>
           {working || stopping || (sending && draftFiles.length > 0) ? <button type="button" className="focus-composer__send" disabled={stopping} onClick={() => void stop()} aria-label="结束当前任务">{stopping ? '…' : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
-            <button type="submit" className="focus-composer__send" disabled={sending || !!editingId || !ready || !!state?.nativeDraft || (!draft.trim() && !draftFiles.length)} aria-label="发送消息">{sending ? '…' : '↑'}</button>}
+            <button type="submit" className="focus-composer__send" disabled={sending || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || (!draft.trim() && !draftFiles.length)} aria-label="发送消息">{sending ? '…' : '↑'}</button>}
         </div>
       </form><p className="focus-composer__hint">Enter 发送 · Shift+Enter 换行</p>
     </div>

@@ -4,7 +4,10 @@ import { join } from 'node:path'
 import type { FocusOwner, FocusSendOutcome, FocusEditDiagnostic } from '../shared/focus-chat'
 
 interface FocusDiagnostic extends FocusEditDiagnostic {
-  event: 'view-state' | 'send-request' | 'send-outcome' | 'edit-request' | 'edit-page' | 'edit-outcome' | 'smart-ui-request' | 'smart-ui-page' | 'smart-ui-outcome' | 'smart-ui-recovered' | 'end-task' | 'user-started' | 'user-captured' | 'user-stored' | 'user-discarded'
+  event: 'view-state' | 'send-request' | 'send-outcome' | 'edit-request' | 'edit-page' | 'edit-outcome' | 'smart-ui-request' | 'smart-ui-page' | 'smart-ui-outcome' | 'smart-ui-recovered' | 'composer-mode-request' | 'composer-mode-outcome' | 'model-setting-request' | 'model-setting-outcome' | 'end-task' | 'user-started' | 'user-captured' | 'user-stored' | 'user-discarded'
+  setting?: 'read' | 'model' | 'effort'
+  composerMode?: 'thinking' | 'search'
+  active?: boolean
   action?: 'choose' | 'submit'
   taskOpen?: boolean
   ready?: boolean
@@ -40,6 +43,9 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
       'requestBodyReadable', 'requestTextMatches', 'requestOriginalMatches', 'requestStateMatches', 'requestStatePresent', 'requestPathMatches',
       'nativeClickReceived', 'clickTrusted', 'clickPrevented'] as const) if (typeof payload[key] === 'boolean') details[key] = payload[key]!
     if (payload.action === 'choose' || payload.action === 'submit') details.action = payload.action
+    if (payload.setting && ['read', 'model', 'effort'].includes(payload.setting)) details.setting = payload.setting
+    if (payload.composerMode === 'thinking' || payload.composerMode === 'search') details.composerMode = payload.composerMode
+    if (typeof payload.active === 'boolean') details.active = payload.active
     for (const key of ['turnCount', 'executionCount', 'reasoningCount', 'searchCount', 'answerLength', 'inputLength', 'attachmentCount', 'savedAttachmentCount',
       'groupCount', 'candidateCount', 'originalLength', 'pageTextLength', 'editorTextLength', 'editorStableReads',
       'settleMs', 'requestUserLength', 'requestCount', 'requestSnapshotCount'] as const) {
@@ -55,7 +61,9 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
       'attachment-draft', 'image-draft', 'history-edit-draft', 'component-missing', 'component-disabled',
       'option-confirmed', 'option-unconfirmed', 'native-click-dispatched', 'native-click-not-received',
       'native-click-target-changed', 'native-click-unreachable', 'native-click-window-unfocused',
-      'native-click-dispatch-failed', 'request-unrelated', 'request-state-mismatch', 'request-state-absent'].includes(payload.reason ?? '')) details.reason = payload.reason!
+      'native-click-dispatch-failed', 'request-unrelated', 'request-state-mismatch', 'request-state-absent',
+      'control-missing', 'native-input-failed', 'menu-unavailable', 'model-options-missing', 'settings-read', 'already-selected',
+      'option-unavailable', 'selection-confirmed', 'selection-unconfirmed', 'slider-unavailable', 'menu-close-unconfirmed'].includes(payload.reason ?? '')) details.reason = payload.reason!
     for (const key of ['turnId', 'messageId'] as const) if (payload[key] !== undefined) details[key] = identifier(payload[key] ?? null)
     if (payload.imageSource === 'provided' || payload.imageSource === 'page') details.imageSource = payload.imageSource
     if (['active', 'idle', 'unknown'].includes(payload.generating ?? '')) details.generating = payload.generating!

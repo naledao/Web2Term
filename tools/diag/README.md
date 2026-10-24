@@ -4,6 +4,28 @@ Small, throwaway probes for problems that only reproduce against live third-part
 pages inside the user's real session. Per `AGENTS.md`, **the user runs and drives
 them; the agent reads the log file.**
 
+## deepseek-composer-modes-probe.cjs
+
+User-run, read-only discovery of the 深度思考 / 智能搜索 composer switches.
+See [steps and log contract](deepseek-composer-modes-probe.md). The user clicks each
+switch twice without sending messages. Trusted clicks and following state changes are
+recorded automatically; manual phase marks remain optional. Discovery records the
+composer ancestor scopes and independent label matches, including nonsemantic controls.
+Bounded attributes/classes/colors use synchronous append under `%TEMP%`.
+It never reads drafts, messages, cookies, storage or request bodies, and never clicks.
+
+## chatgpt-model-settings-probe.cjs
+
+User-run, passive discovery of ChatGPT's native model and thinking-effort menus.
+See [steps and log contract](chatgpt-model-settings-probe.md). The user expands menus,
+selects another model/effort and restores the original selections without sending.
+The probe records trusted clicks, composer scopes, portal/ARIA-linked menus, semantic
+selection markers and bounded icon structure. Known model/effort labels are retained;
+other text is length-only, IDs are aliased, and editors/message regions are excluded.
+It reuses the application's existing profile and `persist:chatgpt`, defaults to the
+local proxy, and synchronously appends under `%TEMP%`. It never clicks, types,
+captures network/storage/cookies, or starts the application injection pipeline.
+
 ## web2term desktop/workspace checks
 
 Only the user runs these offline checks:

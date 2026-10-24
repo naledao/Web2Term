@@ -1,7 +1,7 @@
 import type { ToolboxInvocation } from '../shared/toolbox'
 import type { BackgroundTasksState } from '../shared/background-tasks'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from '../shared/github'
-import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome } from '../shared/focus-chat'
+import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusModelSettingsResult } from '../shared/focus-chat'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
@@ -196,6 +196,8 @@ const api: AppApi = {
   sendFocusMessage: (request: FocusSendRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatSend, request),
   editFocusMessage: (request: FocusEditRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatEdit, request),
   actOnFocusUi: (request: FocusUiRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatUiAction, request),
+  setFocusComposerMode: (request): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatComposerMode, request),
+  updateFocusModelSettings: (request): Promise<FocusModelSettingsResult> => ipcRenderer.invoke(IpcChannels.focusChatModelSettings, request),
   /** '' once the side chat is open, otherwise the message to show. */
   askFocusSelection: (request: FocusSelectionRequest): Promise<string> => ipcRenderer.invoke(IpcChannels.focusChatAsk, request),
 

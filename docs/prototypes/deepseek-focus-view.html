@@ -27,7 +27,7 @@ html[data-theme=dark]{color-scheme:dark;--bg:#17191e;--canvas:#17191e;--sidebar:
 <body>
 <div class="designbar"><strong>交互设计稿</strong><span class="explain muted">基于本轮日志结构 · 所有正文与命令结果均为演示</span><span class="grow"></span><label><input type="checkbox" id="internal-toggle">显示内部消息</label><button id="play">播放处理过程</button><button id="confirm-demo">待确认</button><button id="error-demo">失败状态</button><button id="reset">重置</button></div>
 <div class="shell">
-<nav class="nav" aria-label="会话导航示例"><div class="brand"><span class="brand-mark">&gt;_</span>Web → Codex Terminal</div><div class="nav-label">当前项目 <span style="float:right">＋</span></div><div class="session active">重新设计 DeepSeek 对话<span>本地 · 本机 · DeepSeek</span></div><div class="session">接口开发与联调<span>SSH · dev-server</span></div><div class="session">整理项目文件<span>本地 · 本机</span></div><div class="nav-footer row"><span class="dot"></span><span class="tiny muted">本地工作区</span></div></nav>
+<nav class="nav" aria-label="会话导航示例"><div class="brand"><span class="brand-mark">&gt;_</span>Web2Term</div><div class="nav-label">当前项目 <span style="float:right">＋</span></div><div class="session active">重新设计 DeepSeek 对话<span>本地 · 本机 · DeepSeek</span></div><div class="session">接口开发与联调<span>SSH · dev-server</span></div><div class="session">整理项目文件<span>本地 · 本机</span></div><div class="nav-footer row"><span class="dot"></span><span class="tiny muted">本地工作区</span></div></nav>
 <main class="main">
 <header class="header"><strong>重新设计 DeepSeek 对话</strong><span class="model"><img src="../../svg/DeepSeek.svg" alt="">DeepSeek</span><span class="grow"></span><button class="plain" id="native">原网页 ↗</button><button class="plain" id="terminal">终端</button><button class="plain" id="settings">执行设置</button><button class="plain" id="theme" aria-label="切换明暗主题">◐</button></header>
 <div class="viewport" id="viewport" tabindex="0" aria-label="对话记录"><div class="transcript" id="transcript">
@@ -41,7 +41,7 @@ html[data-theme=dark]{color-scheme:dark;--bg:#17191e;--canvas:#17191e;--sidebar:
 <div class="event"><div class="event-title">理解当前任务</div><details><summary>查看可见思考</summary><div class="event-body">演示片段：先区分用户的问题、模型的可见思考与软件内部执行，再确定一轮对话的边界。</div></details></div>
 <div class="event"><div class="event-title">搜索交互与事件组织方式</div><div class="event-search"><button class="source-pill" data-source="事件组织">事件组织示例 ↗</button><button class="source-pill" data-source="终端交互">终端交互示例 ↗</button></div></div>
 <div class="event"><div class="event-title">对照当前项目</div><details><summary>查看可见思考</summary><div class="event-body">演示片段：把多次执行与结果回传保存在当前轮次中，主界面以最终回答为主。</div></details></div>
-<div class="event"><div class="event-title">读取项目配置</div><details class="command"><summary>Get-Content package.json <span style="float:right;color:var(--green)">退出码 0</span></summary><pre>{ "name": "gpt-web-to-codex-terminal" }</pre><footer>0.3 秒 · 输出已回传 · 演示记录</footer></details></div>
+<div class="event"><div class="event-title">读取项目配置</div><details class="command"><summary>Get-Content package.json <span style="float:right;color:var(--green)">退出码 0</span></summary><pre>{ "name": "web2term" }</pre><footer>0.3 秒 · 输出已回传 · 演示记录</footer></details></div>
 <div class="event"><div class="event-title">定位聊天组件</div><details class="command"><summary>rg --files src/renderer <span style="float:right;color:var(--green)">退出码 0</span></summary><pre>src/renderer/src/App.tsx
 src/renderer/src/components/ConversationTranscript.tsx</pre><footer>0.2 秒 · 输出已回传 · 演示记录</footer></details></div>
 <div class="event"><div class="event-title">补充检索</div><div class="event-search"><button class="source-pill" data-source="消息与工具结果">消息与工具结果示例 ↗</button></div></div>
@@ -52,9 +52,9 @@ src/renderer/src/components/ConversationTranscript.tsx</pre><footer>0.2 秒 · �
 <div class="internal"><div class="internal-label">软件内部回传 · 不显示成用户提问</div>【上一条命令执行结果】
 结果: 成功
 退出码: 0
-目录: C:\codes\gpt-web-to-codex-terminal
+目录: C:\codes\Web2Term
 
-{ "name": "gpt-web-to-codex-terminal" }</div>
+{ "name": "web2term" }</div>
 <div class="notice" id="notice" hidden></div>
 <div class="answer" id="answer-body"><p>可以把现在的聊天整理成一个<strong>完整的工作回合</strong>：你提出目标，助手处理任务，再给出结果。命令和回传留在这一轮的过程里。</p><h3>主界面保留三件事</h3><ul><li><strong>你的问题</strong>：保留原始提问、附件和继续追问。</li><li><strong>当前进度</strong>：用简短状态说明正在做什么，点击可以展开过程。</li><li><strong>最终回答</strong>：集中展示结论、代码和需要你处理的事项。<button class="citation" data-source="对话结构">1</button></li></ul><div class="codeblock"><div class="codehead">一轮完整的交互 <button id="copy-structure">复制</button></div><pre id="structure-text">用户目标
   └─ 处理过程（默认收起）
@@ -99,7 +99,7 @@ $('play').onclick=playMain
 $('internal-toggle').onchange=event=>document.body.classList.toggle('show-internal',event.target.checked)
 $('theme').onclick=()=>{document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'}
 $('show-process').onclick=()=>{$('process').open=!$('process').open;$('process').scrollIntoView({block:'nearest'})}
-$('terminal').onclick=()=>openDrawer('终端 · 当前会话','<div class="row"><span class="dot"></span><span>本机 · PowerShell</span><span class="grow"></span><span class="tiny muted">演示输出</span></div><p class="tiny muted">C:\\codes\\gpt-web-to-codex-terminal</p><pre>PS &gt; Get-Content package.json\n{ \"name\": \"gpt-web-to-codex-terminal\" }\n退出码 0\n\nPS &gt; rg --files src/renderer\nsrc/renderer/src/App.tsx\nsrc/renderer/src/components/ConversationTranscript.tsx\n退出码 0\n\nPS &gt; Get-Content src/shared/platforms.ts\n// 平台描述\n退出码 0</pre><p class="tiny muted">此面板使用本地演示数据，未启动任何命令。</p>')
+$('terminal').onclick=()=>openDrawer('终端 · 当前会话','<div class="row"><span class="dot"></span><span>本机 · PowerShell</span><span class="grow"></span><span class="tiny muted">演示输出</span></div><p class="tiny muted">C:\\codes\\Web2Term</p><pre>PS &gt; Get-Content package.json\n{ \"name\": \"web2term\" }\n退出码 0\n\nPS &gt; rg --files src/renderer\nsrc/renderer/src/App.tsx\nsrc/renderer/src/components/ConversationTranscript.tsx\n退出码 0\n\nPS &gt; Get-Content src/shared/platforms.ts\n// 平台描述\n退出码 0</pre><p class="tiny muted">此面板使用本地演示数据，未启动任何命令。</p>')
 $('settings').onclick=()=>{openDrawer('执行设置','<h3>执行模式</h3><div class="row" id="modes"><button class="selected" data-mode="manual" aria-pressed="true">手动执行</button><button data-mode="auto" aria-pressed="false">自动执行</button></div><p class="muted tiny" id="mode-hint">命令确认后执行，结果归入当前轮次。</p><h3>本轮任务</h3><div class="row"><button id="pause-demo">暂停后续执行</button><button id="stop-demo">结束任务</button></div><p class="tiny muted">设置与任务按钮仅改变演示状态。</p>');$('modes').onclick=event=>{const button=event.target.closest('[data-mode]');if(!button)return;$('modes').querySelectorAll('button').forEach(el=>{el.classList.toggle('selected',el===button);el.setAttribute('aria-pressed',String(el===button))});$('mode-hint').textContent=button.dataset.mode==='auto'?'按已有执行规则自动处理命令，过程仍可查看。':'命令确认后执行，结果归入当前轮次。'};$('pause-demo').onclick=()=>toast('后续执行已暂停（演示）');$('stop-demo').onclick=()=>{stop('任务已结束');$('drawer').close()}}
 $('native').onclick=()=>openDrawer('DeepSeek 原网页','<p>实际接入后，此入口会恢复当前会话的原生网页。</p><p class="muted">当前为本地交互设计稿，不会访问 DeepSeek 或重新登录。</p>')
 document.addEventListener('click',event=>{const source=event.target.closest('[data-source]');if(source){const p=document.createElement('p');p.textContent=source.dataset.source+'：这是一条用于说明引用交互的本地示例。';openDrawer('引用资料',p)}})

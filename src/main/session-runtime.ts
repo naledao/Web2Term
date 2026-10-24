@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { validFocusUiAction } from '../shared/focus-smart-ui'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
+import type { FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
+import { validFocusModelSettingsRequest } from '../shared/focus-chat'
 import { writeFile } from 'node:fs/promises'
 import { createConnection } from 'mysql2/promise'
 import { formatMysqlCell } from './mysql-field-value'
@@ -1163,6 +1165,8 @@ export class SessionRuntime {
       turns: this.focusChat.turns(owner.platformId, owner.conversationId),
       hiddenMessageIds: this.focusChat.hiddenMessageIds(owner.platformId, owner.conversationId),
       smartReplies: page?.smartReplies ?? [],
+      composerModes: page?.composerModes ?? [],
+      modelSettings: page?.modelSettings,
       executions: owner.conversationId ? this.options.store.listExecutions(owner.conversationId).filter(record => !archivedExecutions.has(record.messageId)) : [] }
   }
 
@@ -1243,6 +1247,34 @@ export class SessionRuntime {
       if (this.focusUploadAbort === controller) this.focusUploadAbort = null
       this.focusSending = false
     }
+  }
+
+  async setFocusComposerMode(request: FocusComposerModeRequest): Promise<FocusSendOutcome> {
+    if (!this.ownsFocus(request) || request.platformId !== 'deepseek') return 'unavailable'
+    if (!['thinking', 'search'].includes(request.id) || typeof request.active !== 'boolean') return 'invalid'
+    if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork() || this.embed.getInterceptorStatus().pendingQuestion) return 'busy'
+    this.focusSending = true
+    writeFocusDiagnostic(request, { event: 'composer-mode-request', composerMode: request.id, active: request.active })
+    try {
+      const result = await this.embed.setFocusComposerMode(request.id, request.active)
+      const outcome = this.ownsFocus(request) ? result : 'cancelled'
+      writeFocusDiagnostic(request, { event: 'composer-mode-outcome', composerMode: request.id, active: request.active, outcome })
+      return outcome
+    } finally { this.focusSending = false }
+  }
+
+  async updateFocusModelSettings(request: FocusModelSettingsRequest): Promise<FocusModelSettingsResult> {
+    if (!this.ownsFocus(request) || request.platformId !== 'chatgpt') return { outcome: 'unavailable', settings: null }
+    if (!validFocusModelSettingsRequest(request)) return { outcome: 'invalid', settings: null }
+    if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork() || this.embed.getInterceptorStatus().pendingQuestion) return { outcome: 'busy', settings: null }
+    this.focusSending = true
+    writeFocusDiagnostic(request, { event: 'model-setting-request', setting: request.kind })
+    try {
+      const result = await this.embed.updateFocusModelSettings(request, randomUUID(), () => this.ownsFocus(request) && !this.runner.hasInFlightWork())
+      const resolved: FocusModelSettingsResult = this.ownsFocus(request) ? result : { outcome: 'cancelled', settings: null }
+      writeFocusDiagnostic(request, { event: 'model-setting-outcome', setting: request.kind, outcome: resolved.outcome, reason: resolved.reason })
+      return resolved
+    } finally { this.focusSending = false }
   }
 
   async actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome> {
@@ -2515,7 +2547,7 @@ export class SessionRuntime {
     this.options.onTaskCompleted(this.id)
     if (this.active && window && !window.isDestroyed() && window.isFocused()) return
     if (!Notification.isSupported()) return
-    const notification = new Notification({ title: 'GPT Web to Codex Terminal', body })
+    const notification = new Notification({ title: 'Web2Term', body })
     notification.on('click', () => this.focus())
     notification.show()
   }

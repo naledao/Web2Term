@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedAt": "2026-10-01T00:00:00.000Z",
-  "title": "Design System: GPT Web to Codex Terminal",
+  "title": "Design System: Web2Term",
   "extensions": {
     "colorMeta": {
       "ink": { "role": "neutral", "displayName": "Deep Ink", "canonical": "#0b1014", "tonalRamp": ["#0b1014", "#121a20", "#1b272f", "#334047", "#56615f", "#77807a", "#a5aaa0", "#f2ede2"] },

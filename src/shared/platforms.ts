@@ -213,6 +213,17 @@ export interface PageAdapter {
  * `assistantSelectors`; these are the parts only the focus view uses.
  */
 export interface FocusPageRules {
+  modelSettings?: {
+    triggerSelector: string
+    modelSelector: string
+    viewToggleSelector: string
+    effortAttribute: string
+    sliderSelector: string
+    sliderRootSelector: string
+    efforts: Array<{ value: string; label: string; position: number }>
+  }
+  composerModeControlSelector?: string
+  composerModes?: Array<{ id: 'thinking' | 'search'; labels: string[]; activeSelector?: string; inactiveSelector?: string }>
   smartUi?: {
     rootSelector: string
     sourceIdAttr: string
@@ -644,6 +655,16 @@ export const CHATGPT_PAGE: PageAdapter = {
     captionSelector: 'p.line-clamp-2'
   },
   focus: {
+    // User-run model-settings probes 2026-10-24T16-38 and T16-43:
+    // one shared Radix menu, hidden model track with aria-checked, visible
+    // reasoning slider 0..2, and the trigger's selected effort even when closed.
+    modelSettings: {
+      triggerSelector: 'button[data-codex-intelligence-trigger][aria-label="选择 ChatGPT 模型"]',
+      modelSelector: '[role="menuitemradio"]', viewToggleSelector: '[data-model-picker-view-toggle]',
+      effortAttribute: 'data-selected-reasoning-effort', sliderSelector: '[data-reasoning-slider]',
+      sliderRootSelector: '[data-model-picker-power-slider] [data-orientation="horizontal"]',
+      efforts: [{ value: 'none', label: 'Instant', position: 0 }, { value: 'medium', label: 'Medium', position: 1 }, { value: 'high', label: 'High', position: 2 }]
+    },
     // User-run smart-ui probe 2026-10-24: DIL cards inside the answer, Radix radio
     // buttons, separate state saves, and a native next request with state snapshots.
     smartUi: {
@@ -727,6 +748,14 @@ export const DEEPSEEK_PAGE: PageAdapter = {
    * M8.3125 0.980206). Reasoning is `.ds-think-content`; the row key is the virtual list's.
    */
   focus: {
+    // User-run modes probe 2026-10-24T16-11: both controls are DIV.ds-toggle-button
+    // without a role, and aria-pressed tracks all four combinations (lines 6/10/14/18).
+    // Read the semantic state directly; hashed classes and animated colors are irrelevant.
+    composerModes: [
+      { id: 'thinking', labels: ['深度思考', '深度思考 (R1)', 'DeepThink', 'DeepThink (R1)'] },
+      { id: 'search', labels: ['智能搜索', '联网搜索', '搜索', 'Search', 'Web search'] }
+    ],
+    composerModeControlSelector: 'button, [role="button"], .ds-button, .ds-toggle-button',
     generatingIcon: {
       primaryControlSelector: '.ds-button--primary.ds-button--circle',
       generatingPrefixes: ['M2 4.88C2 3.68009'],

@@ -74,8 +74,8 @@ jobs:
           VERSION: ${{ needs.prepare-release.outputs.version }}
         run: |
           Copy-Item `
-            "release/GPT-Web-to-Codex-Terminal-Setup-$env:VERSION.exe" `
-            "release/GPT-Web-to-Codex-Terminal-Setup.exe"
+            "release/Web2Term-Setup-$env:VERSION.exe" `
+            "release/Web2Term-Setup.exe"
 
       - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
@@ -83,9 +83,9 @@ jobs:
           name: windows-release-assets
           if-no-files-found: error
           path: |
-            release/GPT-Web-to-Codex-Terminal-Setup-${{ needs.prepare-release.outputs.version }}.exe
-            release/GPT-Web-to-Codex-Terminal-Setup-${{ needs.prepare-release.outputs.version }}.exe.blockmap
-            release/GPT-Web-to-Codex-Terminal-Setup.exe
+            release/Web2Term-Setup-${{ needs.prepare-release.outputs.version }}.exe
+            release/Web2Term-Setup-${{ needs.prepare-release.outputs.version }}.exe.blockmap
+            release/Web2Term-Setup.exe
             release/latest.yml
 
   build-macos:
@@ -119,15 +119,15 @@ jobs:
         env:
           VERSION: ${{ needs.prepare-release.outputs.version }}
         run: |
-          app_path="release/mac-arm64/GPT Web to Codex Terminal.app"
+          app_path="release/mac-arm64/Web2Term.app"
           codesign --verify --deep --strict --verbose=2 "$app_path"
           codesign --display --verbose=4 "$app_path"
-          hdiutil verify "release/GPT-Web-to-Codex-Terminal-Setup-${VERSION}.dmg"
+          hdiutil verify "release/Web2Term-Setup-${VERSION}.dmg"
 
       - name: Prepare stable macOS download alias
         env:
           VERSION: ${{ needs.prepare-release.outputs.version }}
-        run: cp "release/GPT-Web-to-Codex-Terminal-Setup-${VERSION}.dmg" "release/GPT-Web-to-Codex-Terminal.dmg"
+        run: cp "release/Web2Term-Setup-${VERSION}.dmg" "release/Web2Term.dmg"
 
       - name: Upload macOS release assets
         uses: actions/upload-artifact@v4
@@ -135,9 +135,9 @@ jobs:
           name: macos-release-assets
           if-no-files-found: error
           path: |
-            release/GPT-Web-to-Codex-Terminal-Setup-${{ needs.prepare-release.outputs.version }}.dmg
-            release/GPT-Web-to-Codex-Terminal-Setup-${{ needs.prepare-release.outputs.version }}.dmg.blockmap
-            release/GPT-Web-to-Codex-Terminal.dmg
+            release/Web2Term-Setup-${{ needs.prepare-release.outputs.version }}.dmg
+            release/Web2Term-Setup-${{ needs.prepare-release.outputs.version }}.dmg.blockmap
+            release/Web2Term.dmg
 
   publish-release:
     needs:
@@ -168,7 +168,7 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           tag="v${VERSION}"
-          title="GPT Web to Codex Terminal v${VERSION} (build ${RUN_NUMBER})"
+          title="Web2Term v${VERSION} (build ${RUN_NUMBER})"
           git tag "$tag" "$COMMIT"
           git push origin "$tag"
           gh release create "$tag" \

@@ -88,6 +88,39 @@ export interface FocusOwner {
   platformId: string
   conversationId: string | null
 }
+export type FocusComposerModeId = 'thinking' | 'search'
+export const FOCUS_COMPOSER_MODES = [{ id: 'thinking', label: '深度思考' }, { id: 'search', label: '智能搜索' }] as const
+export interface FocusComposerMode { id: FocusComposerModeId; active: boolean | null; disabled: boolean }
+export interface FocusComposerModeRequest extends FocusOwner { id: FocusComposerModeId; active: boolean }
+export function validFocusComposerModes(value: unknown): value is FocusComposerMode[] {
+  return Array.isArray(value) && value.length <= 2 && new Set(value.map(mode => mode?.id)).size === value.length && value.every(mode =>
+    !!mode && ['thinking', 'search'].includes(mode.id) && (mode.active === null || typeof mode.active === 'boolean') && typeof mode.disabled === 'boolean')
+}
+export interface FocusModelOption { value: string; label: string }
+export interface FocusModelSettings {
+  model: string | null
+  effort: string | null
+  models: FocusModelOption[]
+  efforts: FocusModelOption[]
+}
+export type FocusModelSettingKind = 'read' | 'model' | 'effort'
+export interface FocusModelSettingsRequest extends FocusOwner { kind: FocusModelSettingKind; value?: string }
+export interface FocusModelSettingsResult { outcome: FocusSendOutcome; settings: FocusModelSettings | null; reason?: string }
+export function validFocusModelSettings(value: unknown): value is FocusModelSettings {
+  if (!value || typeof value !== 'object') return false
+  const settings = value as FocusModelSettings
+  const options = (items: unknown): items is FocusModelOption[] => Array.isArray(items) && items.length <= 20 &&
+    new Set(items.map(item => item?.value)).size === items.length && items.every(item => item &&
+      typeof item.value === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._()+:/-]{0,79}$/.test(item.value) &&
+      typeof item.label === 'string' && item.label.trim().length > 0 && item.label.length <= 100 && !/[\u0000-\u001f]/.test(item.label))
+  return options(settings.models) && options(settings.efforts) &&
+    (settings.model === null || settings.models.some(item => item.value === settings.model)) &&
+    (settings.effort === null || settings.efforts.some(item => item.value === settings.effort))
+}
+export function validFocusModelSettingsRequest(request: FocusModelSettingsRequest): boolean {
+  return request.kind === 'read' ? request.value === undefined : ['model', 'effort'].includes(request.kind) &&
+    typeof request.value === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._()+:/-]{0,79}$/.test(request.value)
+}
 export interface FocusPageSnapshot {
   path: string
   ready: boolean
@@ -96,6 +129,8 @@ export interface FocusPageSnapshot {
   generating: 'active' | 'idle' | 'unknown'
   reply: { sourceMessageId: string; parts: FocusPart[]; answer: string } | null
   smartReplies?: { sourceMessageId: string; answer: string }[]
+  composerModes?: FocusComposerMode[]
+  modelSettings?: FocusModelSettings
 }
 export interface FocusChatState extends FocusOwner {
   ready: boolean
@@ -106,6 +141,8 @@ export interface FocusChatState extends FocusOwner {
   executions: ExecutionRecord[]
   hiddenMessageIds?: string[]
   smartReplies?: { sourceMessageId: string; answer: string }[]
+  composerModes?: FocusComposerMode[]
+  modelSettings?: FocusModelSettings
 }
 /** File delivery has its own persisted lifecycle; shell delivery is recorded by the turn. */
 export function focusDelivery(record: ExecutionRecord, delivery?: FocusDelivery): FocusDelivery | undefined {

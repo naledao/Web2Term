@@ -478,7 +478,7 @@ export class ConversationShell implements ExecutionShell {
       const args = windows
         ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
             Buffer.from(buildWrapper(this.sessionToken), 'utf16le').toString('base64')]
-        : ['-l', '-c', buildPosixWrapper(this.sessionToken), 'codex-terminal', this.currentCwd]
+        : ['-l', '-c', buildPosixWrapper(this.sessionToken), 'web2term', this.currentCwd]
 
       let child: ChildProcess
       try {

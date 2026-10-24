@@ -47,7 +47,8 @@ function fixture() {
     submitWithRetry(...args) { calls.push(args) }, report: item => reports.push(item),
     composerToolbarControls: () => [], queryAllAssistant: () => [], isAssistantTurn: () => true,
     latestReplyNode: nodes => nodes.at(-1), turnKeyOf: node => node.id,
-    readReplyText: node => node.body || '', readReplyMarkdown: node => node.markdown || '', smartUiCardsOf: () => [], smartUiLayoutsOf: () => [],
+    readReplyText: node => node.body || '', readReplyMarkdown: node => node.markdown || '', smartUiCardsOf: () => [], smartUiLayoutsOf: () => [], focusComposerModesOf: () => [],
+    focusModelSettingsOf: () => ({ model: null, effort: null, models: [], efforts: [] }),
     extractCommand: () => null, PAGE: DEEPSEEK_PAGE,
     queryAll: () => [], isVisibleElement: () => true
   })

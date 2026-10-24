@@ -12,7 +12,7 @@ import type { UpdateStatus } from "../shared/types"
  */
 const UPDATER_PARTITION = "electron-updater"
 const RELEASE_API_URL = "https://api.github.com/repos/naledao/Web2Term/releases/latest"
-const MAC_DOWNLOAD_URL = "https://github.com/naledao/Web2Term/releases/latest/download/GPT-Web-to-Codex-Terminal.dmg"
+const MAC_DOWNLOAD_URL = "https://github.com/naledao/Web2Term/releases/latest/download/Web2Term.dmg"
 
 let broadcast: (status: UpdateStatus) => void = () => {}
 
@@ -108,7 +108,7 @@ async function checkUnsignedMacUpdate(): Promise<UpdateStatus> {
     const response = await updaterSession.fetch(RELEASE_API_URL, {
       headers: {
         Accept: "application/vnd.github+json",
-        "User-Agent": `gpt-web-to-codex-terminal/${app.getVersion()}`
+        "User-Agent": `Web2Term/${app.getVersion()}`
       }
     })
     if (!response.ok) throw new Error(`GitHub 更新检查失败：HTTP ${response.status}`)

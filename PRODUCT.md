@@ -16,7 +16,7 @@ Inferred from the product documentation: developers and technical teams who want
 
 ## Product Purpose
 
-GPT Web to Codex Terminal brings an AI web conversation, a persistent local or SSH terminal, project files, and Git context into one desktop workspace. The product helps a developer move from intent to inspected command output without losing the thread between the model and the machine.
+Web2Term brings an AI web conversation, a persistent local or SSH terminal, project files, and Git context into one desktop workspace. The product helps a developer move from intent to inspected command output without losing the thread between the model and the machine.
 
 ## Positioning
 
@@ -38,7 +38,7 @@ Users work inside a desktop workspace with sessions, embedded ChatGPT / DeepSeek
 
 ## Brand Commitments
 
-The product name is GPT Web to Codex Terminal. Existing repository assets include the product icon and platform marks for ChatGPT, Claude, DeepSeek, and Gemini. The product voice can be direct, technical, and concrete.
+The product name is Web2Term. Existing repository assets include the product icon and platform marks for ChatGPT, Claude, DeepSeek, and Gemini. The product voice can be direct, technical, and concrete.
 
 ## Evidence on Hand
 

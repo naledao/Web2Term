@@ -8,8 +8,8 @@ import { writeQuestionLog } from './question-chat-page'
 import { supportsSelectionQuestion } from '../shared/deepseek-question'
 import type { QuestionChatAction, QuestionChatState, SelectionQuestionDraft } from '../shared/deepseek-question'
 import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
-import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo, FocusEditDiagnostic } from '../shared/focus-chat'
-import { supportsFocusView } from '../shared/focus-chat'
+import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo, FocusEditDiagnostic, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
+import { supportsFocusView, validFocusComposerModes, validFocusModelSettings } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
 import { writeRawSendDiagnostic } from './raw-send-log'
 import { writePromptDiagnostic } from './prompt-log'
@@ -17,6 +17,7 @@ import { writeReplyDiagnostic } from './reply-log'
 import { observeFocusEditRequest, observeFocusPageRequest } from './focus-edit-request'
 import { smartUiSubmission } from './focus-ui-request'
 import { dispatchFocusUiClick } from './focus-ui-click'
+import { dispatchFocusModelClick } from './focus-model-click'
 import type { FocusUiAction, FocusUiRecovery } from '../shared/focus-smart-ui'
 import { parseReadFilesRequest } from '../shared/file-requests'
 import type { FileSendOutcome } from '../shared/file-requests'
@@ -1314,9 +1315,64 @@ export class ChatGptEmbed {
           (part.url !== undefined && (typeof part.url !== 'string' || !/^https?:\/\//.test(part.url) || part.url.length > 2000))))) return null
       if (raw.smartReplies !== undefined && (!Array.isArray(raw.smartReplies) || raw.smartReplies.length > 8 || raw.smartReplies.some(reply =>
         !reply || typeof reply.sourceMessageId !== 'string' || reply.sourceMessageId.length > 160 || typeof reply.answer !== 'string' || reply.answer.length > 250000))) return null
+      if (raw.composerModes !== undefined && !validFocusComposerModes(raw.composerModes)) return null
+      if (raw.modelSettings !== undefined && !validFocusModelSettings(raw.modelSettings)) return null
       return raw
     } catch { return null }
     finally { if (timer) clearTimeout(timer) }
+  }
+
+  async setFocusComposerMode(id: 'thinking' | 'search', active: boolean): Promise<FocusSendOutcome> {
+    const contents = this.focusPage()
+    if (!contents || this.platform.id !== 'deepseek' || this.focusEditToken) return 'unavailable'
+    const url = contents.getURL()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const result = await Promise.race([
+        contents.executeJavaScript('window.__cmdTerminalInterceptor?.setComposerMode(' + JSON.stringify(id) + ',' +
+          JSON.stringify(active) + ',' + JSON.stringify(new URL(url).pathname) + ') ?? "unavailable"'),
+        new Promise<string>(resolve => { timer = setTimeout(() => resolve('unknown'), 3500) })
+      ])
+      if (contents.isDestroyed() || contents.getURL() !== url) return 'cancelled'
+      return ['ok', 'busy', 'unavailable', 'invalid', 'unknown', 'cancelled'].includes(result) ? result : 'unknown'
+    } catch { return 'unknown' }
+    finally { if (timer) clearTimeout(timer) }
+  }
+
+  private focusModelNativeClick: { token: string; dispatch(step: number): void } | null = null
+  async updateFocusModelSettings(request: FocusModelSettingsRequest, token: string, owns: () => boolean): Promise<FocusModelSettingsResult> {
+    const contents = this.focusPage()
+    if (!contents || this.platform.id !== 'chatgpt' || this.focusEditToken || this.focusModelNativeClick) return { outcome: 'unavailable', settings: null }
+    const url = contents.getURL()
+    const route = new URL(url)
+    let timer: ReturnType<typeof setTimeout> | undefined, step = 0
+    const current = (): boolean => {
+      if (!owns() || contents.isDestroyed() || this.focusModelNativeClick?.token !== token) return false
+      try {
+        const live = new URL(contents.getURL())
+        // A model choice may update the query string while retaining the same chat.
+        return live.origin === route.origin && live.pathname === route.pathname
+      } catch { return false }
+    }
+    this.focusModelNativeClick = { token, dispatch: next => {
+      if (!current() || !Number.isSafeInteger(next) || next !== step + 1 || next > 5) return
+      step = next
+      void dispatchFocusModelClick(contents, token, next, current,
+        () => !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false))
+    } }
+    try {
+      const raw = await Promise.race([
+        contents.executeJavaScript('window.__cmdTerminalInterceptor?.updateModelSettings(' + JSON.stringify(request.kind) + ',' +
+          JSON.stringify(request.value ?? null) + ',' + JSON.stringify(new URL(url).pathname) + ',' + JSON.stringify(token) + ')'),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 9500) })
+      ])
+      if (!current()) return { outcome: 'cancelled', settings: null }
+      if (!raw || !['ok', 'busy', 'unavailable', 'invalid', 'unknown', 'cancelled'].includes(raw.outcome) ||
+        !validFocusModelSettings(raw.settings)) return { outcome: 'unknown', settings: null }
+      return { outcome: raw.outcome, settings: raw.settings,
+        ...(typeof raw.reason === 'string' && /^[a-z-]{1,60}$/.test(raw.reason) ? { reason: raw.reason } : {}) }
+    } catch { return { outcome: 'unknown', settings: null, reason: 'page-exception' } }
+    finally { if (timer) clearTimeout(timer); if (this.focusModelNativeClick?.token === token) this.focusModelNativeClick = null }
   }
 
   async sendFocusUser(text: string): Promise<FocusSendOutcome> {
@@ -1739,6 +1795,9 @@ export class ChatGptEmbed {
         break
       case 'focus-ui-click':
         if (payload.focusEditToken && this.focusUiNativeClick?.token === payload.focusEditToken) this.focusUiNativeClick.dispatch()
+        break
+      case 'focus-model-click':
+        if (payload.focusModelToken && payload.focusModelToken === this.focusModelNativeClick?.token && typeof payload.count === 'number') this.focusModelNativeClick.dispatch(payload.count)
         break
       case 'configured':
         this.interceptor.installed = true

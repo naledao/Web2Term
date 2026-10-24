@@ -1,5 +1,5 @@
 ---
-name: GPT Web to Codex Terminal
+name: Web2Term
 description: Conversation, meet execution.
 colors:
   ink: "#0b1014"
@@ -62,7 +62,7 @@ components:
     height: "48px"
 ---
 
-# Design System: GPT Web to Codex Terminal
+# Design System: Web2Term
 
 ## Overview
 

@@ -205,6 +205,8 @@
   let focusBaselinePosition = null
   let focusReplyPosition = null
   let focusEditing = null
+  let focusModeChanging = null
+  let focusModelCache = null
   // Editing can remove the latest reply and temporarily expose an older one. It must
   // never be mistaken for the new reply or re-executed as a fresh command.
   const focusEditExcludedIds = new Set()
@@ -1538,6 +1540,86 @@
   const composerToolbarControls = () => {
     const root = composerToolbarRoot()
     return root ? [...root.querySelectorAll(CONTROL_SELECTOR)].filter(isVisibleElement) : []
+  }
+
+  const focusModelPickerParts = () => {
+    const rules = PAGE.focus?.modelSettings
+    if (!rules) return null
+    const triggers = queryAll([rules.triggerSelector]).filter(isVisibleElement)
+    if (triggers.length !== 1) return null
+    const trigger = triggers[0], id = trigger.getAttribute('aria-controls')
+    const candidate = id ? document.getElementById(id) : null
+    const menu = candidate?.getAttribute('role') === 'menu' && isVisibleElement(candidate) && trigger.id &&
+      (candidate.getAttribute('aria-labelledby') || '').split(/\s+/).includes(trigger.id) &&
+      trigger.getAttribute('aria-expanded') === 'true' ? candidate : null
+    return { trigger, menu, rules }
+  }
+  /** Passive between explicit refreshes; never opens a menu from the polling loop. */
+  const focusModelSettingsOf = () => {
+    const parts = focusModelPickerParts()
+    if (!parts) { focusModelCache = null; return { model: null, effort: null, models: [], efforts: [] } }
+    const { trigger, menu, rules } = parts
+    if (!focusModelCache || focusModelCache.path !== location.pathname || focusModelCache.trigger !== trigger) {
+      focusModelCache = { path: location.pathname, trigger, data: { model: null, effort: null, models: [], efforts: [] } }
+    }
+    const data = focusModelCache.data
+    if (menu) {
+      // Both tracks stay mounted. The inactive model track is aria-hidden, but
+      // its radio selection is authoritative and lets reads avoid changing views.
+      const items = [...menu.querySelectorAll(rules.modelSelector)].map(node => ({
+        value: collapse(node.textContent || ''), checked: node.getAttribute('aria-checked')
+      })).filter(item => /^GPT[- ]?\d[A-Za-z0-9 ._()+:/-]{0,75}$/.test(item.value))
+      if (items.length && items.length <= 20 && new Set(items.map(item => item.value)).size === items.length) {
+        data.models = items.map(item => ({ value: item.value, label: item.value }))
+        const selected = items.filter(item => item.checked === 'true')
+        data.model = selected.length === 1 ? selected[0].value : null
+      } else { data.models = []; data.model = null }
+      const slider = menu.querySelector(rules.sliderSelector), input = slider?.querySelector('[role="slider"]')
+      data.efforts = input?.getAttribute('aria-valuemin') === '0' && input.getAttribute('aria-valuemax') === '2' &&
+        !controlDisabled(slider) && slider.querySelector('[aria-disabled="true"], [data-locked="true"]') === null
+        ? rules.efforts.map(({ value, label }) => ({ value, label })) : []
+    }
+    const effort = trigger.getAttribute(rules.effortAttribute)
+    data.effort = data.efforts.some(item => item.value === effort) ? effort : null
+    return { ...data, models: data.models.slice(), efforts: data.efforts.slice() }
+  }
+
+  const focusComposerModeControls = () => {
+    const rules = PAGE.focus?.composerModes || []
+    if (!rules.length) return []
+    const selector = PAGE.focus.composerModeControlSelector || CONTROL_SELECTOR
+    let node = getComposer()?.parentElement, partial = []
+    for (let depth = 0; node && node !== document.body && depth < 10; depth++, node = node.parentElement) {
+      const controls = [...node.querySelectorAll(selector)].filter(isVisibleElement)
+      const found = rules.filter(rule => controls.some(control => rule.labels.includes(collapse(control.textContent))))
+      // The inner footer can contain attachment/send only. Keep walking until the
+      // named mode switches are actually present, not just any two buttons.
+      if (found.length === rules.length) return controls
+      if (!partial.length && found.length) partial = controls
+    }
+    return partial
+  }
+
+  /** Read only the two named switches inside the current composer's input region. */
+  const focusComposerModesOf = () => {
+    const controls = focusComposerModeControls()
+    return (PAGE.focus?.composerModes || []).map(rule => {
+      const matches = controls.filter(control => rule.labels.includes(collapse(control.textContent)))
+      const control = matches.length === 1 ? matches[0] : null
+      let active = null
+      if (control) {
+        for (const attribute of ['aria-pressed', 'aria-checked', 'aria-selected', 'data-state', 'data-selected', 'data-checked']) {
+          const value = control.getAttribute(attribute)
+          if (['true', 'on', 'checked', 'active', 'selected'].includes(value)) { active = true; break }
+          if (['false', 'off', 'unchecked', 'inactive', 'unselected'].includes(value)) { active = false; break }
+        }
+        if (active === null && rule.activeSelector && rule.inactiveSelector) {
+          const on = control.matches(rule.activeSelector), off = control.matches(rule.inactiveSelector)
+          if (on !== off) active = on
+        }
+      }
+      return { control, data: { id: rule.id, active, disabled: !control || active === null || controlDisabled(control) } }
+    })
   }
 
   const findComposerControl = (selectors) => {
@@ -3161,7 +3243,7 @@
   const checkForCommand = () => {
     lastReplyScanAt = Date.now()
     replyScanSnapshot = {}
-    if (focusEditing) return
+    if (focusEditing || focusModeChanging) return
     // Confirm our submitted user turn before accepting a fast next assistant action.
     if (fileSend?.submitted) {
       fileSendStatus(fileSend.token)
@@ -4519,11 +4601,152 @@
       return true
     },
 
+    prepareFocusModelClick(token, step) {
+      const operation = focusModeChanging, click = operation?.click
+      if (!operation || operation.token !== token || !click || click.step !== step || click.prepared || !operation.current()) return null
+      click.prepared = true
+      const target = click.target
+      if (!target.isConnected || !isVisibleElement(target) || controlDisabled(target) || !click.validate()) { click.dispatched = false; return null }
+      const box = target.getBoundingClientRect()
+      const fraction = click.fraction === null ? .5 : getComputedStyle(target).direction === 'rtl' ? 1 - click.fraction : click.fraction
+      const x = Math.max(box.left + 1, Math.min(box.right - 1, box.left + box.width * fraction)), y = box.top + box.height / 2
+      const hit = document.elementFromPoint(x, y)
+      if (box.width < 3 || box.height < 3 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight || !hit || !target.contains(hit)) {
+        click.dispatched = false; return null
+      }
+      return { x, y }
+    },
+    finishFocusModelClick(token, step, dispatched) {
+      const operation = focusModeChanging, click = operation?.click
+      if (!operation || operation.token !== token || !click || click.step !== step || (dispatched === true && !click.prepared) || !operation.current()) return false
+      click.dispatched = dispatched === true
+      return true
+    },
+    /** One owned menu operation, driven by trusted native input and confirmed from DOM state. */
+    async updateModelSettings(kind, value, expectedPath, token) {
+      const result = (outcome, reason) => ({ outcome, reason, settings: focusModelSettingsOf() })
+      if (!PAGE.focus?.modelSettings || !['read', 'model', 'effort'].includes(kind) || typeof token !== 'string' ||
+        !/^[a-zA-Z0-9-]{1,80}$/.test(token) || (kind === 'read' ? value !== null : typeof value !== 'string' || value.length > 80)) return result('invalid', 'invalid-request')
+      if (location.pathname !== expectedPath || !getComposer()) return result('unavailable', 'page-unavailable')
+      if (focusModeChanging || focusEditing || fileSend || state.programmatic || state.awaitingReplySince || state.pendingQuestion || findStopButton()) return result('busy', 'page-busy')
+      const operation = { token, generation: state.taskPromptGeneration, path: expectedPath, click: null, step: 0, current: null }
+      operation.current = () => focusModeChanging === operation && location.pathname === operation.path && state.taskPromptGeneration === operation.generation
+      const deadline = Date.now() + 7000
+      const waitFor = async (predicate, timeout = 1100) => {
+        const end = Math.min(deadline, Date.now() + timeout)
+        while (operation.current() && Date.now() < end) {
+          if (predicate()) return true
+          await new Promise(resolve => setTimeout(resolve, 40))
+        }
+        return operation.current() && predicate()
+      }
+      const nativeClick = async (target, fraction = null, validate = () => true) => {
+        if (!target || !operation.current() || Date.now() >= deadline || operation.step >= 5) return false
+        const click = { target, fraction, validate, step: ++operation.step, prepared: false, dispatched: null }
+        operation.click = click
+        report({ event: 'focus-model-click', focusModelToken: token, count: click.step })
+        await waitFor(() => click.dispatched !== null)
+        return click.dispatched === true && operation.current()
+      }
+      const confirmed = async predicate => {
+        let stable = 0
+        return await waitFor(() => { stable = predicate() ? stable + 1 : 0; return stable >= 3 })
+      }
+      focusModeChanging = operation
+      let openedHere = false, outcome = 'unknown', reason = 'selection-unconfirmed'
+      try {
+        const perform = async () => {
+          await waitFor(() => !!focusModelPickerParts())
+          let parts = focusModelPickerParts()
+          if (!parts || controlDisabled(parts.trigger)) return ['unavailable', 'control-missing']
+          if (parts.trigger.getAttribute('aria-expanded') !== 'true') {
+            openedHere = true
+            if (!await nativeClick(parts.trigger, null, () => focusModelPickerParts()?.trigger === parts.trigger)) return ['unknown', 'native-input-failed']
+          }
+          if (!await waitFor(() => !!focusModelPickerParts()?.menu)) return ['unknown', 'menu-unavailable']
+          parts = focusModelPickerParts()
+          let data = focusModelSettingsOf()
+          if (!data.models.length) return ['unavailable', 'model-options-missing']
+          if (kind === 'read') return data.model ? ['ok', 'settings-read'] : ['unknown', 'selection-unconfirmed']
+          if (kind === 'model') {
+            if (!data.models.some(item => item.value === value)) return ['invalid', 'option-unavailable']
+            if (data.model === value) return ['ok', 'already-selected']
+            const locate = () => [...(focusModelPickerParts()?.menu?.querySelectorAll(parts.rules.modelSelector) || [])]
+              .filter(node => collapse(node.textContent || '') === value)
+            let matches = locate()
+            if (matches.length !== 1) return ['unavailable', 'option-unavailable']
+            if (!isVisibleElement(matches[0]) || matches[0].closest('[aria-hidden="true"]')) {
+              const toggles = [...parts.menu.querySelectorAll(parts.rules.viewToggleSelector)].filter(node => isVisibleElement(node) && !node.closest('[aria-hidden="true"]'))
+              if (toggles.length !== 1 || !await nativeClick(toggles[0])) return ['unknown', 'native-input-failed']
+              if (!await waitFor(() => locate().some(node => isVisibleElement(node) && !node.closest('[aria-hidden="true"]')))) return ['unknown', 'menu-unavailable']
+            }
+            matches = locate()
+            if (matches.length !== 1 || !await nativeClick(matches[0], null, () => locate().length === 1 && locate()[0] === matches[0])) return ['unknown', 'native-input-failed']
+            return await confirmed(() => focusModelSettingsOf().model === value) ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
+          }
+          if (!data.efforts.some(item => item.value === value)) return ['invalid', 'option-unavailable']
+          if (data.effort === value) return ['ok', 'already-selected']
+          const model = data.model, rule = parts.rules.efforts.find(item => item.value === value)
+          const slider = parts.menu.querySelector(parts.rules.sliderSelector)
+          const root = slider?.querySelector(parts.rules.sliderRootSelector)
+          if (!root || slider.closest('[aria-hidden="true"]')) return ['unavailable', 'slider-unavailable']
+          if (!await nativeClick(root, rule.position / 2, () => focusModelSettingsOf().model === model &&
+            focusModelPickerParts()?.menu?.querySelector(parts.rules.sliderSelector) === slider)) return ['unknown', 'native-input-failed']
+          return await confirmed(() => focusModelSettingsOf().model === model && focusModelSettingsOf().effort === value)
+            ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
+        }
+        ;[outcome, reason] = await perform()
+      } catch { outcome = 'unknown'; reason = 'page-exception' }
+      finally {
+        if (openedHere && operation.current()) {
+          const trigger = focusModelPickerParts()?.trigger
+          if (trigger?.getAttribute('aria-expanded') === 'true') {
+            const closed = await nativeClick(trigger) && await waitFor(() => focusModelPickerParts()?.trigger.getAttribute('aria-expanded') !== 'true', 500)
+            if (!closed && outcome === 'ok') { outcome = 'unknown'; reason = 'menu-close-unconfirmed' }
+          }
+        }
+        if (!operation.current()) { outcome = 'cancelled'; reason = 'conversation-changed' }
+        if (focusModeChanging === operation) focusModeChanging = null
+      }
+      return result(outcome, reason)
+    },
+
+    /** One requested mode change. No draft writes, submit, state replay or automatic retry. */
+    async setComposerMode(id, active, expectedPath) {
+      if (typeof active !== 'boolean' || !(PAGE.focus?.composerModes || []).some(rule => rule.id === id)) return 'invalid'
+      if (location.pathname !== expectedPath || !getComposer()) return 'unavailable'
+      if (focusModeChanging || focusEditing || fileSend || state.programmatic || state.awaitingReplySince !== 0 || findStopButton()) return 'busy'
+      const operation = { path: expectedPath, generation: state.taskPromptGeneration }
+      const current = () => focusModeChanging === operation && location.pathname === operation.path &&
+        state.taskPromptGeneration === operation.generation
+      const locate = () => focusComposerModesOf().find(mode => mode.data.id === id)
+      let mode = locate()
+      if (!mode?.control || mode.data.active === null) return 'unavailable'
+      if (mode.data.disabled) return 'busy'
+      if (mode.data.active === active) return 'ok'
+      focusModeChanging = operation
+      try {
+        pressButton(mode.control)
+        const deadline = Date.now() + 2000
+        let stable = 0
+        while (current() && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 80))
+          if (!current()) return 'cancelled'
+          mode = locate()
+          stable = mode?.data.active === active ? stable + 1 : 0
+          if (stable >= 2) return 'ok'
+        }
+        return current() ? 'unknown' : 'cancelled'
+      } finally { if (focusModeChanging === operation) focusModeChanging = null }
+    },
+
     /** Read-only view data. User text is exposed only through the scoped recovery read above. */
     focusSnapshot() {
       // Every page-specific read below comes from the platform's measured focus rules.
       const rules = PAGE.focus || { reasoningSelectors: [] }
       const composer = getComposer()
+      const composerModes = rules.composerModes ? focusComposerModesOf().map(mode => mode.data) : undefined
+      const modelSettings = rules.modelSettings ? focusModelSettingsOf() : undefined
       const rendered = new Map()
       const markdownOf = node => {
         if (!rendered.has(node)) rendered.set(node, readReplyMarkdown(node))
@@ -4537,7 +4760,7 @@
           // through a widget marker. Oversize replies use the normal answer channel.
           return answer.length <= 250000 ? [{ sourceMessageId: messageIdOf(node), answer }] : []
         }) : []
-      if (focusEditing) return { path: location.pathname, ready: !!composer, nativeDraft: false, waiting: true, generating: 'unknown', reply: null, smartReplies }
+      if (focusEditing) return { path: location.pathname, ready: !!composer, nativeDraft: false, waiting: true, generating: 'unknown', reply: null, smartReplies, composerModes, modelSettings }
       let generating = 'unknown'
       if (rules.generatingIcon) {
         const { primaryControlSelector, generatingPrefixes, idlePrefixes } = rules.generatingIcon
@@ -4605,7 +4828,7 @@
       }
       const historyDraft = !!rules.edit && queryAll([rules.edit.editorSelector]).some(isVisibleElement)
       return { path: location.pathname, ready: !!composer, nativeDraft: historyDraft || (!!composer && collapse(readComposer(composer)) !== ''),
-        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply, smartReplies }
+        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply, smartReplies, composerModes, modelSettings }
     },
 
     async recoverCommand(token, generation, allowSend, manual = false, expectedMessageId = null) {

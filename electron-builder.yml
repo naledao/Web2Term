@@ -1,11 +1,12 @@
+# Stable upgrade identity; the displayed product name is configured below.
 appId: com.example.gptweb2codexterminal
-productName: GPT Web to Codex Terminal
+productName: Web2Term
 
 # Pin the artifact name so the file on disk, the path recorded in latest.yml,
 # and the asset name on GitHub all match. Without it electron-builder writes
 # spaces (disk) / hyphens (latest.yml) / dots (GitHub upload) and the updater
 # 404s because it downloads the name latest.yml declares.
-artifactName: GPT-Web-to-Codex-Terminal-Setup-${version}.${ext}
+artifactName: Web2Term-Setup-${version}.${ext}
 
 directories:
   buildResources: build

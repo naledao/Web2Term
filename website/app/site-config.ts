@@ -5,8 +5,8 @@ export const assetPath = (path: string): string => `${basePath}${path}`
 export const PRODUCT_NAME = 'Web2Term'
 export const REPOSITORY_URL = 'https://github.com/naledao/Web2Term'
 export const LATEST_RELEASE_URL = `${REPOSITORY_URL}/releases/latest`
-export const WINDOWS_DOWNLOAD_URL = `${LATEST_RELEASE_URL}/download/GPT-Web-to-Codex-Terminal-Setup.exe`
-export const MACOS_DOWNLOAD_URL = `${LATEST_RELEASE_URL}/download/GPT-Web-to-Codex-Terminal.dmg`
+export const WINDOWS_DOWNLOAD_URL = `${LATEST_RELEASE_URL}/download/Web2Term-Setup.exe`
+export const MACOS_DOWNLOAD_URL = `${LATEST_RELEASE_URL}/download/Web2Term.dmg`
 export const MACOS_INSTALLATION_GUIDE_URL = `${REPOSITORY_URL}/blob/main/build/macos-installation.md`
 export const LINUX_AGENT_DOWNLOAD_URL = `${LATEST_RELEASE_URL}/download/web2term-linux-amd64`
 export const LINUX_AGENT_CHECKSUM_URL = `${LINUX_AGENT_DOWNLOAD_URL}.sha256`
