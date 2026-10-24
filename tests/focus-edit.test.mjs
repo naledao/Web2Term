@@ -210,7 +210,7 @@ test('native request observer ignores other endpoints and conversations and neve
 test('one passive request listener is registered per partition and released edits stop observing', () => {
   let installed = 0, listener, continued = 0
   const session = { webRequest: { onBeforeRequest(_filter, receive) { installed++; listener = receive } } }
-  const frame = {}, contents = { id: 41, session, mainFrame: frame, isDestroyed: () => false, getURL: () => 'https://chatgpt.com/c/one' }
+  const frame = { processId: 9, routingId: 10 }, contents = { id: 41, session, mainFrame: frame, isDestroyed: () => false, getURL: () => 'https://chatgpt.com/c/one' }
   const first = [], second = []
   const releaseFirst = requestExports.observeFocusEditRequest(contents, expectedRequest, value => first.push(value))
   const releaseSecond = requestExports.observeFocusEditRequest(contents, expectedRequest, value => second.push(value))
@@ -224,10 +224,14 @@ test('one passive request listener is registered per partition and released edit
   assert.equal(first.length, 0)
   assert.equal(second.length, 1)
   assert.equal(second[0].requestCount, 1)
+  receive({ frame: { processId: 9, routingId: 11 } })
+  assert.equal(second.length, 1, 'a child frame cannot acknowledge a main-frame submit')
+  receive({ frame: { processId: 9, routingId: 10 } })
+  assert.equal(second.length, 2, 'another wrapper of the same main frame is accepted')
   releaseSecond()
   receive()
-  assert.equal(second.length, 1)
-  assert.equal(continued, 4, 'all requests continue without changing headers, body or destination')
+  assert.equal(second.length, 2)
+  assert.equal(continued, 6, 'all requests continue without changing headers, body or destination')
 })
 
 test('folded prompt previews never substitute for full original verification or new-id acknowledgement', async () => {

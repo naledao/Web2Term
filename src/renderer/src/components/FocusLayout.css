@@ -1,0 +1,11 @@
+.focus-layout{--fl-muted:color-mix(in srgb,var(--fc-text) 72%,var(--fc-bg));min-width:0;margin:16px 0;color:var(--fc-text);font-size:14px;line-height:1.6}
+.focus-layout__viewport{max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;scrollbar-color:var(--fc-muted) transparent;border-radius:14px}
+.focus-layout__viewport:focus-visible{outline:2px solid var(--fc-accent);outline-offset:3px}
+.focus-layout__canvas{width:100%;box-sizing:border-box}
+.focus-layout__canvas *{box-sizing:border-box;min-width:0;margin:0;padding:0;border:0 solid var(--fc-border);font-family:inherit;overflow-wrap:break-word}
+.focus-layout__canvas h1,.focus-layout__canvas h2,.focus-layout__canvas h3,.focus-layout__canvas h4,.focus-layout__canvas h5,.focus-layout__canvas h6{font-size:inherit;line-height:inherit;font-weight:inherit}
+.focus-layout__canvas svg{display:inline-block;flex-shrink:0;vertical-align:middle;overflow:visible}
+.focus-layout__canvas p,.focus-layout__canvas li{white-space:normal}
+.focus-layout--list .focus-layout__viewport{border-radius:0}
+.focus-layout--list ul,.focus-layout--list ol{list-style:none}
+.focus-layout__hint{margin:6px 0 0;color:var(--fl-muted);font-size:12px;line-height:1.6}

@@ -1478,6 +1478,23 @@ canvas, iframe, figure or role=img/figure content): their top-level block, svg s
 element counts, iframe host, list/table counts and visually hidden text, plus a redacted
 markup tree. This is for the focus view, which currently spells such a chart out as text.
 
+## chatgpt-smart-ui-probe.cjs
+
+User-run passive capture for generated answer forms: radio/checkbox choices, custom
+buttons, selection/disabled state, native submit requests and persisted component data.
+Instructions and privacy/coverage limits: [chatgpt-smart-ui-probe.md](chatgpt-smart-ui-probe.md).
+
+```powershell
+.\node_modules\electron\dist\electron.exe .\tools\diag\chatgpt-smart-ui-probe.cjs
+```
+
+Log: `%TEMP%\gpt-login-diag\chatgpt-smart-ui-<timestamp>-<pid>.log`. The user opens an
+existing component, changes options, submits once and refreshes. The standalone probe
+observes only; it does not click, type, send, replay requests or load app code.
+Text, identifiers and values are reduced to lengths and per-run HMAC references.
+It records bounded DOM/ARIA/form structure, computed layout, open shadow roots, allowed
+child frames, passive events and JSON schemas including genui state snapshots.
+
 ## claude-dom-probe.js
 
 **The run that answers: what does `claude.ai` actually look like, from scratch?**

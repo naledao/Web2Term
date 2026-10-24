@@ -424,19 +424,249 @@
     return series.length <= 6 ? { series, rows } : null
   }
 
+  /** Measured DIL radio cards. Preserve native values/labels; never execute page markup. */
+  const smartUiCardsOf = (node) => {
+    const rules = PAGE.focus?.smartUi
+    if (!rules) return []
+    const answer = replyRootOf(node)
+    if (!answer) return []
+    const roots = [...(answer.matches(rules.rootSelector) ? [answer] : []), ...answer.querySelectorAll(rules.rootSelector)]
+    return roots.flatMap(dil => {
+      const sourceMessageId = dil.getAttribute(rules.sourceIdAttr)
+      if (!sourceMessageId || sourceMessageId !== messageIdOf(node)) return []
+      const cards = [...new Set([...dil.querySelectorAll(rules.groupSelector)].map(group => group.closest(rules.cardSelector)))]
+        .filter(card => card && dil.contains(card) && card.closest(rules.rootSelector) === dil).slice(0, 8)
+      return cards.flatMap((element, index) => {
+        const groups = [...element.querySelectorAll(rules.groupSelector)]
+        if (groups.length !== 1) return []
+        const group = groups[0], controls = [...group.querySelectorAll(rules.optionSelector)]
+        const buttons = [...element.querySelectorAll(rules.actionSelector)]
+        if (controls.length < 2 || controls.length > 32 || buttons.length < 1 || buttons.length > 4) return []
+        const labels = [...dil.querySelectorAll('label')]
+        const options = controls.map(control => {
+          const labelNode = control.closest('label') || labels.find(label => label.htmlFor === control.id)
+          const label = collapse(labelNode?.textContent || control.getAttribute('aria-label') || control.textContent)
+          const candidateTitle = collapse(labelNode?.querySelector('strong, b, [data-d-default-strong]')?.textContent).slice(0, 500)
+          const title = label.startsWith(candidateTitle) ? candidateTitle : ''
+          return { value: control.getAttribute('value') || '', label: label.slice(0, 3000), title,
+            description: title && label.startsWith(title) ? label.slice(title.length).trim().slice(0, 3000) : '',
+            selected: control.getAttribute('aria-checked') === 'true', disabled: controlDisabled(control) }
+        })
+        if (options.some(option => !option.value || option.value.length > 500 || !option.label) ||
+          new Set(options.map(option => option.value)).size !== options.length || options.filter(option => option.selected).length > 1) return []
+        const actions = buttons.map(button => ({ label: collapse(button.textContent).slice(0, 500), disabled: controlDisabled(button) }))
+        if (actions.some(button => !button.label)) return []
+        const identity = JSON.stringify([options.map(option => [option.value, option.label]), actions.map(action => action.label)])
+        let hash = 2166136261
+        for (let at = 0; at < identity.length; at++) hash = Math.imul(hash ^ identity.charCodeAt(at), 16777619)
+        const data = { version: 1, sourceMessageId, index, signature: (hash >>> 0).toString(16).padStart(8, '0'),
+          title: collapse(element.querySelector('h1, h2, h3, h4, h5, h6')?.textContent).slice(0, 500),
+          description: collapse(element.querySelector(':scope > p')?.textContent).slice(0, 3000),
+          label: collapse(group.getAttribute('aria-label')).slice(0, 500), disabled: controlDisabled(group), options, buttons: actions }
+        return [{ element, controls, buttons, data }]
+      })
+    })
+  }
+  const smartUiMarkdown = data => {
+    const json = JSON.stringify(data).replace(/</g, '\\u003c')
+    const fallback = [data.title, data.description, ...data.options.map(option => (option.selected ? '[x] ' : '[ ] ') + option.label), ...data.buttons.map(button => button.label)]
+      .filter(Boolean).join('\n').split('\n').map(line => '> ' + line).join('\n')
+    return '\n\n<!--focus-ui ' + json + ' -->\n' + fallback + '\n\n'
+  }
+
+  /** A bounded presentation tree, read from native DIL boxes, lists, grids and vector icons. */
+  const smartUiLayoutsOf = node => {
+    const rules = PAGE.focus?.smartUi, answer = rules ? replyRootOf(node) : null
+    if (!answer) return []
+    const roots = [...(answer.matches(rules.rootSelector) ? [answer] : []), ...answer.querySelectorAll(rules.rootSelector)]
+    const allowed = new Set(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'small',
+      'ul', 'ol', 'li', 'hr', 'br', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
+    const ignored = new Set(['script', 'style', 'iframe', 'object', 'embed', 'img', 'video', 'audio', 'canvas', 'link', 'meta', 'foreignobject', 'use', 'animate', 'set'])
+    const length = value => /^(?:0|auto|normal|none|\d+(?:\.\d+)?(?:px|%|rem|em))$/.test(value) && (!/^\d/.test(value) || parseFloat(value) <= 2000)
+    const pixels = value => Number.parseFloat(value) || 0
+    const rgba = value => { const values = String(value).match(/[\d.]+/g)?.map(Number) || []; return { values, clear: value === 'transparent' || (values.length === 4 && values[3] === 0) } }
+    const separator = element => {
+      if (element.tagName.toLowerCase() === 'hr') return true
+      if (!['div', 'span'].includes(element.tagName.toLowerCase()) || collapse(element.textContent) || element.querySelector('svg, input, button')) return false
+      const style = getComputedStyle(element), height = pixels(style.height)
+      return pixels(style.borderTopWidth) > 0 || pixels(style.borderBottomWidth) > 0 ||
+        (height > 0 && height <= 2 && !rgba(style.backgroundColor).clear)
+    }
+    const iconList = element => {
+      if (!['div', 'section', 'ul', 'ol'].includes(element.tagName.toLowerCase())) return false
+      const style = getComputedStyle(element)
+      if (style.display.includes('grid') || (style.display.includes('flex') && !style.flexDirection.startsWith('column'))) return false
+      const children = [...element.children].filter(child => {
+        const css = getComputedStyle(child)
+        return css.display !== 'none' && !['hidden', 'collapse'].includes(css.visibility) && !child.hasAttribute('hidden')
+      })
+      const rows = children.filter(child => {
+        if (!collapse(child.textContent) || !child.querySelector('svg') || child.querySelector('h1, h2, table, ul, ol')) return false
+        const css = getComputedStyle(child)
+        return child.tagName.toLowerCase() === 'li' || (css.display.includes('flex') && css.flexDirection.startsWith('row'))
+      })
+      // Keep the list boundary, rather than swallowing the answer's headings and prose.
+      return rows.length >= 2 && children.every(child => rows.includes(child) || separator(child))
+    }
+    const geometry = { viewBox: 'viewBox', width: 'width', height: 'height', d: 'd', x: 'x', y: 'y', x1: 'x1', y1: 'y1', x2: 'x2', y2: 'y2',
+      cx: 'cx', cy: 'cy', r: 'r', rx: 'rx', ry: 'ry', points: 'points', fill: 'fill', stroke: 'stroke',
+      'stroke-width': 'strokeWidth', 'stroke-linecap': 'strokeLinecap', 'stroke-linejoin': 'strokeLinejoin', 'fill-rule': 'fillRule', 'clip-rule': 'clipRule' }
+    return roots.flatMap(dil => {
+      const sourceMessageId = dil.getAttribute(rules.sourceIdAttr)
+      if (!sourceMessageId || sourceMessageId !== messageIdOf(node)) return []
+      const lists = new Set([dil, ...dil.querySelectorAll('[data-d-component], ul, ol')].filter(iconList))
+      let boxes = [...new Set([...(dil.matches(rules.cardSelector) ? [dil] : []), ...dil.querySelectorAll(rules.cardSelector), ...lists])].filter(element =>
+        element.closest(rules.rootSelector) === dil && !element.closest(rules.groupSelector) && !element.querySelector(rules.groupSelector) &&
+        !(PAGE.answerCharts && (element.matches(PAGE.answerCharts.rootSelector) || element.querySelector(PAGE.answerCharts.rootSelector))))
+      boxes = boxes.filter(element => !boxes.some(parent => parent !== element && parent.contains(element)))
+      if (!boxes.length && !dil.querySelector(rules.groupSelector) && dil.querySelector('[data-d-component]') &&
+        !(PAGE.answerCharts && dil.querySelector(PAGE.answerCharts.rootSelector))) boxes = [dil]
+      return boxes.slice(0, 8).flatMap(element => {
+        if (!isVisibleElement(element)) return []
+        const base = getComputedStyle(element), baseColor = base.color
+        let count = 0, chars = 0, failed = false
+        const read = (current, parent, depth) => {
+          if (++count > 600 || depth > 22) { failed = true; return null }
+          if (current.nodeType === Node.TEXT_NODE) {
+            const value = String(current.nodeValue || '').replace(/\s+/g, ' ')
+            chars += value.length
+            if (value.length > 10000 || chars > 40000) { failed = true; return null }
+            return value
+          }
+          if (current.nodeType !== Node.ELEMENT_NODE) return null
+          const nativeTag = current.tagName.toLowerCase()
+          if (ignored.has(nativeTag)) return null
+          const computed = getComputedStyle(current)
+          if (computed.display === 'none' || ['hidden', 'collapse'].includes(computed.visibility) || current.hasAttribute('hidden')) return null
+          const divider = separator(current)
+          const tag = allowed.has(nativeTag) ? nativeTag : nativeTag === 'a' || nativeTag === 'button' || nativeTag === 'input' || nativeTag === 'textarea' ? 'span' : 'div'
+          const result = { tag }, style = {}, attrs = {}
+          const put = (key, value) => { if (value) style[key] = value }
+          if (['flex', 'inline-flex', 'grid', 'inline-grid', 'inline-block', 'contents', 'table', 'table-row', 'table-cell'].includes(computed.display)) put('display', computed.display)
+          if (computed.display.includes('flex') || computed.display.includes('grid')) {
+            for (const key of ['flexDirection', 'flexWrap', 'alignItems', 'justifyContent']) put(key, computed[key])
+          }
+          for (const key of ['alignSelf', 'flexGrow', 'flexShrink']) if (computed[key] && !['auto', '0', '1'].includes(computed[key])) put(key, computed[key])
+          // A grow value of one is significant even though shrink defaults to one.
+          if (computed.flexGrow === '1') put('flexGrow', '1')
+          if (computed.flexShrink === '0') put('flexShrink', '0')
+          for (const key of ['flexBasis', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight', 'rowGap', 'columnGap']) {
+            const value = computed[key]
+            if (value && !['auto', 'none', 'normal', '0px', '0%'].includes(value) && length(value)) put(key, value)
+            if (key === 'flexBasis' && value === '0%') put(key, value)
+          }
+          for (const key of ['width', 'height']) {
+            const value = current.style?.getPropertyValue(key) || ''
+            if (current !== element && value && length(value)) put(key, value)
+            else if (nativeTag === 'svg' && length(computed[key])) put(key, computed[key])
+            else if (key === 'width' && current !== element && parent?.display.includes('flex') && parent.flexDirection === 'row' && computed.flexShrink === '0' && length(computed.width)) put(key, computed.width)
+          }
+          // Native Divider can be an empty div with a one-pixel background, not a border.
+          if (divider && pixels(computed.height) > 0 && pixels(computed.height) <= 2 && length(computed.height)) put('height', computed.height)
+          for (const key of ['gridColumn', 'gridRow']) if (computed[key] && /^(?:[1-9]|span [1-8])(?: \/ (?:auto|[1-9]|span [1-8]))?$/.test(computed[key])) put(key, computed[key])
+          if (computed.display.includes('grid')) {
+            const explicit = current.style?.getPropertyValue('grid-template-columns') || ''
+            if (/^repeat\([1-8],\s*minmax\(0(?:px)?,\s*1fr\)\)$/.test(explicit)) put('gridTemplateColumns', explicit)
+            else {
+              const columns = computed.gridTemplateColumns.split(/\s+/)
+              if (columns.length <= 8 && columns.every(value => /^\d+(?:\.\d+)?px$/.test(value))) {
+                const total = columns.reduce((sum, value) => sum + pixels(value), 0)
+                if (total > 0) put('gridTemplateColumns', columns.map(value => Math.max(.001, Math.round(pixels(value) / total * 1000) / 1000) + 'fr').join(' '))
+              }
+            }
+          }
+          for (const key of ['padding', 'margin']) {
+            if (current === element && key === 'margin') continue
+            const values = ['Top', 'Right', 'Bottom', 'Left'].map(side => computed[key + side] || '0px')
+            if (values.every(length) && values.some(value => value !== '0px')) put(key, values.every(value => value === values[0]) ? values[0] : values.join(' '))
+          }
+          const borders = ['Top', 'Right', 'Bottom', 'Left'].map(side => computed['border' + side + 'Width'] || '0px')
+          if (borders.every(length) && borders.some(value => pixels(value) > 0)) {
+            put('borderWidth', borders.every(value => value === borders[0]) ? borders[0] : borders.join(' '))
+            put('borderStyle', ['solid', 'dashed', 'dotted'].includes(computed.borderTopStyle) ? computed.borderTopStyle : 'solid')
+            put('borderColor', '$border')
+          }
+          const radii = String(computed.borderRadius || '').split(/\s+/).map(value => /^\d+(?:\.\d+)?px$/.test(value) ? Math.min(999, pixels(value)) + 'px' : value)
+          if (radii.every(length) && radii.some(value => pixels(value) > 0)) put('borderRadius', radii.join(' '))
+          for (const key of ['fontSize', 'lineHeight']) if ((!parent || computed[key] !== parent[key]) && length(computed[key])) put(key, computed[key])
+          if ((!parent || computed.fontWeight !== parent.fontWeight) && /^[1-9]00$/.test(computed.fontWeight)) put('fontWeight', computed.fontWeight)
+          if (computed.fontStyle === 'italic') put('fontStyle', 'italic')
+          if (['center', 'right', 'end'].includes(computed.textAlign)) put('textAlign', computed.textAlign)
+          if (['pre-wrap', 'pre-line', 'nowrap'].includes(computed.whiteSpace)) put('whiteSpace', computed.whiteSpace)
+          if (!parent || computed.color !== parent.color) {
+            const color = rgba(computed.color).values
+            put('color', computed.color === baseColor ? '$text' : color.length >= 3 && Math.max(...color.slice(0, 3)) - Math.min(...color.slice(0, 3)) > 25 ? '$accent' : '$muted')
+          }
+          if (!rgba(computed.backgroundColor).clear) {
+            const color = rgba(computed.backgroundColor).values
+            put('backgroundColor', divider ? '$border' : color.length >= 3 && (Math.min(...color.slice(0, 3)) > 248 || Math.max(...color.slice(0, 3)) < 12) ? '$bg' : '$soft')
+          }
+          if (computed.opacity && Number(computed.opacity) < 1 && Number(computed.opacity) >= 0) put('opacity', computed.opacity)
+          if (['svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'].includes(tag)) {
+            for (const [name, key] of Object.entries(geometry)) {
+              const value = current.getAttribute(name)
+              if (value === null) continue
+              if (key === 'fill' || key === 'stroke') attrs[key] = ['none', 'transparent'].includes(value) ? value : 'currentColor'
+              else if (key === 'd' && value.length <= 16000 && /^[MmZzLlHhVvCcSsQqTtAaEe0-9.,+\s-]*$/.test(value)) attrs[key] = value
+              else if (key === 'viewBox' && /^-?\d+(?:\.\d+)?(?:[ ,]+-?\d+(?:\.\d+)?){3}$/.test(value)) attrs[key] = value
+              else if (key === 'points' && value.length <= 16000 && /^[0-9.,+\s-]+$/.test(value)) attrs[key] = value
+              else if (['strokeLinecap', 'strokeLinejoin', 'fillRule', 'clipRule'].includes(key) && /^(?:butt|round|square|miter|bevel|evenodd|nonzero)$/.test(value)) attrs[key] = value
+              else if (/^-?\d+(?:\.\d+)?$/.test(value) && Math.abs(Number(value)) <= 2000) attrs[key] = value
+            }
+            for (const key of ['fill', 'stroke']) if (!(key in attrs) && computed[key]) attrs[key] =
+              ['none', 'transparent'].includes(computed[key]) ? computed[key] : 'currentColor'
+          }
+          if (Object.keys(style).length) result.style = style
+          if (Object.keys(attrs).length) result.attrs = attrs
+          if (nativeTag === 'input' || nativeTag === 'textarea') {
+            if (nativeTag === 'input' && !['text', 'search', ''].includes(current.getAttribute('type') || '')) return null
+            result.children = [String(current.getAttribute('placeholder') || '').slice(0, 500)]
+          } else result.children = [...current.childNodes].map(child => read(child, computed, depth + 1)).filter(child => child !== null)
+          return result
+        }
+        const root = read(element, null, 0)
+        if (!root || failed || chars === 0) return []
+        const data = { version: 1, sourceMessageId, label: collapse(element.getAttribute('aria-label') ||
+          element.querySelector('h1, h2, h3, h4, strong, b')?.textContent).slice(0, 500) || '智能界面布局',
+          width: Math.min(2000, Math.max(32, Math.round(element.getBoundingClientRect().width))), ...(lists.has(element) ? { kind: 'list' } : {}), root }
+        if (JSON.stringify(data).length > 180000) return []
+        return [{ element, data, fallback: String(element.innerText || '').trim().slice(0, 20000) }]
+      })
+    })
+  }
+  const layoutMarkdown = layout => '\n\n<!--focus-layout ' + JSON.stringify(layout.data).replace(/</g, '\\u003c') + ' -->\n' +
+    layout.fallback.split('\n').map(line => '> ' + line).join('\n') + '\n\n'
+
   /** Preserve the rendered answer structure as Markdown for the app-owned transcript. */
   const readReplyMarkdown = (node) => {
     const root = replyRootOf(node)
     if (!root) return ''
+    const smartCards = PAGE.focus?.smartUi ? smartUiCardsOf(node) : []
+    const layouts = PAGE.focus?.smartUi ? smartUiLayoutsOf(node) : []
 
-    const render = (current, depth = 0) => {
+    const render = (current, depth = 0, strongContext = false) => {
       if (!current) return ''
       if (current.nodeType === Node.TEXT_NODE) return String(current.nodeValue || '')
       if (current.nodeType !== Node.ELEMENT_NODE) return ''
 
       const element = current
+      const smart = smartCards.find(card => card.element === element)
+      if (smart) return smartUiMarkdown(smart.data)
+      const layout = layouts.find(item => item.element === element)
+      if (layout) return layoutMarkdown(layout)
       const tag = element.tagName.toLowerCase()
-      const children = () => [...element.childNodes].map((child) => render(child, depth)).join('')
+      const heading = /^h[1-6]$/.test(tag)
+      // DIL Text uses p/span with an explicit strong marker or a computed weight;
+      // treating these as plain wrappers loses emphasis outside the layout cards.
+      const strong = tag === 'strong' || tag === 'b' || element.getAttribute('data-d-default-strong') !== null ||
+        (PAGE.focus?.smartUi && (tag === 'p' || tag === 'span') && element.getAttribute('data-d-component') === 'Text' &&
+          Number.parseFloat(getComputedStyle(element).fontWeight) >= 600)
+      const children = () => [...element.childNodes].map((child) => render(child, depth, strongContext || strong || heading)).join('')
+      const emphasis = body => {
+        if (!strong || strongContext || !body.trim()) return body
+        // Delimiters must touch non-whitespace, especially in inline Text spans.
+        return body.replace(/^(\s*)([\s\S]*?\S)(\s*)$/, (_, before, text, after) => before + '**' + text + '**' + after)
+      }
       const chart = PAGE.answerCharts
       if (chart && element.matches(chart.rootSelector)) return chartMarkdown(element, chart)
       // ChatGPT's current renderer uses a span marker for inline code instead of a
@@ -457,7 +687,7 @@
         return `\n\n\`\`\`${language}\n${raw}\n\`\`\`\n\n`
       }
       if (tag === 'code') return `\`${String(element.textContent || '').replace(/\`/g, '\\`')}\``
-      if (tag === 'strong' || tag === 'b') return `**${children()}**`
+      if (tag === 'strong' || tag === 'b') return emphasis(children())
       if (tag === 'em' || tag === 'i') return `*${children()}*`
       if (tag === 'del' || tag === 's') return `~~${children()}~~`
       if (tag === 'a') {
@@ -465,7 +695,7 @@
         const href = String(element.getAttribute('href') || '')
         return href ? `[${label}](${href})` : label
       }
-      if (/^h[1-6]$/.test(tag)) return `\n\n${'#'.repeat(Number(tag[1]))} ${children().trim()}\n\n`
+      if (heading) return `\n\n${'#'.repeat(Number(tag[1]))} ${children().trim()}\n\n`
       if (tag === 'blockquote') {
         const body = children().trim().split('\n').map((line) => `> ${line}`).join('\n')
         return `\n\n${body}\n\n`
@@ -475,17 +705,17 @@
           .filter((child) => child.tagName.toLowerCase() === 'li')
           .map((child, index) => {
             const prefix = tag === 'ol' ? `${index + 1}. ` : '- '
-            const body = render(child, depth + 1).trim().replace(/\n+/g, '\n')
+            const body = render(child, depth + 1, strongContext).trim().replace(/\n+/g, '\n')
             return `${'  '.repeat(depth)}${prefix}${body}`
           })
           .join('\n')
         return `\n${items}\n`
       }
       if (tag === 'li') return children()
-      if (tag === 'p') return `\n\n${children().trim()}\n\n`
+      if (tag === 'p') return `\n\n${emphasis(children().trim())}\n\n`
       if (tag === 'table') {
         const rows = [...element.querySelectorAll('tr')].map((row) =>
-          [...row.querySelectorAll(':scope > th, :scope > td')].map((cell) => String(cell.innerText || '').trim())
+          [...row.querySelectorAll(':scope > th, :scope > td')].map((cell) => render(cell, depth, strongContext).trim().replace(/\s*\n+\s*/g, ' ').replace(/\|/g, '\\|'))
         )
         if (rows.length === 0) return children()
         const width = Math.max(...rows.map((row) => row.length))
@@ -494,8 +724,8 @@
         const body = normalized.slice(1)
         return `\n\n| ${header.join(' | ')} |\n| ${header.map(() => '---').join(' | ')} |${body.length ? `\n${body.map((row) => `| ${row.join(' | ')} |`).join('\n')}` : ''}\n\n`
       }
-      if (tag === 'div' || tag === 'section' || tag === 'article') return children()
-      return children()
+      if (tag === 'div' || tag === 'section' || tag === 'article') return emphasis(children())
+      return emphasis(children())
     }
 
     return render(root)
@@ -1755,6 +1985,155 @@
     const at = text.lastIndexOf(USER_TEXT_SENTINEL)
     if (at === -1) return text
     return text.slice(at + USER_TEXT_SENTINEL.length)
+  }
+
+  /** Forward one explicit focus action to the live native component, once. */
+  const actOnSmartUi = async (request, expectedPath, diagnostic = {}) => {
+    diagnostic.stage = 'prepare'
+    diagnostic.submitted = false
+    const finish = (outcome, reason) => { diagnostic.reason = reason; return outcome }
+    const rules = PAGE.focus?.smartUi
+    if (!rules || !request || !['choose', 'submit'].includes(request.kind) ||
+      !Number.isSafeInteger(request.index) || request.index < 0 || request.index >= 8 ||
+      typeof request.sourceMessageId !== 'string' || typeof request.signature !== 'string' || !request.token) return finish('invalid', 'invalid-request')
+    if (location.pathname !== expectedPath) return finish('unavailable', 'conversation-changed')
+    if (focusEditing) return finish('busy', 'edit-in-progress')
+    if (state.programmatic) return finish('busy', 'programmatic-send')
+    if (fileSend) return finish('busy', 'file-send')
+    if (state.awaitingReplySince) return finish('busy', 'awaiting-reply')
+    if (state.pendingQuestion) return finish('busy', 'question-pending')
+    if (findStopButton()) return finish('busy', 'model-generating')
+    const composer = getComposer()
+    if (!composer) return finish('no-composer', 'no-composer')
+    if (collapse(readComposer(composer))) return finish('busy', 'text-draft')
+    if (draftAttachmentEvidence(attachmentSnapshot())) return finish('busy', 'attachment-draft')
+    if (hasDraftImageAttachment()) return finish('busy', 'image-draft')
+    if (PAGE.focus.edit && queryAll([PAGE.focus.edit.editorSelector]).some(isVisibleElement)) return finish('busy', 'history-edit-draft')
+    diagnostic.stage = 'locate'
+    const locate = () => {
+      const nodes = queryAllAssistant().filter(node => messageIdOf(node) === request.sourceMessageId && isVisibleElement(node))
+      if (nodes.length !== 1) return null
+      return smartUiCardsOf(nodes[0]).find(card => card.data.index === request.index && card.data.signature === request.signature && isVisibleElement(card.element)) || null
+    }
+    let card = locate()
+    if (!card || card.data.disabled) return finish('unavailable', card ? 'component-disabled' : 'component-missing')
+    const token = { token: request.token, generation: state.taskPromptGeneration, submitted: false }
+    const current = () => focusEditing === token && location.pathname === expectedPath && state.taskPromptGeneration === token.generation
+    const pause = () => new Promise(resolve => setTimeout(resolve, 60))
+    let confirmed = false
+    focusEditing = token
+    state.programmatic = true
+    const clickControl = () => {
+      const live = locate()
+      if (!live || live.data.disabled) return null
+      if (request.kind === 'choose') {
+        const index = live.data.options.findIndex(option => option.value === request.optionValue && !option.disabled)
+        return index < 0 ? null : live.controls[index]
+      }
+      return live.data.options.some(option => option.value === request.selectedValue && option.selected) &&
+        !live.data.buttons[request.buttonIndex]?.disabled ? live.buttons[request.buttonIndex] : null
+    }
+    const guardClick = event => {
+      const click = token.nativeClick
+      if (!click?.prepared || click.received || !event.isTrusted) return
+      const target = clickControl()
+      if (!current() || !target || target !== click.target || !(event.target === target || target.contains(event.target))) {
+        click.failure = 'native-click-target-changed'
+        event.preventDefault(); event.stopImmediatePropagation()
+        return
+      }
+      if (event.type === 'click') {
+        click.received = true
+        diagnostic.nativeClickReceived = true
+        diagnostic.clickTrusted = true
+        queueMicrotask(() => { diagnostic.clickPrevented = event.defaultPrevented })
+      }
+    }
+    const inputEvents = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']
+    const requestClick = () => {
+      diagnostic.nativeClickReceived = false
+      token.nativeClick = { prepared: false, received: false, failure: null,
+        prepare() {
+          if (this.prepared) return null
+          this.prepared = true
+          const target = clickControl()
+          if (!current() || !target || !target.isConnected || !isVisibleElement(target) || controlDisabled(target)) {
+            this.failure = 'native-click-target-changed'
+            return { ok: false, reason: this.failure }
+          }
+          try { target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' }) } catch (_) {}
+          const rect = target.getBoundingClientRect(), x = rect.left + rect.width / 2, y = rect.top + rect.height / 2
+          const hit = document.elementFromPoint(x, y)
+          if (rect.width <= 0 || rect.height <= 0 || !hit || !(hit === target || target.contains(hit))) {
+            this.failure = 'native-click-unreachable'
+            return { ok: false, reason: this.failure }
+          }
+          this.target = target
+          return { ok: true, x, y }
+        } }
+      for (const type of inputEvents) document.addEventListener(type, guardClick, true)
+      report({ event: 'focus-ui-click', focusEditToken: request.token })
+    }
+    try {
+      if (request.kind === 'choose') {
+        const index = card.data.options.findIndex(option => option.value === request.optionValue && !option.disabled)
+        if (index < 0) return finish('invalid', 'invalid-request')
+        if (card.data.options[index].selected) return finish('ok', 'option-confirmed')
+        diagnostic.stage = 'confirm'
+        requestClick()
+        const deadline = Date.now() + 2500
+        while (current() && Date.now() < deadline) {
+          await pause()
+          if (token.nativeClick.failure) return finish('stuck', token.nativeClick.failure)
+          card = locate()
+          if (token.nativeClick.received && card?.data.options.some(option => option.value === request.optionValue && option.selected)) {
+            // Native Radix/React state gets a turn to settle before enabling submit.
+            await pause(); await pause(); await pause()
+            if (!current()) return finish('cancelled', 'cancelled')
+            return locate()?.data.options.some(option => option.value === request.optionValue && option.selected)
+              ? finish('ok', 'option-confirmed') : finish('stuck', 'option-unconfirmed')
+          }
+        }
+        return current() ? finish('stuck', diagnostic.nativeClickReceived ? 'option-unconfirmed' : 'native-click-not-received') : finish('cancelled', 'cancelled')
+      }
+      if (!Number.isSafeInteger(request.buttonIndex) || !card.buttons[request.buttonIndex] || card.data.buttons[request.buttonIndex].disabled ||
+        !request.selectedValue || !card.data.options.some(option => option.value === request.selectedValue && option.selected)) return finish('unavailable', 'form-not-ready')
+      const baseline = queryAllAssistant().map(messageIdOf).filter(Boolean)
+      for (const id of baseline) focusEditExcludedIds.add(id)
+      token.submitted = true
+      diagnostic.stage = 'submit'
+      diagnostic.submitted = true
+      // The native handler adds genui_state_snapshots and may create a branch. Do not
+      // synthesize a plain chat send, construct its API payload, or retry this click.
+      requestClick()
+      const deadline = Date.now() + SEND_TIMEOUT_MS
+      while (current() && Date.now() < deadline) {
+        if (token.nativeClick.failure) return finish('stuck', token.nativeClick.failure)
+        const submission = token.submission
+        if (submission && !submission.matched) return finish('stuck', 'request-mismatch')
+        const groups = PAGE.focus.edit ? queryAll([PAGE.focus.edit.turnSelector]).filter(isVisibleElement) : []
+        if (token.nativeClick.received && submission?.matched && groups.some(group => group.getAttribute(PAGE.focus.edit.turnIdAttr) === submission.messageId)) {
+          focusReplyBaseline = null; focusBaselinePosition = null; focusReplyPosition = null
+          state.replyActionDetected = false; state.failedCommand = null; state.commandRecoveryUsed = false; state.lastCommandMessageId = null
+          draftRejected = false
+          report({ event: 'user-message', text: submission.text, focusEditToken: request.token })
+          setReplyWaiting(Date.now(), 'smart-ui-sent')
+          state.taskActive = true
+          report({ event: 'sent', text: submission.text.slice(0, 400), promptInjected: false, taskPromptGeneration: token.generation })
+          scheduleScrollToBottom(); confirmed = true
+          diagnostic.stage = 'confirm'
+          return finish('ok', 'new-user-confirmed')
+        }
+        await pause()
+      }
+      return current() ? finish('stuck', !diagnostic.nativeClickReceived ? 'native-click-not-received' :
+        token.submission ? 'submit-unconfirmed' : 'request-not-observed') : finish('cancelled', 'cancelled')
+    } finally {
+      for (const type of inputEvents) document.removeEventListener(type, guardClick, true)
+      if (focusEditing === token) focusEditing = null
+      if (state.taskPromptGeneration === token.generation) state.programmatic = false
+      if (confirmed) scheduleCheck()
+    }
   }
 
   /** Measured native edit form. Submit ONCE, then require matching request and DOM ids. */
@@ -4092,12 +4471,73 @@
       return true
     },
 
-    /** Read-only view data. Never expose user rows, injected prefixes or protocol JSON. */
+    async smartUiAction(request, expectedPath) {
+      const diagnostic = {}
+      const outcome = await actOnSmartUi(request, expectedPath, diagnostic)
+      return { outcome, diagnostic }
+    },
+    prepareSmartUiClick(token) {
+      if (!focusEditing || focusEditing.token !== token || focusEditing.generation !== state.taskPromptGeneration) return null
+      return focusEditing.nativeClick?.prepare() || null
+    },
+    failSmartUiClick(token, reason) {
+      if (!focusEditing || focusEditing.token !== token || !focusEditing.nativeClick ||
+        !['native-click-window-unfocused', 'native-click-dispatch-failed'].includes(reason)) return false
+      focusEditing.nativeClick.failure = reason
+      return true
+    },
+    noteSmartUiSubmission(token, submission) {
+      if (!focusEditing || focusEditing.token !== token || !focusEditing.submitted || !submission ||
+        typeof submission.matched !== 'boolean' || (submission.matched && (typeof submission.text !== 'string' || !submission.text.trim() || submission.text.length > 20000))) return false
+      focusEditing.submission = submission
+      return true
+    },
+
+    /** A missed native card send can be recovered from its adjacent rendered user row. */
+    readSmartUiRecovery(sourceIds, expectedPath) {
+      const rules = PAGE.focus?.edit
+      if (!PAGE.focus?.smartUi || !rules || location.pathname !== expectedPath || focusEditing || state.programmatic ||
+        fileSend || state.awaitingReplySince || state.pendingQuestion || !Array.isArray(sourceIds) || sourceIds.length > 200) return null
+      const groups = queryAll([rules.turnSelector]).filter(group => isVisibleElement(group) && group.querySelector(rules.userTextSelector))
+      if (groups.length < 2) return null
+      const group = groups.at(-1), previous = groups.at(-2), user = group.querySelector(rules.userTextSelector)
+      const parents = queryAllAssistant().filter(node => previous.contains(node) && sourceIds.includes(messageIdOf(node)) && smartUiCardsOf(node).length > 0)
+      const ids = [...new Set(parents.map(messageIdOf))]
+      if (ids.length !== 1 || user.querySelector('img, input, textarea, [contenteditable="true"]')) return null
+      const userMessageId = group.getAttribute(rules.turnIdAttr), userText = userTextOf(normalizeLineEndings(user.innerText || '')).trim()
+      if (!/^[a-zA-Z0-9_:-]{1,160}$/.test(userMessageId || '') || !userText || userText.length > 20000) return null
+      return { sourceMessageId: ids[0], userMessageId, userText }
+    },
+    adoptSmartUiRecovery(recovery, expectedPath) {
+      if (!recovery) return false
+      const live = this.readSmartUiRecovery([recovery.sourceMessageId], expectedPath)
+      if (!live || live.userMessageId !== recovery.userMessageId || live.userText !== recovery.userText) return false
+      // Align only the passive focus reader. Historical replies must never arm command execution.
+      focusReplyBaseline = recovery.sourceMessageId
+      focusBaselinePosition = null
+      focusReplyPosition = null
+      return true
+    },
+
+    /** Read-only view data. User text is exposed only through the scoped recovery read above. */
     focusSnapshot() {
       // Every page-specific read below comes from the platform's measured focus rules.
       const rules = PAGE.focus || { reasoningSelectors: [] }
       const composer = getComposer()
-      if (focusEditing) return { path: location.pathname, ready: !!composer, nativeDraft: false, waiting: true, generating: 'unknown', reply: null }
+      const rendered = new Map()
+      const markdownOf = node => {
+        if (!rendered.has(node)) rendered.set(node, readReplyMarkdown(node))
+        return rendered.get(node)
+      }
+      const smartReplies = rules.smartUi ? queryAllAssistant().filter(node => isVisibleElement(node) &&
+        (node.matches?.(rules.smartUi.rootSelector) || node.querySelector?.(rules.smartUi.rootSelector))).slice(-8)
+        .flatMap(node => {
+          const answer = markdownOf(node)
+          // Never replace a complete saved answer with a truncated live copy or cut
+          // through a widget marker. Oversize replies use the normal answer channel.
+          return answer.length <= 250000 ? [{ sourceMessageId: messageIdOf(node), answer }] : []
+        }) : []
+      if (focusEditing) return { path: location.pathname, ready: !!composer, nativeDraft: false, waiting: true, generating: 'unknown', reply: null, smartReplies }
       let generating = 'unknown'
       if (rules.generatingIcon) {
         const { primaryControlSelector, generatingPrefixes, idlePrefixes } = rules.generatingIcon
@@ -4161,11 +4601,11 @@
           (state.enabled && state.awaitingReplySince !== 0 &&
             (raw.trim().startsWith('{') || raw.trim().startsWith(String.fromCharCode(96).repeat(3) + 'json')))
         reply = { sourceMessageId: node ? turnKeyOf(node) : '', parts,
-          answer: answer && !protocol ? readReplyMarkdown(node).slice(0, 250000) : '' }
+          answer: answer && !protocol ? markdownOf(node).slice(0, 250000) : '' }
       }
       const historyDraft = !!rules.edit && queryAll([rules.edit.editorSelector]).some(isVisibleElement)
       return { path: location.pathname, ready: !!composer, nativeDraft: historyDraft || (!!composer && collapse(readComposer(composer)) !== ''),
-        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply }
+        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply, smartReplies }
     },
 
     async recoverCommand(token, generation, allowSend, manual = false, expectedMessageId = null) {

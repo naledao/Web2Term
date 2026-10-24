@@ -14,7 +14,10 @@ import { sendPageFiles } from './page-files'
 import { writeRawSendDiagnostic } from './raw-send-log'
 import { writePromptDiagnostic } from './prompt-log'
 import { writeReplyDiagnostic } from './reply-log'
-import { observeFocusEditRequest } from './focus-edit-request'
+import { observeFocusEditRequest, observeFocusPageRequest } from './focus-edit-request'
+import { smartUiSubmission } from './focus-ui-request'
+import { dispatchFocusUiClick } from './focus-ui-click'
+import type { FocusUiAction, FocusUiRecovery } from '../shared/focus-smart-ui'
 import { parseReadFilesRequest } from '../shared/file-requests'
 import type { FileSendOutcome } from '../shared/file-requests'
 import type { PreparedFileResult, PreparedAttachment } from './file-access'
@@ -1309,6 +1312,8 @@ export class ChatGptEmbed {
         raw.reply.parts.length > 50 || raw.reply.parts.some(part => !part || !['reasoning', 'search'].includes(part.kind) ||
           typeof part.text !== 'string' || part.text.length > 50000 ||
           (part.url !== undefined && (typeof part.url !== 'string' || !/^https?:\/\//.test(part.url) || part.url.length > 2000))))) return null
+      if (raw.smartReplies !== undefined && (!Array.isArray(raw.smartReplies) || raw.smartReplies.length > 8 || raw.smartReplies.some(reply =>
+        !reply || typeof reply.sourceMessageId !== 'string' || reply.sourceMessageId.length > 160 || typeof reply.answer !== 'string' || reply.answer.length > 250000))) return null
       return raw
     } catch { return null }
     finally { if (timer) clearTimeout(timer) }
@@ -1320,6 +1325,74 @@ export class ChatGptEmbed {
   }
 
   private focusEditToken: string | null = null
+  async readFocusUiRecovery(sourceIds: string[]): Promise<FocusUiRecovery | null> {
+    const contents = this.focusPage()
+    if (!contents || this.platform.id !== 'chatgpt' || this.focusEditToken || !sourceIds.length) return null
+    try {
+      const url = contents.getURL(), path = new URL(url).pathname
+      const value = await contents.executeJavaScript('window.__cmdTerminalInterceptor?.readSmartUiRecovery(' + JSON.stringify(sourceIds.slice(-200)) + ',' + JSON.stringify(path) + ')')
+      if (contents.isDestroyed() || contents.getURL() !== url || !value || !sourceIds.includes(value.sourceMessageId) ||
+        typeof value.userMessageId !== 'string' || !/^[a-zA-Z0-9_:-]{1,160}$/.test(value.userMessageId) ||
+        typeof value.userText !== 'string' || !value.userText.trim() || value.userText.length > 20000) return null
+      return value
+    } catch { return null }
+  }
+  async adoptFocusUiRecovery(recovery: FocusUiRecovery): Promise<boolean> {
+    const contents = this.focusPage()
+    if (!contents || this.platform.id !== 'chatgpt' || this.focusEditToken) return false
+    try {
+      const url = contents.getURL()
+      const adopted = await contents.executeJavaScript('window.__cmdTerminalInterceptor?.adoptSmartUiRecovery(' + JSON.stringify(recovery) + ',' + JSON.stringify(new URL(url).pathname) + ')')
+      return !contents.isDestroyed() && contents.getURL() === url && adopted === true
+    } catch { return false }
+  }
+  private focusUiNativeClick: { token: string; dispatch(): void } | null = null
+  async actOnFocusUi(request: FocusUiAction & { token: string }, diagnose: (details: FocusEditDiagnostic) => void): Promise<FocusSendOutcome> {
+    const contents = this.focusPage(), rules = this.platform.page.focus?.smartUi
+    if (!contents || !rules || this.focusEditToken) {
+      diagnose({ stage: 'prepare', reason: !contents ? 'page-unavailable' : !rules ? 'rules-missing' : 'edit-in-progress' })
+      return 'unavailable'
+    }
+    this.focusEditToken = request.token
+    let stopObserving: (() => void) | undefined
+    try {
+      const url = new URL(contents.getURL()), conversationId = this.platform.conversationIdFromPath(url.pathname)
+      if (!conversationId) return 'unavailable'
+      let clickHandled = false, requestCount = 0
+      const current = (): boolean => !contents.isDestroyed() && contents.getURL() === url.href && this.focusEditToken === request.token
+      this.focusUiNativeClick = { token: request.token, dispatch: () => {
+        if (clickHandled || !current()) return
+        clickHandled = true
+        void dispatchFocusUiClick(contents, request.token, current,
+          () => !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false), diagnose)
+      } }
+      if (request.kind === 'submit') stopObserving = observeFocusPageRequest(contents, url.origin, details => {
+        if (!current() || details.method !== 'POST') return
+        const summary = smartUiSubmission(details, { origin: url.origin, path: rules.submissionPath, conversationId,
+          sourceMessageId: request.sourceMessageId, selectedValue: request.selectedValue })
+        diagnose({ stage: 'request', reason: summary?.reason ?? 'request-unrelated', requestCount: ++requestCount,
+          requestPathMatches: new URL(details.url).pathname === rules.submissionPath,
+          ...(summary ? { requestStateMatches: summary.requestStateMatches, requestStatePresent: summary.requestStatePresent,
+            requestSnapshotCount: summary.requestSnapshotCount, submitted: true } : {}) })
+        if (!summary) return
+        void contents.executeJavaScript('window.__cmdTerminalInterceptor?.noteSmartUiSubmission(' + JSON.stringify(request.token) + ',' + JSON.stringify(summary) + ')').catch(() => {})
+      })
+      const raw = await contents.executeJavaScript('(async () => {' +
+        'const api = window.__cmdTerminalInterceptor;' +
+        'return typeof api?.smartUiAction === "function" && typeof api?.noteSmartUiSubmission === "function" && typeof api?.prepareSmartUiClick === "function" ? ' +
+        'await api.smartUiAction(' + JSON.stringify(request) + ',' + JSON.stringify(url.pathname) + ') : {outcome:"unavailable",diagnostic:{stage:"prepare",reason:"api-missing"}}' +
+        '})()')
+      if (raw?.diagnostic && typeof raw.diagnostic === 'object') diagnose({ ...raw.diagnostic, requestCount })
+      const outcome = typeof raw === 'string' ? raw : raw?.outcome
+      return ['ok', 'busy', 'stuck', 'unavailable', 'no-composer', 'invalid', 'cancelled'].includes(outcome) ? outcome : 'unavailable'
+    } catch { diagnose({ stage: 'prepare', reason: 'page-exception' }); return 'stuck' }
+    finally {
+      stopObserving?.()
+      if (this.focusUiNativeClick?.token === request.token) this.focusUiNativeClick = null
+      if (this.focusEditToken === request.token) this.focusEditToken = null
+    }
+  }
+
   async editFocusUser(request: { token: string; originalText: string; text: string; replyMessageId: string | null },
     diagnose: (details: FocusEditDiagnostic) => void = () => {}): Promise<FocusSendOutcome> {
     const contents = this.focusPage()
@@ -1663,6 +1736,9 @@ export class ChatGptEmbed {
         // The page measured the button; only a trusted input event actually presses it.
         if (payload.reason === 'continue-clicked') this.clickAt(payload.x, payload.y)
         console.info(`[embed:${this.platform.id}] interceptor ${JSON.stringify(payload)}`)
+        break
+      case 'focus-ui-click':
+        if (payload.focusEditToken && this.focusUiNativeClick?.token === payload.focusEditToken) this.focusUiNativeClick.dispatch()
         break
       case 'configured':
         this.interceptor.installed = true

@@ -415,8 +415,13 @@ export class CommandRunner {
   /** Do not interleave an automatic task result with a command or attachment send. */
   canSendAutomaticResult(): boolean {
     return !this.disposed && !this.automation.paused && this.terminalModeOn()
-      && this.inFlight.size === 0 && !this.activeShell && !this.fileAbort
-      && !this.localShell?.running && !this.deps.remoteShell()?.running
+      && !this.hasInFlightWork()
+  }
+
+  /** Actual execution/delivery activity, independent of task completion and auto mode. */
+  hasInFlightWork(): boolean {
+    return this.inFlight.size > 0 || this.activeShell !== null || this.fileAbort !== null
+      || !!this.localShell?.running || !!this.deps.remoteShell()?.running
   }
 
   setMode(mode: ExecutionMode): AutomationState {

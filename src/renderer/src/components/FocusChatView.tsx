@@ -1,9 +1,16 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, JSX, ReactNode, RefObject, SyntheticEvent } from 'react'
 import MDEditor from '@uiw/react-md-editor'
 import ConversationTranscript from './ConversationTranscript'
 import FocusChart, { parseFocusChart } from './FocusChart'
 import type { FocusChartData } from './FocusChart'
+import FocusSmartUi, { FocusSmartUiContext } from './FocusSmartUi'
+import FocusLayout from './FocusLayout'
+import { parseFocusLayout } from '@shared/focus-layout'
+import type { FocusLayoutData } from '@shared/focus-layout'
+import { parseFocusUi } from '@shared/focus-smart-ui'
+import type { FocusUiAction, FocusUiWidget } from '@shared/focus-smart-ui'
+import type { FocusSendOutcome } from '@shared/focus-chat'
 import deepseekIcon from '../assets/DeepSeek.svg'
 import chatgptIcon from '../assets/ChatGPT.svg'
 // The view's brand icon per focus platform (`FOCUS_PLATFORMS`); a platform without one shows its name.
@@ -151,23 +158,26 @@ function executionNeedsAction(record: ExecutionRecord, delivery?: FocusDelivery)
  * fallback list. The focus view draws the chart in place of both; a marker that does not
  * parse leaves the quote, and the comment itself is never shown (skipHtml).
  */
-const CHART_BLOCK = /<!--focus-chart (\{[\s\S]*?\}) -->\n((?:>[^\n]*(?:\n|$))*)/g
-const CHART_MARKER = /<!--focus-chart [\s\S]*? -->\n?/g
+const RICH_BLOCK = /<!--focus-(chart|ui|layout) (\{[^\n]*\}) -->\n((?:>[^\n]*(?:\n|$))*)/g
+const CHART_MARKER = /<!--focus-(?:chart|ui|layout) [\s\S]*? -->\n?/g
 const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: AppTheme }): JSX.Element {
   const source = cleanFocusAnswer(text)
-  const blocks: Array<string | FocusChartData> = []
+  const blocks: Array<string | { kind: 'chart'; data: FocusChartData } | { kind: 'ui'; data: FocusUiWidget } | { kind: 'layout'; data: FocusLayoutData }> = []
   let last = 0
-  for (const match of source.matchAll(CHART_BLOCK)) {
-    const chart = parseFocusChart(match[1])
-    if (!chart) continue
-    blocks.push(source.slice(last, match.index), chart)
+  for (const match of source.matchAll(RICH_BLOCK)) {
+    const data = match[1] === 'chart' ? parseFocusChart(match[2]) : match[1] === 'layout' ? parseFocusLayout(match[2]) : parseFocusUi(match[2])
+    if (!data) continue
+    const block = match[1] === 'chart' ? { kind: 'chart' as const, data: data as FocusChartData } :
+      match[1] === 'layout' ? { kind: 'layout' as const, data: data as FocusLayoutData } : { kind: 'ui' as const, data: data as FocusUiWidget }
+    blocks.push(source.slice(last, match.index), block)
     last = match.index + match[0].length
   }
   if (!blocks.length) return <MDEditor.Markdown source={source} skipHtml wrapperElement={{ 'data-color-mode': theme }} />
   blocks.push(source.slice(last))
   return <>{blocks.map((block, index) => typeof block === 'string'
     ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml wrapperElement={{ 'data-color-mode': theme }} /> : null
-    : <FocusChart key={index} data={block} />)}</>
+    : block.kind === 'chart' ? <FocusChart key={index} data={block.data} /> : block.kind === 'layout'
+      ? <FocusLayout key={index} data={block.data} /> : <FocusSmartUi key={index} data={block.data} />)}</>
 })
 
 interface AskContext { range: Range; answer: HTMLElement; text: string; answerText: string; sourceMessageId: string; backward: boolean }
@@ -530,6 +540,23 @@ export default function FocusChatView(props: Props): JSX.Element {
   const linkedExecutions = new Set(turns.flatMap(turn => turn.executionIds))
   const unlinkedAttention = records.filter(record => !linkedExecutions.has(record.messageId) && executionNeedsAction(record, focusDelivery(record)))
   const ready = state?.ready === true
+  const richAnswers = new Map((state?.smartReplies ?? []).map(reply => [reply.sourceMessageId, reply.answer]))
+  const actOnUi = useCallback(async (action: FocusUiAction): Promise<FocusSendOutcome> => {
+    if (sendLock.current || working || editingId || !ready || state?.nativeDraft) return 'busy'
+    sendLock.current = true; setSending(true); readEpoch.current++
+    try {
+      const result = await window.api.actOnFocusUi({ ...owner, ...action })
+      readEpoch.current++
+      const next = await window.api.getFocusChat(owner)
+      if (alive.current && next && focusOwnerKey(next) === ownerKey) {
+        lastSnapshot.current = JSON.stringify(next); setState(next)
+      }
+      return result
+    } finally { sendLock.current = false; if (alive.current) setSending(false) }
+  }, [ownerKey, working, editingId, ready, state?.nativeDraft])
+  const smartUiContext = useMemo(() => ({ disabled: working || sending || stopping || !!editingId || !ready || !!state?.nativeDraft,
+    liveSources: new Set((state?.smartReplies ?? []).map(reply => reply.sourceMessageId)), act: actOnUi, onOriginal: props.onOriginal }),
+  [working, sending, stopping, editingId, ready, state?.nativeDraft, state?.smartReplies, actOnUi, props.onOriginal])
   const setDraftText = (text: string): void => {
     draftRef.current = text
     setDraft(text)
@@ -661,7 +688,8 @@ export default function FocusChatView(props: Props): JSX.Element {
     const running = executions.some(record => record.status === 'running')
     const pending = executions.some(record => ['pending', 'blocked'].includes(record.status))
     const deliveryPending = executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending')
-    const answer = turn.segments.at(-1)?.answer || ''
+    const lastSegment = turn.segments.at(-1)
+    const answer = (lastSegment?.sourceMessageId ? richAnswers.get(lastSegment.sourceMessageId) : '') || lastSegment?.answer || ''
     const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.parseFailures?.length
     const label = turn.commandRecovery ? (turn.status === 'working' ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : deliveryPending ? '正在回传执行结果…' :
       turn.status === 'stopped' ? '已停止 · 已有内容保留' : turn.status === 'working' ? '正在处理…' : '已回复'
@@ -716,7 +744,7 @@ export default function FocusChatView(props: Props): JSX.Element {
         {entries.length === 0 ? <div className="focus-chat__empty">{modelIcon ? <img src={modelIcon} alt="" /> : null}<h2>从一个目标开始</h2><p>说说你想解决的问题，一起找到下一步。</p></div> : entries.map(entry => entry.turn ? renderTurn(entry.turn) :
           <article className={'focus-history focus-history--' + entry.message!.role + (editingId === entry.message!.id ? ' focus-user--editing' : '')} data-message-id={entry.message!.id} key={entry.message!.id}>
             {entry.message!.role === 'assistant' ? <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}{modelLabel}</div> : null}
-            {entry.message!.role === 'assistant' ? <>{entry.message!.attachments.map(props.renderAttachment)}<div data-question-answer={entry.message!.sourceMessageId ?? ''}><Markdown text={entry.message!.content} theme={theme} /></div></>
+            {entry.message!.role === 'assistant' ? <>{entry.message!.attachments.map(props.renderAttachment)}<div data-question-answer={entry.message!.sourceMessageId ?? ''}><Markdown text={richAnswers.get(entry.message!.sourceMessageId ?? '') || entry.message!.content} theme={theme} /></div></>
               : userContent(entry.message!.id, cleanFocusUserText(entry.message!.content), entry.message!.attachments.length > 0, entry.message!.attachments.map(props.renderAttachment))}
           </article>)}
         {unlinkedAttention.length > 0 ? <details className="focus-process" {...remembered('unlinked-process', true)}>
@@ -727,7 +755,7 @@ export default function FocusChatView(props: Props): JSX.Element {
         </details> : null}
       </ConversationTranscript>,
   [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, working, sending, stopping, editingId, props.renderAttachment, props.onOpenTerminal, props.onRun, props.onSkip])
-  return <section className="focus-chat" aria-label="专注对话" data-theme={theme}>
+  return <FocusSmartUiContext.Provider value={smartUiContext}><section className="focus-chat" aria-label="专注对话" data-theme={theme}>
     <header className="focus-chat__header">
       <span>{modelIcon ? <img className="focus-chat__brand-icon" src={modelIcon} alt={modelLabel} /> : <strong>{modelLabel}</strong>}</span>
       <button type="button" className="focus-chat__new-chat" aria-label="新建对话" title="新建对话"
@@ -782,5 +810,5 @@ export default function FocusChatView(props: Props): JSX.Element {
         </div>
       </form><p className="focus-composer__hint">Enter 发送 · Shift+Enter 换行</p>
     </div>
-  </section>
+  </section></FocusSmartUiContext.Provider>
 }

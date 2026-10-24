@@ -55,25 +55,38 @@ export function summarizeFocusEditRequest(details: Pick<OnBeforeRequestListenerD
 /** One passive listener per partition; only the active editing view's request is read. */
 export function observeFocusEditRequest(contents: WebContents, expected: ExpectedEdit,
   receive: (submission: FocusEditSubmission) => void): () => void {
+  let count = 0
+  return observeFocusPageRequest(contents, expected.origin, details => {
+    const page = new URL(contents.getURL())
+    if (page.origin !== expected.origin || !page.pathname.endsWith('/' + expected.conversationId)) return
+    const summary = summarizeFocusEditRequest(details, expected)
+    if (summary) receive({ ...summary, requestCount: ++count })
+  })
+}
+
+/** Shared slot for a user-initiated edit or smart-component action, never two listeners. */
+export function observeFocusPageRequest(contents: WebContents, origin: string, receive: ObserveRequest): () => void {
   const ses = contents.session
   let active = observers.get(ses)
   if (!active) {
     active = new Map()
     observers.set(ses, active)
     const dispatch = active
-    ses.webRequest.onBeforeRequest({ urls: [expected.origin + '/backend-api/*'] }, (details, callback) => {
+    ses.webRequest.onBeforeRequest({ urls: [origin + '/backend-api/*'] }, (details, callback) => {
       // Observation does not block, cancel or rewrite the request.
       callback({})
       try { if (details.webContentsId !== undefined) dispatch.get(details.webContentsId)?.(details) } catch { /* metadata only */ }
     })
   }
-  let count = 0
   const observe: ObserveRequest = details => {
-    if (contents.isDestroyed() || (details.frame && details.frame !== contents.mainFrame)) return
-    const page = new URL(contents.getURL())
-    if (page.origin !== expected.origin || !page.pathname.endsWith('/' + expected.conversationId)) return
-    const summary = summarizeFocusEditRequest(details, expected)
-    if (summary) receive({ ...summary, requestCount: ++count })
+    if (contents.isDestroyed()) return
+    const main = contents.mainFrame, frame = details.frame
+    // Electron may expose another wrapper for the same frame. Compare its public
+    // identity while still excluding iframe requests from the native send proof.
+    if (frame && frame !== main && !(Number.isSafeInteger(frame.processId) && Number.isSafeInteger(frame.routingId) &&
+      frame.processId === main.processId && frame.routingId === main.routingId)) return
+    if (new URL(contents.getURL()).origin !== origin) return
+    receive(details)
   }
   active.set(contents.id, observe)
   return () => { if (active.get(contents.id) === observe) active.delete(contents.id) }

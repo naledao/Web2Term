@@ -1,5 +1,6 @@
 import type { ToolboxInvocation } from './toolbox'
 import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo } from './focus-chat'
+import type { FocusUiRequest } from './focus-smart-ui'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
 import { BACKGROUND_TASK_MARKER } from './background-tasks'
@@ -30,6 +31,7 @@ export const IpcChannels = {
   focusChatGet: 'focus-chat:get',
   focusChatSend: 'focus-chat:send',
   focusChatEdit: 'focus-chat:edit',
+  focusChatUiAction: 'focus-chat:ui-action',
   focusChatAsk: 'focus-chat:ask',
   embedState: 'embed:state',
   questionChatGetState: 'question-chat:get-state',
@@ -1259,6 +1261,8 @@ export interface InterceptorPageEvent {
     | 'reply-watchdog'
     /** The page's own "continue" control was pressed on a reply the server cut off. */
     | 'continue-generation'
+    /** One pending focus card control asks main to deliver native mouse input. */
+    | 'focus-ui-click'
     | 'sent-raw'
     | 'raw-busy'
     /** Reported by the injected theme script; see src/main/injected/theme.js. */
@@ -2217,6 +2221,7 @@ export interface AppApi {
   getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
   sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome>
   editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome>
+  actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome>
   /** Ask about a focus-view selection in the side chat; '' once it is open, otherwise the message to show. */
   askFocusSelection(request: FocusSelectionRequest): Promise<string>
   /** Subscribe to embed state; returns an unsubscribe function. */

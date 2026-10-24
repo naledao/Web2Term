@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { validFocusUiAction } from '../shared/focus-smart-ui'
+import type { FocusUiRequest } from '../shared/focus-smart-ui'
 import { writeFile } from 'node:fs/promises'
 import { createConnection } from 'mysql2/promise'
 import { formatMysqlCell } from './mysql-field-value'
@@ -78,7 +80,7 @@ import { RedisReader, normalizeRedisDraft } from './redis-reader'
 import { ChatGptEmbed } from './embed'
 import { FocusChat } from './focus-chat'
 import { stageFocusAttachments } from './focus-attachments'
-import { supportsFocusView, validFocusFiles } from '../shared/focus-chat'
+import { cleanFocusUserText, supportsFocusView, validFocusFiles } from '../shared/focus-chat'
 import { writeFocusDiagnostic } from './focus-chat-log'
 import { getGithubCliState } from './github-cli'
 import { dispatchGithubLoginTask } from './github-login-task'
@@ -368,6 +370,8 @@ export class SessionRuntime {
   private pendingGoal = ''
   private readonly focusChat: FocusChat
   private focusSending = false
+  private focusUiRecovering = false
+  private focusUiRecoveredTurn: { platformId: string; conversationId: string; turnId: string } | null = null
   private focusRevision: { token: string; platformId: string; conversationId: string; turnIds: string[]; messageIds: string[]; acknowledged: boolean } | null = null
   private focusUploadAbort: AbortController | null = null
   /** Clean chat turns waiting for a brand-new conversation to receive its URL/id. */
@@ -1096,13 +1100,57 @@ export class SessionRuntime {
       this.activePlatformId === owner.platformId && this.embed.getState().conversationId === owner.conversationId
   }
 
+  /** Reconcile one missed native card send from rendered history; never replay its action. */
+  private async recoverFocusUi(owner: FocusOwner): Promise<void> {
+    if (owner.platformId !== 'chatgpt' || !owner.conversationId || this.focusUiRecovering || this.focusSending || this.focusRevision ||
+      this.focusChat.currentTurnId(owner.platformId) || this.runner.hasInFlightWork()) return
+    this.focusUiRecovering = true
+    let locked = false
+    try {
+      const messages = this.options.store.listConversationMessages(owner.conversationId)
+      const sourceIds = messages.filter(message => message.role === 'assistant' && message.sourceMessageId).map(message => message.sourceMessageId!)
+      const recovery = await this.embed.readFocusUiRecovery(sourceIds)
+      if (!recovery || !this.ownsFocus(owner) || this.focusSending || this.focusRevision || this.focusChat.currentTurnId(owner.platformId)) return
+      const current = this.options.store.listConversationMessages(owner.conversationId)
+      const normalized = (text: string): string => cleanFocusUserText(text).replace(/\s+/g, ' ').trim()
+      if (current.some(message => message.role === 'user' && (message.sourceMessageId === recovery.userMessageId ||
+        normalized(message.content) === normalized(recovery.userText)))) return
+      const index = current.findIndex(message => message.role === 'assistant' && message.sourceMessageId === recovery.sourceMessageId)
+      if (index < 0) return
+      this.focusSending = true; locked = true
+      if (!await this.embed.adoptFocusUiRecovery(recovery) || !this.ownsFocus(owner)) return
+      const turns = this.focusChat.turns(owner.platformId, owner.conversationId)
+      const parent = turns.findIndex(turn => turn.segments.some(segment => segment.sourceMessageId === recovery.sourceMessageId))
+      const replaced = parent >= 0 ? turns.slice(parent + 1) : turns.filter(turn => turn.createdAt > current[index].createdAt)
+      const turnId = this.focusChat.revise(owner.platformId, owner.conversationId, recovery.userText,
+        replaced.map(turn => turn.id), current.slice(index + 1).map(message => message.id))
+      if (!turnId) return
+      this.captureConversationMessage(owner.platformId, 'user', recovery.userText, recovery.userMessageId, [], turnId)
+      this.focusUiRecoveredTurn = { platformId: owner.platformId, conversationId: owner.conversationId, turnId }
+      writeFocusDiagnostic(owner, { event: 'smart-ui-recovered', turnId, messageId: recovery.userMessageId, inputLength: recovery.userText.length })
+    } catch { /* Recovery is optional; a failed read must not break the focus transcript. */ }
+    finally { if (locked) this.focusSending = false; this.focusUiRecovering = false }
+  }
+
   async getFocusChat(owner: FocusOwner): Promise<FocusChatState | null> {
     if (!this.ownsFocus(owner)) return null
     this.focusChat.context(owner.platformId, owner.conversationId)
+    await this.recoverFocusUi(owner)
+    if (!this.ownsFocus(owner)) return null
     const token = this.focusChat.token(owner.platformId)
     const page = await this.embed.readFocusSnapshot()
     if (!this.ownsFocus(owner)) return null
     if (page) this.focusChat.snapshot(owner.platformId, token, page)
+    const recovered = this.focusUiRecoveredTurn
+    if (recovered && recovered.platformId === owner.platformId && recovered.conversationId === owner.conversationId &&
+      recovered.turnId === this.focusChat.currentTurnId(owner.platformId) && page?.ready && page.generating === 'idle' && page.reply?.sourceMessageId) {
+      const turn = this.focusChat.turns(owner.platformId, owner.conversationId).find(item => item.id === recovered.turnId)
+      if (turn?.status === 'working') {
+        this.focusChat.settled(owner.platformId, page.reply.sourceMessageId, page.reply.answer)
+        this.captureConversationMessage(owner.platformId, 'assistant', page.reply.answer, page.reply.sourceMessageId)
+      }
+      this.focusUiRecoveredTurn = null
+    }
     writeFocusDiagnostic(owner, { event: 'view-state', ready: page?.ready === true,
       nativeDraft: page?.nativeDraft === true, waiting: page?.waiting === true, generating: page?.generating ?? 'unknown',
       turnCount: this.focusChat.turns(owner.platformId, owner.conversationId).length,
@@ -1114,6 +1162,7 @@ export class SessionRuntime {
       generating: page?.generating ?? 'unknown', waiting: page?.waiting === true,
       turns: this.focusChat.turns(owner.platformId, owner.conversationId),
       hiddenMessageIds: this.focusChat.hiddenMessageIds(owner.platformId, owner.conversationId),
+      smartReplies: page?.smartReplies ?? [],
       executions: owner.conversationId ? this.options.store.listExecutions(owner.conversationId).filter(record => !archivedExecutions.has(record.messageId)) : [] }
   }
 
@@ -1192,6 +1241,48 @@ export class SessionRuntime {
     } finally {
       await staged?.cleanup().catch(() => {})
       if (this.focusUploadAbort === controller) this.focusUploadAbort = null
+      this.focusSending = false
+    }
+  }
+
+  async actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome> {
+    if (!this.ownsFocus(request) || request.platformId !== 'chatgpt' || !request.conversationId) return 'unavailable'
+    if (!validFocusUiAction(request)) return 'invalid'
+    const status = this.embed.getInterceptorStatus()
+    writeFocusDiagnostic(request, { event: 'smart-ui-request', action: request.kind,
+      taskOpen: status.taskStartedAt !== null && status.taskFinishedAt === null })
+    // An open task also covers a settled prose answer asking the user to choose.
+    // Let the page check generation/drafts; only actual work owns this main-process lock.
+    const busyReason = this.focusSending ? 'send-in-progress' : this.focusRevision ? 'edit-in-progress' :
+      this.runner.hasInFlightWork() ? 'command-in-flight' : status.pendingQuestion ? 'question-pending' : null
+    if (busyReason) {
+      writeFocusDiagnostic(request, { event: 'smart-ui-outcome', action: request.kind, outcome: 'busy', stage: 'prepare', reason: busyReason })
+      return 'busy'
+    }
+    const hidden = new Set(this.focusChat.hiddenMessageIds(request.platformId, request.conversationId))
+    const messages = this.options.store.listConversationMessages(request.conversationId).filter(message => !hidden.has(message.id))
+    const index = messages.findIndex(message => message.role === 'assistant' && message.sourceMessageId === request.sourceMessageId)
+    const turns = this.focusChat.turns(request.platformId, request.conversationId)
+    const turnIndex = turns.findIndex(turn => turn.segments.some(segment => segment.sourceMessageId === request.sourceMessageId))
+    if (index < 0) {
+      writeFocusDiagnostic(request, { event: 'smart-ui-outcome', action: request.kind, outcome: 'unavailable', stage: 'locate', reason: 'component-missing' })
+      return 'unavailable'
+    }
+    const token = randomUUID()
+    // A native action on an older card branches from that assistant. Retain its turn,
+    // archive only subsequent turns/rows, and commit that change only after a real send.
+    const revision = { token, platformId: request.platformId, conversationId: request.conversationId,
+      turnIds: (turnIndex >= 0 ? turns.slice(turnIndex + 1) : turns.filter(turn => turn.createdAt > messages[index].createdAt)).map(turn => turn.id),
+      messageIds: messages.slice(index + 1).map(message => message.id), acknowledged: false }
+    this.focusSending = true
+    if (request.kind === 'submit') this.focusRevision = revision
+    try {
+      const result = await this.embed.actOnFocusUi({ ...request, token }, details => writeFocusDiagnostic(request, { ...details, event: 'smart-ui-page', action: request.kind }))
+      const outcome = result === 'ok' && request.kind === 'submit' && !revision.acknowledged ? 'stuck' : result
+      writeFocusDiagnostic(request, { event: 'smart-ui-outcome', action: request.kind, outcome })
+      return outcome
+    } finally {
+      if (this.focusRevision === revision) this.focusRevision = null
       this.focusSending = false
     }
   }

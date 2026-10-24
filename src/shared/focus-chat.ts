@@ -95,6 +95,7 @@ export interface FocusPageSnapshot {
   waiting: boolean
   generating: 'active' | 'idle' | 'unknown'
   reply: { sourceMessageId: string; parts: FocusPart[]; answer: string } | null
+  smartReplies?: { sourceMessageId: string; answer: string }[]
 }
 export interface FocusChatState extends FocusOwner {
   ready: boolean
@@ -104,6 +105,7 @@ export interface FocusChatState extends FocusOwner {
   turns: FocusTurn[]
   executions: ExecutionRecord[]
   hiddenMessageIds?: string[]
+  smartReplies?: { sourceMessageId: string; answer: string }[]
 }
 /** File delivery has its own persisted lifecycle; shell delivery is recorded by the turn. */
 export function focusDelivery(record: ExecutionRecord, delivery?: FocusDelivery): FocusDelivery | undefined {
@@ -126,6 +128,13 @@ export interface FocusEditDiagnostic {
   requestBodyReadable?: boolean
   requestTextMatches?: boolean
   requestOriginalMatches?: boolean
+  requestStateMatches?: boolean
+  requestStatePresent?: boolean
+  requestSnapshotCount?: number
+  requestPathMatches?: boolean
+  nativeClickReceived?: boolean
+  clickTrusted?: boolean
+  clickPrevented?: boolean
   groupCount?: number
   candidateCount?: number
   originalLength?: number

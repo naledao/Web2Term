@@ -213,6 +213,15 @@ export interface PageAdapter {
  * `assistantSelectors`; these are the parts only the focus view uses.
  */
 export interface FocusPageRules {
+  smartUi?: {
+    rootSelector: string
+    sourceIdAttr: string
+    cardSelector: string
+    groupSelector: string
+    optionSelector: string
+    actionSelector: string
+    submissionPath: string
+  }
   edit?: {
     turnSelector: string
     turnIdAttr: string
@@ -635,6 +644,14 @@ export const CHATGPT_PAGE: PageAdapter = {
     captionSelector: 'p.line-clamp-2'
   },
   focus: {
+    // User-run smart-ui probe 2026-10-24: DIL cards inside the answer, Radix radio
+    // buttons, separate state saves, and a native next request with state snapshots.
+    smartUi: {
+      rootSelector: '[data-dil-message-id]', sourceIdAttr: 'data-dil-message-id',
+      cardSelector: '[data-d-has-border]', groupSelector: '[role="radiogroup"][data-d-component]',
+      optionSelector: 'button[role="radio"]', actionSelector: 'button[data-d-component]:not([role])',
+      submissionPath: '/backend-api/f/conversation'
+    },
     // Measured 2026-10-23, chatgpt-edit-2026-10-23T14-35-02-142Z-644.log:
     // snapshots 90/92, request 33. The inline editor also matches the main composer.
     edit: {

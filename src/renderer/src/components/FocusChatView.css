@@ -51,6 +51,25 @@
 .focus-assistant__head img{width:34px;height:34px;object-fit:contain}
 .focus-history--assistant{font-size:14px;margin:0 0 32px;overflow-wrap:anywhere}
 .focus-answer{font-size:14px;line-height:1.9;overflow-wrap:anywhere}
+.focus-smart-ui{margin:16px 0;padding:14px;border:1px solid var(--fc-border);border-radius:14px;background:var(--fc-bg);color:var(--fc-text);font-size:15px;line-height:1.65;overflow-wrap:anywhere}
+.focus-smart-ui h3{margin:0 0 8px;font-size:16px;line-height:1.5;font-weight:650}
+.focus-smart-ui__description{margin:0 0 10px}
+.focus-smart-ui fieldset{min-width:0;margin:0;padding:0;border:0}
+.focus-smart-ui__legend{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.focus-smart-ui__option{display:flex;align-items:flex-start;gap:10px;min-height:44px;padding:9px 2px;cursor:pointer}
+.focus-smart-ui__option:has(input:disabled){cursor:default;opacity:.6}
+.focus-smart-ui__option:not(:has(input:disabled)):hover .focus-smart-ui__option-text{color:var(--fc-accent)}
+.focus-smart-ui__option input{flex:none;width:18px;height:18px;margin:3px 0 0;accent-color:var(--fc-text);cursor:inherit}
+.focus-smart-ui__option input:focus-visible{outline:2px solid var(--fc-accent);outline-offset:3px}
+.focus-smart-ui__option-text{min-width:0;flex:1}
+.focus-smart-ui__option-text strong{margin-inline-end:8px;font-weight:600}
+.focus-smart-ui__actions{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.focus-smart-ui__actions button{width:100%;min-height:40px;padding:8px 16px;border:0;border-radius:999px;background:var(--fc-text);color:var(--fc-bg);font-size:14px;line-height:1.5}
+.focus-smart-ui__actions button:hover:not(:disabled){opacity:.85}
+.focus-smart-ui__status,.focus-smart-ui__error{margin:10px 0 0;font-size:12px;line-height:1.7}
+.focus-smart-ui__status{color:var(--fc-text)}
+.focus-smart-ui__error{color:var(--fc-danger)}
+.focus-smart-ui__status button,.focus-smart-ui__error button{padding:3px 6px;border:0;border-radius:4px;background:transparent;text-decoration:underline;text-underline-offset:3px}
 .focus-chat .wmde-markdown{background:transparent;color:var(--fc-text);font-size:15px;line-height:1.95}
 .focus-chat .wmde-markdown pre{background:var(--fc-soft);overflow:auto;max-width:100%}
 .focus-chat .wmde-markdown table{display:block;overflow:auto;max-width:100%}

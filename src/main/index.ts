@@ -1281,6 +1281,8 @@ function registerIpcHandlers(): void {
       typeof request.messageId !== 'string' || request.messageId.length > 512) return 'invalid'
     return runtime.editFocusMessage(request)
   })
+    ipcMain.handle(IpcChannels.focusChatUiAction, (event, request) =>
+      focusRuntime(event, request)?.actOnFocusUi(request) ?? 'unavailable')
   ipcMain.handle(IpcChannels.questionChatGetState, (event, sessionId: string) => questionRuntime(event, sessionId)?.embed.getQuestionChatState() ?? null)
   ipcMain.handle(IpcChannels.questionChatCreate, (event, sessionId: string, platformId: string) => {
     const runtime = questionRuntime(event, sessionId)
