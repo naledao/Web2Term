@@ -81,6 +81,54 @@ test('hides only an explicit injected prefix and preserves genuine user wording'
   assert.equal(shared.cleanFocusAnswer('文中引用【任务完成】'), '文中引用【任务完成】')
 })
 
+test('question transport JSON becomes readable clarification text across native code-block wrappers', () => {
+  const payload = JSON.stringify({ type: 'questions', questions: [
+    { question: '希望创建哪种 CPU 性能监控任务？', options: ['后台持续监控', '监控三分钟'] },
+    { question: '采样间隔是多少？' }
+  ] })
+  const expected = '1. 希望创建哪种 CPU 性能监控任务？\n2. 采样间隔是多少？'
+  for (const text of [payload, '```json\n' + payload + '\n```', 'JSON\n\n```\n' + payload + '\n```',
+    'JSON\r\n\r\n```JSON\r\n  ' + payload + '\r\n```', '~~~~json\n' + payload + '\n~~~~']) {
+    assert.equal(shared.cleanFocusAnswer(text), expected)
+    assert.equal(shared.cleanFocusUserText(text), text, 'user messages must never be rewritten as protocol')
+  }
+  assert.equal(shared.cleanFocusAnswer('{"type":"question","question":"监控多久？"}'), '1. 监控多久？')
+})
+
+test('execution and file-request protocols, including partial streamed blocks, stay out of focus answer text', () => {
+  for (const payload of ['{"command":"Get-Date","description":"检查时间"}', '{"type":"read_files","files":[{"path":"sample.txt"}]}',
+    '{"command":"Get-', '{"type":"questions","questions":[', '{"type":"questions","questions":[]}']) {
+    assert.equal(shared.cleanFocusAnswer(payload), '')
+    assert.equal(shared.cleanFocusAnswer('JSON\n\n```json\n' + payload + '\n```'), '')
+  }
+  assert.equal(shared.cleanFocusAnswer('```json\n{"type":"questions","questions":['), '')
+})
+
+test('ordinary JSON, nested data and protocol examples inside prose retain their formatting', () => {
+  for (const content of ['{"cpu":12.5,"memory":50}', '{"type":"report","questions":[]}',
+    '{"example":{"type":"questions","questions":[]}}']) {
+    for (const text of [content, '```json\n' + content + '\n```']) assert.equal(shared.cleanFocusAnswer(text), text)
+  }
+  for (const text of ['下面是协议示例：\n\n```json\n{"type":"questions","questions":[]}\n```',
+    '```json\n{"command":"Get-Date"}\n```\n\n以上只是格式说明。']) assert.equal(shared.cleanFocusAnswer(text), text)
+})
+
+test('clarification snapshots and settled answers are normalized, including raw JSON kept by older versions', () => {
+  const { chat, store, rows } = fixture()
+  const payload = 'JSON\n\n```json\n{"type":"questions","questions":[{"question":"希望监控多久？"}]}\n```'
+  const id = chat.begin('chatgpt', 'chat-1', '创建 CPU 监控任务')
+  chat.snapshot('chatgpt', chat.token('chatgpt'), page('clarify', payload))
+  assert.equal(chat.turns('chatgpt', 'chat-1')[0].segments[0].answer, '1. 希望监控多久？')
+  chat.settled('chatgpt', 'clarify', payload)
+  assert.equal(rows.get(id).turn.segments[0].answer, '1. 希望监控多久？')
+  // Simulate the stopped historical turn in the reported screenshot.
+  rows.get(id).turn.status = 'stopped'
+  rows.get(id).turn.segments[0].answer = payload
+  const restored = new FocusChat('workspace-1', store).turns('chatgpt', 'chat-1')[0]
+  assert.equal(shared.cleanFocusAnswer(restored.segments[0].answer), '1. 希望监控多久？')
+  assert.equal(restored.status, 'stopped', 'display normalization never restarts a task')
+})
+
 test('multiple commands, internal deliveries and final prose belong to one human turn', () => {
   const { chat, rows } = fixture()
   const id = chat.begin('deepseek', 'chat-1', '修改聊天视图')

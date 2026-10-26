@@ -1154,6 +1154,7 @@ export class SessionRuntime {
       this.focusUiRecoveredTurn = null
     }
     writeFocusDiagnostic(owner, { event: 'view-state', ready: page?.ready === true,
+      sendFailed: !!page?.sendFailure, retryable: page?.sendFailure?.retryable === true,
       nativeDraft: page?.nativeDraft === true, waiting: page?.waiting === true, generating: page?.generating ?? 'unknown',
       turnCount: this.focusChat.turns(owner.platformId, owner.conversationId).length,
       answerLength: page?.reply?.answer.length ?? 0,
@@ -1161,6 +1162,7 @@ export class SessionRuntime {
       searchCount: page?.reply?.parts.filter(part => part.kind === 'search').length ?? 0 })
     const archivedExecutions = this.focusChat.supersededExecutionIds(owner.platformId, owner.conversationId)
     return { ...owner, ready: page?.ready === true, nativeDraft: page?.nativeDraft === true,
+      sendFailure: page?.sendFailure ?? null,
       generating: page?.generating ?? 'unknown', waiting: page?.waiting === true,
       turns: this.focusChat.turns(owner.platformId, owner.conversationId),
       hiddenMessageIds: this.focusChat.hiddenMessageIds(owner.platformId, owner.conversationId),
@@ -1206,6 +1208,19 @@ export class SessionRuntime {
       if (this.focusUploadAbort === controller) this.focusUploadAbort = null
       this.focusSending = false
     }
+  }
+
+  /** Retry the rejected native message; never run its associated shell command again. */
+  async retryFocusSend(owner: FocusOwner, failureId: string): Promise<FocusSendOutcome> {
+    if (!this.ownsFocus(owner)) return 'unavailable'
+    if (this.focusSending || this.runner.hasInFlightWork()) return 'busy'
+    this.focusSending = true
+    writeFocusDiagnostic(owner, { event: 'send-retry-request' })
+    try {
+      const outcome = await this.embed.retryFocusSend(failureId, () => this.ownsFocus(owner))
+      writeFocusDiagnostic(owner, { event: 'send-retry-outcome', outcome })
+      return outcome
+    } finally { this.focusSending = false }
   }
 
   async retryCommandRecovery(owner: FocusOwner, token: number): Promise<string> {

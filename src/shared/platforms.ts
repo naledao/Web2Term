@@ -213,6 +213,8 @@ export interface PageAdapter {
  * `assistantSelectors`; these are the parts only the focus view uses.
  */
 export interface FocusPageRules {
+  /** Native error text observed below a failed user message, outside its content. */
+  sendFailure?: { messages: string[]; retryLabels: string[]; controlSelector: string }
   modelSettings?: {
     triggerSelector: string
     modelSelector: string
@@ -748,6 +750,13 @@ export const DEEPSEEK_PAGE: PageAdapter = {
    * M8.3125 0.980206). Reasoning is `.ds-think-content`; the row key is the virtual list's.
    */
   focus: {
+    // User screenshot 2026-10-26: a rejected result has this message below its
+    // user bubble, with a retry icon before it and copy/edit actions after it.
+    sendFailure: {
+      messages: ['消息发送过于频繁，请稍后重试'],
+      retryLabels: ['重试', '重新发送', '重试发送', 'Retry', 'Resend'],
+      controlSelector: 'button, [role="button"], .ds-button, .ds-icon-button'
+    },
     // User-run modes probe 2026-10-24T16-11: both controls are DIV.ds-toggle-button
     // without a role, and aria-pressed tracks all four combinations (lines 6/10/14/18).
     // Read the semantic state directly; hashed classes and animated colors are irrelevant.

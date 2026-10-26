@@ -1271,6 +1271,10 @@ function registerIpcHandlers(): void {
     return questionRuntime(event, value.sessionId)
   }
   ipcMain.handle(IpcChannels.focusChatGet, (event, owner) => focusRuntime(event, owner)?.getFocusChat(owner) ?? null)
+  ipcMain.handle(IpcChannels.focusChatRetrySend, (event, owner, failureId) => {
+    if (typeof failureId !== 'string' || !failureId || failureId.length > 512) return 'invalid'
+    return focusRuntime(event, owner)?.retryFocusSend(owner, failureId) ?? 'unavailable'
+  })
   ipcMain.handle(IpcChannels.focusChatSend, (event, request) => {
     const runtime = focusRuntime(event, request)
     if (!runtime || typeof request.text !== 'string' || request.text.length > 20000) return 'invalid'

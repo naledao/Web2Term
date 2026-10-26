@@ -103,12 +103,12 @@ const requestedFiles = [
 const shortenedNames = ['api-user-auth-intro...', 'user_login_api.md', 'user_service_login_…']
 const token = 'files-offline-regression'
 
-function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div') {
+function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div', inputAccept = '') {
   const composer = element(composerTag, composerTag === 'textarea' ? { placeholder: '发送消息' } : { contenteditable: 'true', role: 'textbox' })
   const cards = element('div')
   const add = element('button', { 'aria-label': '添加文件等内容' })
   const send = element('button', { 'aria-label': '发送' })
-  const input = element('input', { type: 'file', multiple: '' })
+  const input = element('input', { type: 'file', multiple: '', accept: inputAccept })
   const root = element('form', {}, [cards, composer, add, send, input])
   const body = element('body', {}, [root])
   const listeners = new Map()
@@ -207,6 +207,19 @@ test('DeepSeek textarea uploads Markdown before inserting its caption and acknow
   assert.equal(app.composer.value, '')
   assert.equal(app.controller.prepareFileSendCaption(token, '附件上下文\r\n问题：Compose 是什么？'), true)
   assert.equal(app.composer.value, '附件上下文\n问题：Compose 是什么？')
+  assert.equal(app.status().status, 'ready')
+  app.confirmOnSend()
+  assert.equal(app.submit(), true)
+  assert.equal(app.status().status, 'sent')
+  assert.equal(app.send.clicks, 1)
+})
+
+test('DeepSeek accepts and acknowledges a JSONC text alias through an extension-restricted input', () => {
+  const file = { fileName: 'opencode.jsonc.txt', mimeType: 'text/plain', sizeBytes: 5020 }
+  const app = fixture([file], {
+    ...platformExports.DEEPSEEK_PAGE, sendButtonSelectors: ['button[aria-label="发送"]']
+  }, 'textarea', '.json,.txt')
+  app.render([file.fileName])
   assert.equal(app.status().status, 'ready')
   app.confirmOnSend()
   assert.equal(app.submit(), true)

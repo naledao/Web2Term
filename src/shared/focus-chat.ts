@@ -121,11 +121,24 @@ export function validFocusModelSettingsRequest(request: FocusModelSettingsReques
   return request.kind === 'read' ? request.value === undefined : ['model', 'effort'].includes(request.kind) &&
     typeof request.value === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._()+:/-]{0,79}$/.test(request.value)
 }
+export interface FocusSendFailure {
+  id: string
+  message: string
+  retryable: boolean
+}
+export function validFocusSendFailure(value: unknown): value is FocusSendFailure {
+  if (!value || typeof value !== 'object') return false
+  const failure = value as FocusSendFailure
+  return typeof failure.id === 'string' && failure.id.length > 0 && failure.id.length <= 512 &&
+    typeof failure.message === 'string' && failure.message.trim().length > 0 && failure.message.length <= 500 &&
+    typeof failure.retryable === 'boolean'
+}
 export interface FocusPageSnapshot {
   path: string
   ready: boolean
   nativeDraft: boolean
   waiting: boolean
+  sendFailure?: FocusSendFailure | null
   generating: 'active' | 'idle' | 'unknown'
   reply: { sourceMessageId: string; parts: FocusPart[]; answer: string } | null
   smartReplies?: { sourceMessageId: string; answer: string }[]
@@ -137,6 +150,7 @@ export interface FocusChatState extends FocusOwner {
   nativeDraft: boolean
   generating: FocusPageSnapshot['generating']
   waiting: boolean
+  sendFailure?: FocusSendFailure | null
   turns: FocusTurn[]
   executions: ExecutionRecord[]
   hiddenMessageIds?: string[]
@@ -195,7 +209,34 @@ export function focusOwnerKey(owner: FocusOwner): string {
   return JSON.stringify([owner.sessionId, owner.platformId, owner.conversationId])
 }
 export function cleanFocusAnswer(text: string): string {
-  return text.replace(/^\s*【任务完成】\s*/, '')
+  const answer = text.replace(/^\s*【任务完成】\s*/, '')
+  // Interpret only an entire transport object. Prose explaining JSON and code
+  // examples embedded in a normal answer must retain their original formatting.
+  let body = answer.trim().replace(/^JSON[ \t]*(?:\r?\n)+/i, '')
+  const opening = /^(`{3,}|~{3,})(?:json)?[ \t]*\r?\n/i.exec(body)
+  if (opening) {
+    body = body.slice(opening[0].length)
+    const closing = new RegExp('(?:^|\\r?\\n)' + opening[1] + '[ \\t]*(?:\\r?\\n|$)').exec(body)
+    if (closing) {
+      if (body.slice(closing.index + closing[0].length).trim()) return answer
+      body = body.slice(0, closing.index)
+    }
+  }
+  body = body.trim()
+  if (!body.startsWith('{')) return answer
+  let value: Record<string, unknown>
+  try { value = JSON.parse(body) }
+  catch {
+    // Never flash an unfinished transport request while its code block streams.
+    return /^\{\s*(?:"command"\s*:|"type"\s*:\s*"(?:questions?|read_files)"(?:\s*[,}]|\s*$))/.test(body) ? '' : answer
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return answer
+  if (typeof value.command === 'string' || value.type === 'read_files') return ''
+  if (value.type !== 'question' && value.type !== 'questions') return answer
+  const questions = value.type === 'questions' ? value.questions : [{ question: value.question }]
+  if (!Array.isArray(questions) || questions.length < 1 || questions.length > 20 ||
+    questions.some(item => !item || typeof item.question !== 'string' || !item.question.trim() || item.question.length > 16000)) return ''
+  return questions.map((item, index) => `${index + 1}. ${item.question.trim()}`).join('\n')
 }
 export function cleanFocusUserText(text: string): string {
   const marker = '\u0000\u0001'

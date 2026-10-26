@@ -127,6 +127,15 @@
 .focus-chat__notice,.focus-chat__error{max-width:760px;margin:0 auto 9px;font-size:11px;line-height:1.8;display:flex;flex-wrap:wrap;align-items:center;gap:6px}
 .focus-chat__notice{color:var(--fc-muted)}
 .focus-chat__error{color:var(--fc-danger)}
+.focus-send-failure{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;max-width:760px;margin:0 auto 12px;padding:14px 16px;border:1px solid var(--fc-danger);border-radius:12px;background:var(--fc-bg);color:var(--fc-danger);font-size:12px;user-select:text;-webkit-user-select:text}
+.focus-send-failure__text{min-width:0;flex:1 1 260px;overflow-wrap:anywhere}
+.focus-send-failure__text p{margin:4px 0}
+.focus-send-failure__text small{color:var(--fc-muted)}
+.focus-send-failure__actions{display:flex;flex-wrap:wrap;gap:8px}
+.focus-send-failure__actions button{padding:7px 12px;border:1px solid var(--fc-border);border-radius:8px;background:var(--fc-bg);color:var(--fc-text);cursor:pointer}
+.focus-send-failure__actions button:first-child{border-color:var(--fc-danger);color:var(--fc-danger)}
+.focus-send-failure__actions button:disabled{opacity:.5;cursor:default}
+.focus-send-failure__actions button:focus-visible{outline:2px solid var(--fc-danger);outline-offset:2px}
 .focus-composer{width:100%;max-width:880px;margin:0;border:1px solid var(--fc-border);border-radius:13px;padding:14px 16px 10px;background:var(--fc-bg);box-sizing:border-box}
 .focus-composer:focus-within{border-color:var(--fc-accent)}
 .focus-composer__files{display:flex;flex-wrap:wrap;gap:8px;max-height:180px;overflow:auto;margin-bottom:10px}

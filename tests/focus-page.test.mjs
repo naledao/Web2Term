@@ -50,11 +50,21 @@ function fixture() {
     readReplyText: node => node.body || '', readReplyMarkdown: node => node.markdown || '', smartUiCardsOf: () => [], smartUiLayoutsOf: () => [], focusComposerModesOf: () => [],
     focusModelSettingsOf: () => ({ model: null, effort: null, models: [], efforts: [] }),
     extractCommand: () => null, PAGE: DEEPSEEK_PAGE,
-    queryAll: () => [], isVisibleElement: () => true
+    queryAll: () => [], isVisibleElement: () => true, focusSendFailureOf: () => null
   })
   for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'focusRowPosition', 'focusReplyAnchor']) context[name] = arrow(name, context)
   return { context, composer, calls, reports, send: method('sendUser', context), snapshot: method('focusSnapshot', context) }
 }
+
+test('the read-only focus snapshot exposes a later native send rejection and clears it when recovered', () => {
+  const f = fixture()
+  const failure = { id: 'failed-user', message: '消息发送过于频繁，请稍后重试', retryable: true }
+  f.context.focusSendFailureOf = () => ({ data: failure })
+  assert.equal(f.snapshot().sendFailure, failure)
+  f.context.focusSendFailureOf = () => null
+  assert.equal(f.snapshot().sendFailure, null)
+  assert.equal(f.calls.length, 0)
+})
 
 test('app composer preserves multiline input and waits for confirmed user-send outcome', async () => {
   const f = fixture()
@@ -113,6 +123,29 @@ function reply(id, position, body = '正文', thoughts = [], links = []) {
     querySelector: selector => selector === '.ds-assistant-message-main-content' ? answer : null,
     querySelectorAll: selector => selector === '.ds-think-content' ? thoughts : selector === 'a[href]' ? links : [] }
 }
+
+test('ChatGPT rich refresh excludes transport code blocks instead of overwriting readable questions', () => {
+  const f = fixture()
+  f.context.PAGE = CHATGPT_PAGE
+  const turn = (id, body, markdown) => ({ id, body, markdown,
+    matches: selector => selector === CHATGPT_PAGE.focus.smartUi.rootSelector,
+    getAttribute: name => name === CHATGPT_PAGE.messageIdAttr ? id : null,
+    querySelector: selector => selector === CHATGPT_PAGE.assistantReplySelectors[0] ? { contains: () => false } : null,
+    querySelectorAll: () => [], closest: () => null })
+  const questions = '{"type":"questions","questions":[{"question":"监控多久？"}]}'
+  const rich = '选择监控方式\n<!--focus-ui {"type":"choice"}-->\n> 监控三分钟'
+  f.context.queryAllAssistant = () => [
+    turn('batch-question', questions, 'JSON\n\n```json\n' + questions + '\n```'),
+    turn('single-question', '{"type":"question","question":"间隔多久？"}', '不应覆盖问题'),
+    turn('command', '{"command":"Get-Date"}', '不应显示执行指令'),
+    turn('files', '{"type":"read_files","files":[]}', '不应显示读取协议'),
+    turn('markdown-only-question', '读取到普通占位文本', '```json\n' + questions + '\n```'),
+    turn('real-card', '选择监控方式', rich)
+  ]
+  const snapshot = f.snapshot()
+  assert.deepEqual(Array.from(snapshot.smartReplies, item => [item.sourceMessageId, item.answer]), [['real-card', rich]])
+  assert.equal(f.calls.length, 0, 'filtering a read-only refresh must not send anything')
+})
 
 test('all three reasoning blocks and interleaved search sources keep document order', () => {
   const f = fixture()

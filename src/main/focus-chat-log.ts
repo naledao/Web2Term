@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import type { FocusOwner, FocusSendOutcome, FocusEditDiagnostic } from '../shared/focus-chat'
 
 interface FocusDiagnostic extends FocusEditDiagnostic {
-  event: 'view-state' | 'send-request' | 'send-outcome' | 'edit-request' | 'edit-page' | 'edit-outcome' | 'smart-ui-request' | 'smart-ui-page' | 'smart-ui-outcome' | 'smart-ui-recovered' | 'composer-mode-request' | 'composer-mode-outcome' | 'model-setting-request' | 'model-setting-outcome' | 'end-task' | 'user-started' | 'user-captured' | 'user-stored' | 'user-discarded'
+  event: 'view-state' | 'send-retry-request' | 'send-retry-outcome' | 'send-request' | 'send-outcome' | 'edit-request' | 'edit-page' | 'edit-outcome' | 'smart-ui-request' | 'smart-ui-page' | 'smart-ui-outcome' | 'smart-ui-recovered' | 'composer-mode-request' | 'composer-mode-outcome' | 'model-setting-request' | 'model-setting-outcome' | 'end-task' | 'user-started' | 'user-captured' | 'user-stored' | 'user-discarded'
+  sendFailed?: boolean
+  retryable?: boolean
   setting?: 'read' | 'model' | 'effort'
   composerMode?: 'thinking' | 'search'
   active?: boolean
@@ -39,7 +41,7 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
     const details: Record<string, string | number | boolean | null> = {
       event: payload.event, sessionId: identifier(owner.sessionId), conversationId: identifier(owner.conversationId)
     }
-    for (const key of ['ready', 'nativeDraft', 'waiting', 'taskOpen', 'anchored', 'submitted', 'originalMatches', 'draftMatches',
+    for (const key of ['ready', 'nativeDraft', 'waiting', 'sendFailed', 'retryable', 'taskOpen', 'anchored', 'submitted', 'originalMatches', 'draftMatches',
       'requestBodyReadable', 'requestTextMatches', 'requestOriginalMatches', 'requestStateMatches', 'requestStatePresent', 'requestPathMatches',
       'nativeClickReceived', 'clickTrusted', 'clickPrevented'] as const) if (typeof payload[key] === 'boolean') details[key] = payload[key]!
     if (payload.action === 'choose' || payload.action === 'submit') details.action = payload.action

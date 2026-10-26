@@ -194,6 +194,7 @@ const api: AppApi = {
   getEmbedState: (): Promise<EmbedState> => ipcRenderer.invoke(IpcChannels.embedGetState),
   getFocusChat: (owner: FocusOwner): Promise<FocusChatState | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner),
   sendFocusMessage: (request: FocusSendRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatSend, request),
+  retryFocusSend: (owner, failureId): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatRetrySend, owner, failureId),
   editFocusMessage: (request: FocusEditRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatEdit, request),
   actOnFocusUi: (request: FocusUiRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatUiAction, request),
   setFocusComposerMode: (request): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatComposerMode, request),

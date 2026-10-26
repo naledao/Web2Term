@@ -30,6 +30,7 @@ export const IpcChannels = {
   embedGetState: 'embed:get-state',
   focusChatGet: 'focus-chat:get',
   focusChatSend: 'focus-chat:send',
+  focusChatRetrySend: 'focus-chat:retry-send',
   focusChatEdit: 'focus-chat:edit',
   focusChatUiAction: 'focus-chat:ui-action',
   focusChatComposerMode: 'focus-chat:composer-mode',
@@ -2224,6 +2225,7 @@ export interface AppApi {
   getEmbedState(): Promise<EmbedState>
   getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
   sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome>
+  retryFocusSend(owner: FocusOwner, failureId: string): Promise<FocusSendOutcome>
   editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome>
   actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome>
   setFocusComposerMode(request: FocusComposerModeRequest): Promise<FocusSendOutcome>

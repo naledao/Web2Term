@@ -42,7 +42,7 @@ export interface PreparedFileResult {
 }
 export type RemoteFileReader = (path: string, maxBytes: number, signal: AbortSignal) => Promise<Buffer>
 
-/** Recognize extensionless UTF-8 text without changing the bytes sent as an attachment. */
+/** Recognize UTF-8 text without changing the bytes sent as an attachment. */
 function isUtf8Text(bytes: Buffer): boolean {
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
@@ -125,9 +125,9 @@ export async function prepareFiles(request: StoredFileReadRequest, signal: Abort
         const sourceName = request.context.scope === 'ssh' ? posix.basename(path) : basename(path)
         let fileName = sourceName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '') || 'attachment'
         if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(fileName)) fileName = `file_${fileName}`
-        // DeepSeek's observed file input accepts .txt, but not extensionless files
-        // such as .gitconfig. Add a transport suffix only to a confirmed text snapshot.
-        const textNameAlias = platformId === 'deepseek' && extension === '' && isUtf8Text(bytes)
+        // DeepSeek's observed file input accepts .txt, but rejects .jsonc and
+        // extensionless files such as .gitconfig. Alias only confirmed UTF-8 text.
+        const textNameAlias = platformId === 'deepseek' && (extension === '' || extension === '.jsonc') && isUtf8Text(bytes)
         if (textNameAlias) fileName += '.txt'
         if (attachments.some((file) => file.fileName === fileName)) throw new Error('本次附件含同名文件，请分两次读取。')
         // Keep the original bytes; directories isolate snapshots and transport names.

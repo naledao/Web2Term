@@ -924,6 +924,45 @@
 
   const userTurns = () => queryAllMessages().filter((node) => !isAssistantTurn(node))
 
+  let focusSendRetry = null
+  /** A rejection belongs to the newest user row, never to quoted code or an older turn. */
+  const focusSendFailureOf = () => {
+    const rules = PAGE.focus?.sendFailure
+    if (!rules) return null
+    const row = queryAllMessages().filter(isVisibleElement).at(-1)
+    if (!row || isAssistantTurn(row)) return null
+    const normalized = text => collapse(text).replace(/[，,。.!！]/g, '')
+    const messages = rules.messages.map(normalized)
+    const matches = element => messages.includes(normalized(element.innerText || ''))
+    const errors = [...row.querySelectorAll('*')].filter(element => isVisibleElement(element) && matches(element) &&
+      !element.closest('pre, code, a, .ds-markdown') && ![...element.children].some(matches))
+    if (errors.length !== 1) return null
+    const error = errors[0]
+    const allControls = [...row.querySelectorAll(rules.controlSelector)].filter(element =>
+      isVisibleElement(element) && !element.contains(error) && !element.closest('pre, code, a, .ds-markdown'))
+    // A control's nested role/icon must not count as another candidate.
+    const controls = allControls.filter(element => !allControls.some(other => other !== element && other.contains(element)))
+    const named = controls.filter(element => rules.retryLabels.some(label =>
+      [element.innerText, element.getAttribute('aria-label'), element.getAttribute('title')].some(text => collapse(text || '') === label)))
+    // The observed retry icon precedes the error; copy/edit actions follow it.
+    // Ambiguous rows stay readable but require checking the original view.
+    const icons = controls.filter(element => !collapse(element.innerText || '') &&
+      (element.compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING))
+    const button = named.length === 1 ? named[0] : named.length === 0 && icons.length === 1 ? icons[0] : null
+    const position = row.getAttribute(PAGE.focus.rowPositionAttr || '') || ''
+    return { row, button, data: {
+      id: JSON.stringify([location.pathname, state.taskPromptGeneration, position, turnKeyOf(row)]),
+      message: collapse(error.innerText).slice(0, 500),
+      retryable: !!button && !controlDisabled(button)
+    } }
+  }
+  const releaseFocusSendRetry = pending => {
+    document.removeEventListener('click', pending.onClick, true)
+    if (focusSendRetry !== pending) return
+    focusSendRetry = null
+    if (state.taskPromptGeneration === pending.generation) state.programmatic = false
+  }
+
   /** Best-effort test for an image currently attached to the composer. */
   const hasDraftImageAttachment = () => {
     const fileInputs = [...document.querySelectorAll('input[type="file"]')]
@@ -4497,6 +4536,50 @@
      * @returns Promise<'ok' | 'no-composer' | 'busy' | 'insert-failed' | 'stuck'>
      */
     /** App-owned composer: the same confirmed user-send path and prompt boundary. */
+    prepareFocusSendRetry(failureId, expectedPath, token) {
+      if (location.pathname !== expectedPath || typeof token !== 'string' || !token || token.length > 160) return { ok: false }
+      const failure = focusSendFailureOf(), composer = getComposer()
+      if (!failure || failure.data.id !== failureId || !failure.data.retryable || !composer) return { ok: false }
+      if (focusSendRetry || state.programmatic || fileSend || focusEditing || state.pendingQuestion || findStopButton() ||
+        collapse(readComposer(composer)) || draftAttachmentEvidence() || hasDraftImageAttachment()) return { ok: false, outcome: 'busy' }
+      const button = failure.button
+      try { button.scrollIntoView({ block: 'nearest' }) } catch (_) { /* no synthetic fallback */ }
+      const rect = button.getBoundingClientRect(), x = Math.round(rect.left + rect.width / 2), y = Math.round(rect.top + rect.height / 2)
+      const hit = document.elementFromPoint(x, y)
+      if (!hit || !(hit === button || button.contains(hit)) || controlDisabled(button)) return { ok: false }
+      const pending = { token, path: expectedPath, generation: state.taskPromptGeneration, received: false,
+        baseline: lastAssistantId(), confirming: false,
+        onClick: event => {
+          if (focusSendRetry === pending && event.isTrusted && (event.target === button || button.contains(event.target))) pending.received = true
+        } }
+      focusSendRetry = pending
+      state.programmatic = true
+      document.addEventListener('click', pending.onClick, true)
+      return { ok: true, x, y }
+    },
+    async finishFocusSendRetry(token, dispatched) {
+      const pending = focusSendRetry
+      if (!pending || pending.token !== token) return 'unavailable'
+      if (!dispatched) { releaseFocusSendRetry(pending); return 'cancelled' }
+      if (pending.confirming) return 'busy'
+      pending.confirming = true
+      const current = () => focusSendRetry === pending && location.pathname === pending.path && state.taskPromptGeneration === pending.generation
+      try {
+        const deadline = Date.now() + 8000
+        while (current() && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 120))
+          if (!current()) return 'cancelled'
+          if (pending.received && !focusSendFailureOf() && (findStopButton() || lastAssistantId() !== pending.baseline)) {
+            state.replyActionDetected = false
+            setReplyWaiting(Date.now(), 'message-retry')
+            state.taskActive = true
+            scheduleScrollToBottom()
+            return 'ok'
+          }
+        }
+        return !current() ? 'cancelled' : focusSendFailureOf() ? 'stuck' : 'unknown'
+      } finally { releaseFocusSendRetry(pending) }
+    },
     sendUser(text, expectedPath) {
       const element = getComposer()
       if (!element) return Promise.resolve('no-composer')
@@ -4745,6 +4828,7 @@
       // Every page-specific read below comes from the platform's measured focus rules.
       const rules = PAGE.focus || { reasoningSelectors: [] }
       const composer = getComposer()
+      const sendFailure = focusSendFailureOf()?.data ?? null
       const composerModes = rules.composerModes ? focusComposerModesOf().map(mode => mode.data) : undefined
       const modelSettings = rules.modelSettings ? focusModelSettingsOf() : undefined
       const rendered = new Map()
@@ -4755,7 +4839,12 @@
       const smartReplies = rules.smartUi ? queryAllAssistant().filter(node => isVisibleElement(node) &&
         (node.matches?.(rules.smartUi.rootSelector) || node.querySelector?.(rules.smartUi.rootSelector))).slice(-8)
         .flatMap(node => {
+          // DIL wrappers also contain ordinary code blocks. A live rich-content
+          // refresh must not overwrite a readable clarification with its protocol JSON.
+          const raw = readReplyText(node)
+          if (looksLikeCommandReply(raw) || looksLikeQuestionReply(raw)) return []
           const answer = markdownOf(node)
+          if (looksLikeCommandReply(answer) || looksLikeQuestionReply(answer)) return []
           // Never replace a complete saved answer with a truncated live copy or cut
           // through a widget marker. Oversize replies use the normal answer channel.
           return answer.length <= 250000 ? [{ sourceMessageId: messageIdOf(node), answer }] : []
@@ -4828,7 +4917,7 @@
       }
       const historyDraft = !!rules.edit && queryAll([rules.edit.editorSelector]).some(isVisibleElement)
       return { path: location.pathname, ready: !!composer, nativeDraft: historyDraft || (!!composer && collapse(readComposer(composer)) !== ''),
-        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply, smartReplies, composerModes, modelSettings }
+        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply, smartReplies, composerModes, modelSettings, sendFailure }
     },
 
     async recoverCommand(token, generation, allowSend, manual = false, expectedMessageId = null) {

@@ -8,8 +8,9 @@ import { writeQuestionLog } from './question-chat-page'
 import { supportsSelectionQuestion } from '../shared/deepseek-question'
 import type { QuestionChatAction, QuestionChatState, SelectionQuestionDraft } from '../shared/deepseek-question'
 import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
+import { randomUUID } from 'node:crypto'
 import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo, FocusEditDiagnostic, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
-import { supportsFocusView, validFocusComposerModes, validFocusModelSettings } from '../shared/focus-chat'
+import { supportsFocusView, validFocusComposerModes, validFocusModelSettings, validFocusSendFailure } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
 import { writeRawSendDiagnostic } from './raw-send-log'
 import { writePromptDiagnostic } from './prompt-log'
@@ -1317,9 +1318,41 @@ export class ChatGptEmbed {
         !reply || typeof reply.sourceMessageId !== 'string' || reply.sourceMessageId.length > 160 || typeof reply.answer !== 'string' || reply.answer.length > 250000))) return null
       if (raw.composerModes !== undefined && !validFocusComposerModes(raw.composerModes)) return null
       if (raw.modelSettings !== undefined && !validFocusModelSettings(raw.modelSettings)) return null
+      if (raw.sendFailure != null && !validFocusSendFailure(raw.sendFailure)) return null
       return raw
     } catch { return null }
     finally { if (timer) clearTimeout(timer) }
+  }
+
+  async retryFocusSend(failureId: string, owns: () => boolean = () => true): Promise<FocusSendOutcome> {
+    const contents = this.focusPage()
+    if (!owns() || !contents || !this.platform.page.focus?.sendFailure || this.focusEditToken) return 'unavailable'
+    const token = randomUUID(), url = contents.getURL()
+    const current = (): boolean => owns() && !contents.isDestroyed() && contents.getURL() === url && this.focusEditToken === token
+    this.focusEditToken = token
+    let dispatched = false
+    try {
+      const point = await contents.executeJavaScript('window.__cmdTerminalInterceptor?.prepareFocusSendRetry(' +
+        JSON.stringify(failureId) + ',' + JSON.stringify(new URL(url).pathname) + ',' + JSON.stringify(token) + ')')
+      if (!current()) return 'cancelled'
+      if (!point?.ok) return point?.outcome === 'busy' ? 'busy' : 'unavailable'
+      const focused = !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false)
+      const zoom = contents.getZoomFactor()
+      if (!focused || ![point.x, point.y, zoom].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0) ||
+        zoom <= 0 || point.x * zoom > 100000 || point.y * zoom > 100000) return 'unavailable'
+      const position = { x: Math.round(point.x * zoom), y: Math.round(point.y * zoom) }
+      contents.sendInputEvent({ type: 'mouseMove', ...position })
+      contents.sendInputEvent({ type: 'mouseDown', ...position, button: 'left', clickCount: 1 })
+      contents.sendInputEvent({ type: 'mouseUp', ...position, button: 'left', clickCount: 1 })
+      dispatched = true
+      const result = await contents.executeJavaScript('window.__cmdTerminalInterceptor?.finishFocusSendRetry(' + JSON.stringify(token) + ',true)')
+      if (!current()) return 'cancelled'
+      return ['ok', 'busy', 'stuck', 'unknown', 'cancelled', 'unavailable'].includes(result) ? result : 'unknown'
+    } catch { return dispatched ? 'unknown' : 'unavailable' }
+    finally {
+      if (!contents.isDestroyed()) await contents.executeJavaScript('window.__cmdTerminalInterceptor?.finishFocusSendRetry(' + JSON.stringify(token) + ',false)').catch(() => {})
+      if (this.focusEditToken === token) this.focusEditToken = null
+    }
   }
 
   async setFocusComposerMode(id: 'thinking' | 'search', active: boolean): Promise<FocusSendOutcome> {

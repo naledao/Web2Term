@@ -538,12 +538,14 @@ export default function FocusChatView(props: Props): JSX.Element {
   const history = messages.filter(message => !represented.ids.has(message.id) &&
     !hiddenMessageIds.has(message.id) &&
     !(message.sourceMessageId && represented.sources.has(message.sourceMessageId)) &&
+    (message.role !== 'assistant' || !!cleanFocusAnswer(message.content).trim() || message.attachments.length > 0) &&
     !message.sourceMessageId?.startsWith('read-files:'))
   const entries = [...history.map(message => ({ at: message.createdAt, message, turn: null as FocusTurn | null })),
     ...turns.map(turn => ({ at: turn.createdAt, turn, message: null as ConversationMessage | null }))]
     .sort((a, b) => a.at - b.at)
   const lastTurn = turns.at(-1)
-  const working = props.needsAnswer || state?.waiting === true || state?.generating === 'active' || lastTurn?.status === 'working'
+  const sendFailure = state?.sendFailure
+  const working = !sendFailure && (props.needsAnswer || state?.waiting === true || state?.generating === 'active' || lastTurn?.status === 'working')
   const linkedExecutions = new Set(turns.flatMap(turn => turn.executionIds))
   const unlinkedAttention = records.filter(record => !linkedExecutions.has(record.messageId) && executionNeedsAction(record, focusDelivery(record)))
   const ready = state?.ready === true
@@ -619,7 +621,7 @@ export default function FocusChatView(props: Props): JSX.Element {
     event.preventDefault()
     const text = draftRef.current
     const sourceFiles = filesRef.current
-    if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || working || !ready || state?.nativeDraft) return
+    if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || working || sendFailure || !ready || state?.nativeDraft) return
     sendLock.current = true
     sendCancelled.current = false
     setSending(true)
@@ -706,6 +708,28 @@ export default function FocusChatView(props: Props): JSX.Element {
     try { await navigator.clipboard.writeText(cleanFocusAnswer(text).replace(CHART_MARKER, '')); setCopiedId(id); setTimeout(() => { if (alive.current) setCopiedId(current => current === id ? null : current) }, 2000) }
     catch { setError('复制失败，可以选择正文手动复制。') }
   }
+  const retrySend = async (): Promise<void> => {
+    if (!sendFailure?.retryable || sendLock.current || actionId || stopping || !ready || state?.nativeDraft) return
+    sendLock.current = true
+    setActionId('native-send-retry')
+    setError('')
+    readEpoch.current++
+    try {
+      const result = await window.api.retryFocusSend(owner, sendFailure.id)
+      if (!alive.current) return
+      if (result !== 'ok') setError(result === 'stuck' ? '消息仍未发送成功，请稍后重试。'
+        : result === 'busy' ? '网页正在处理或保留着草稿，请稍后重试。'
+          : result === 'cancelled' ? '会话状态已变化，请核对当前消息。'
+            : result === 'unknown' ? '重试发送的结果尚未确认，请到原始视图核对。'
+              : '未能定位这条消息的重试控件，请到原始视图处理。')
+      const next = await window.api.getFocusChat(owner)
+      if (alive.current && next && focusOwnerKey(next) === ownerKey) {
+        lastSnapshot.current = JSON.stringify(next)
+        setState(next)
+      }
+    } catch { if (alive.current) setError('重试发送的结果尚未确认，请到原始视图核对。') }
+    finally { readEpoch.current++; sendLock.current = false; if (alive.current) setActionId(null) }
+  }
   const retryFormat = async (token: number): Promise<void> => {
     if (actionId) return
     setActionId('format:' + token)
@@ -729,15 +753,16 @@ export default function FocusChatView(props: Props): JSX.Element {
     </div>
   )
   const renderTurn = (turn: FocusTurn): JSX.Element => {
+    const sendBlocked = !!sendFailure && turn === lastTurn
     const executions = turn.executionIds.flatMap(id => recordsById.get(id) ? [recordsById.get(id)!] : [])
     const deliveryOf = (record: ExecutionRecord): FocusDelivery | undefined => focusDelivery(record, turn.deliveries[record.messageId])
     const running = executions.some(record => record.status === 'running')
     const pending = executions.some(record => ['pending', 'blocked'].includes(record.status))
     const deliveryPending = executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending')
     const lastSegment = turn.segments.at(-1)
-    const answer = (lastSegment?.sourceMessageId ? richAnswers.get(lastSegment.sourceMessageId) : '') || lastSegment?.answer || ''
+    const answer = cleanFocusAnswer((lastSegment?.sourceMessageId ? richAnswers.get(lastSegment.sourceMessageId) : '') || lastSegment?.answer || '')
     const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.parseFailures?.length
-    const label = turn.commandRecovery ? (turn.status === 'working' ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : deliveryPending ? '正在回传执行结果…' :
+    const label = sendBlocked ? '消息发送失败 · 等待重试' : turn.commandRecovery ? (turn.status === 'working' ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : deliveryPending ? '正在回传执行结果…' :
       turn.status === 'stopped' ? '已停止 · 已有内容保留' : turn.status === 'working' ? '正在处理…' : '已回复'
     const userMessage = turn.userMessageId ? messagesById.get(turn.userMessageId) : null
     return <article className="focus-turn" data-message-id={turn.id} key={turn.id}>
@@ -748,8 +773,8 @@ export default function FocusChatView(props: Props): JSX.Element {
         </>)}</div>
       <div className="focus-assistant">
         <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}<span>{modelLabel}</span></div>
-        <details className="focus-process" {...remembered('process:' + turn.id, true)}><summary><span className={turn.status === 'working' ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{turn.status === 'working' ? '' : turn.status === 'blocked' ? '!' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <ProcessHint /> : null}</summary>
-          <ProcessScroll follow={turn.status === 'working'}>
+        <details className="focus-process" {...remembered('process:' + turn.id, true)}><summary><span className={turn.status === 'working' && !sendBlocked ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{sendBlocked ? '!' : turn.status === 'working' ? '' : turn.status === 'blocked' ? '!' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <ProcessHint /> : null}</summary>
+          <ProcessScroll follow={turn.status === 'working' && !sendBlocked}>
           {turn.segments.map(segment => {
             const segmentExecutions = executions.filter(record => turn.executionCycles?.[record.messageId] === segment.cycle)
             const commentary = segment !== turn.segments.at(-1) ? segment.answer : ''
@@ -766,7 +791,7 @@ export default function FocusChatView(props: Props): JSX.Element {
           {turn.parseFailures?.map(failure => <details className="focus-execution" key={'parse:' + failure.messageId}>
             <summary>指令格式错误 · 未执行</summary><pre>{failure.text}</pre>
           </details>)}
-          {!hasProcess ? <p className="focus-chat__muted focus-process__empty">{turn.status === 'working' ? '正在思考…' : '本轮没有额外执行步骤。'}</p> : null}
+          {!hasProcess ? <p className="focus-chat__muted focus-process__empty">{sendBlocked ? '消息尚未发送成功。' : turn.status === 'working' ? '正在思考…' : '本轮没有额外执行步骤。'}</p> : null}
           </ProcessScroll>
         </details>
         {turn.notice === 'parse-failed' ? <div className="focus-chat__error" role="alert">
@@ -827,6 +852,15 @@ export default function FocusChatView(props: Props): JSX.Element {
       {props.needsAnswer ? <div className="focus-chat__notice" role="status">{modelLabel} 需要你的回答，任务正在等待。<button type="button" onClick={props.onQuestion}>回答问题</button></div> : null}
       {!ready ? <div className="focus-chat__notice">网页尚未就绪。<button type="button" onClick={props.onOriginal}>切回原始视图完成登录或检查页面</button></div> : null}
       {state?.nativeDraft && !sending ? <div className="focus-chat__notice">原网页输入框中保留着内容，专注视图不会覆盖。<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
+      {sendFailure ? <div className="focus-send-failure" role="alert" aria-busy={actionId === 'native-send-retry'}>
+        <div className="focus-send-failure__text"><strong>消息未发送成功</strong><p>{sendFailure.message}</p>
+          <small>{sendFailure.retryable ? '消息内容已保留，重试只发送这条消息。' : '原网页暂未提供可用的重试控件，请在原始视图中处理。'}</small></div>
+        <div className="focus-send-failure__actions">
+          <button type="button" disabled={!sendFailure.retryable || !!actionId || sending || stopping || !ready || !!state?.nativeDraft}
+            onClick={() => void retrySend()}>{actionId === 'native-send-retry' ? '正在重试…' : '重试发送'}</button>
+          <button type="button" onClick={props.onOriginal}>查看原始视图</button>
+        </div>
+      </div> : null}
       {error ? <div className="focus-chat__error" role="alert">{error}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       <form className="focus-composer" onSubmit={event => void submit(event)}>
         {draftFiles.length ? <div className="focus-composer__files" aria-label="待发送附件">{draftFiles.map(item =>
@@ -859,10 +893,10 @@ export default function FocusChatView(props: Props): JSX.Element {
         <input ref={fileInput} type="file" multiple hidden onChange={event => { addFiles([...event.currentTarget.files ?? []]); event.currentTarget.value = '' }} />
         <div className="focus-composer__tools"><div className="focus-composer__left">
           <button type="button" className="focus-composer__attachment" disabled={sending || !!editingId || changingMode !== null || settingPending !== null} onClick={() => fileInput.current?.click()} title="添加附件，也可直接粘贴截图或文件">＋ 附件</button>
-          {owner.platformId === 'deepseek' ? <FocusComposerModes modes={state?.composerModes ?? []} disabled={sending || stopping || !!working || !!editingId || !ready}
+          {owner.platformId === 'deepseek' ? <FocusComposerModes modes={state?.composerModes ?? []} disabled={sending || stopping || !!working || !!sendFailure || !!editingId || !ready}
             pending={changingMode} onChange={(id, active) => { void changeMode(id, active) }} /> : null}
         </div><span>{modelLabel}</span>
-          {working || stopping || (sending && draftFiles.length > 0) ? <button type="button" className="focus-composer__send" disabled={stopping} onClick={() => void stop()} aria-label="结束当前任务">{stopping ? '…' : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
+          {working || sendFailure || stopping || (sending && draftFiles.length > 0) ? <button type="button" className="focus-composer__send" disabled={stopping} onClick={() => void stop()} aria-label="结束当前任务">{stopping ? '…' : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
             <button type="submit" className="focus-composer__send" disabled={sending || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || (!draft.trim() && !draftFiles.length)} aria-label="发送消息">{sending ? '…' : '↑'}</button>}
         </div>
       </form><p className="focus-composer__hint">Enter 发送 · Shift+Enter 换行</p>

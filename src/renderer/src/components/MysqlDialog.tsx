@@ -2,6 +2,7 @@ import AppPopover from './AppPopover'
 import { useToolApi, useToolSurface, ToolMinimizeButton } from './ToolSurfaceContext'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
+import { Dialog } from '@base-ui/react/dialog'
 import { Tooltip } from '@base-ui/react/tooltip'
 import MysqlIcon from './MysqlIcon'
 import ConfirmDialog from './ConfirmDialog'
@@ -1830,7 +1831,11 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
                             type="button"
                             className="mysql-page__table-item"
                             title={table.comment === '' ? table.name : table.name + ' · ' + table.comment}
-                            onClick={() => {
+                            onClick={(event) => {
+                              // Releasing a text selection must not open the table and remove it.
+                              const selection = window.getSelection()
+                              if (event.detail > 0 && selection && !selection.isCollapsed && selection.rangeCount > 0
+                                && selection.getRangeAt(0).intersectsNode(event.currentTarget)) return
                               if (activeForm !== null && activeConnection !== null) void openTableTab(activeConnection.key, activeForm, table.name, table.comment)
                             }}
                           >
@@ -1898,42 +1903,53 @@ export default function MysqlDialog({ open, theme, onClose }: MysqlDialogProps):
         the connection and where it points before anything is lost.
       */}
       {createTableOpen ? (
-        <AppPopover
-          className='mysql-page__create-overlay'
-         onClose={() => setCreateTableOpen(false)} busy={createTableBusy} aria-labelledby="mysql-create-table-title">
-          <div className='mysql-page__create-dialog' aria-labelledby='mysql-create-table-title'>
-            <div className='mysql-page__create-header'>
-              <div>
-                <h3 id='mysql-create-table-title'>创建数据表</h3>
-                <p>在当前数据库中执行 CREATE TABLE 语句</p>
+        <Dialog.Root open={visible} disablePointerDismissal onOpenChange={(next, details) => {
+          if (next) return
+          if (createTableBusy) { details.cancel(); return }
+          setCreateTableOpen(false)
+        }}>
+          <Dialog.Portal container={pageRef} keepMounted>
+            <Dialog.Popup
+              className='mysql-page__create-overlay'
+              aria-labelledby='mysql-create-table-title'
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget && !createTableBusy) setCreateTableOpen(false)
+              }}>
+              <div className='mysql-page__create-dialog'>
+                <div className='mysql-page__create-header'>
+                  <div>
+                    <h3 id='mysql-create-table-title'>创建数据表</h3>
+                    <p>在当前数据库中执行 CREATE TABLE 语句</p>
+                  </div>
+                  <Dialog.Close type='button' className='mysql-page__create-close' aria-label='关闭' disabled={createTableBusy}>×</Dialog.Close>
+                </div>
+                <div className='mysql-page__create-body'>
+                  <div className='mysql-page__create-target'>目标数据库：<strong>{activeForm?.database ?? ''}</strong></div>
+                  <div className='mysql-page__create-label'>建表 SQL</div>
+                  <div className={createTableBusy ? 'mysql-page__create-sql mysql-page__create-sql--disabled' : 'mysql-page__create-sql'}>
+                    <Suspense fallback={<p className='mysql-page__hint'>正在加载编辑器…</p>}>
+                      <SqlEditor
+                        value={createTableSql}
+                        onChange={(value) => { setCreateTableSql(value); if (createTableError) setCreateTableError('') }}
+                        theme={theme}
+                        label='建表 SQL'
+                        placeholder={'CREATE TABLE users (\n  id BIGINT PRIMARY KEY AUTO_INCREMENT,\n  name VARCHAR(100) NOT NULL\n);'}
+                        autoFocus
+                        disabled={createTableBusy}
+                      />
+                    </Suspense>
+                  </div>
+                  <p className='mysql-page__create-tip'>仅支持单条 CREATE TABLE 语句，成功后自动刷新数据表列表。</p>
+                  {createTableError ? <p className='mysql-page__create-error' role='alert'>{createTableError}</p> : null}
+                </div>
+                <div className='mysql-page__create-footer'>
+                  <Dialog.Close type='button' className='mysql-page__btn' disabled={createTableBusy}>取消</Dialog.Close>
+                  <button type='button' className='mysql-page__btn mysql-page__btn--primary' disabled={createTableBusy || createTableSql.trim() === ''} onClick={() => void submitCreateTable()}>{createTableBusy ? '创建中…' : '执行并创建'}</button>
+                </div>
               </div>
-              <button type='button' className='mysql-page__create-close' aria-label='关闭' disabled={createTableBusy} onClick={() => setCreateTableOpen(false)}>×</button>
-            </div>
-            <div className='mysql-page__create-body'>
-              <div className='mysql-page__create-target'>目标数据库：<strong>{activeForm?.database ?? ''}</strong></div>
-              <div className='mysql-page__create-label'>建表 SQL</div>
-              <div className={createTableBusy ? 'mysql-page__create-sql mysql-page__create-sql--disabled' : 'mysql-page__create-sql'}>
-                <Suspense fallback={<p className='mysql-page__hint'>正在加载编辑器…</p>}>
-                  <SqlEditor
-                    value={createTableSql}
-                    onChange={(value) => { setCreateTableSql(value); if (createTableError) setCreateTableError('') }}
-                    theme={theme}
-                    label='建表 SQL'
-                    placeholder={'CREATE TABLE users (\n  id BIGINT PRIMARY KEY AUTO_INCREMENT,\n  name VARCHAR(100) NOT NULL\n);'}
-                    autoFocus
-                    disabled={createTableBusy}
-                  />
-                </Suspense>
-              </div>
-              <p className='mysql-page__create-tip'>仅支持单条 CREATE TABLE 语句，成功后自动刷新数据表列表。</p>
-              {createTableError ? <p className='mysql-page__create-error' role='alert'>{createTableError}</p> : null}
-            </div>
-            <div className='mysql-page__create-footer'>
-              <button type='button' className='mysql-page__btn' disabled={createTableBusy} onClick={() => setCreateTableOpen(false)}>取消</button>
-              <button type='button' className='mysql-page__btn mysql-page__btn--primary' disabled={createTableBusy || createTableSql.trim() === ''} onClick={() => void submitCreateTable()}>{createTableBusy ? '创建中…' : '执行并创建'}</button>
-            </div>
-          </div>
-        </AppPopover>
+            </Dialog.Popup>
+          </Dialog.Portal>
+        </Dialog.Root>
       ) : null}
       {cellDetail !== null ? (
         <AppPopover className="mysql-page__cell-backdrop" onClose={() => setCellDetail(null)} aria-labelledby="mysql-cell-dialog-title">
