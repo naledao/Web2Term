@@ -1,3 +1,6 @@
+import { parseTaskToolContext } from './autonomous-task'
+import type { TaskToolContext } from './autonomous-task'
+
 /** A line printed by the startup command, after it obtained the real child PID. */
 export const BACKGROUND_TASK_MARKER = '__W2T_BACKGROUND_TASK__'
 
@@ -9,11 +12,51 @@ export interface BackgroundTaskRegistration {
   exit_code_path?: string
 }
 
-export type BackgroundTaskStatus = 'checking' | 'running' | 'completed' | 'failed' | 'exited' | 'unknown'
-export type BackgroundTaskDeliveryStatus = 'pending' | 'sent' | 'needs-attention' | 'cancelled'
-export type BackgroundTaskNotificationKind = 'created' | 'finished'
+export type BackgroundTaskStatus = 'checking' | 'running' | 'completed' | 'failed' | 'exited' | 'stopped' | 'unknown'
+export type BackgroundTaskDeliveryStatus = 'pending' | 'sending' | 'sent' | 'needs-attention' | 'cancelled' | 'superseded'
+export type BackgroundTaskNotificationKind = 'created' | 'ready' | 'startup-timeout' | 'finished'
+export interface BackgroundReadinessConfig { type: 'auto' | 'tcp' | 'http'; url?: string; port?: number; timeout_seconds?: number }
+export interface BackgroundCommandOptions { kind: 'job' | 'service'; readiness?: BackgroundReadinessConfig }
+export interface BackgroundStartupState {
+  state: 'starting' | 'ready' | 'timeout' | 'failed'
+  deadlineAt: number
+  readyAt?: number
+  url?: string
+  evidence?: string
+  stdoutOffset: number
+  stderrOffset: number
+  stdoutCarry: string
+  stderrCarry: string
+  applicationStarted?: boolean
+}
+
+/** Validate both the page protocol and persisted execution options. */
+export function parseBackgroundOptions(value: unknown): BackgroundCommandOptions | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const item = value as BackgroundCommandOptions
+  if (!['job', 'service'].includes(item.kind)) return null
+  if (item.readiness === undefined) return { kind: item.kind }
+  const ready = item.readiness
+  if (item.kind !== 'service' || !ready || typeof ready !== 'object' || Array.isArray(ready) || !['auto', 'tcp', 'http'].includes(ready.type)) return null
+  if (ready.timeout_seconds !== undefined && (!Number.isInteger(ready.timeout_seconds) || ready.timeout_seconds < 10 || ready.timeout_seconds > 600)) return null
+  if (ready.type === 'tcp' && (!Number.isInteger(ready.port) || ready.port! < 1 || ready.port! > 65535)) return null
+  if (ready.type !== 'tcp' && ready.port !== undefined) return null
+  if (ready.type === 'http') {
+    try {
+      if (typeof ready.url !== 'string' || ready.url.length > 2048) return null
+      const url = new URL(ready.url)
+      if (!['http:', 'https:'].includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.username || url.password || url.hash) return null
+    } catch { return null }
+  } else if (ready.url !== undefined) return null
+  return { kind: item.kind, readiness: { type: ready.type, ...(ready.url ? { url: ready.url } : {}),
+    ...(ready.port ? { port: ready.port } : {}), ...(ready.timeout_seconds ? { timeout_seconds: ready.timeout_seconds } : {}) } }
+}
 
 export interface BackgroundTask {
+  /** Frozen startup provenance. An explicit null is invalid, never a legacy unscoped task. */
+  taskContext?: TaskToolContext | null
+  /** Live monitor confirmation, not a restart/resume grant. */
+  resultSettled?: boolean
   id: string
   name: string
   pid: number
@@ -28,6 +71,18 @@ export interface BackgroundTask {
   exitCode: number | null
   createdAt: number
   checkedAt: number | null
+  /** A confirmed manual stop request; retained until the observer confirms exit. */
+  stopRequestedAt?: number
+  /** Ephemeral control state, not restored from disk. */
+  stopInProgress?: boolean
+  backgroundOptions?: BackgroundCommandOptions
+  /** Exact requested startup options, before optional service inference changes monitoring. */
+  launchOptions?: BackgroundCommandOptions | null
+  startup?: BackgroundStartupState
+  readinessDeliveryStatus?: BackgroundTaskDeliveryStatus
+  readinessDeliveryMessage?: string
+  timeoutDeliveryStatus?: BackgroundTaskDeliveryStatus
+  timeoutDeliveryMessage?: string
   message: string
   output: string
   errorOutput: string
@@ -41,6 +96,11 @@ export interface BackgroundTask {
 
 export interface BackgroundTasksState {
   tasks: BackgroundTask[]
+}
+
+export interface BackgroundTaskStopResult {
+  ok: boolean
+  message: string
 }
 
 /**
@@ -69,8 +129,8 @@ export interface StoredBackgroundTask {
   owner: { platformId: string; conversationId: string }
 }
 
-const STATUSES: readonly BackgroundTaskStatus[] = ['checking', 'running', 'completed', 'failed', 'exited', 'unknown']
-const DELIVERIES: readonly BackgroundTaskDeliveryStatus[] = ['pending', 'sent', 'needs-attention', 'cancelled']
+const STATUSES: readonly BackgroundTaskStatus[] = ['checking', 'running', 'completed', 'failed', 'exited', 'stopped', 'unknown']
+const DELIVERIES: readonly BackgroundTaskDeliveryStatus[] = ['pending', 'sending', 'sent', 'needs-attention', 'cancelled', 'superseded']
 
 /** A stored row as read back from disk, or null when any part of it is unusable. */
 export function parseStoredBackgroundTask(raw: string): StoredBackgroundTask | null {
@@ -91,9 +151,32 @@ export function parseStoredBackgroundTask(raw: string): StoredBackgroundTask | n
       !(task.exitCode === null || Number.isSafeInteger(task.exitCode)) || !Number.isFinite(task.createdAt) ||
       !text(task.output, 300_000) || !text(task.errorOutput, 300_000) || !text(task.message, 4096)) return null
     if ((task.stderrPath !== null && !text(task.stderrPath)) || (task.exitCodePath !== null && !text(task.exitCodePath))) return null
-    for (const key of ['deliveryStatus', 'creationDeliveryStatus'] as const) {
-      if (task[key] !== undefined && !DELIVERIES.includes(task[key]!)) return null
+    if (task.stopRequestedAt !== undefined && (!Number.isFinite(task.stopRequestedAt) || task.stopRequestedAt < 0)) return null
+    if (task.backgroundOptions !== undefined && !parseBackgroundOptions(task.backgroundOptions)) return null
+    if (task.launchOptions !== undefined && task.launchOptions !== null) {
+      const launch = parseBackgroundOptions(task.launchOptions)
+      if (!launch) return null
+      task.launchOptions = launch
     }
+    if (task.startup !== undefined) {
+      const startup = task.startup
+      if (!startup || !['starting', 'ready', 'timeout', 'failed'].includes(startup.state) || !Number.isFinite(startup.deadlineAt) ||
+        ![startup.stdoutOffset, startup.stderrOffset].every(n => Number.isSafeInteger(n) && n >= 0) ||
+        !text(startup.stdoutCarry, 4096) || !text(startup.stderrCarry, 4096) ||
+        (startup.evidence !== undefined && !text(startup.evidence, 4096)) || (startup.url !== undefined && !text(startup.url, 2048)) ||
+        (startup.readyAt !== undefined && !Number.isFinite(startup.readyAt))) return null
+    }
+    delete task.stopInProgress
+    for (const key of ['deliveryStatus', 'creationDeliveryStatus', 'readinessDeliveryStatus', 'timeoutDeliveryStatus'] as const) {
+      if (task[key] !== undefined && !DELIVERIES.includes(task[key]!)) return null
+      if (task[key] === 'sending') {
+        task[key] = 'needs-attention'
+        const messageKey = key.replace('Status', 'Message') as 'deliveryMessage' | 'creationDeliveryMessage' | 'readinessDeliveryMessage' | 'timeoutDeliveryMessage'
+        task[messageKey] = '应用重启前正在发送，结果未确认；请核对原对话，软件不会自动重复提交。'
+      }
+    }
+    if (Object.hasOwn(task, 'taskContext')) task.taskContext = parseTaskToolContext(task.taskContext)
+    delete task.resultSettled
     return value
   } catch { return null }
 }

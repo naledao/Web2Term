@@ -13,6 +13,11 @@ import { useToolWindows, ToolWindowDock } from './components/ToolWindows'
 import type { PdfPreviewTarget } from './components/PdfPreviewDialog'
 import BackendLoginForm from './components/BackendLoginForm'
 import Web2termDevicesSettings from './components/Web2termDevicesSettings'
+import ComputerUseSettings from './components/ComputerUseSettings'
+import AutonomousTaskSummary from './components/AutonomousTaskSummary'
+import type { AutonomousTaskState } from '@shared/autonomous-task'
+import { DEFAULT_COMPUTER_USE_PREFERENCES, normalizeComputerUsePreferences } from '@shared/computer-use'
+import type { ComputerUseCapability, ComputerUsePreferences } from '@shared/computer-use'
 import TerminalActionsMenu from './components/TerminalActionsMenu'
 import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
@@ -100,6 +105,7 @@ function adjacentPanelTab(ids: PanelTab[], removed: PanelTab, remaining = ids.fi
 const SETTINGS_SECTIONS = [
   { id: 'appearance', label: '外观' },
   { id: 'chat', label: '对话' },
+  { id: 'automation', label: 'computer use' },
   { id: 'backend', label: '后端服务' },
   { id: 'devices', label: 'web2term 设备' },
   { id: 'proxy', label: '网络代理' },
@@ -114,6 +120,7 @@ function SettingsSectionIcon({ section }: { section: SettingsSection }): JSX.Ele
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       {section === 'appearance' ? <><circle cx="12" cy="12" r="8" /><path d="M12 4v16" /><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none" /></> : null}
       {section === 'chat' ? <><path d="M4 5h16v11H9l-5 4V5z" /><path d="M8 9h8M8 12h5" /></> : null}
+      {section === 'automation' ? <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4M8 9l3 3 5-5" /></> : null}
       {section === 'backend' ? <><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M12 10v4" /></> : null}
       {section === 'devices' ? <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8m-4-4v4M7 9l2 2-2 2m5 0h4" /></> : null}
       {section === 'proxy' ? <><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></> : null}
@@ -412,6 +419,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [automation, setAutomation] = useState<AutomationState | null>(null)
   const [executions, setExecutions] = useState<ExecutionRecord[]>([])
   const [recentCommandOpen, setRecentCommandOpen] = useState(false)
+  const recentCommandTriggerRef = useRef<HTMLButtonElement>(null)
   const [recentCommands, setRecentCommands] = useState<RecentCommandJson[]>([])
   const [recentCommandLoading, setRecentCommandLoading] = useState(false)
   const [recentCommandRunning, setRecentCommandRunning] = useState<string | null>(null)
@@ -501,6 +509,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance')
   const settingsBodyRef = useRef<HTMLDivElement>(null)
   const [settings, setSettings] = useState<AppSettings | null>(null)
+  const [computerUseDraft, setComputerUseDraft] = useState<ComputerUsePreferences>({ ...DEFAULT_COMPUTER_USE_PREFERENCES })
+  const [computerUseCapability, setComputerUseCapability] = useState<ComputerUseCapability | null>(null)
+  const [computerUseError, setComputerUseError] = useState('')
   // After `settings` is declared: reading it earlier is a TDZ ReferenceError that blanks the window.
   useEffect(() => {
     setChatView(readChatView(sessionId, platformId, settings?.defaultChatView ?? DEFAULT_CHAT_VIEW))
@@ -635,6 +646,30 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const sshActive = ssh !== null && ssh.attached
   const web2termActive = sessionKind === 'web2term' || terminal?.transport?.kind === 'web2term'
   const remoteTerminal = sshActive || web2termActive
+  useEffect(() => {
+    if (!settingsOpen) return
+    let cancelled = false
+    let updates = 0
+    setComputerUseCapability(null)
+    setComputerUseError('')
+    const unsubscribe = window.api.onComputerUseCapabilityChanged(value => {
+      if (cancelled || value.context.sessionId !== sessionId || value.context.platformId !== platformId) return
+      updates += 1
+      setComputerUseError('')
+      setComputerUseCapability(value)
+    })
+    void window.api.getComputerUseCapability().then(value => {
+      if (cancelled || updates) return
+      if (value.context.sessionId !== sessionId || value.context.platformId !== platformId) {
+        setComputerUseError('当前会话已变化，请重新打开设置。')
+        return
+      }
+      setComputerUseCapability(value)
+    }).catch(() => {
+      if (!cancelled && !updates) setComputerUseError('读取桌面能力状态失败，请重新打开设置。')
+    })
+    return () => { cancelled = true; unsubscribe() }
+  }, [settingsOpen, sessionId, platformId, sshActive, web2termActive])
   const commandHistoryTarget = sshActive
     ? `ssh:${ssh.hostId || ssh.target}`
     : web2termActive ? `web2term:${terminal?.transport?.deviceId ?? ''}` : 'local'
@@ -683,6 +718,24 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [sessionId, panelWidth, panelCollapsed, panelTab, backgroundTasksOpen, githubRepositoriesOpen])
 
   const conversationId = embed.conversationId
+  const [autonomousTaskState, setAutonomousTaskState] = useState<AutonomousTaskState | null>(null)
+  const visibleAutonomousTask = autonomousTaskState?.sessionId === sessionId && autonomousTaskState.platformId === platformId &&
+    autonomousTaskState.conversationId === conversationId ? autonomousTaskState : null
+  useEffect(() => {
+    let cancelled = false
+    let pushed = false
+    const matches = (state: AutonomousTaskState | null): state is AutonomousTaskState => !!state &&
+      state.sessionId === sessionId && state.platformId === platformId && state.conversationId === conversationId
+    const off = window.api.onAutonomousTaskChanged(state => {
+      if (!cancelled && matches(state)) { pushed = true; setAutonomousTaskState(state) }
+    })
+    void window.api.getAutonomousTask().then(state => {
+      if (!cancelled && !pushed) setAutonomousTaskState(matches(state) ? state : null)
+    }).catch(() => {
+      if (!cancelled && !pushed) setAutonomousTaskState({ sessionId, platformId, conversationId, task: null, error: '读取自主任务失败，请重新打开当前会话。' })
+    })
+    return () => { cancelled = true; off() }
+  }, [sessionId, platformId, conversationId])
   const transcriptScrollKey = conversationScrollKey(sessionId, platformId, conversationId)
   const conversationMessagesReady = conversationTranscript.ownerKey === transcriptScrollKey
   const conversationMessages = conversationMessagesReady ? conversationTranscript.messages : []
@@ -1298,15 +1351,17 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [conversationId])
 
   useEffect(() => {
-    if (taskRunning) setRecentCommandOpen(false)
-  }, [taskRunning])
+    if (taskRunning || panelTab !== 'control' || panelCollapsed) setRecentCommandOpen(false)
+  }, [taskRunning, panelTab, panelCollapsed])
 
+  const [taskStopError, setTaskStopError] = useState('')
   const endTask = useCallback(async (): Promise<void> => {
+    setTaskStopError('')
     try {
       setInterceptor(await window.api.endTask())
       await refreshExecutions()
     } catch {
-      /* leave pushed state to correct the UI */
+      setTaskStopError('后续自动执行已撤销，部分页面或终端停止请求未确认，请查看实际状态。')
     }
   }, [refreshExecutions])
 
@@ -1325,7 +1380,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setPanelTab('terminal')
       setPanelCollapsed(false)
     }
-  }, [pendingQuestion?.messageId])
+  }, [pendingQuestion?.messageId, pendingQuestion?.taskContext?.questionId])
 
   const updateQuestionDraft = useCallback((value: string): void => {
     setQuestionDrafts((previous) => {
@@ -1369,7 +1424,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     setAnsweringQuestion(true)
     setQuestionError('')
     try {
-      setInterceptor(await window.api.answerQuestion(pendingQuestion.messageId, answer))
+      const next = await window.api.answerQuestion(pendingQuestion.messageId, answer, pendingQuestion.taskContext)
+      setInterceptor(current => current?.pendingQuestion?.messageId === pendingQuestion.messageId &&
+        current.pendingQuestion.taskContext?.questionId === pendingQuestion.taskContext?.questionId ? next : current)
     } catch (error) {
       setQuestionError(error instanceof Error ? error.message : '回答发送失败，请重试。')
     } finally {
@@ -1383,9 +1440,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     setCancelingQuestion(true)
     setQuestionError('')
     try {
-      const next = await window.api.cancelQuestion(messageId)
+      const next = await window.api.cancelQuestion(messageId, pendingQuestion.taskContext)
       // A late reply to cancelling an old question must preserve a newer one.
-      setInterceptor((current) => current?.pendingQuestion?.messageId === messageId
+      setInterceptor((current) => current?.pendingQuestion?.messageId === messageId && current.pendingQuestion.taskContext?.questionId === pendingQuestion.taskContext?.questionId
         ? { ...current, pendingQuestion: next.pendingQuestion }
         : current)
     } catch (error) {
@@ -1792,6 +1849,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       .then((value) => {
         if (cancelled) return
         setSettings(value)
+        setComputerUseDraft(normalizeComputerUsePreferences(value))
         setBackendUrlDraft(value.backendUrl ?? '')
         setProxyDrafts(value.embedProxy ?? {})
         setThemeDraft(value.theme)
@@ -1867,8 +1925,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
   /**
    * The embedded page is a NATIVE view: it always paints above the DOM. Regular dialogs hide
-   * it while they are open; the pending-question widget is deliberately excluded because it
-   * lives in the terminal column and must leave the chat page usable underneath.
+   * it while they are open. The recent-command popover is constrained to the terminal column,
+   * as is the pending-question widget, so both leave the chat page usable underneath.
    */
   const terminalModalOpen = terminalVisible && sshFilesOpen
   const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
@@ -2078,6 +2136,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       // Show back what main actually stored — it normalises a bare "host:port"
       // into a URL, and the user should see that rather than be surprised later.
       const next = await window.api.updateSettings({
+        ...computerUseDraft,
         theme: themeDraft,
         backendUrl,
         embedProxy: proxyDrafts,
@@ -2092,6 +2151,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         userAvatarScale: userAvatarScaleDraft
       })
       setSettings(next)
+      setComputerUseDraft(normalizeComputerUsePreferences(next))
       setBackendUrlDraft(next.backendUrl)
       onThemeChange(next.theme)
       setThemeDraft(next.theme)
@@ -2112,7 +2172,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     } finally {
       setSavingSettings(false)
     }
-  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
+  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, computerUseDraft, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
 
   /** Drag the shared sidebar's left edge to resize it. */
   const startPanelResize = useCallback(
@@ -2146,6 +2206,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       case 'close':
         if (web2termActive) void closeWeb2termTerminal()
         else void dismissSsh()
+        break
+      case 'local':
+        if (sshActive) void dismissSsh()
         break
       case 'ssh': setSshDialogOpen(true); break
       case 'web2term': onOpenWeb2termConnection(terminalSwitchRef.current); break
@@ -2236,8 +2299,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               className="model-picker__trigger"
               aria-label="模型"
               aria-haspopup="menu"
-              disabled={taskRunning || switchingPlatform || platformId === ''}
-              title={taskRunning ? '任务运行中不能切换模型' : '切换模型'}
+              disabled={taskRunning && visibleAutonomousTask?.task?.status !== 'recorded' || switchingPlatform || platformId === ''}
+              title={taskRunning ? visibleAutonomousTask?.task?.status === 'recorded' ? '切换模型将中断当前 computer use 任务' : '任务运行中不能切换模型' : '切换模型'}
               onClick={(event) => {
                 const rect = event.currentTarget.getBoundingClientRect()
                 void window.api.showModelMenu(platformId, { x: Math.round(rect.left), y: Math.round(rect.bottom) }).then((next) => {
@@ -2524,8 +2587,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             <button
               type="button"
               className="btn btn--danger"
-              disabled={!taskRunning}
-              title={`停止 ${activePlatformLabel || '模型'} 生成、终端命令和后续自动执行，并允许切换对话`}
+              disabled={!taskRunning && visibleAutonomousTask?.task?.status !== 'recorded'}
+              title={`停止 ${activePlatformLabel || '模型'} 生成、computer use、终端命令和自动回传；后台进程保持独立运行`}
               onClick={() => void endTask()}
             >
               结束任务
@@ -2534,7 +2597,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               type="button"
               className="btn"
               disabled={!conversationId || taskRunning || recentCommandRunning !== null}
+              ref={recentCommandTriggerRef}
               aria-expanded={recentCommandOpen}
+              aria-haspopup="dialog"
+              aria-controls={recentCommandOpen ? `recent-command-picker-${sessionId}` : undefined}
               title="选择最近三条指令之一，在当前终端执行并自动将结果返回给 AI"
               onClick={() => void openRecentCommands()}
             >
@@ -2542,11 +2608,14 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             </button>
           </div>
 
-          {recentCommandOpen ? (
+          {recentCommandOpen && panelTab === 'control' && !panelCollapsed ? (
             <AppPopover
+              id={`recent-command-picker-${sessionId}`}
               className="recent-command-picker"
               aria-label="选择历史指令"
-             onClose={() => setRecentCommandOpen(false)}>
+              anchor={recentCommandTriggerRef.current}
+              containerRef={panelRef}
+              onClose={() => setRecentCommandOpen(false)}>
               <div className="recent-command-picker__header">
                 <div>
                   <strong>选择历史指令</strong>
@@ -2597,7 +2666,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             ) : null}
           </div>
 
-          {currentGoal ? (
+          {taskStopError ? <p className="autonomous-task-summary__error" role="alert">{taskStopError}</p> : null}
+          <AutonomousTaskSummary state={visibleAutonomousTask} />
+          {!visibleAutonomousTask?.task && currentGoal ? (
             <p className="terminal__last" title={currentGoal}>
               当前的目标：{currentGoal}
             </p>
@@ -3579,6 +3650,23 @@ ${record.command}`
                 </section>
 
                 <section
+                  id="settings-panel-automation"
+                  role="tabpanel"
+                  aria-labelledby="settings-tab-automation"
+                  tabIndex={0}
+                  hidden={settingsSection !== 'automation'}
+                  className="settings-card settings-appearance-card"
+                >
+                  <div className="settings-card__heading">
+                    <span className="settings-card__icon"><SettingsSectionIcon section="automation" /></span>
+                    <h2>computer use</h2>
+                  </div>
+                  <ComputerUseSettings preferences={computerUseDraft} onChange={setComputerUseDraft}
+                    capability={computerUseCapability} error={computerUseError}
+                    disabled={settingsLoading || settingsLoadFailed || savingSettings || settings === null} />
+                </section>
+
+                <section
                   id="settings-panel-backend"
                   role="tabpanel"
                   aria-labelledby="settings-tab-backend"
@@ -3838,7 +3926,7 @@ ${record.command}`
               {settingsError ? <p className="settings-feedback settings-feedback--save" role="alert">{settingsError}</p> : null}
               <span className="panel__spacer" />
               <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setDefaultPlatformDraft(settings?.defaultPlatformId ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' ? '关闭' : '取消'}</button>
-              {settingsSection !== 'devices' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' || settingsSection === 'chat' ? '保存' : '保存并重新加载'}</button> : null}
+              {settingsSection !== 'devices' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' || settingsSection === 'chat' || settingsSection === 'automation' ? '保存' : '保存并重新加载'}</button> : null}
             </div>
           </div>
         </div>
@@ -3978,23 +4066,29 @@ ${record.command}`
         </Dialog.Root>
       ) : null}
       {commandPreview !== null ? (
-        <Suspense fallback={
-          <AppPopover className="command-viewer" data-theme={theme} aria-label="完整指令" onClose={() => setCommandPreview(null)}>
-            <header className="command-viewer__head">
-              <h2 className="command-viewer__title">完整指令</h2>
-              <button type="button" className="command-viewer__button" onClick={() => setCommandPreview(null)}>关闭</button>
-            </header>
-            <p className="command-viewer__loading" role="status">正在加载指令查看器…</p>
-          </AppPopover>
-        }>
-          <CommandViewer
-            command={commandPreview.command}
-            description={commandPreview.description}
-            language={commandPreview.language}
-            theme={theme}
-            onClose={() => setCommandPreview(null)}
-          />
-        </Suspense>
+        <Dialog.Root open modal onOpenChange={(open) => { if (!open) setCommandPreview(null) }}>
+          <Dialog.Portal>
+            <Dialog.Backdrop className="command-viewer__backdrop" />
+            <Dialog.Popup className="command-viewer" data-theme={theme} aria-label="完整指令">
+              <Suspense fallback={
+                <>
+                  <header className="command-viewer__head">
+                    <Dialog.Title className="command-viewer__title">完整指令</Dialog.Title>
+                    <Dialog.Close className="command-viewer__button" title="关闭（Esc）">关闭</Dialog.Close>
+                  </header>
+                  <p className="command-viewer__loading" role="status">正在加载指令查看器…</p>
+                </>
+              }>
+                <CommandViewer
+                  command={commandPreview.command}
+                  description={commandPreview.description}
+                  language={commandPreview.language}
+                  theme={theme}
+                />
+              </Suspense>
+            </Dialog.Popup>
+          </Dialog.Portal>
+        </Dialog.Root>
       ) : null}
       {pdfPreview ? <PdfPreviewDialog key={`${pdfPreview.hostId}:${pdfPreview.path}`} target={pdfPreview} theme={settings?.theme ?? 'light'} onClose={() => setPdfPreview(null)} /> : null}
       {imagePreview ? <ImagePreviewDialog source={imagePreview.source} name={imagePreview.name} onClose={() => setImagePreview(null)} /> : null}

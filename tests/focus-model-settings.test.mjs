@@ -34,6 +34,7 @@ function actual(name, context, method = false, path = pagePath) {
 function fixture() {
   let open = false, view = 'effort', model = 'GPT-6', effort = 'high', now = 0, step = 0
   let focused = true, owner = true, blocked = false, duplicates = false, range = '2', afterInput = null, hit = null
+  let triggerVisible = true, effortPresent = true
   const composer = { draft: 'keep this draft exactly' }, inputs = [], reports = []
   const rules = CHATGPT_PAGE.focus.modelSettings
   const node = (text, attributes, box, visible = () => true) => ({
@@ -43,9 +44,9 @@ function fixture() {
     closest(selector) { return selector.includes('aria-hidden') && !this.visible() ? {} : null },
     getBoundingClientRect() { return { left: box[0], top: box[1], width: box[2], height: box[3], right: box[0] + box[2], bottom: box[1] + box[3] } }
   })
-  const trigger = node('High', { id: 'native-trigger' }, [10, 10, 160, 32])
+  let trigger = node('High', { id: 'native-trigger' }, [10, 10, 160, 32], () => triggerVisible)
   trigger.getAttribute = key => ({ 'aria-expanded': String(open), 'aria-controls': open ? 'native-menu' : null,
-    [rules.effortAttribute]: effort })[key] ?? null
+    [rules.effortAttribute]: effortPresent ? effort : null })[key] ?? null
   const models = ['GPT-6', 'GPT-5.6 Sol'].map((text, i) => {
     const item = node(text, {}, [10, 80 + i * 35, 240, 30], () => open && view === 'model')
     item.getAttribute = key => key === 'aria-checked' ? String(model === text) : null
@@ -97,9 +98,11 @@ function fixture() {
       else if (hit === root) effort = ['none', 'medium', 'high'][Math.round((event.x / 1.5 - 20) / 100)]
       afterInput?.(hit)
     } }
-  return { context, inputs, reports, composer, trigger, models, read: context.focusModelSettingsOf,
-    change: async (kind, value = null) => { step = 0; return await api.updateModelSettings(kind, value, '/', 'test-operation') },
+  return { context, inputs, reports, composer, get trigger() { return trigger }, models, read: context.focusModelSettingsOf,
+    change: async (kind, value = null) => { step = 0; return await api.updateModelSettings(kind, value, context.location.pathname, 'test-operation') },
     originalOpen() { open = true }, isOpen: () => open,
+    replaceTrigger() { const previous = trigger; trigger = { ...previous, isConnected: true }; previous.isConnected = false },
+    showTrigger(value) { triggerVisible = value }, showEffortAttribute(value) { effortPresent = value },
     failFocus() { focused = false }, changeOwner() { owner = false }, duplicateModels() { duplicates = true },
     differentRange() { range = '3' }, afterInput(callback) { afterInput = callback } }
 }
@@ -117,6 +120,81 @@ test('initial read discovers hidden model radios without selecting anything and 
   assert.equal(f.isOpen(), false)
   assert.equal(f.composer.draft, 'keep this draft exactly')
   assert.equal(shared.validFocusModelSettings(result.settings), true)
+})
+
+test('confirmed settings survive trigger replacement and temporary removal without opening the menu', async () => {
+  const f = fixture(), result = await f.change('read')
+  const expected = JSON.stringify(result.settings), inputs = f.inputs.length
+  f.replaceTrigger()
+  assert.equal(JSON.stringify(f.read()), expected)
+  f.showTrigger(false)
+  assert.equal(JSON.stringify(f.read()), expected)
+  f.showTrigger(true)
+  f.showEffortAttribute(false)
+  assert.equal(JSON.stringify(f.read()), expected)
+  f.showEffortAttribute(true)
+  assert.equal(JSON.stringify(f.read()), expected)
+  assert.equal(f.inputs.length, inputs)
+  assert.equal(f.isOpen(), false)
+  assert.equal(f.composer.draft, 'keep this draft exactly')
+})
+
+test('the first text or attachment send retains settings when home becomes its new conversation', async () => {
+  for (const sending of ['waiting', 'programmatic', 'attachment']) {
+    const f = fixture(), result = await f.change('read')
+    const expected = JSON.stringify(result.settings), inputs = f.inputs.length
+    if (sending === 'waiting') f.context.state.awaitingReplySince = 1
+    if (sending === 'programmatic') f.context.state.programmatic = true
+    if (sending === 'attachment') f.context.fileSend = { submitted: true }
+    f.context.location.pathname = '/c/6ade12d0-6344-83e8-a38d-4666cda5b371'
+    f.replaceTrigger()
+    f.showTrigger(false)
+    assert.equal(JSON.stringify(f.read()), expected, sending)
+    f.context.state.awaitingReplySince = 0
+    f.context.state.programmatic = false
+    f.context.fileSend = null
+    f.showTrigger(true)
+    assert.equal(JSON.stringify(f.read()), expected, sending + ' after generation')
+    assert.equal(f.inputs.length, inputs)
+    assert.equal(f.isOpen(), false)
+  }
+})
+
+test('manual navigation and switching between conversations discard settings even if a reply is active', async () => {
+  const f = fixture()
+  await f.change('read')
+  f.context.location.pathname = '/c/first'
+  assert.equal(f.read().model, null, 'idle navigation from home must not inherit a selection')
+  assert.equal(f.read().models.length, 0)
+  await f.change('read')
+  assert.equal(f.read().model, 'GPT-6')
+  f.context.state.awaitingReplySince = 1
+  f.context.location.pathname = '/c/second'
+  f.showTrigger(false)
+  const switched = f.read()
+  assert.equal(switched.model, null)
+  assert.equal(switched.effort, null)
+  assert.equal(switched.models.length, 0)
+  assert.equal(switched.efforts.length, 0)
+  f.context.location.pathname = '/'
+  assert.equal(f.read().model, null, 'returning to home must not resurrect the previous selection')
+})
+
+test('live menu evidence still updates settings and invalid menus invalidate confirmed selections', async () => {
+  const f = fixture()
+  await f.change('read')
+  f.replaceTrigger()
+  const changed = await f.change('model', 'GPT-5.6 Sol')
+  assert.equal(changed.outcome, 'ok')
+  assert.equal(changed.settings.model, 'GPT-5.6 Sol')
+  assert.equal(changed.settings.effort, 'medium')
+  f.originalOpen()
+  f.duplicateModels()
+  assert.equal(f.read().model, null)
+  assert.equal(f.read().models.length, 0)
+  f.differentRange()
+  assert.equal(f.read().effort, null)
+  assert.equal(f.read().efforts.length, 0)
 })
 test('model switch opens native list, selects once, and reads the model-specific effort afterward', async () => {
   const f = fixture(), result = await f.change('model', 'GPT-5.6 Sol')

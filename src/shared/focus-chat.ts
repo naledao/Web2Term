@@ -29,8 +29,8 @@ export function focusPlatformLabels(): string {
   return Object.values(FOCUS_PLATFORMS).map(platform => platform.label).join('、')
 }
 export type FocusTurnStatus = 'working' | 'answered' | 'stopped' | 'blocked'
-/** `superseded`: a newer execution took over before this result was handed back; nothing to do. */
-export type FocusDelivery = 'pending' | 'sent' | 'blocked' | 'failed' | 'superseded'
+/** `superseded`: a newer execution took over; `background`: dedicated task notifications own the results. */
+export type FocusDelivery = 'pending' | 'sent' | 'blocked' | 'failed' | 'superseded' | 'background'
 export const FOCUS_MAX_FILES = 3
 export const FOCUS_MAX_FILE_BYTES = 20 * 1024 * 1024
 export const FOCUS_MAX_BATCH_BYTES = 25 * 1024 * 1024
@@ -157,15 +157,22 @@ export interface FocusChatState extends FocusOwner {
   smartReplies?: { sourceMessageId: string; answer: string }[]
   composerModes?: FocusComposerMode[]
   modelSettings?: FocusModelSettings
+  /** Set while computer use is on and the Windows helper is not ready: why sending waits. */
+  sendBlock?: string | null
 }
 /** File delivery has its own persisted lifecycle; shell delivery is recorded by the turn. */
 export function focusDelivery(record: ExecutionRecord, delivery?: FocusDelivery): FocusDelivery | undefined {
-  if (record.kind !== 'read_files') return delivery
+  if (record.kind !== 'read_files') {
+    // Older turns saved a successful background startup as waiting for a normal
+    // shell result, even though the background notification queue replaced it.
+    if (record.background && record.status === 'done' && (!delivery || delivery === 'pending')) return 'background'
+    return delivery
+  }
   return record.deliveryStatus === 'sent' ? 'sent' :
     record.deliveryStatus === 'failed' || record.deliveryStatus === 'unknown' ? 'failed' :
       record.deliveryStatus === 'pending' || record.deliveryStatus === 'uploading' ? 'pending' : undefined
 }
-export type FocusSendOutcome = 'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable' | 'invalid' | 'upload-failed' | 'unsupported-file-type' | 'unknown' | 'cancelled'
+export type FocusSendOutcome = 'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable' | 'invalid' | 'upload-failed' | 'unsupported-file-type' | 'unknown' | 'cancelled' | 'helper-not-ready'
 export interface FocusSendRequest extends FocusOwner { text: string; files?: FocusAttachmentInput[] }
 export interface FocusEditRequest extends FocusOwner { messageId: string; text: string }
 /** Metadata only, produced by the page's edit pipeline; no message or prompt text. */
@@ -209,7 +216,7 @@ export function focusOwnerKey(owner: FocusOwner): string {
   return JSON.stringify([owner.sessionId, owner.platformId, owner.conversationId])
 }
 export function cleanFocusAnswer(text: string): string {
-  const answer = text.replace(/^\s*【任务完成】\s*/, '')
+  const answer = text.replace(/^\s*(?:#{1,6}[ \t]+)?(?:\*\*【任务完成】\*\*|__【任务完成】__|【任务完成】)\s*/, '')
   // Interpret only an entire transport object. Prose explaining JSON and code
   // examples embedded in a normal answer must retain their original formatting.
   let body = answer.trim().replace(/^JSON[ \t]*(?:\r?\n)+/i, '')

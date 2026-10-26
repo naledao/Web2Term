@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react'
-import type { ComponentProps, Ref } from 'react'
+import type { ComponentProps, Ref, RefObject } from 'react'
 import { Popover } from '@base-ui/react/popover'
 import './AppPopover.css'
 
@@ -12,6 +12,8 @@ interface Props extends Omit<PopupProps, 'open' | 'role' | 'aria-modal' | 'onClo
   dismissOnEscape?: boolean
   keepMounted?: boolean
   anchor?: HTMLElement | null
+  /** Mount and constrain sidebar popovers away from the native chat view. */
+  containerRef?: RefObject<HTMLElement | null>
   ref?: Ref<HTMLDivElement>
 }
 
@@ -34,7 +36,7 @@ export default function AppPopover({ open = true, keepMounted = false, ...props 
 }
 
 function PopoverSurface({ open, onClose, busy = false, dismissOnOutside = true, dismissOnEscape = true,
-  keepMounted, anchor, className = '', initialFocus, finalFocus, children, ref, ...props }: Props & { open: boolean }) {
+  keepMounted, anchor, containerRef, className = '', initialFocus, finalFocus, children, ref, ...props }: Props & { open: boolean }) {
   const marker = useRef<HTMLSpanElement>(null)
   const [container, setContainer] = useState<HTMLElement | null>(null)
   const origin = useRef(captureAnchor(anchor))
@@ -42,7 +44,7 @@ function PopoverSurface({ open, onClose, busy = false, dismissOnOutside = true, 
   const previousOpen = useRef(open)
   if (open && !previousOpen.current) { origin.current = captureAnchor(anchor); restoreFocus.current = true }
   previousOpen.current = open
-  useLayoutEffect(() => { setContainer(marker.current?.parentElement ?? null) }, [])
+  useLayoutEffect(() => { setContainer(containerRef?.current ?? marker.current?.parentElement ?? null) }, [containerRef])
   return <>
     <span hidden ref={marker} />
     <Popover.Root open={open} modal={false} onOpenChange={(next, details) => {
@@ -55,9 +57,13 @@ function PopoverSurface({ open, onClose, busy = false, dismissOnOutside = true, 
       restoreFocus.current = !outside
       onClose()
     }}>
-      {container ? <Popover.Portal container={container} keepMounted={keepMounted} className="app-popover-portal">
+      {container ? <Popover.Portal container={container} keepMounted={keepMounted}
+        className={`app-popover-portal${containerRef ? ' app-popover-portal--bounded' : ''}`}>
         <Popover.Positioner anchor={origin.current.virtual} positionMethod="fixed" side={origin.current.side} align="end"
-          sideOffset={8} collisionPadding={12} collisionAvoidance={{ side: 'flip', align: 'shift', fallbackAxisSide: 'end' }}
+          sideOffset={8} collisionPadding={12} collisionBoundary={containerRef ? container : undefined}
+          collisionAvoidance={containerRef
+            ? { side: 'shift', align: 'shift', fallbackAxisSide: 'none' }
+            : { side: 'flip', align: 'shift', fallbackAxisSide: 'end' }}
           className="app-popover-positioner">
           <Popover.Popup {...props} ref={ref} className={`app-popover ${className}`} aria-modal={false}
             initialFocus={initialFocus} finalFocus={finalFocus ?? (() => restoreFocus.current && origin.current.trigger?.isConnected ? origin.current.trigger : false)}>

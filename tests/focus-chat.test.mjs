@@ -129,6 +129,17 @@ test('clarification snapshots and settled answers are normalized, including raw 
   assert.equal(restored.status, 'stopped', 'display normalization never restarts a task')
 })
 
+test('completion markers are hidden when formatted as a standalone heading or bold text', () => {
+  for (const marker of ['【任务完成】', '**【任务完成】**', '__【任务完成】__', '## 【任务完成】', '### **【任务完成】**']) {
+    assert.equal(shared.cleanFocusAnswer(marker + '\n\n已成功解压至 `/root/website-source-2/`。'),
+      '已成功解压至 `/root/website-source-2/`。')
+  }
+  for (const text of ['文中引用【任务完成】', '> 【任务完成】\n引用说明', '`【任务完成】` 是协议标记',
+    '```text\n【任务完成】\n```', '**【任务完成】是协议示例**']) {
+    assert.equal(shared.cleanFocusAnswer(text), text)
+  }
+})
+
 test('multiple commands, internal deliveries and final prose belong to one human turn', () => {
   const { chat, rows } = fixture()
   const id = chat.begin('deepseek', 'chat-1', '修改聊天视图')
@@ -323,6 +334,34 @@ test('persisted file-upload status takes precedence over shell delivery state', 
   assert.equal(shared.focusDelivery({ kind: 'read_files', deliveryStatus: 'unknown' }, 'pending'), 'failed')
   assert.equal(shared.focusDelivery({ kind: 'read_files', deliveryStatus: 'cancelled' }, 'pending'), undefined)
   assert.equal(shared.focusDelivery({ kind: 'command' }, 'blocked'), 'blocked')
+})
+
+test('successful background startups release legacy pending delivery without inventing a sent result', () => {
+  const record = { kind: 'command', background: true, status: 'done' }
+  assert.equal(shared.focusDelivery(record, 'pending'), 'background')
+  assert.equal(shared.focusDelivery(record), 'background')
+  for (const delivery of ['sent', 'blocked', 'failed', 'superseded', 'background']) {
+    assert.equal(shared.focusDelivery(record, delivery), delivery)
+  }
+  for (const status of ['pending', 'running', 'failed', 'interrupted', 'timeout', 'skipped']) {
+    assert.equal(shared.focusDelivery({ ...record, status }, 'pending'), 'pending')
+  }
+  assert.equal(shared.focusDelivery({ ...record, background: false }, 'pending'), 'pending')
+})
+
+test('background handoff and its eventual final reply persist as one answered human turn', () => {
+  const { chat, store } = fixture()
+  chat.begin('deepseek', 'chat-1', '创建页面并启动服务')
+  chat.command('deepseek', 'startup', true)
+  chat.delivery('deepseek', 'chat-1', 'startup', 'background')
+  chat.rawSent('deepseek')
+  chat.settled('deepseek', 'created', '正在等待后台构建。')
+  chat.rawSent('deepseek')
+  chat.settled('deepseek', 'final', '【任务完成】\n页面已托管，访问验证通过。')
+  const turn = onlyTurn(new FocusChat('workspace-1', store))
+  assert.equal(turn.status, 'answered')
+  assert.equal(turn.deliveries.startup, 'background')
+  assert.deepEqual(Array.from(turn.segments, segment => segment.answer), ['', '正在等待后台构建。', '页面已托管，访问验证通过。'])
 })
 
 test('attachment payloads are bounded and cannot request arbitrary local file paths', () => {

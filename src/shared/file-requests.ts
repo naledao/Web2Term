@@ -22,7 +22,7 @@ export interface StoredFileReadRequest extends ReadFilesRequest {
 }
 
 export type FileDeliveryStatus = 'pending' | 'uploading' | 'sent' | 'failed' | 'unknown' | 'cancelled'
-export type FileSendOutcome = 'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'cancelled' | 'unsupported-file-type' | 'upload-failed' | 'unknown'
+export type FileSendOutcome = 'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'cancelled' | 'unsupported-file-type' | 'upload-failed' | 'not-submitted' | 'unknown'
 
 export function parseReadFilesRequest(value: unknown): ReadFilesRequest | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null

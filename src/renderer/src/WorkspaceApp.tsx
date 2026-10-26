@@ -1,3 +1,4 @@
+import EmergencyStopControls from './components/EmergencyStopControls'
 import AppPopover from './components/AppPopover'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
@@ -13,6 +14,7 @@ import NewSessionPopover from './components/NewSessionPopover'
 import Web2termWordmark from './components/Web2termWordmark'
 import './assets/workspace-empty.css'
 import './assets/workspace-brand.css'
+import './assets/workspace-updates.css'
 
 const INITIAL_WORKSPACE: WorkspaceState = {
   view: 'manager',
@@ -76,6 +78,7 @@ export default function WorkspaceApp(): ReactElement {
   const [pendingDelete, setPendingDelete] = useState<ManagedSessionSummary | null>(null)
   const [appVersion, setAppVersion] = useState('')
   const [updateNotice, setUpdateNotice] = useState<{ version: string } | null>(null)
+  const updateNoticeAnchor = useRef<HTMLSpanElement>(null)
   const [updateDownloading, setUpdateDownloading] = useState(false)
   const [updateLive, setUpdateLive] = useState<{ phase: UpdateStatus['phase']; percent: number }>({ phase: 'idle', percent: 0 })
   const [theme, setTheme] = useState<AppTheme>('light')
@@ -393,6 +396,7 @@ export default function WorkspaceApp(): ReactElement {
                 : '暂无任务'}
           </span>
         </button>
+        <EmergencyStopControls />
         {appVersion ? <span className="workspace__version" title="应用版本号">v{appVersion}</span> : null}
       </footer>
 
@@ -488,8 +492,10 @@ export default function WorkspaceApp(): ReactElement {
           onWeb2term={trigger => openWeb2termDeviceDialog(trigger, { projectId: newSessionProjectId })} />
       ) : null}
       {web2termDeviceDialogOpen ? <Web2termDeviceDialog onClose={closeWeb2termDeviceDialog} onConnected={openWeb2termConnection} /> : null}
+      <span ref={updateNoticeAnchor} className="workspace__update-anchor" aria-hidden="true" />
       <ConfirmDialog
         open={updateNotice !== null}
+        anchor={updateNoticeAnchor.current}
         title={updateLive.phase === 'downloaded' ? `新版本 v${updateNotice?.version ?? ''} 已下载` : `发现新版本 v${updateNotice?.version ?? ''}`}
         description={updateLive.phase === 'downloading' ? `正在下载更新… ${updateLive.percent}%` : updateLive.phase === 'downloaded' ? '下载完成，点击“重启并安装”即可升级，不会丢失当前会话。' : '新版本已可下载。下载完成后重启即可安装，不会打断当前任务。'}
         icon="⬆"

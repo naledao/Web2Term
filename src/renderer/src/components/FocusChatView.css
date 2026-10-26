@@ -69,6 +69,7 @@
 .focus-assistant__head img{width:34px;height:34px;object-fit:contain}
 .focus-history--assistant{font-size:14px;margin:0 0 32px;overflow-wrap:anywhere}
 .focus-answer{font-size:14px;line-height:1.9;overflow-wrap:anywhere}
+.focus-answer+.focus-answer{margin-top:18px}
 .focus-smart-ui{margin:16px 0;padding:14px;border:1px solid var(--fc-border);border-radius:14px;background:var(--fc-bg);color:var(--fc-text);font-size:15px;line-height:1.65;overflow-wrap:anywhere}
 .focus-smart-ui h3{margin:0 0 8px;font-size:16px;line-height:1.5;font-weight:650}
 .focus-smart-ui__description{margin:0 0 10px}
@@ -101,7 +102,6 @@
 .focus-process__body{max-height:min(360px,45vh);overflow-y:auto;overflow-anchor:none;margin-top:4px;padding:0 8px 6px 2px;border:1px solid var(--fc-border);border-radius:8px;background:var(--fc-soft)}
 .focus-process__content{display:flow-root}
 .focus-process__cycle{border-left:1px solid var(--fc-border);padding:4px 0 5px 13px;margin:8px 0 0 3px}
-.focus-process__commentary{margin:8px 0}
 .focus-reasoning{margin:4px 0 10px}
 .focus-reasoning>summary{cursor:pointer;padding:3px 0;color:var(--fc-muted)}
 .focus-reasoning .wmde-markdown{font-size:11px;color:var(--fc-muted)}
@@ -165,7 +165,7 @@
 .focus-composer__mode-pending{min-width:1em;text-align:center}
 .focus-composer__tools>span{margin-left:auto;color:var(--fc-muted);font-size:11px}
 .focus-composer__tools .focus-composer__send{width:34px;height:34px;border:0;border-radius:50%;display:grid;place-items:center;padding:0;background:var(--fc-accent);color:var(--fc-bg);font-size:19px;line-height:1}
-.focus-composer__send .focus-composer__stop-icon{display:block;width:16px;height:16px}
+.focus-composer__send .focus-composer__stop-icon,.focus-composer__send .focus-composer__pending-icon{display:block;width:16px;height:16px}
 .focus-chat .focus-composer__hint{display:block;width:100%;max-width:880px;text-align:center;margin:7px 0 0;font-size:11px;color:var(--fc-muted)}
 .focus-chat__status{color:var(--fc-accent)}
 .focus-chat__pulse{width:6px;height:6px;background:var(--fc-accent);border-radius:50%;animation:focus-chat-pulse 900ms ease-in-out infinite alternate;flex:none}

@@ -23,6 +23,7 @@ interface ConfirmDialogProps {
   danger?: boolean
   dismissOnBackdrop?: boolean
   dismissOnEscape?: boolean
+  anchor?: HTMLElement | null
   items?: ConfirmDialogItem[]
   onConfirm: () => void
   onCancel: () => void
@@ -38,6 +39,7 @@ export default function ConfirmDialog({
   danger = false,
   dismissOnBackdrop = true,
   dismissOnEscape = true,
+  anchor,
   items = [],
   onConfirm,
   onCancel
@@ -51,6 +53,7 @@ export default function ConfirmDialog({
     <AppPopover
       className="confirm-popover"
       aria-label={title}
+      anchor={anchor}
       open={visible} keepMounted busy={busy} onClose={onCancel}
       dismissOnOutside={dismissOnBackdrop} dismissOnEscape={dismissOnEscape} initialFocus={cancelButton}
     >

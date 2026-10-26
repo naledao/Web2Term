@@ -1,0 +1,6 @@
+[
+  { "name": "positive subdivision", "anchors": [{"x":0,"y":0},{"x":33,"y":0}], "points": [{"x":0,"y":0},{"x":11,"y":0},{"x":22,"y":0},{"x":33,"y":0}] },
+  { "name": "negative physical coordinates and rounding", "anchors": [{"x":20,"y":5},{"x":-13,"y":-2}], "points": [{"x":20,"y":5},{"x":9,"y":3},{"x":-2,"y":0},{"x":-13,"y":-2}] },
+  { "name": "waypoint retained", "anchors": [{"x":-16,"y":0},{"x":0,"y":0},{"x":0,"y":17}], "points": [{"x":-16,"y":0},{"x":0,"y":0},{"x":0,"y":9},{"x":0,"y":17}] },
+  { "name": "closed canvas path", "anchors": [{"x":0,"y":0},{"x":16,"y":0},{"x":0,"y":0}], "points": [{"x":0,"y":0},{"x":16,"y":0},{"x":0,"y":0}] }
+]

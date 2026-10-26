@@ -1,5 +1,10 @@
+import type { EmergencyStopState, EmergencyStopResetResult } from '../shared/emergency-stop'
 import type { ToolboxInvocation } from '../shared/toolbox'
-import type { BackgroundTasksState } from '../shared/background-tasks'
+import type { ComputerUseCapability } from '../shared/computer-use'
+import type { AutonomousTaskState, TaskResumeRequest } from '../shared/autonomous-task'
+import type { TaskLease } from '../shared/autonomous-task'
+import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from '../shared/task-presentation'
+import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/background-tasks'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from '../shared/github'
 import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusModelSettingsResult } from '../shared/focus-chat'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
@@ -271,12 +276,20 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   setPromptInjectionEnabled: (enabled: boolean): Promise<InterceptorStatus> =>
     ipcRenderer.invoke(IpcChannels.interceptorSetPromptInjectionEnabled, enabled),
 
-  answerQuestion: (messageId: string, answer: string): Promise<InterceptorStatus> =>
-    ipcRenderer.invoke(IpcChannels.interceptorAnswerQuestion, messageId, answer),
+  answerQuestion: (messageId: string, answer: string, owner?: import('../shared/task-clarification').TaskQuestionRequest): Promise<InterceptorStatus> =>
+    ipcRenderer.invoke(IpcChannels.interceptorAnswerQuestion, messageId, answer, owner),
 
-  cancelQuestion: (messageId: string): Promise<InterceptorStatus> =>
-    ipcRenderer.invoke(IpcChannels.interceptorCancelQuestion, messageId),
+  cancelQuestion: (messageId: string, owner?: import('../shared/task-clarification').TaskQuestionRequest): Promise<InterceptorStatus> =>
+    ipcRenderer.invoke(IpcChannels.interceptorCancelQuestion, messageId, owner),
 
+  getEmergencyStop: (): Promise<EmergencyStopState> => ipcRenderer.invoke(IpcChannels.emergencyStopGet),
+  triggerEmergencyStop: (): Promise<EmergencyStopState> => ipcRenderer.invoke(IpcChannels.emergencyStopTrigger),
+  resetEmergencyStop: (): Promise<EmergencyStopResetResult> => ipcRenderer.invoke(IpcChannels.emergencyStopReset),
+  onEmergencyStopChanged: (listener: (state: EmergencyStopState) => void) => {
+    const handler = (_event: IpcRendererEvent, state: EmergencyStopState): void => listener(state)
+    ipcRenderer.on(IpcChannels.emergencyStopChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.emergencyStopChanged, handler)
+  },
   endTask: (): Promise<InterceptorStatus> => ipcRenderer.invoke(IpcChannels.interceptorEndTask),
   retryCommandRecovery: (owner: FocusOwner, token: number): Promise<string> => ipcRenderer.invoke(IpcChannels.commandRecoveryRetry, owner, token),
 
@@ -292,6 +305,26 @@ removeConversation: (id: string): Promise<Conversation[]> =>
 
   updateSettings: (patch: AppSettingsPatch): Promise<AppSettings> =>
     ipcRenderer.invoke(IpcChannels.settingsUpdate, patch),
+
+  getComputerUseCapability: (): Promise<ComputerUseCapability> =>
+    ipcRenderer.invoke(IpcChannels.computerUseGetCapability),
+  onComputerUseCapabilityChanged: (listener: (capability: ComputerUseCapability) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, capability: ComputerUseCapability): void => listener(capability)
+    ipcRenderer.on(IpcChannels.computerUseCapabilityChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.computerUseCapabilityChanged, handler)
+  },
+
+  getAutonomousTask: (): Promise<AutonomousTaskState | null> => ipcRenderer.invoke(IpcChannels.autonomousTaskGet),
+  getTaskActivity: (request: TaskLease): Promise<TaskActivity | null> => ipcRenderer.invoke(IpcChannels.taskActivityGet, request),
+  getTaskObservationImage: (request: TaskObservationRequest): Promise<string | null> => ipcRenderer.invoke(IpcChannels.taskObservationImageGet, request),
+  revealTaskArtifact: (request: TaskArtifactRequest): Promise<string> => ipcRenderer.invoke(IpcChannels.taskArtifactReveal, request),
+  reopenTaskQuestion: (request: import('../shared/task-clarification').TaskQuestionRequest): Promise<string> => ipcRenderer.invoke(IpcChannels.autonomousTaskQuestionReopen, request),
+  resumeAutonomousTask: (request: TaskResumeRequest): Promise<string> => ipcRenderer.invoke(IpcChannels.autonomousTaskResume, request),
+  onAutonomousTaskChanged: (listener: (state: AutonomousTaskState) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: AutonomousTaskState): void => listener(state)
+    ipcRenderer.on(IpcChannels.autonomousTaskChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.autonomousTaskChanged, handler)
+  },
 
   getBackendAuthState: (): Promise<BackendAuthState> => ipcRenderer.invoke(IpcChannels.backendAuthGet),
   sendBackendLoginCode: (draft: BackendLoginCodeDraft): Promise<BackendAuthResult<{ resendAfterSeconds: number }>> =>
@@ -469,6 +502,7 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   },
   getExtraTerminals: (): Promise<ExtraTerminalsState> => ipcRenderer.invoke(IpcChannels.extraTerminalsGet),
   getBackgroundTasks: (sessionId: string): Promise<BackgroundTasksState> => ipcRenderer.invoke(IpcChannels.backgroundTasksGet, sessionId),
+  stopBackgroundTask: (sessionId: string, taskId: string): Promise<BackgroundTaskStopResult> => ipcRenderer.invoke(IpcChannels.backgroundTaskStop, sessionId, taskId),
   onBackgroundTasksChanged: (listener: (state: BackgroundTasksState, sessionId: string) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, state: BackgroundTasksState, sessionId: string): void => listener(state, sessionId)
     ipcRenderer.on(IpcChannels.backgroundTasksChanged, handler)

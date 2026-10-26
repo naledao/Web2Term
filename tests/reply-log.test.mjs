@@ -29,6 +29,20 @@ test('command parsing and recovery retain only bounded diagnostic metadata', () 
   assert.equal(replyDiagnosticMetadata('deepseek', { event: 'command-recovery', recoveryStatus: 'sent' }, context).recoveryStatus, 'sent')
 })
 
+test('computer recognition retains outcome and acceptance without raw JSON or paths', () => {
+  const value = replyDiagnosticMetadata('deepseek', { event: 'computer-request', messageId: 'computer:page:1',
+    computerOutcome: 'invalid', computerIssue: 'ambiguous-request', computerProtocolCode: 'duplicate_field', live: true,
+    rawJson: '{"type":"computer","text":"sensitive-sentinel"}', pagePath: '/private-route' },
+  { ...context, computerAccepted: true })
+  assert.equal(value.computerOutcome, 'invalid')
+  assert.equal(value.computerIssue, 'ambiguous-request')
+  assert.equal(value.computerAccepted, true)
+  assert.equal(value.computerProtocolCode, 'duplicate_field')
+  assert.ok(value.computerRequestLength > 0)
+  assert.ok(!JSON.stringify(value).includes('sensitive-sentinel'))
+  assert.ok(!JSON.stringify(value).includes('private-route'))
+})
+
 test('scan metadata preserves correlation and waiting/generation evidence', () => {
   const value = replyDiagnosticMetadata('claude', {
     ...payload, awaitingReplyBefore: true, replyStreamingState: 'true',

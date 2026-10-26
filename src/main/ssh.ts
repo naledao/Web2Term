@@ -8,6 +8,7 @@ import type { Socket } from 'node:net'
 import { basename, posix } from 'node:path'
 import type { SshDownloadTask, SshFileEntry, SshState, SshUploadTask, TerminalLine } from '../shared/types'
 import { REMOTE_SHELL_COMMAND, RemoteShell } from './remote-shell'
+import { stopSshCommand } from './ssh-command-stop'
 import type { GitBackend } from './git'
 import { writeGitDiagnostic } from './git-diagnostic'
 import { sshWorkingDirectory } from '../shared/ssh-directory'
@@ -233,7 +234,13 @@ export class SshManager {
           reject(new Error('SSH 连接已断开。'))
           return
         }
-        const shell = new RemoteShell(stream, handlers)
+        const shell = new RemoteShell(stream, {
+          ...handlers,
+          stopProcess: (identity, signal) => {
+            if (this.client !== client) return Promise.reject(new Error('原 SSH 连接已断开，无法确认命令停止。'))
+            return stopSshCommand(client, identity, signal)
+          }
+        })
         if (cwd.trim() !== '') shell.noteCwd(cwd.trim())
         resolve(shell)
       })
@@ -970,6 +977,10 @@ export class SshManager {
       }
 
       const shell = new RemoteShell(stream, {
+        stopProcess: (identity, signal) => {
+          if (this.client !== client) return Promise.reject(new Error('原 SSH 连接已断开，无法确认命令停止。'))
+          return stopSshCommand(client, identity, signal)
+        },
         onOutput: (chunk) => { if (this.client === client) this.pushModelOutput(chunk) },
         onCwdChanged: () => {
           // Initial probing happens before this.exec is published. An older

@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../fixtures/windows-coordinate-cases.json" LogicalName="windows-coordinate-cases.json" />
+    <EmbeddedResource Include="../fixtures/windows-key-cases.json" LogicalName="windows-key-cases.json" />
+    <EmbeddedResource Include="../fixtures/windows-drag-cases.json" LogicalName="windows-drag-cases.json" />
+    <Compile Include="../../native/computer-use/windows/ActionContract.cs" Link="ActionContract.cs" />
+    <Compile Include="../../native/computer-use/windows/ApplicationCatalog.cs" Link="ApplicationCatalog.cs" />
+    <Compile Include="../../native/computer-use/windows/ApplicationInterop.cs" Link="ApplicationInterop.cs" />
+    <Compile Include="../../native/computer-use/windows/ApplicationLaunch.cs" Link="ApplicationLaunch.cs" />
+    <Compile Include="../../native/computer-use/windows/ResourceOpen.cs" Link="ResourceOpen.cs" />
+    <Compile Include="../../native/computer-use/windows/WindowCatalog.cs" Link="WindowCatalog.cs" />
+    <Compile Include="../../native/computer-use/windows/ControlPlaneWindows.cs" Link="ControlPlaneWindows.cs" />
+    <Compile Include="../../native/computer-use/windows/WindowInteractions.cs" Link="WindowInteractions.cs" />
+    <Compile Include="../../native/computer-use/windows/WindowFocus.cs" Link="WindowFocus.cs" />
+    <Compile Include="../../native/computer-use/windows/Observation.cs" Link="Observation.cs" />
+    <Compile Include="../../native/computer-use/windows/ControlTree.cs" Link="ControlTree.cs" />
+    <Compile Include="../../native/computer-use/windows/ObservationBinding.cs" Link="ObservationBinding.cs" />
+    <Compile Include="../../native/computer-use/windows/Coordinates.cs" Link="Coordinates.cs" />
+    <Compile Include="../../native/computer-use/windows/Click.cs" Link="Click.cs" />
+    <Compile Include="../../native/computer-use/windows/HelperInputState.cs" Link="HelperInputState.cs" />
+    <Compile Include="../../native/computer-use/windows/DesktopActivityPolicy.cs" Link="DesktopActivityPolicy.cs" />
+    <Compile Include="../../native/computer-use/windows/ClickInterop.cs" Link="ClickInterop.cs" />
+    <Compile Include="../../native/computer-use/windows/TypeText.cs" Link="TypeText.cs" />
+    <Compile Include="../../native/computer-use/windows/PressKey.cs" Link="PressKey.cs" />
+    <Compile Include="../../native/computer-use/windows/Scroll.cs" Link="Scroll.cs" />
+    <Compile Include="../../native/computer-use/windows/ScrollInterop.cs" Link="ScrollInterop.cs" />
+    <Compile Include="../../native/computer-use/windows/Drag.cs" Link="Drag.cs" />
+    <Compile Include="../../native/computer-use/windows/WaitFor.cs" Link="WaitFor.cs" />
+  </ItemGroup>
+</Project>

@@ -32,12 +32,15 @@ export interface PreparedAttachment {
   sha256: string
   textNameAlias?: boolean
 }
+export interface PreparedFileSource { path: string; sizeBytes: number; sha256: string }
 export interface PreparedFileResult {
   text: string
   attachments: PreparedAttachment[]
   images: ConversationImageAttachmentInput[]
   summary: string
   failed: boolean
+  /** Actual source snapshots, never staged upload paths or filename aliases. */
+  sources?: PreparedFileSource[]
   cleanup(): Promise<void>
 }
 export type RemoteFileReader = (path: string, maxBytes: number, signal: AbortSignal) => Promise<Buffer>
@@ -94,6 +97,7 @@ export async function prepareFiles(request: StoredFileReadRequest, signal: Abort
     throw new Error(`每次最多读取 ${MAX_READ_FILES} 个文件，请分批调用。`)
   }
   const attachments: PreparedAttachment[] = []
+  const sources: PreparedFileSource[] = []
   const images: ConversationImageAttachmentInput[] = []
   const sections: string[] = []
   let directory: string | null = null
@@ -136,7 +140,9 @@ export async function prepareFiles(request: StoredFileReadRequest, signal: Abort
         const stagedPath = join(itemDir, fileName)
         await writeFile(stagedPath, bytes, { signal })
         const mimeType = textNameAlias ? 'text/plain' : ATTACHMENT_MIME[extension] ?? (SOURCE_EXTENSIONS.has(extension) ? 'text/plain' : 'application/octet-stream')
-        attachments.push({ path: stagedPath, fileName, mimeType, sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), textNameAlias })
+        const sha256 = createHash('sha256').update(bytes).digest('hex')
+        attachments.push({ path: stagedPath, fileName, mimeType, sizeBytes: bytes.length, sha256, textNameAlias })
+        sources.push({ path, sizeBytes: bytes.length, sha256 })
         totalBytes += bytes.length
         if (mimeType.startsWith('image/')) images.push({ fileName, mimeType, dataBase64: bytes.toString('base64'), sizeBytes: bytes.length, width: null, height: null })
         sections.push(`文件: ${path}\n附件已准备: ${fileName} (${(bytes.length / 1_000_000).toFixed(2)} MB)${textNameAlias ? '\nDeepSeek 文件名兼容：临时附件增加 .txt 后缀，内容字节保持不变。' : ''}`)
@@ -147,7 +153,7 @@ export async function prepareFiles(request: StoredFileReadRequest, signal: Abort
       }
     }
     signal.throwIfAborted()
-    return { text: `【read_files 结果】\n主机: ${request.context.scope === 'ssh' ? request.context.hostId : '本机'}\n目录: ${request.context.cwd}\n\n${sections.join('\n\n')}`, attachments, images, summary: `AI 读取文件：\n${request.files.map((item) => item.path).join('\n')}`, failed, cleanup }
+    return { text: `【read_files 结果】\n主机: ${request.context.scope === 'ssh' ? request.context.hostId : '本机'}\n目录: ${request.context.cwd}\n\n${sections.join('\n\n')}`, attachments, images, sources, summary: `AI 读取文件：\n${request.files.map((item) => item.path).join('\n')}`, failed, cleanup }
   } catch (error) {
     await cleanup()
     throw error

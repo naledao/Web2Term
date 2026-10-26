@@ -5,9 +5,12 @@ import { IDLE_TIMEOUT_MS, MAX_RUNTIME_MS } from './shell'
 import type { ExecutionShell, ShellResult } from './shell'
 import { REMOTE_DETECT_COMMAND } from './environment'
 import type { EnvironmentKind } from '../shared/types'
+import type { RemoteProcessIdentity } from './ssh-command-stop'
+
+export const REMOTE_INTERRUPT_TIMEOUT_MS = 10_000
 
 /** SSH exec channels and web2term PTYs share the command framing transport. */
-export interface RemoteShellChannel extends Pick<EventEmitter, 'on' | 'once'> {
+export interface RemoteShellChannel extends Pick<EventEmitter, 'on' | 'once' | 'removeListener'> {
   write(data: string): unknown
   close(): unknown
   signal(name: string): unknown
@@ -51,9 +54,10 @@ interface PendingRun {
  *
  * Exported so the protocol can be driven against a real shell without Electron.
  */
-export function buildEnvelope(token: string, seq: number, command: string, separateOutput = false): string {
+export function buildEnvelope(token: string, seq: number, command: string, separateOutput = false, identify = false): string {
   return (
     [
+      ...(identify ? [`printf '\\n__CT_SHELL_${token}__ %s %s\\n' "$$" "$(ct_start=$(LC_ALL=C ps -p "$$" -o lstart= 2>/dev/null); [ -n "$ct_start" ] && printf '%s' "$ct_start" | base64 | tr -d '\\r\\n')"`] : []),
       '{',
       command,
       '} </dev/null',
@@ -90,6 +94,12 @@ export class RemoteShell implements ExecutionShell {
   private closed = false
   private disposed = false
   private currentCwd = ''
+  private processIdentity: RemoteProcessIdentity | null = null
+  private stopInFlight: Promise<boolean> | null = null
+  private cancelInterrupt: (() => void) | null = null
+  private stopFailed = false
+  private stopping = false
+  private closeObserved = false
 
   constructor(
     private readonly stream: RemoteShellChannel,
@@ -100,13 +110,20 @@ export class RemoteShell implements ExecutionShell {
       onClosed?: (interrupted: boolean) => void
       /** Confirmed by the completion marker, even for commands with no output. */
       onCwdChanged?: (cwd: string) => void
+      /** Uses another channel on this same SSH connection, independent of the busy shell. */
+      stopProcess?: (identity: RemoteProcessIdentity, signal: AbortSignal) => Promise<void>
     } = {}
   ) {
     stream.on('data', (chunk: Buffer) => this.handleData(chunk))
     // Merged into one stream on purpose: there is no terminal to colour them
     // differently, and losing stderr would lose most of what went wrong.
     stream.stderr?.on('data', (chunk: Buffer) => this.handleData(chunk))
-    stream.on('close', () => this.handleClosed())
+    stream.on('close', () => {
+      this.closeObserved = true
+      // A parent channel closing is insufficient evidence that its children
+      // stopped. Keep the run/manager pending until the independent check ends.
+      if (!this.stopping) this.handleClosed()
+    })
   }
 
   get alive(): boolean {
@@ -136,6 +153,8 @@ export class RemoteShell implements ExecutionShell {
   run(command: string, timeoutMs?: number, silent = false): Promise<ShellResult> {
     if (this.disposed) return Promise.resolve(this.reject('远端会话已关闭。'))
     if (this.closed) return Promise.resolve(this.reject('远端会话已结束，请重新连接后重试。'))
+    if (this.stopFailed) return Promise.resolve(this.reject('远端命令停止状态未确认，请通过“终端操作 → 重置终端”重新连接后检查原命令状态。'))
+    if (this.stopInFlight) return Promise.resolve(this.reject('正在停止远端命令，请等待停止确认。'))
     if (this.pending) return Promise.resolve(this.reject('远端终端正忙，忽略了这条命令。'))
 
     const cleaned = command.replace(/[\r\n]+$/, '')
@@ -171,7 +190,7 @@ export class RemoteShell implements ExecutionShell {
 
       try {
         // Leading newline separates the marker from output without a trailing LF.
-        this.stream.write(buildEnvelope(this.token, seq, cleaned, true))
+        this.stream.write(buildEnvelope(this.token, seq, cleaned, true, Boolean(this.options.stopProcess && !this.processIdentity)))
       } catch {
         this.clearPending()
         resolve(this.reject('写入远端终端失败。'))
@@ -180,17 +199,69 @@ export class RemoteShell implements ExecutionShell {
   }
 
   async interrupt(): Promise<boolean> {
+    if (this.stopInFlight) return this.stopInFlight
     if (!this.pending || this.closed || this.disposed) return false
 
-    this.pending.interrupted = true
-    const closed = new Promise<void>((resolve) => this.stream.once('close', () => resolve()))
-    this.terminate()
-    await closed
-    return true
+    const pending = this.pending
+    pending.interrupted = true
+    this.stopping = true
+    clearTimeout(pending.idleTimer)
+    clearTimeout(pending.ceilingTimer)
+    const stopping = new Promise<boolean>((resolve, reject) => {
+      const controller = new AbortController()
+      let settled = false
+      let channelClosed = this.closeObserved
+      let controlDone = !this.options.stopProcess
+      const finish = (error?: Error, stopped = true): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        this.stream.removeListener('close', onClose)
+        this.cancelInterrupt = null
+        controller.abort()
+        if (error) {
+          this.stopFailed = true
+          if (this.pending === pending) pending.interrupted = false
+          reject(new Error(`${error.message} 请通过“终端操作 → 重置终端”重新连接，检查原命令状态后再执行，勿重复启动。`))
+        } else {
+          if (stopped && this.closeObserved) this.handleClosed()
+          this.stopping = false
+          resolve(stopped)
+        }
+      }
+      const onClose = (): void => {
+        channelClosed = true
+        if (controlDone) finish()
+      }
+      const timer = setTimeout(() => finish(new Error(
+        `远端在 ${REMOTE_INTERRUPT_TIMEOUT_MS / 1000} 秒内未确认命令及其子进程停止。`
+      )), REMOTE_INTERRUPT_TIMEOUT_MS)
+      this.cancelInterrupt = () => finish(undefined, false)
+      this.stream.once('close', onClose)
+      if (this.options.stopProcess) {
+        if (!this.processIdentity) {
+          finish(new Error('尚未取得远端命令的进程身份，无法确认停止。'))
+          return
+        }
+        // Do not close the command channel first: the server may drop its parent
+        // while leaving apt, compilers or other descendants alive and holding pipes.
+        void Promise.resolve().then(() => this.options.stopProcess!(this.processIdentity!, controller.signal))
+          .then(() => {
+            if (settled) return
+            controlDone = true
+            if (channelClosed) finish()
+            else this.terminate()
+          }, error => finish(error instanceof Error ? error : new Error(String(error))))
+      } else this.terminate()
+    })
+    this.stopInFlight = stopping
+    try { return await stopping }
+    finally { if (this.stopInFlight === stopping) this.stopInFlight = null }
   }
 
   dispose(stopRunning = false): void {
     this.disposed = true
+    this.cancelInterrupt?.()
     const running = this.pending !== null
     // Settled, not dropped. `run()`'s caller is awaiting this promise, so a
     // pending command left unresolved would park the whole automation loop with
@@ -249,9 +320,8 @@ export class RemoteShell implements ExecutionShell {
   /**
    * Abandon a command that will not finish.
    *
-   * `signal('KILL')` is what actually stops the remote process; `close()` only
-   * drops the channel, and a runaway command would keep running on the server with
-   * nobody listening. Not every server implements signals, hence the fallback.
+   * Best-effort channel teardown. A server may ignore SSH signals or delay the
+   * close event; manual interruption uses stopProcess and a bounded confirmation.
    */
   private terminate(): void {
     try {
@@ -301,7 +371,7 @@ export class RemoteShell implements ExecutionShell {
    */
   private handleData(chunk: Buffer): void {
     if (this.closed || this.disposed) return
-    if (this.pending) {
+    if (this.pending && !this.stopping) {
       clearTimeout(this.pending.idleTimer)
       this.pending.idleTimer = setTimeout(() => {
         if (this.pending) this.pending.timedOut = 'idle'
@@ -320,10 +390,21 @@ export class RemoteShell implements ExecutionShell {
   }
 
   private handleLine(line: string): void {
+    const identityPrefix = `__CT_SHELL_${this.token}__ `
+    if (this.options.stopProcess && line.startsWith(identityPrefix)) {
+      const match = /^(\d+) ([A-Za-z0-9+/]+={0,2})$/.exec(line.slice(identityPrefix.length))
+      if (match && !this.processIdentity && Number(match[1]) > 1 && Number(match[1]) <= 2147483647 && match[2].length <= 512) {
+        this.processIdentity = { pid: Number(match[1]), started: match[2] }
+      }
+      return
+    }
     const donePrefix = `__CT_DONE_${this.token}_`
     if (line.startsWith(donePrefix)) {
       const match = /^(\d+)__\s+(-?\d+)\s*(.*)$/.exec(line.slice(donePrefix.length))
       if (match && this.pending !== null && Number(match[1]) === this.pending.seq) {
+        // A normal completion racing with a manual stop must not release the
+        // automation slot while the old shell's children are still being checked.
+        if (this.stopping) return
         const pending = this.pending
         this.clearPending()
         const cwd = match[3].trim()

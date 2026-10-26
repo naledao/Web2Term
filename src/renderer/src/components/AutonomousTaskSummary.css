@@ -1,0 +1,16 @@
+.autonomous-task-summary {
+  margin-top: 10px;
+  color: var(--text);
+  font-size: inherit;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.autonomous-task-summary summary { cursor: pointer; }
+.autonomous-task-summary summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.autonomous-task-summary__meta { color: var(--text-muted); }
+.autonomous-task-summary summary .autonomous-task-summary__meta { margin-left: 8px; }
+.autonomous-task-summary__goal { white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+.autonomous-task-summary dl { margin: 8px 0; }
+.autonomous-task-summary dl > div { display: grid; grid-template-columns: 5em minmax(0, 1fr); gap: 8px; margin-top: 4px; }
+.autonomous-task-summary dd { margin: 0; }
+.autonomous-task-summary__error { color: var(--danger, var(--text)); }

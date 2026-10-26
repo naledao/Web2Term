@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
 import ts from 'typescript'
+import { taskContextModule } from './fixtures/task-context-module.mjs'
 
 function load(relative, dependencies) {
   const exports = {}
@@ -22,7 +23,7 @@ function load(relative, dependencies) {
   return exports
 }
 const fileRequests = load('../src/shared/file-requests.ts', {})
-const backgroundTasks = load('../src/shared/background-tasks.ts', {})
+const backgroundTasks = load('../src/shared/background-tasks.ts', { './autonomous-task': taskContextModule })
 const types = load('../src/shared/types.ts', { './file-requests': fileRequests, './background-tasks': backgroundTasks })
 const { CHATGPT_PLATFORM } = load('../src/shared/platforms.ts', { './types': types })
 const id = '6ad1b11e-bec4-83e8-be6f-24834af50921'

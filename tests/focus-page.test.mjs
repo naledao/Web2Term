@@ -168,6 +168,32 @@ test('complete and partial command, question and read-files protocol never becom
   }
 })
 
+test('rich-content snapshots exclude command protocol while preserving ordinary JSON and shell examples', () => {
+  const f = fixture()
+  f.context.PAGE = CHATGPT_PAGE
+  f.context.messageIdOf = node => node.id
+  f.context.state.awaitingReplySince = 1
+  const texts = [
+    '{"command":"ls -lh /root/website-source-2.zip","description":"检查文件","timeout_seconds":30}',
+    '{"command":"unzip -n -q /root/website-source-2.zip","description":"解压项目","timeout_seconds":30}',
+    '{"type":"read_files","files":[{"path":"/root/package.json"}]}',
+    '{"type":"questions","questions":[]}',
+    '{"com',
+    '配置示例：\n```json\n{"name":"example"}\n```',
+    '运行示例：\n```sh\nnpm run dev\n```',
+    '已成功解压至 `/root/website-source-2/`。'
+  ]
+  f.context.queryAllAssistant = () => texts.map((body, index) => ({
+    id: 'message-' + index, body, markdown: body,
+    getAttribute: name => name === 'data-chatgpt-selection-message-id' ? 'message-' + index : null,
+    querySelector: selector => [CHATGPT_PAGE.focus.smartUi.rootSelector, CHATGPT_PAGE.assistantReplySelectors[0]].includes(selector) ? {} : null,
+    querySelectorAll: () => [], closest: () => null
+  }))
+  const snapshot = f.snapshot()
+  assert.deepEqual(Array.from(snapshot.smartReplies, reply => reply.answer), texts.slice(5))
+  assert.equal(snapshot.reply.answer, texts.at(-1))
+})
+
 test('virtualized history cannot replace the current streaming row', () => {
   const f = fixture()
   f.context.focusReplyBaseline = 'previous'

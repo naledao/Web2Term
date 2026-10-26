@@ -1,0 +1,9 @@
+/* Keep update popovers at the viewport corner, above the transfer status bar. */
+.workspace__update-anchor {
+  position: fixed;
+  right: 24px;
+  bottom: 56px;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}

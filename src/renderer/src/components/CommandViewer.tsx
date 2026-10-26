@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { ReactElement } from 'react'
-import { Popover } from '@base-ui/react/popover'
-import AppPopover from './AppPopover'
+import { Dialog } from '@base-ui/react/dialog'
 import CodeMirror, { EditorState, EditorView, oneDarkTheme } from '@uiw/react-codemirror'
-import type { BasicSetupOptions, ReactCodeMirrorRef } from '@uiw/react-codemirror'
+import type { BasicSetupOptions } from '@uiw/react-codemirror'
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/language'
 import { powerShell } from '@codemirror/legacy-modes/mode/powershell'
 import { shell } from '@codemirror/legacy-modes/mode/shell'
@@ -17,7 +16,6 @@ interface CommandViewerProps {
   description: string
   language: CommandLanguage
   theme: AppTheme
-  onClose: () => void
 }
 
 const COMMAND_LANGUAGES = {
@@ -59,8 +57,7 @@ const VIEWER_SETUP: BasicSetupOptions = {
   dropCursor: false
 }
 
-export default function CommandViewer({ command, description, language, theme, onClose }: CommandViewerProps): ReactElement {
-  const editorRef = useRef<ReactCodeMirrorRef>(null)
+export default function CommandViewer({ command, description, language, theme }: CommandViewerProps): ReactElement {
   const [wrapLines, setWrapLines] = useState(true)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   useEffect(() => {
@@ -79,14 +76,10 @@ export default function CommandViewer({ command, description, language, theme, o
   ], [language, theme, wrapLines])
 
   return (
-    <AppPopover onClose={onClose} aria-label="完整指令"
-      className="command-viewer"
-      data-theme={theme}
-      initialFocus={() => editorRef.current?.view?.contentDOM ?? true}
-    >
+    <>
       <header className="command-viewer__head">
         <div className="command-viewer__heading">
-          <Popover.Title className="command-viewer__title">完整指令</Popover.Title>
+          <Dialog.Title className="command-viewer__title">完整指令</Dialog.Title>
           <span className="command-viewer__language">{language === 'powershell' ? 'PowerShell' : 'Shell / zsh / bash'}</span>
         </div>
         <div className="command-viewer__tools">
@@ -100,13 +93,12 @@ export default function CommandViewer({ command, description, language, theme, o
           }}>{copyState === 'copied' ? '已复制' : '复制指令'}</button>
           <button type="button" className="command-viewer__button" aria-pressed={wrapLines}
             onClick={() => setWrapLines((current) => !current)}>自动换行</button>
-          <Popover.Close className="command-viewer__button" title="关闭（Esc）">关闭</Popover.Close>
+          <Dialog.Close className="command-viewer__button" title="关闭（Esc）">关闭</Dialog.Close>
         </div>
       </header>
-      {description !== '' ? <Popover.Description className="command-viewer__description">{description}</Popover.Description> : null}
+      {description !== '' ? <Dialog.Description className="command-viewer__description">{description}</Dialog.Description> : null}
       <div className="command-viewer__body">
         <CodeMirror
-          ref={editorRef}
           value={command}
           theme={theme === 'dark' ? oneDarkTheme : 'light'}
           height="100%"
@@ -117,6 +109,6 @@ export default function CommandViewer({ command, description, language, theme, o
           indentWithTab={false}
         />
       </div>
-    </AppPopover>
+    </>
   )
 }

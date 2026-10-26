@@ -201,6 +201,8 @@ export interface ExecutionShell {
   /** Stop the command currently in flight. Returns false when there was nothing to stop. */
   interrupt(): Promise<boolean>
   dispose(): void
+  /** Optional local-process retirement barrier; a rejected command is not proof of process exit. */
+  whenQuiescent?(): Promise<void>
 }
 
 interface PendingRun {
@@ -253,6 +255,9 @@ export interface ConversationShellOptions {
  * fires, and the session is killed and restarted automatically.
  */
 export class ConversationShell implements ExecutionShell {
+  private readonly retiring = new Map<ChildProcess, Promise<void>>()
+  private readonly closedChildren = new WeakSet<ChildProcess>()
+  async whenQuiescent(): Promise<void> { while (this.retiring.size) await Promise.all(this.retiring.values()) }
   private child: ChildProcess | null = null
   private starting: Promise<boolean> | null = null
   private disposed = false
@@ -510,6 +515,7 @@ export class ConversationShell implements ExecutionShell {
       }
 
       this.child = child
+      child.once('close', () => this.closedChildren.add(child))
 
       const readyTimer = setTimeout(() => {
         this.readyResolve = null
@@ -534,6 +540,8 @@ export class ConversationShell implements ExecutionShell {
   private handleExit(child: ChildProcess): void {
     // A late close from the previous process must not clear its replacement.
     if (this.child !== child) return
+    // An error can settle the pending command before the process emits close.
+    this.trackRetirement(child)
     if (this.lineBuffer !== '') {
       this.handleLine(this.lineBuffer)
       this.lineBuffer = ''
@@ -638,6 +646,14 @@ export class ConversationShell implements ExecutionShell {
     this.options.onOutput?.(`${line}\n`)
   }
 
+  /** A settled run is not proof that a retiring child has closed. */
+  private trackRetirement(child: ChildProcess): void {
+    if (!this.retiring.has(child) && !this.closedChildren.has(child)) {
+      const closed = new Promise<void>(resolve => child.once('close', () => { this.closedChildren.add(child); this.retiring.delete(child); resolve() }))
+      this.retiring.set(child, closed)
+    }
+  }
+
   /**
    * Take down the session process AND its descendants.
    *
@@ -664,6 +680,7 @@ export class ConversationShell implements ExecutionShell {
    * all. `taskkill /T` kills the parent itself, so nothing is lost by not pre-killing it.
    */
   private killChild(child: ChildProcess): void {
+    this.trackRetirement(child)
     if (this.kind === 'posix') {
       try {
         if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL')

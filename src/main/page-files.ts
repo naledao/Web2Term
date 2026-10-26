@@ -107,7 +107,7 @@ export async function sendPageFiles(
   token: string,
   isCurrent: () => boolean,
   signal: AbortSignal,
-  options: { caption?: string; allowNewConversation?: boolean; userText?: string } = {}
+  options: { caption?: string; allowNewConversation?: boolean; userText?: string; computerResult?: { path: string; generation: number } } = {}
 ): Promise<FileSendOutcome> {
   const debuggerApi = contents.debugger
   let attached = false
@@ -150,6 +150,10 @@ export async function sendPageFiles(
   let stage = 'begin'
   const log = (event: string, details: Record<string, unknown> = {}): void => writeDiagnostic(platformId, token, event, { platformId, stage, elapsedMs: Date.now() - started, ...details })
   const finish = (outcome: FileSendOutcome, reason: string): FileSendOutcome => {
+    if (options.computerResult && outcome === 'upload-failed' && !submitted && stage !== 'submit') outcome = 'not-submitted'
+    // Automatic screenshots may wait on an idle composer. A changed draft after upload is a
+    // blocked delivery, never a reason to start another upload or recapture the desktop.
+    if (options.computerResult && (outcome === 'busy' || outcome === 'no-composer') && stage !== 'begin') outcome = 'unknown'
     log('finish', { outcome, reason, submitted })
     if (outcome !== 'ok') console.warn(`[files:${platformId}] ${outcome} at ${stage}: ${reason}; log: ${diagnosticLogPaths.get(platformId) ?? 'unavailable'}`)
     return outcome
@@ -206,7 +210,9 @@ export async function sendPageFiles(
     if (!attachments.length) return finish('upload-failed', 'no-attachments')
     if (attachments.length && debuggerApi.isAttached()) return finish('upload-failed', 'debugger-already-attached')
     const fileInfo = attachments.map(({ fileName, mimeType, sizeBytes }) => ({ fileName, mimeType, sizeBytes }))
-    const begin = options.userText !== undefined
+    const begin = options.computerResult
+      ? await call('beginComputerFileSend', token, fileInfo, options.computerResult)
+      : options.userText !== undefined
       ? await call('beginFocusFileSend', token, fileInfo, options.userText, new URL(ownerUrl).pathname)
       : await call('beginFileSend', token, fileInfo)
     log('begin-result', { result: begin ?? 'missing-handler' })

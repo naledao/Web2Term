@@ -13,7 +13,7 @@
     "dev:watch": "electron-vite dev --watch",
     "electron:install": "node node_modules/electron/install.js",
     "prepreview": "npm run electron:install",
-    "build": "npm run typecheck && electron-vite build",
+    "build": "npm run typecheck && electron-vite build && node build/build-windows-helper.mjs",
     "preview": "electron-vite preview",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test:redis": "node --experimental-strip-types --test tests/redis-reader.test.mjs",

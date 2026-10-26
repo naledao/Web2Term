@@ -1,5 +1,7 @@
 .app-popover-portal { display: contents; }
+.app-popover-portal--bounded { position: absolute; inset: 0; display: block; pointer-events: none; }
 .app-popover-positioner { z-index: 1200; max-width: calc(100vw - 24px); outline: none; }
+.app-popover-portal--bounded .app-popover-positioner { pointer-events: auto; }
 
 /* Remove former viewport overlays while retaining each form's content layout. */
 .app-popover.app-popover,
@@ -37,6 +39,5 @@
   box-shadow: none;
 }
 .app-popover > :is(.workspace-project-dialog__box, .new-session-modal__box, .confirm-dialog__box) { overflow-y: auto; }
-.app-popover.command-viewer { --app-popover-background: var(--command-surface); width: min(1100px, calc(100vw - 24px)); height: min(760px, var(--available-height)); }
 .app-popover.pdf-preview { width: min(1400px, calc(100vw - 24px)); height: min(880px, var(--available-height)); }
-.app-popover.recent-command-picker { --app-popover-background: var(--bg-elevated); width: 360px; padding: 12px !important; overflow-y: auto; }
+.app-popover.recent-command-picker { width: 360px; }

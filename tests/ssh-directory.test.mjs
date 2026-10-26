@@ -17,7 +17,7 @@ function load(relative, dependencies = {}) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText
   new Script(compiled).runInNewContext({
-    exports, Buffer, Error, URL, performance, setTimeout, clearTimeout,
+    exports, Buffer, Error, URL, performance, AbortController, setTimeout, clearTimeout,
     require(name) {
       assert.ok(name in dependencies, `unexpected dependency ${name}`)
       return dependencies[name]
@@ -42,6 +42,7 @@ const { SshManager } = load('../src/main/ssh.ts', {
   'node:https': { request: forbidden },
   'node:path': path,
   './remote-shell': remote,
+  './ssh-command-stop': load('../src/main/ssh-command-stop.ts'),
   './git-diagnostic': { writeGitDiagnostic() {} },
   './ssh-pdf-preview': { SshPdfPreviewReader: class { cancel() {} } },
   '../shared/ssh-directory': directory
@@ -53,6 +54,11 @@ class FakeChannel extends EventEmitter {
   write(text) { this.writes.push(text) }
   close() { this.emit('close') }
   signal() {}
+  identify() {
+    const token = this.writes.at(-1).match(/__CT_SHELL_([a-f0-9]+)__/)[1]
+    const started = Buffer.from('Sun Oct 25 20:00:00 2026').toString('base64')
+    this.emit('data', Buffer.from(`__CT_SHELL_${token}__ 2301 ${started}\n`))
+  }
   finish(cwd, exitCode = 0, output = '') {
     const envelope = this.writes.at(-1)
     const token = envelope.match(/__CT_DONE_([a-f0-9]+)_%s__/)[1]
@@ -143,6 +149,47 @@ test('SshManager publishes model cwd changes without moving the interactive PTY'
   channel.finish('/old-session')
   await oldRequest
   assert.equal(states.length, 0, 'an old SSH channel must not update a replacement connection')
+})
+
+test('SshManager stops through a separate control channel and reopens only its command shell at the same cwd', async t => {
+  const channels = [], commands = []
+  let connectionsClosed = 0
+  const client = { exec(command, callback) {
+    commands.push(command)
+    const channel = new FakeChannel()
+    channels.push(channel)
+    callback(null, channel)
+  }, end() { connectionsClosed++ } }
+  const manager = new SshManager(() => {}, () => {}, () => {})
+  t.after(() => manager.dispose())
+  manager.client = client
+  manager.state = { status: 'connected', attached: true, hostId: 'fixture-host' }
+  manager.openExecChannel(client)
+  channels[0].identify()
+  channels[0].finish('/work/demo', 0, '/home/test\n')
+  for (let i = 0; i < 8; i++) await Promise.resolve()
+  const shell = manager.execShell()
+  assert.ok(shell)
+  const running = shell.run('long command')
+  const stopping = shell.interrupt()
+  for (let i = 0; i < 8; i++) await Promise.resolve()
+  assert.equal(channels.length, 2, 'a busy command uses another channel on the same SSH connection')
+  assert.match(commands[1], /__CT_REMOTE_STOP__/)
+  channels[0].emit('close')
+  assert.equal(channels.length, 2, 'parent close alone must not start a replacement')
+  channels[1].emit('data', Buffer.from('__CT_REMOTE_STOP__stopped\n'))
+  channels[1].emit('close', 0)
+  assert.equal(await stopping, true)
+  assert.equal((await running).interrupted, true)
+  assert.equal(channels.length, 3)
+  assert.match(commands[2], /cd '\/work\/demo'/)
+  channels[2].identify()
+  channels[2].finish('/work/demo', 0, '/home/test\n')
+  for (let i = 0; i < 8; i++) await Promise.resolve()
+  assert.notEqual(manager.execShell(), shell)
+  assert.equal(manager.execShell().cwd, '/work/demo')
+  assert.equal(manager.getState().status, 'connected')
+  assert.equal(connectionsClosed, 0, 'manual PTY, transfers and other SSH channels retain their connection')
 })
 
 test('Up recalls submitted input while SSH prompt echoes remain visible', async (t) => {

@@ -82,7 +82,7 @@ export default function GithubRepositoriesPane({ visible, owner, taskRunning, co
       const candidates = tasks.filter(item => isGithubLoginTask(item, context.owner.conversationId, context.since))
         .sort((a, b) => a.createdAt - b.createdAt)
       let task = context.taskId ? tasks.find(item => item.id === context.taskId) : candidates[0]
-      if (task && ['completed', 'failed', 'exited'].includes(task.status)) {
+      if (task && ['completed', 'failed', 'exited', 'stopped'].includes(task.status)) {
         task = candidates.find(item => item.createdAt > task!.createdAt) ?? task
       }
       if (task) { context.taskId = task.id; setLoginTask(task) }
@@ -168,7 +168,7 @@ export default function GithubRepositoriesPane({ visible, owner, taskRunning, co
       }
       finally { checkingLogin = false }
     }
-    if (!taskRunning || (loginTask && ['completed', 'failed', 'exited'].includes(loginTask.status))) void check()
+    if (!taskRunning || (loginTask && ['completed', 'failed', 'exited', 'stopped'].includes(loginTask.status))) void check()
     const onFocus = (): void => { void check() }
     window.addEventListener('focus', onFocus)
     return () => { cancelled = true; window.removeEventListener('focus', onFocus) }

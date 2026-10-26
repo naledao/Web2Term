@@ -1,0 +1,21 @@
+{
+  "valid": [
+    { "input": "Tab", "key": "Tab", "down": [["Tab", 9, false]] },
+    { "input": " shift + ctrl + s ", "key": "Control+Shift+S", "down": [["Control", 162, false], ["Shift", 160, false], ["S", 83, false]] },
+    { "input": "Alt+F4", "key": "Alt+F4", "down": [["Alt", 164, false], ["F4", 115, false]] },
+    { "input": "Meta+R", "key": "Win+R", "down": [["Win", 91, true], ["R", 82, false]] },
+    { "input": "ArrowLeft", "key": "Left", "down": [["Left", 37, true]] },
+    { "input": "Return", "key": "Enter", "down": [["Enter", 13, false]] },
+    { "input": "NumpadEnter", "key": "NumpadEnter", "down": [["NumpadEnter", 13, true]] },
+    { "input": "Ctrl+PgDn", "key": "Control+PageDown", "down": [["Control", 162, false], ["PageDown", 34, true]] },
+    { "input": "Ctrl+Divide", "key": "Control+Divide", "down": [["Control", 162, false], ["Divide", 111, true]] },
+    { "input": "0", "key": "0", "down": [["0", 48, false]] },
+    { "input": "Numpad0", "key": "Numpad0", "down": [["Numpad0", 96, false]] },
+    { "input": "Esc", "key": "Escape", "down": [["Escape", 27, false]] },
+    { "input": "Alt", "key": "Alt", "down": [["Alt", 164, false]] },
+    { "input": "CapsLock", "key": "CapsLock", "down": [["CapsLock", 20, false]] },
+    { "input": "Apps", "key": "Menu", "down": [["Menu", 93, true]] },
+    { "input": "Win+Shift+Alt+Control+F24", "key": "Control+Alt+Shift+Win+F24", "down": [["Control", 162, false], ["Alt", 164, false], ["Shift", 160, false], ["Win", 91, true], ["F24", 135, false]] }
+  ],
+  "invalid": ["", " ", "Control+", "+Enter", "Control++S", "Ctrl+Control+S", "Control+Shift", "S+Control", "A+B", "F25", "Ctrl+Alt+Del", "Shift+Control+Alt+Delete", "Ctrl+S,Enter", "{ENTER}", "0x41", "VK_RETURN", "Control+中文", "Enter\n", "Ctrl\t+S", "key_down(Enter)"]
+}

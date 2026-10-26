@@ -1,3 +1,4 @@
+import { progressVmModules } from './fixtures/progress-vm-modules.mjs'
 // User-run offline regression: node --test tests/web2term-environment.test.mjs
 // Calls the real runtime probe/prompt update methods with fake shells and views.
 // Never constructs SessionRuntime, starts Electron/a shell, or contacts a service.
@@ -6,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
 import ts from 'typescript'
+import { taskContextModule } from './fixtures/task-context-module.mjs'
 
 const forbidden = () => { throw new Error('Real I/O is forbidden in this test') }
 function load(relative, dependencies = {}, desktop = 'win32') {
@@ -15,7 +17,7 @@ function load(relative, dependencies = {}, desktop = 'win32') {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText).runInNewContext({ exports, Buffer, URL, console,
     process: { platform: desktop, env: {} },
-    require(name) {
+    require(name) { if (Object.hasOwn(progressVmModules, name)) return progressVmModules[name];
       assert.ok(name in dependencies, `Unexpected dependency: ${name}`)
       return dependencies[name]
     }
@@ -23,9 +25,11 @@ function load(relative, dependencies = {}, desktop = 'win32') {
   return exports
 }
 const files = load('../src/shared/file-requests.ts')
-const backgroundTasks = load('../src/shared/background-tasks.ts')
+const backgroundTasks = load('../src/shared/background-tasks.ts', { './autonomous-task': taskContextModule })
 const types = load('../src/shared/types.ts', { './file-requests': files, './background-tasks': backgroundTasks })
 const platforms = load('../src/shared/platforms.ts', { './types': types })
+const protocol = load('../src/shared/computer-use-protocol.ts')
+const computerUse = load('../src/shared/computer-use.ts', { './computer-use-protocol': protocol })
 const REPORT = 'OSCAP=Ubuntu 26.04.1 LTS|OSVER=7.0.0-38-generic|ARCH=x86_64|SHELLP=/usr/bin/bash|SHELLV=GNU bash, version 5.3.9|CWD=/home/fixture'
 const result = (output, patch = {}) => ({ output, exitCode: 0, rejected: false, interrupted: false,
   timedOut: false, sessionLost: false, cwd: '/home/fixture', ...patch })
@@ -36,10 +40,17 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
     './posix-shell': { localPosixShellPath: () => '/bin/zsh' }, '../shared/types': types
   }, desktop)
   const { SessionRuntime } = load('../src/main/session-runtime.ts', {
+  './computer-recovery': {},
+    './task-coordinator': {},
+    './computer-use-tool': {},
+    './task-progression': {},
+    './task-background-wait': {},
+    './task-continuity': {},
+    '../shared/computer-use-protocol': protocol,
     'node:crypto': { randomUUID: forbidden }, 'mysql2/promise': { createConnection: forbidden },
     './mysql-field-value': {}, electron: {}, './command-log': {},
     './focus-chat': {}, './focus-attachments': {}, './focus-chat-log': {}, '../shared/focus-chat': {},
-    '../shared/types': types, '../shared/platforms': platforms, './file-access': {},
+    '../shared/types': types, '../shared/platforms': platforms, '../shared/computer-use': computerUse, './file-access': {},
     'node:os': { homedir: forbidden }, './commands': {}, './db': {}, './nacos-view': {},
     './mysql-table-rows': {}, './redis-reader': {}, './embed': {}, './environment': environment,
     './shell': { resolvePowerShell: () => 'powershell.exe' }, './ssh': {}, './web2term-shell': {}, './terminal-notes': {},
@@ -51,6 +62,7 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
   const remote = { alive: true, cwd: '/home/fixture' }
   let probeCalls = 0
   Object.assign(runtime, {
+    computerUseTool: { definitions: () => [] },
     id: 'environment-fixture', disposed: false,
     web2term: transport === 'web2term' ? { ...remote, hostId: 'web2term:fixture',
       binding: { deviceName: 'Private device name', agentId: 'private-device-id' } } : null,
@@ -58,7 +70,7 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
     environment: transport === 'local' ? environment.nodeFallback() : { ...types.FALLBACK_ENVIRONMENT, kind: 'posix', osCaption: 'Linux' },
     environmentScope: { scope: transport === 'local' ? 'local' : 'ssh', hostId: '', label: '' },
     embeds: new Map(platforms.CHAT_PLATFORMS.map((platform) => [platform.id, { platform,
-      embed: { setPromptParts: (parts) => prompts.set(platform.id, parts) } }])),
+      embed: { setPromptParts: (parts) => prompts.set(platform.id, parts), setComputerUseRecognitionEnabled() {} } }])),
     runner: { runEnvironmentProbe: async () => { probeCalls++; return {
       kind: transport !== 'local' || desktop === 'darwin' ? 'posix' : 'windows', result: result(output, flags)
     } } },

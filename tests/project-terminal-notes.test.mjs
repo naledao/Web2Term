@@ -1,3 +1,4 @@
+import { progressVmModules } from './fixtures/progress-vm-modules.mjs'
 // User-run offline regressions: node --test tests/project-terminal-notes.test.mjs
 // Real SQLite and runtime methods with fake terminals/views; no Electron launch,
 // shell process, app profile, UI automation or network.
@@ -10,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
 import ts from 'typescript'
+import { taskContextModule } from './fixtures/task-context-module.mjs'
 
 const nodeRequire = createRequire(import.meta.url)
 const compile = code => ts.transpileModule(code, {
@@ -18,7 +20,7 @@ const compile = code => ts.transpileModule(code, {
 function load(path, dependencies = {}) {
   const exports = {}
   new Script(compile(readFileSync(new URL(path, import.meta.url), 'utf8')), { filename: path })
-    .runInNewContext({ exports, Buffer, URL, console, require(name) {
+    .runInNewContext({ exports, Buffer, URL, console, require(name) { if (Object.hasOwn(progressVmModules, name)) return progressVmModules[name];
       if (name.startsWith('node:')) return nodeRequire(name)
       assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`)
       return dependencies[name]
@@ -26,18 +28,32 @@ function load(path, dependencies = {}) {
   return exports
 }
 const files = load('../src/shared/file-requests.ts')
-const tasks = load('../src/shared/background-tasks.ts')
+const tasks = load('../src/shared/background-tasks.ts', { './autonomous-task': taskContextModule })
 const types = load('../src/shared/types.ts', { './file-requests': files, './background-tasks': tasks })
 const platforms = load('../src/shared/platforms.ts', { './types': types })
+const protocol = load('../src/shared/computer-use-protocol.ts')
+const computerUse = load('../src/shared/computer-use.ts', { './computer-use-protocol': protocol })
+const autonomousTasks = load('../src/shared/autonomous-task.ts')
 const notes = load('../src/main/terminal-notes.ts')
 const { ConversationStore } = load('../src/main/db.ts', {
+  './computer-action-storage': load('../src/main/computer-action-storage.ts'),
+  './computer-recovery': load('../src/main/computer-recovery.ts', { '../shared/autonomous-task': load('../src/shared/autonomous-task.ts') }),
+  '../shared/computer-actions': load('../src/shared/computer-actions.ts'),
+  '../shared/autonomous-task': autonomousTasks,
   electron: { nativeImage: {} }, '../shared/types': types,
   '../shared/file-requests': files, './terminal-notes': notes,
   './execution-recovery': { recoverInterruptedExecutions: () => 0, interruptRunningCommands: () => 0 }
 })
 const { SessionRuntime } = load('../src/main/session-runtime.ts', {
+  './computer-recovery': {},
+  './task-coordinator': {},
+  './computer-use-tool': {},
+  './task-progression': {},
+    './task-background-wait': {},
+    './task-continuity': {},
+  '../shared/computer-use-protocol': protocol,
   electron: {}, 'mysql2/promise': {}, './mysql-field-value': {}, './command-log': {},
-  '../shared/types': types, '../shared/platforms': platforms, '../shared/deepseek-question': {},
+  '../shared/types': types, '../shared/platforms': platforms, '../shared/computer-use': computerUse, '../shared/deepseek-question': {},
   './file-access': {}, './commands': {}, './extra-terminals': {}, './background-tasks': {}, './background-task-results': {}, '../shared/background-tasks': {}, './db': {},
   './focus-chat': {}, './focus-attachments': {}, './focus-chat-log': {}, '../shared/focus-chat': {},
   './nacos-view': {}, './mysql-table-rows': {}, './mysql-ddl-export': {}, './redis-reader': {},
@@ -65,6 +81,7 @@ function runtime(store, projectId = null, transport = 'local', cwd = 'C:\\work\\
   const events = [], prompts = []
   const terminal = { cwd }
   Object.assign(instance, {
+    computerUseTool: { definitions: () => [] },
     projectId, disposed: false, lastDirectoryNotes: null, lastPersistedLocalCwd: cwd,
     options: { store, localMachineId: 'desktop', onSummaryChanged() {}, onTerminalNotesSaved() {} },
     web2term: transport === 'web2term' ? { alive: Boolean(cwd), cwd, hostId: 'device', binding: { deviceName: '设备', agentId: 'device' } } : null,
@@ -72,7 +89,7 @@ function runtime(store, projectId = null, transport = 'local', cwd = 'C:\\work\\
     ssh: { getState: () => ({ attached: transport === 'ssh', modelCwd: cwd, hostId: 'ssh-host', name: 'SSH' }) },
     runner: { getTerminalState: () => terminal }, environment: { ...types.FALLBACK_ENVIRONMENT },
     embeds: new Map(platforms.CHAT_PLATFORMS.map(platform => [platform.id, {
-      platform, embed: { setPromptParts(parts) { prompts.push(parts) } }
+      platform, embed: { setPromptParts(parts) { prompts.push(parts) }, setComputerUseRecognitionEnabled() {} }
     }])),
     toolPrompt: () => '', send: (channel, value) => events.push({ channel, value })
   })

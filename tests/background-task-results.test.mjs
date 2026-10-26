@@ -6,6 +6,7 @@ import { createRequire } from 'node:module'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
 import ts from 'typescript'
+import { taskContextModule } from './fixtures/task-context-module.mjs'
 
 const require = createRequire(import.meta.url)
 const compile = code => ts.transpileModule(code, {
@@ -32,24 +33,133 @@ const task = (patch = {}) => ({
 })
 const settle = () => new Promise(setImmediate)
 function fixture(t) {
-  const timers = new Set(), sends = [], statuses = [], outcomes = []
+  const timers = new Set(), sends = [], statuses = [], outcomes = [], signals = [], delivered = []
+  const latest = new Map()
   let canSend = true
+  let current = true, idleCount = 0
   const exports = {}
-  new Script(compile(resultSource)).runInNewContext({ exports,
+  new Script(compile(resultSource)).runInNewContext({ exports, AbortController,
     setTimeout(callback) { const timer = { callback }; timers.add(timer); return timer },
     clearTimeout(timer) { timers.delete(timer) }
   })
   const queue = new exports.BackgroundTaskResults({
     canSend: route => typeof canSend === 'function' ? canSend(route) : canSend,
-    async send(text, route) { sends.push({ text, ...route }); const value = outcomes.shift(); return typeof value === 'function' ? value() : value ?? 'ok' },
-    onStatus: (id, status, message, kind) => statuses.push({ id, status, message, kind })
+    current: () => current,
+    async send(text, route, task, signal) { signals.push(signal); sends.push({ text, ...route }); const value = outcomes.shift(); return typeof value === 'function' ? value() : value ?? 'ok' },
+    onOutcome: (task, outcome) => delivered.push({ id: task.id, outcome }),
+    onIdle: () => { idleCount++ },
+    onStatus: (id, status, message, kind) => statuses.push({ id, status, message, kind }),
+    latest: id => latest.get(id)
   })
   t.after(() => queue.dispose())
-  return { queue, sends, statuses, outcomes, timers, build: exports.buildBackgroundTaskResult,
+  return { queue, sends, statuses, outcomes, signals, delivered, timers, latest, build: exports.buildBackgroundTaskResult,
+    setCurrent(value) { current = value }, idleCount: () => idleCount,
     setCanSend(value) { canSend = value },
     async tick() { const pending = [...timers]; timers.clear(); for (const timer of pending) timer.callback(); await settle() }
   }
 }
+
+const readyService = (patch = {}) => task({ status: 'running', exitCode: null, backgroundOptions: { kind: 'service' },
+  startup: { state: 'ready', readyAt: 1, deadlineAt: 120000, url: 'https://localhost:44301', evidence: 'Application started; 本任务正在监听',
+    stdoutOffset: 0, stderrOffset: 0, stdoutCarry: '', stderrCarry: '' }, ...patch })
+
+test('fast services merge creation into one ready result and allow the model to continue', async t => {
+  const f = fixture(t)
+  f.queue.capture(owner, () => true, 'created')(readyService({ startup: undefined }))
+  const ready = f.queue.capture(owner, () => true, 'ready')
+  ready(readyService())
+  await f.tick()
+  ready(readyService())
+  await f.tick()
+  assert.equal(f.sends.length, 1)
+  assert.match(f.sends[0].text, /【后台服务已就绪】/)
+  assert.match(f.sends[0].text, /继续原任务/)
+  assert.match(f.sends[0].text, /无需等待服务退出/)
+  assert.doesNotMatch(f.sends[0].text, /等待软件自动发送【后台任务执行结果】/)
+  assert.ok(f.statuses.some(item => item.kind === 'created' && item.status === 'superseded'))
+})
+
+test('a busy creation attempt cannot be retried with stale waiting instructions after readiness arrives', async t => {
+  const f = fixture(t)
+  let release
+  f.outcomes.push(() => new Promise(resolve => { release = resolve }))
+  f.queue.capture(owner, () => true, 'created')(readyService({ startup: undefined }))
+  await f.tick()
+  const current = readyService()
+  f.latest.set(current.id, current)
+  f.queue.capture(owner, () => true, 'ready')(current)
+  release('busy')
+  await settle()
+  await f.tick()
+  assert.equal(f.sends.length, 2, 'one busy attempt followed by one ready notification')
+  assert.match(f.sends[1].text, /【后台服务已就绪】/)
+  assert.deepEqual(f.statuses.filter(item => item.status === 'sent').map(item => item.kind), ['ready'])
+})
+
+test('restored cancelled or already confirmed ready notifications are never submitted again', async t => {
+  const f = fixture(t)
+  for (const readinessDeliveryStatus of ['sent', 'cancelled', 'needs-attention', 'superseded']) {
+    f.queue.capture(owner, () => true, 'ready')(readyService({ id: readinessDeliveryStatus, readinessDeliveryStatus }))
+  }
+  await f.tick()
+  assert.equal(f.sends.length, 0)
+})
+
+test('a service that exits before delivery cannot send an obsolete ready notification', async t => {
+  const f = fixture(t), current = readyService()
+  f.latest.set(current.id, current)
+  f.queue.capture(owner, () => true, 'ready')(current)
+  f.latest.set(current.id, readyService({ status: 'failed', exitCode: 1, startup: { ...current.startup, state: 'failed' } }))
+  await f.tick()
+  assert.equal(f.sends.length, 0)
+  assert.equal(f.statuses.at(-1).status, 'superseded')
+  f.queue.capture(owner)(f.latest.get(current.id))
+  await f.tick()
+  assert.match(f.sends[0].text, /服务已退出/)
+})
+
+test('manual stop in progress pauses ready delivery and an accepted stop suppresses it', async t => {
+  const f = fixture(t), current = readyService()
+  f.queue.capture(owner, () => true, 'ready')(current)
+  f.latest.set(current.id, { ...current, stopInProgress: true })
+  await f.tick()
+  assert.equal(f.sends.length, 0)
+  f.latest.set(current.id, { ...current, stopInProgress: false, stopRequestedAt: 100 })
+  await f.tick()
+  assert.equal(f.sends.length, 0)
+  assert.equal(f.statuses.at(-1).status, 'superseded')
+})
+
+test('timeout is an observation result rather than an instruction to kill or restart the service', async t => {
+  const f = fixture(t), current = readyService()
+  f.queue.capture(owner, () => true, 'startup-timeout')({ ...current, startup: { ...current.startup, state: 'timeout', readyAt: undefined } })
+  await f.tick()
+  assert.match(f.sends[0].text, /进程仍在运行/)
+  assert.match(f.sends[0].text, /不要直接重复启动/)
+  f.queue.capture(owner, () => true, 'ready')(current)
+  await f.tick()
+  assert.equal(f.sends.length, 2)
+})
+
+test('an exception after starting submission is treated as uncertain instead of retried', async t => {
+  const f = fixture(t)
+  f.outcomes.push(() => { throw new Error('acknowledgement lost') })
+  f.queue.capture(owner, () => true, 'ready')(readyService())
+  await f.tick()
+  await f.tick()
+  assert.equal(f.sends.length, 1)
+  assert.equal(f.statuses.at(-1).status, 'needs-attention')
+  assert.ok(f.statuses.some(item => item.status === 'sending'))
+})
+
+test('manual stop notifications tell the model to wait for the user instead of restarting the task', t => {
+  const f = fixture(t)
+  const text = f.build(task({ status: 'stopped', exitCode: null, stopRequestedAt: 10, output: 'shutdown complete' }))
+  assert.match(text, /用户已手动停止/)
+  assert.match(text, /不要自动重启、重试或修复/)
+  assert.match(text, /shutdown complete/)
+  assert.doesNotMatch(text, /继续必要的验证、修复/)
+})
 
 test('final results are queued and sent once to the captured conversation, including final logs and exit status', async t => {
   const f = fixture(t), route = { ...owner }, complete = f.queue.capture(route)
@@ -80,7 +190,7 @@ test('creation notifications include startup stdout and stderr without treating 
   assert.match(f.sends[0].text, /【后台任务已创建】/)
   assert.match(f.sends[0].text, /startup ready/)
   assert.match(f.sends[0].text, /TEST-CODE/)
-  assert.doesNotMatch(f.sends[0].text, /结果: 成功|【后台任务执行结果】/)
+  assert.doesNotMatch(f.sends[0].text, /^结果: 成功|^【后台任务执行结果】/m)
 })
 
 test('creation confirmation and final result are separate, ordered, and each sent once', async t => {
@@ -205,7 +315,7 @@ test('disposal stops retries and ignores a late page acknowledgement', async t =
   f.queue.dispose()
   finish('ok')
   await settle()
-  assert.equal(f.statuses.at(-1).status, 'pending')
+  assert.equal(f.statuses.at(-1).status, 'sending')
   assert.equal(f.timers.size, 0)
 })
 
@@ -223,7 +333,7 @@ test('failure, unknown exit codes and large logs have accurate bounded final mes
 
 test('background task protocol lives in tool prompts, including web2term without file reading', () => {
   const files = load('../src/shared/file-requests.ts')
-  const protocol = load('../src/shared/background-tasks.ts')
+  const protocol = load('../src/shared/background-tasks.ts', { './autonomous-task': taskContextModule })
   const types = load('../src/shared/types.ts', { './file-requests': files, './background-tasks': protocol })
   for (const kind of ['windows', 'posix']) {
     const parts = types.buildTerminalPromptParts({ ...types.FALLBACK_ENVIRONMENT, kind }, types.toolPromptForPlatform('deepseek'))
@@ -236,12 +346,30 @@ test('background task protocol lives in tool prompts, including web2term without
     assert.ok(!parts.basePrompt.includes('exit_code_path'))
     assert.ok(parts.toolPrompt.includes('【工具：background_task】'))
     assert.ok(parts.toolPrompt.includes('【工具：read_files】'))
-    assert.ok(parts.toolPrompt.includes('收到创建通知后'))
-    assert.ok(parts.toolPrompt.includes('【后台任务已创建】'))
+    assert.ok(parts.toolPrompt.includes('【后台服务已就绪】'))
+    assert.ok(parts.toolPrompt.includes('继续原任务'))
+    assert.ok(parts.toolPrompt.includes('服务运行不限时'))
+    assert.ok(parts.toolPrompt.includes('创建仅确认登记'))
     assert.ok(!parts.toolPrompt.includes('按 10–30 秒'))
     assert.ok(parts.toolPrompt.includes('"background":true'))
-    assert.ok(parts.toolPrompt.includes('软件负责启动独立进程'))
+    assert.ok(parts.toolPrompt.includes('软件负责启动、登记、日志和监控'))
     assert.ok(!parts.toolPrompt.includes('"pid": 12345'), 'the model no longer owns PID generation')
+    const backgroundPrompt = parts.toolPrompt.slice(parts.toolPrompt.indexOf('【工具：background_task】'))
+    assert.ok(backgroundPrompt.length <= 650, 'keep the background tool instructions compact')
+    assert.ok(!backgroundPrompt.includes(protocol.BACKGROUND_TASK_MARKER), 'legacy registration stays in code, not model instructions')
+    const examples = [...backgroundPrompt.matchAll(/```json\n([\s\S]*?)\n```/g)]
+    assert.equal(examples.length, 1)
+    const example = JSON.parse(examples[0][1])
+    assert.equal(example.background, true)
+    assert.equal(example.background_kind, 'service')
+    assert.ok(protocol.parseBackgroundOptions({ kind: example.background_kind, readiness: example.readiness }), 'the example must match the executable protocol')
+    assert.match(backgroundPrompt, /一次性任务用 "job"，常驻服务必须用 "service"/)
+    assert.match(backgroundPrompt, /无 stdin\/TTY/)
+    assert.match(backgroundPrompt, /外层 timeout_seconds 只限启动，最多 30 秒/)
+    assert.match(backgroundPrompt, /超时保留进程/)
+    assert.match(backgroundPrompt, /勿轮询、sleep、读日志等待或重复启动/)
+    assert.match(backgroundPrompt, /目标机回环地址.*不得臆造/)
+    assert.match(backgroundPrompt, /是否【任务完成】仍取决于用户目标/)
     assert.ok(parts.prefix.includes(parts.toolPrompt))
   }
   const remote = types.toolPromptForPlatform('deepseek', false)
@@ -289,4 +417,74 @@ test('page guards preserve drafts and reject a changed route before inserting an
   assert.equal(await app.action('final result', null, { path: '/c/original', requireIdle: true }), 'busy')
   assert.equal(app.composer.value, 'user draft')
   assert.equal(app.calls.length, 0)
+})
+
+test('revoked task notifications are cancelled before sending and cannot feed a new goal', async t => {
+  const f = fixture(t)
+  f.queue.capture(owner)(task())
+  f.setCurrent(false)
+  f.queue.reconcile()
+  await f.tick()
+  assert.equal(f.sends.length, 0)
+  assert.ok(f.statuses.some(s => s.status === 'cancelled'))
+})
+
+test('revocation aborts an in-flight send and still releases the session scheduling lock', async t => {
+  const f = fixture(t)
+  let resolve
+  f.outcomes.push(() => new Promise(done => { resolve = done }))
+  f.queue.capture(owner)(task())
+  await f.tick()
+  assert.equal(f.queue.isSending, true); assert.equal(f.signals[0].aborted, false)
+  f.setCurrent(false); f.queue.reconcile()
+  assert.equal(f.signals[0].aborted, true)
+  resolve('ok'); await settle()
+  assert.equal(f.queue.isSending, false); assert.equal(f.idleCount(), 1)
+  assert.equal(f.delivered.length, 0)
+  assert.equal(f.statuses.some(s => s.status === 'sent'), false)
+})
+
+
+test('global cancellation covers queued and not-yet-produced callbacks across every conversation', async t => {
+  const f = fixture(t), lateA = f.queue.capture(owner), lateB = f.queue.capture({ platformId: 'deepseek', conversationId: 'chat-b' })
+  f.queue.capture(owner)(task())
+  f.queue.cancelAll()
+  lateA(task({ id: 'late-a' })); lateB(task({ id: 'late-b', conversationId: 'chat-b' }))
+  await f.tick()
+  assert.equal(f.sends.length, 0)
+  assert.ok(f.statuses.every(s => s.status === 'pending' || s.status === 'cancelled'))
+  f.queue.capture(owner)(task({ id: 'new-user-task' }))
+  await f.tick()
+  assert.equal(f.sends.length, 1)
+})
+
+test('cancelling a submission preserves uncertainty, while a late positive acknowledgement only updates its original history', async t => {
+  const f = fixture(t)
+  let ack
+  f.outcomes.push(() => new Promise(resolve => { ack = resolve }))
+  f.queue.capture(owner)(task())
+  await f.tick()
+  f.queue.cancelAll()
+  assert.equal(f.signals[0].aborted, true)
+  assert.equal(f.statuses.at(-1).status, 'needs-attention')
+  ack('ok'); await settle()
+  assert.equal(f.statuses.at(-1).status, 'sent')
+  assert.equal(f.delivered.length, 0, 'late history receipt never advances a new task')
+  await f.tick()
+  assert.equal(f.sends.length, 1)
+})
+
+
+test('a failing status journal cannot retain cancelled outbox entries or revive old callbacks', async t => {
+  const f = fixture(t)
+  f.setCanSend(false)
+  const late = f.queue.capture(owner)
+  f.queue.capture(owner)(task()); f.queue.capture({ ...owner, conversationId: 'chat-b' })(task({ id: 'second', conversationId: 'chat-b' }))
+  const report = f.queue.report.bind(f.queue)
+  f.queue.report = () => { throw new Error('journal unavailable') }
+  assert.throws(() => f.queue.cancelAll(), /journal unavailable/)
+  f.queue.report = report
+  late(task({ id: 'late' }))
+  f.setCanSend(true); await f.tick()
+  assert.equal(f.sends.length, 0)
 })

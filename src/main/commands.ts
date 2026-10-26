@@ -18,7 +18,8 @@ import type { FileReadContext, FileSendOutcome, StoredFileReadRequest } from '..
 import type { PreparedFileResult } from './file-access'
 import type { ParsedAction, ParsedReadFiles } from '../shared/types'
 import type { CommandDiagnostic } from './command-log'
-import { BACKGROUND_TASK_MARKER } from '../shared/background-tasks'
+import type { TaskToolContext, TaskToolEvent } from '../shared/autonomous-task'
+import { BACKGROUND_TASK_MARKER, parseBackgroundOptions } from '../shared/background-tasks'
 
 /**
  * Commands that get a loud warning line. They still RUN in auto mode — this is an
@@ -131,6 +132,8 @@ const TERMINAL_PUSH_INTERVAL_MS = 150
 const INTERRUPT_NOTICE_MS = 5000
 
 export interface CommandRunnerDeps {
+  acquireLocalCommand?(record: ExecutionRecord, signal: AbortSignal, conditions: { current(): boolean; eligible(): boolean; waiting(): void }): Promise<import('./desktop-coordinator').DesktopPermit>
+  onAdmissionChanged?: () => void
   store: ConversationStore
   /** Current conversation id, or null when the page is not on a conversation. */
   currentConversationId: () => string | null
@@ -138,8 +141,16 @@ export interface CommandRunnerDeps {
   onCommandDiagnostic?: (details: CommandDiagnostic) => void
   /** Push text into the composer and submit it without the system prompt. */
   sendRawToPage: (
-    text: string
-  ) => Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed'>
+    text: string, task?: TaskToolContext
+  ) => Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'>
+  taskTools?: {
+    timeoutMs?(context: TaskToolContext): number
+    current(context: TaskToolContext): boolean
+    event(context: TaskToolContext, event: TaskToolEvent): boolean
+    format(context: TaskToolContext, text: string): string
+    files?(context: TaskToolContext, sources: NonNullable<PreparedFileResult['sources']>): void
+  }
+  onIdle?: () => void
   fileContext: () => FileReadContext
   filePlatform: () => FileReadingPlatform | null
   prepareFiles: (request: StoredFileReadRequest, signal: AbortSignal) => Promise<PreparedFileResult>
@@ -165,10 +176,12 @@ export interface CommandRunnerDeps {
   /** Freeze the startup command's machine before awaiting its result. */
   captureBackgroundTasks?: (record: ExecutionRecord, shell: ExecutionShell) => (output: string) => number
   /** Software owns the complete background startup; run keeps normal interruption semantics. */
-  startBackgroundTask?: (record: ExecutionRecord, shell: ExecutionShell, run: (command: string) => Promise<ShellResult>) => Promise<{ result: ShellResult; registered: number }>
+  startBackgroundTask?: (record: ExecutionRecord, shell: ExecutionShell, run: (command: string) => Promise<ShellResult>) => Promise<{ result: ShellResult; registered: number; reused?: boolean }>
   onTerminalChanged: (state: TerminalState) => void
   /** A user-triggered history replay starts a task before its terminal result is sent. */
   onTaskStarted?: () => void
+  /** Application-wide or user-ended task latch; checked for detected, queued and manual runs. */
+  executionAllowed?: () => boolean
   /** Notify the host application when the model explicitly reports that the task is complete. */
   onTaskCompleted: (description: string) => void
 }
@@ -341,7 +354,7 @@ export function executionKeyOf(parsed: ParsedCommand, conversationId: string): s
   const raw = parsed.messageId.trim()
   if (raw !== '') return raw
 
-  const material = `${conversationId}\u0000${parsed.command}\u0000${parsed.description}${parsed.background ? '\u0000background' : ''}`
+  const material = `${conversationId}\u0000${parsed.command}\u0000${parsed.description}${parsed.background ? '\u0000background' : ''}${parsed.backgroundOptions ? '\u0000' + JSON.stringify(parsed.backgroundOptions) : ''}`
   let hash = 5381
   for (let i = 0; i < material.length; i += 1) {
     hash = ((hash << 5) + hash + material.charCodeAt(i)) | 0
@@ -377,6 +390,7 @@ export class CommandRunner {
   private pushTimer: NodeJS.Timeout | null = null
   /** Message ids currently executing, so a double click cannot run one twice. */
   private readonly inFlight = new Set<string>()
+  private readonly commandAdmissions = new Map<string, { record: ExecutionRecord; controller: AbortController; confirmed: boolean; started: boolean }>()
   /** The exact backend whose run() promise is currently in flight. */
   private activeShell: ExecutionShell | null = null
   /** Distinguishes consecutive runs that reuse the same persistent shell object. */
@@ -386,6 +400,11 @@ export class CommandRunner {
   private executionRequest = 0
   private fileAbort: AbortController | null = null
   private readonly fileResults = new Map<string, PreparedFileResult>()
+  private fileTaskContext: TaskToolContext | null = null
+  private taskTextResult: { record: ExecutionRecord; text: string } | null = null
+  private taskFileResult: ExecutionRecord | null = null
+  private taskResultTimer: ReturnType<typeof setTimeout> | null = null
+  private taskTextSending = false
 
   private automation: AutomationState = {
     // Manual by default: nothing runs on its own until the user asks for it.
@@ -420,13 +439,83 @@ export class CommandRunner {
 
   /** Actual execution/delivery activity, independent of task completion and auto mode. */
   hasInFlightWork(): boolean {
-    return this.inFlight.size > 0 || this.activeShell !== null || this.fileAbort !== null
+    return this.inFlight.size > 0 || this.activeShell !== null || this.fileAbort !== null || this.taskTextSending
       || !!this.localShell?.running || !!this.deps.remoteShell()?.running
+  }
+
+  reconcileTaskTools(): void {
+    for (const { record, controller } of this.commandAdmissions.values()) if (!this.taskCurrent(record) || this.deps.currentConversationId() !== record.conversationId) controller.abort()
+    if (this.fileTaskContext && !this.deps.taskTools?.current(this.fileTaskContext)) this.fileAbort?.abort()
+    if (this.taskTextResult && !this.taskCurrent(this.taskTextResult.record)) this.clearTaskResults()
+    if (this.taskFileResult && !this.taskCurrent(this.taskFileResult)) this.clearTaskResults()
+  }
+  private taskCurrent(record: ExecutionRecord, shell?: ExecutionShell): boolean {
+    return record.taskContext === undefined || !!record.taskContext && !!this.deps.taskTools?.current(record.taskContext) &&
+      !this.deps.remoteShell() && (!shell || shell === this.localShell)
+  }
+  private taskEvent(record: Pick<ExecutionRecord, 'taskContext'>, event: TaskToolEvent): boolean {
+    return record.taskContext === undefined || !!record.taskContext && !!this.deps.taskTools?.event(record.taskContext, event)
+  }
+  private taskResult(record: ExecutionRecord, text: string): string {
+    return record.taskContext && this.deps.taskTools ? this.deps.taskTools.format(record.taskContext, text) : text
+  }
+  private clearTaskResults(): void {
+    this.taskTextResult = null
+    this.taskFileResult = null
+    if (this.taskResultTimer) clearTimeout(this.taskResultTimer)
+    this.taskResultTimer = null
+  }
+  private scheduleTaskResults(): void {
+    if (this.taskResultTimer || !this.taskTextResult && !this.taskFileResult || this.disposed) return
+    this.taskResultTimer = setTimeout(() => { this.taskResultTimer = null; void this.retryTaskResults() }, 1500)
+    this.taskResultTimer.unref()
+  }
+  private async retryTaskResults(): Promise<void> {
+    const pending = this.taskTextResult ?? (this.taskFileResult ? { record: this.taskFileResult, text: null } : null)
+    if (!pending || this.disposed) return
+    if (!this.taskCurrent(pending.record)) { this.clearTaskResults(); return }
+    if (this.automation.paused || !this.terminalModeOn() || this.hasInFlightWork()) { this.scheduleTaskResults(); return }
+    try {
+      if (pending.text !== null) await this.deliverTaskText(pending.record, pending.text)
+      else {
+        this.taskFileResult = null
+        // execute's file branch reuses fileResults and the existing upload token; no file read is repeated.
+        if (this.fileResults.has(pending.record.messageId)) await this.execute(pending.record.messageId)
+      }
+    }
+    catch { this.clearTaskResults(); this.taskEvent(pending.record, { stage: 'uncertain', message: '结果交付异常，停止重发，不重跑原工具。' }) }
+    finally { this.deps.onIdle?.() }
+  }
+  /** Retry only a saved, definitely unsubmitted text result. Never calls runRecord/prepareFiles. */
+  private async deliverTaskText(record: ExecutionRecord, text: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'> {
+    if (!record.taskContext || !this.taskCurrent(record)) return 'stale'
+    this.taskTextResult = { record: structuredClone(record), text }
+    this.taskTextSending = true
+    try {
+      if (!this.taskEvent(record, { stage: 'sending' })) { this.clearTaskResults(); return 'stale' }
+      let outcome: Awaited<ReturnType<CommandRunnerDeps['sendRawToPage']>>
+      try { outcome = await this.deps.sendRawToPage(text, record.taskContext) } catch { outcome = 'unknown' }
+      if (outcome === 'busy' || outcome === 'no-composer') {
+        this.taskEvent(record, { stage: 'pending', message: '原结果已保存，等待页面空闲后仅重试交付，不重跑工具。' })
+        if (record.kind === 'read_files') this.deps.store.setFileDeliveryStatus(record.messageId, 'pending')
+        this.scheduleTaskResults()
+      } else {
+        this.clearTaskResults()
+        this.taskEvent(record, { stage: outcome === 'ok' ? 'delivered' : 'uncertain', message: outcome === 'ok' ? '原工具结果已回传。' : '结果提交未确认，停止自动重发，不重跑工具。' })
+        if (record.kind === 'read_files') {
+          this.deps.store.setFileDeliveryStatus(record.messageId, outcome === 'ok' ? 'sent' : 'unknown')
+          const cached = this.fileResults.get(record.messageId); this.fileResults.delete(record.messageId)
+          if (cached) await cached.cleanup().catch(() => {})
+        }
+      }
+      return outcome
+    } finally { this.taskTextSending = false }
   }
 
   setMode(mode: ExecutionMode): AutomationState {
     const previous = this.automation.mode
     this.automation = { ...this.automation, mode }
+    this.deps.onAdmissionChanged?.()
 
     // Switching to auto is an explicit "go" signal, so pick up whatever is
     // already waiting instead of making the user click 运行 as well.
@@ -455,6 +544,7 @@ export class CommandRunner {
 
   setPaused(paused: boolean): AutomationState {
     this.automation = { ...this.automation, paused }
+    this.deps.onAdmissionChanged?.()
     // Resuming should pick the loop back up. Otherwise a command that arrived
     // while paused would sit there forever with nothing driving it.
     if (!paused && this.automation.mode === 'auto' && this.terminalModeOn()) this.resumeNewestPending()
@@ -497,7 +587,7 @@ export class CommandRunner {
 
   /** Terminal mode off: no detection, no auto-run, no result send-back. */
   private terminalModeOn(): boolean {
-    return this.deps.terminalModeEnabled ? this.deps.terminalModeEnabled() : true
+    return this.deps.executionAllowed?.() !== false && (this.deps.terminalModeEnabled ? this.deps.terminalModeEnabled() : true)
   }
 
   /* ---------------- commands from the page ---------------- */
@@ -508,10 +598,11 @@ export class CommandRunner {
    * It is ALWAYS stored, so the user can see it and run it by hand. Whether it
    * runs by itself depends on the mode and on `live` (see the notice below).
    */
-  handleDetected(parsed: ParsedAction, conversationIdOverride?: string): boolean {
-    if ('type' in parsed) return this.handleReadFiles(parsed, conversationIdOverride)
+  handleDetected(parsed: ParsedAction, conversationIdOverride?: string, taskContext?: TaskToolContext): boolean {
+    if ('type' in parsed) return this.handleReadFiles(parsed, conversationIdOverride, taskContext)
     if ((parsed.background !== undefined && typeof parsed.background !== 'boolean') ||
-      (parsed.background && !parsed.command.trim())) { this.noteParseFailure('后台任务参数无效'); return true }
+      (parsed.background && !parsed.command.trim()) ||
+      (parsed.backgroundOptions !== undefined && (!parsed.background || !parseBackgroundOptions(parsed.backgroundOptions)))) { this.noteParseFailure('后台任务参数无效'); this.taskEvent({ taskContext }, { stage: 'skipped', message: '后台任务参数无效，未执行。' }); return true }
     // Terminal mode off: leave replies alone. Returning true marks the command handled so nothing is deferred.
     if (!this.terminalModeOn()) {
       console.info('[cmd] terminal mode off, detected command ignored')
@@ -533,10 +624,12 @@ export class CommandRunner {
       conversationId,
       command: parsed.command,
       background: parsed.background === true,
+      backgroundOptions: parsed.backgroundOptions ? parseBackgroundOptions(parsed.backgroundOptions)! : undefined,
       description: parsed.description,
       timeoutSeconds: parsed.timeoutSeconds,
       status: danger ? 'blocked' : 'pending',
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      ...(taskContext ? { taskContext } : {})
     })
 
     if (created) {
@@ -544,7 +637,8 @@ export class CommandRunner {
         conversationId,
         key,
         parsed.rawJson ?? JSON.stringify({ command: parsed.command, description: parsed.description, timeout_seconds: parsed.timeoutSeconds,
-          ...(parsed.background ? { background: true } : {}) })
+          ...(parsed.background ? { background: true } : {}),
+          ...(parsed.backgroundOptions ? { background_kind: parsed.backgroundOptions.kind, readiness: parsed.backgroundOptions.readiness } : {}) })
       )
     }
 
@@ -565,7 +659,15 @@ export class CommandRunner {
       this.deps.store.setExecutionStatus(key, 'skipped')
       this.appendLine({ kind: 'notice', text: '模型报告任务完成（command 为空）' })
       this.broadcastExecutions(conversationId)
-      this.deps.onTaskCompleted(parsed.description)
+      if (taskContext) {
+        const record = this.deps.store.getExecution(key)
+        if (record) {
+          const text = this.taskResult(record, JSON.stringify({ type: 'task_completion_required', goal_verified: false,
+            message: '模型报告完成，但整项目标尚未逐项核对。请使用 computer.complete_task，引用本任务实际文件回读／界面后状态／后台结果证据，列出产物路径与未确认事项；无证据先继续核对。空命令没有执行，也没有标记任务完成。' }))
+          this.taskEvent({ taskContext }, { stage: 'result-ready', execution: 'not_executed', resultText: text, message: '完成声明需要证据，等待回传核对要求。' })
+          void this.deliverTaskText(record, text).catch(() => this.taskEvent({ taskContext }, { stage: 'uncertain', message: '完成核对反馈交付未确认，不自动重发。' }))
+        }
+      } else this.deps.onTaskCompleted(parsed.description)
       return true
     }
 
@@ -578,6 +680,7 @@ export class CommandRunner {
      * trip. The user still needs to see it, hence the loud line.
      */
     if (isPlaceholderCommand(parsed.command)) {
+      this.taskEvent({ taskContext }, { stage: 'skipped', message: '占位命令未执行。' })
       this.diagnostic({ event: 'skipped', reason: 'placeholder', messageId: key, ownerConversationId: conversationId })
       this.deps.store.setExecutionStatus(key, 'skipped')
       this.appendLine({
@@ -672,6 +775,7 @@ export class CommandRunner {
       conversationId,
       command: original.command,
       background: original.background === true,
+      backgroundOptions: original.backgroundOptions,
       description: original.description,
       timeoutSeconds: original.timeoutSeconds,
       status: 'pending',
@@ -681,7 +785,7 @@ export class CommandRunner {
     this.deps.onTaskStarted?.()
     this.appendLine({ kind: 'notice', text: '正在重新执行历史指令，完成后自动将结果返回给 AI' })
     this.broadcastExecutions(conversationId)
-    void this.execute(replayId).catch((error) => {
+    void this.execute(replayId, true).catch((error) => {
       if (this.disposed) return
       const message = error instanceof Error ? error.message : String(error)
       this.deps.store.finishExecution(replayId, { status: 'failed', exitCode: null, output: message, finishedAt: Date.now() })
@@ -696,12 +800,14 @@ export class CommandRunner {
   async runExecution(messageId: string): Promise<void> {
     const record = this.deps.store.getExecution(messageId)
     if (!record) return
+    const admission = this.commandAdmissions.get(messageId)
+    if (admission) { admission.confirmed = true; this.deps.onAdmissionChanged?.() }
     /*
      * This is the manual 运行 click, so every way it can decline says so on the pane. The common
      * one: auto mode already picked this command up and is waiting for the previous one to stop,
      * which over SSH can take a long time — and until now a click then did nothing visible.
      */
-    if (this.inFlight.has(messageId)) {
+    if (this.inFlight.has(messageId) || this.taskTextSending && this.taskTextResult?.record.messageId === messageId) {
       this.appendLine({
         kind: 'notice',
         text: record.status === 'running'
@@ -714,19 +820,21 @@ export class CommandRunner {
       this.appendLine({ kind: 'notice', text: '这条命令已经不是待执行状态，不会重复运行。' })
       return
     }
-    await this.execute(messageId)
+    await this.execute(messageId, true)
   }
 
   skipExecution(messageId: string): void {
     const record = this.deps.store.getExecution(messageId)
     if (!record) return
     if (record.status !== 'pending' && record.status !== 'blocked' && !(record.kind === 'read_files' && ['pending', 'failed'].includes(record.deliveryStatus ?? ''))) return
+    this.commandAdmissions.get(messageId)?.controller.abort()
     if (record.kind === 'read_files') {
       this.deps.store.setFileDeliveryStatus(messageId, 'cancelled')
       const result = this.fileResults.get(messageId)
       this.fileResults.delete(messageId)
       if (result) void result.cleanup().catch((error) => console.warn('[files] cleanup:', error.message))
     }
+    this.taskEvent(record, { stage: 'skipped', message: '用户跳过了本步，未执行。' })
     this.deps.store.setExecutionStatus(messageId, 'skipped')
     this.appendLine({ kind: 'notice', text: '已跳过该命令' })
     this.broadcastExecutions(record.conversationId)
@@ -736,7 +844,8 @@ export class CommandRunner {
    * Run one stored command and, when it finishes, hand the output back to the
    * model. Serialised per conversation by the shell itself.
    */
-  private async execute(messageId: string): Promise<void> {
+  private async execute(messageId: string, confirmed = false): Promise<void> {
+    if (this.deps.executionAllowed?.() === false) return
     // Two fast clicks on 运行 would otherwise both pass the status check below
     // and run the command twice.
     if (this.inFlight.has(messageId)) {
@@ -751,6 +860,10 @@ export class CommandRunner {
       this.diagnostic({ event: 'skipped', reason: 'missing-record', messageId })
       return
     }
+    if (record.kind !== 'command' && record.kind !== 'read_files') {
+      this.appendLine({ kind: 'error', text: '这条记录的工具类型不受终端支持，未执行；桌面动作不能作为命令运行。' })
+      return
+    }
     if (record.status !== 'pending' && record.status !== 'blocked' && !(record.kind === 'read_files' && ['pending', 'failed'].includes(record.deliveryStatus ?? '') && (record.status === 'done' || record.status === 'failed'))) {
       /*
        * The common one after a reconnect or a reload: the command IS stored, and its status says
@@ -761,37 +874,75 @@ export class CommandRunner {
       return
     }
 
+    if (!this.taskCurrent(record)) {
+      if (record.status === 'pending' || record.status === 'blocked') this.deps.store.setExecutionStatus(messageId, 'skipped')
+      if (record.kind === 'read_files') this.deps.store.setFileDeliveryStatus(messageId, 'cancelled')
+      this.appendLine({ kind: 'notice', text: '原任务／步骤或机器归属已失效，本条未执行；记录保留，不恢复旧任务。' })
+      this.broadcastExecutions(record.conversationId)
+      return
+    }
+
     const request = (this.executionRequest += 1)
     this.fileAbort?.abort()
     this.inFlight.add(messageId)
-
+    let permit: import('./desktop-coordinator').DesktopPermit | undefined
+    const shells = new Set<ExecutionShell>()
     try {
+      if (record.kind !== 'read_files' && !this.deps.remoteShell() && this.deps.acquireLocalCommand) {
+        const admission = { record, controller: new AbortController(), confirmed, started: false }
+        this.commandAdmissions.set(messageId, admission)
+        const current = (): boolean => !this.disposed && !admission.controller.signal.aborted && request === this.executionRequest && this.taskCurrent(record) &&
+          !this.deps.remoteShell() && this.deps.currentConversationId() === record.conversationId && ['pending', 'blocked', 'running'].includes(this.deps.store.getExecution(messageId)?.status ?? '')
+        const eligible = (): boolean => !this.automation.paused && this.terminalModeOn() && (this.automation.mode === 'auto' || admission.confirmed)
+        try { permit = await this.deps.acquireLocalCommand(record, admission.controller.signal, { current, eligible, waiting: () => {
+          this.appendLine({ kind: 'notice', text: '等待全局桌面协调放行，本机命令尚未准备或执行。' })
+          this.taskEvent(record, { stage: 'waiting-desktop', execution: 'not_executed', message: '等待全局桌面协调放行，本机命令尚未执行。' })
+          this.broadcastExecutions(record.conversationId)
+        } }) } catch {
+          if (record.taskContext) this.taskEvent(record, { stage: 'cancelled', execution: 'not_executed', message: '排队命令已取消或归属失效，未准备或执行。' })
+          if (['pending', 'blocked'].includes(this.deps.store.getExecution(messageId)?.status ?? '')) this.deps.store.setExecutionStatus(messageId, 'skipped')
+          this.broadcastExecutions(record.conversationId)
+          return
+        }
+        if (!current() || !eligible()) return
+        admission.started = true
+      }
       if (record.kind === 'read_files') await this.runFileRecord(record, request)
-      else await this.runRecord(record, request)
+      else await this.runRecord(record, request, shell => shells.add(shell))
     } catch (error) {
+      this.taskEvent(record, { stage: 'uncertain', execution: 'unknown', message: '原工具执行或交付异常，请先核对实际状态，不自动重放。' })
+      const stored = record.taskContext ? this.deps.store.getExecution(messageId) : null
+      if (stored && ['pending', 'blocked', 'running'].includes(stored.status)) this.deps.store.finishExecution(messageId, {
+        status: 'failed', exitCode: null, output: stored.output || '执行器异常，实际执行结果未确认；请核对状态后决定下一步。', finishedAt: Date.now() })
       this.diagnostic({
         event: 'error', reason: 'exception', messageId, ownerConversationId: record.conversationId,
         errorType: error instanceof Error ? error.name : 'Other'
       })
       throw error
     } finally {
+      // Local dispose can resolve run() before its process tree has actually closed.
+      for (const shell of shells) await shell.whenQuiescent?.()
+      permit?.release()
+      this.commandAdmissions.delete(messageId)
       this.inFlight.delete(messageId)
+      this.deps.onIdle?.()
     }
   }
 
-  private handleReadFiles(parsed: ParsedReadFiles, conversationIdOverride?: string): boolean {
+  private handleReadFiles(parsed: ParsedReadFiles, conversationIdOverride?: string, taskContext?: TaskToolContext): boolean {
     if (!this.terminalModeOn()) return true
     const conversationId = conversationIdOverride ?? this.deps.currentConversationId()
     if (!conversationId) return false
     const validated = parseReadFilesRequest(parsed)
-    if (!validated) { this.noteParseFailure('read_files 参数无效'); return true }
+    if (!validated) { this.noteParseFailure('read_files 参数无效'); this.taskEvent({ taskContext }, { stage: 'skipped', message: '文件请求无效，未读取。' }); return true }
     let context: FileReadContext
     try { context = this.deps.fileContext() } catch (error) {
       this.appendLine({ kind: 'error', text: (error as Error).message })
+      this.taskEvent({ taskContext }, { stage: 'skipped', message: '文件执行环境不可用，未读取。' })
       return true
     }
     const key = parsed.messageId.trim() || `files:${createHash('sha256').update(conversationId + JSON.stringify(validated)).digest('hex')}`
-    const created = this.deps.store.createExecution({ messageId: key, conversationId, command: `读取文件：\n${validated.files.map((file) => file.path).join('\n')}`, description: validated.description, timeoutSeconds: 180, status: 'pending', createdAt: Date.now(), fileRequest: { ...validated, context } })
+    const created = this.deps.store.createExecution({ messageId: key, conversationId, command: `读取文件：\n${validated.files.map((file) => file.path).join('\n')}`, description: validated.description, timeoutSeconds: 180, status: 'pending', createdAt: Date.now(), fileRequest: { ...validated, context }, ...(taskContext ? { taskContext } : {}) })
     if (!created) return true
     this.appendLine({ kind: 'notice', text: `检测到文件读取请求（${validated.files.length} 个文件，${context.scope === 'ssh' ? 'SSH' : '本机'}）` })
     this.broadcastExecutions(conversationId)
@@ -810,9 +961,10 @@ export class CommandRunner {
     }
     const controller = new AbortController()
     this.fileAbort = controller
+    this.fileTaskContext = record.taskContext ?? null
     const platform = this.deps.filePlatform()
     const current = (): boolean => {
-      if (!platform || this.deps.filePlatform()?.id !== platform.id || controller.signal.aborted || requestId !== this.executionRequest || this.deps.currentConversationId() !== record.conversationId || !this.terminalModeOn() || this.automation.paused) return false
+      if (!this.taskCurrent(record) || !platform || this.deps.filePlatform()?.id !== platform.id || controller.signal.aborted || requestId !== this.executionRequest || this.deps.currentConversationId() !== record.conversationId || !this.terminalModeOn() || this.automation.paused) return false
       try {
         const context = this.deps.fileContext()
         return context.scope === stored.context.scope && context.hostId === stored.context.hostId
@@ -821,25 +973,39 @@ export class CommandRunner {
     const token = `files-${createHash('sha256').update(record.conversationId + record.messageId).digest('hex').slice(0, 24)}`
     const timeout = setTimeout(() => controller.abort(), 180000)
     let result = this.fileResults.get(record.messageId)
+    const reused = !!result
     try {
       if (!platform || !current()) {
         this.appendLine({ kind: 'error', text: '文件读取未执行：原会话／主机已切换，或任务已暂停。' })
         return
       }
-      if (this.activeShell?.running) await this.interruptWithNotice(this.activeShell, '正在中断当前命令，停止后读取文件…')
+      if (this.activeShell?.running) {
+        const active = this.activeShell
+        if (!await this.interruptWithNotice(active, '正在中断当前命令，停止后读取文件…') && active.running) return
+      }
       if (!current()) return
-      this.deps.store.setExecutionStatus(record.messageId, 'running')
+      if (!this.taskEvent(record, { stage: 'executing' })) return
+      if (!reused || !record.taskContext) this.deps.store.setExecutionStatus(record.messageId, 'running')
       this.appendLine({ kind: 'notice', text: result ? '正在重试文件结果回传…' : record.command })
       this.broadcastExecutions(record.conversationId)
       if (!result) {
         result = await this.deps.prepareFiles(stored, controller.signal)
         this.fileResults.set(record.messageId, result)
       }
-      this.deps.store.finishExecution(record.messageId, { status: result.failed ? 'failed' : 'done', exitCode: null, output: result.text, finishedAt: Date.now() })
+      if (!reused || !record.taskContext) this.deps.store.finishExecution(record.messageId, { status: result.failed ? 'failed' : 'done', exitCode: null, output: result.text, finishedAt: Date.now() })
+      if (!reused && record.taskContext && result.sources && current()) this.deps.taskTools?.files?.(record.taskContext, result.sources)
+      this.taskEvent(record, { stage: 'result-ready', execution: 'executed', message: result.failed ? '文件读取存在失败，详见实际结果。' : '文件读取完成，等待回传。', resultText: this.taskResult(record, result.text) })
       this.appendLine({ kind: 'output', text: result.text })
       if (!result.attachments.length) {
         this.deps.store.setFileDeliveryStatus(record.messageId, 'cancelled')
         this.appendLine({ kind: 'error', text: '没有可发送的附件。读取错误已保留在本地执行记录。' })
+        if (record.taskContext && current()) { await this.deliverTaskText(record, this.taskResult(record, result.text)); return }
+        if (record.taskContext && this.taskCurrent(record) && !controller.signal.aborted && requestId === this.executionRequest) {
+          this.taskTextResult = { record: structuredClone(record), text: this.taskResult(record, result.text) }
+          this.deps.store.setFileDeliveryStatus(record.messageId, 'pending')
+          this.taskEvent(record, { stage: 'pending', message: '读取错误文字已保存，恢复后仅回传结果。' }); this.scheduleTaskResults()
+          return
+        }
         this.fileResults.delete(record.messageId)
         try { await result.cleanup() } catch (error) { console.warn('[files] staging cleanup:', (error as Error).message) }
         return
@@ -847,14 +1013,26 @@ export class CommandRunner {
       this.deps.store.setFileDeliveryStatus(record.messageId, 'pending')
       this.broadcastExecutions(record.conversationId)
       if (this.sendDelaySeconds) await new Promise<void>((resolve) => setTimeout(resolve, this.sendDelaySeconds * 1000))
-      if (!current()) { this.appendLine({ kind: 'notice', text: '文件已读取，结果暂未回传。恢复后可重试回传。' }); return }
+      if (!current()) {
+        if (record.taskContext && this.taskCurrent(record) && !controller.signal.aborted && requestId === this.executionRequest) {
+          this.taskFileResult = structuredClone(record); this.scheduleTaskResults()
+          this.taskEvent(record, { stage: 'pending', message: '附件已准备，恢复后仅重试交付。' })
+        }
+        this.appendLine({ kind: 'notice', text: '文件已读取，结果暂未回传。恢复后可重试回传。' }); return
+      }
       this.deps.store.setFileDeliveryStatus(record.messageId, 'uploading')
       this.broadcastExecutions(record.conversationId)
       this.appendLine({ kind: 'notice', text: `正在向 ${platform.label} 上传 ${result.attachments.length} 个附件…` })
-      const outcome = await this.deps.sendFilesToPage(result, token, current, controller.signal)
+      if (!this.taskEvent(record, { stage: 'sending' })) return
+      const outcome = await this.deps.sendFilesToPage(record.taskContext ? { ...result, text: this.taskResult(record, result.text) } : result, token, current, controller.signal)
       const pausedDelivery = outcome === 'cancelled' && this.automation.paused && !controller.signal.aborted && requestId === this.executionRequest
       const delivery = outcome === 'ok' ? 'sent' : outcome === 'unknown' || outcome === 'stuck' ? 'unknown' : pausedDelivery || outcome === 'busy' ? 'pending' : outcome === 'cancelled' ? 'cancelled' : 'failed'
       this.deps.store.setFileDeliveryStatus(record.messageId, delivery)
+      if (record.taskContext && (outcome === 'busy' || outcome === 'no-composer')) {
+        this.taskFileResult = structuredClone(record); this.scheduleTaskResults()
+      } else if (this.taskFileResult?.messageId === record.messageId) this.clearTaskResults()
+      this.taskEvent(record, { stage: delivery === 'sent' ? 'delivered' : delivery === 'pending' || delivery === 'failed' ? 'pending' : delivery === 'unknown' ? 'uncertain' : 'cancelled',
+        message: delivery === 'sent' ? '文件结果已交付原对话；文件内容及业务目标仍需模型核对。' : '文件结果尚未确认交付，沿用现有文件回传状态。' })
       if (delivery === 'sent') {
         try {
           this.deps.store.appendConversationMessage(record.conversationId, 'user', result.summary, `read-files:${record.messageId}`, Date.now(), result.images)
@@ -869,22 +1047,32 @@ export class CommandRunner {
         this.appendLine({ kind: 'error', text: reason })
       }
     } catch (error) {
+      this.taskEvent(record, { stage: 'cancelled', message: '文件操作中断或失败，未确认交付。' })
       this.deps.store.finishExecution(record.messageId, { status: controller.signal.aborted ? 'interrupted' : 'failed', exitCode: null, output: (error as Error).message, finishedAt: Date.now() })
       this.deps.store.setFileDeliveryStatus(record.messageId, 'cancelled')
       this.appendLine({ kind: 'error', text: `文件操作结束：${(error as Error).message}` })
     } finally {
       clearTimeout(timeout)
       if (this.fileAbort === controller) this.fileAbort = null
+      if (this.fileTaskContext === record.taskContext) this.fileTaskContext = null
+      if (!this.taskCurrent(record)) {
+        const stale = this.fileResults.get(record.messageId); this.fileResults.delete(record.messageId)
+        const delivery = this.deps.store.getExecution(record.messageId)?.deliveryStatus
+        if (delivery !== 'sent' && delivery !== 'unknown') this.deps.store.setFileDeliveryStatus(record.messageId, 'cancelled')
+        if (stale) void stale.cleanup().catch(() => {})
+      }
       this.broadcastExecutions(record.conversationId)
       this.flushTerminal()
     }
   }
 
-  private async runRecord(record: ExecutionRecord, request: number): Promise<void> {
+  private async runRecord(record: ExecutionRecord, request: number, observed?: (shell: ExecutionShell) => void): Promise<void> {
     const conversationId = record.conversationId
     const messageId = record.messageId
     this.diagnostic({ event: 'preparing', messageId, ownerConversationId: conversationId, requestId: request })
+    if (!this.taskCurrent(record)) return
     const shell = await this.prepareExecutionShell()
+    if (shell) observed?.(shell)
     if (this.disposed) {
       this.diagnostic({ event: 'skipped', reason: 'disposed', messageId, ownerConversationId: conversationId })
       return
@@ -898,6 +1086,10 @@ export class CommandRunner {
       this.diagnostic({ event: 'skipped', reason: 'no-shell', messageId, ownerConversationId: conversationId })
       return
     }
+    if (!this.taskCurrent(record, shell)) {
+      this.taskEvent(record, { stage: 'cancelled', execution: 'not_executed', message: '准备期间原任务或本机后端已变化，未执行命令。' })
+      return
+    }
     if (request !== this.executionRequest) {
       this.diagnostic({ event: 'skipped', reason: 'superseded', messageId, ownerConversationId: conversationId, requestId: request })
       this.deps.store.setExecutionStatus(messageId, 'skipped')
@@ -905,6 +1097,13 @@ export class CommandRunner {
       return
     }
 
+    const taskBudget = record.taskContext ? this.deps.taskTools?.timeoutMs?.(record.taskContext) : undefined
+    if (taskBudget !== undefined && taskBudget <= 0) {
+      this.deps.store.setExecutionStatus(messageId, 'skipped'); this.broadcastExecutions(conversationId); return
+    }
+    const timeoutSeconds = taskBudget === undefined ? record.timeoutSeconds
+      : Math.min(record.timeoutSeconds > 0 ? record.timeoutSeconds : Infinity, Math.max(1, Math.ceil(taskBudget / 1000)))
+    if (!this.taskEvent(record, { stage: 'executing' })) return
     this.deps.store.setExecutionStatus(messageId, 'running')
     this.diagnostic({
       event: 'started', messageId, ownerConversationId: conversationId, requestId: request,
@@ -917,13 +1116,13 @@ export class CommandRunner {
     const startup = record.background && this.deps.startBackgroundTask
       ? await this.deps.startBackgroundTask(record, shell, async command => {
         this.backgroundStartupOutput += 1
-        try { return await this.runOnShell(shell, command, Math.min(record.timeoutSeconds || 30, 30)) }
+        try { return await this.runOnShell(shell, command, Math.min(timeoutSeconds || 30, 30)) }
         finally { this.backgroundStartupOutput -= 1 }
       }) : null
     const result: ShellResult = startup?.result ?? (record.background
       ? { output: '软件后台任务启动器不可用，任务未启动。', exitCode: 1, cwd: shell.cwd,
         rejected: true, interrupted: false, sessionLost: false, timedOut: false }
-      : await this.runOnShell(shell, record.command, record.timeoutSeconds))
+      : await this.runOnShell(shell, record.command, timeoutSeconds))
     this.diagnostic({
       event: 'finished', messageId, ownerConversationId: conversationId, exitCode: result.exitCode,
       rejected: result.rejected === true, interrupted: result.interrupted === true,
@@ -932,12 +1131,12 @@ export class CommandRunner {
     if (this.disposed) return
 
     let backgroundTaskCount = startup?.registered ?? 0
-    if (record.background) this.appendLine({ kind: backgroundTaskCount > 0 ? 'notice' : 'error', text: result.output })
+    if (record.background) this.appendLine({ kind: backgroundTaskCount > 0 || startup?.reused ? 'notice' : 'error', text: result.output })
     if (!result.rejected && registerBackgroundTasks) {
       try {
         const count = registerBackgroundTasks(result.output)
         backgroundTaskCount = count
-        if (count > 0) this.appendLine({ kind: 'notice', text: `已登记 ${count} 个后台任务；创建确认将发送给 AI，软件监控结束后再自动发送最终结果。` })
+        if (count > 0) this.appendLine({ kind: 'notice', text: `已登记 ${count} 个后台任务；服务就绪或任务结束后，软件自动将结果发送给 AI。` })
         else if (result.output.split(/\r?\n/).some(line => line.startsWith(BACKGROUND_TASK_MARKER))) {
           this.appendLine({ kind: 'notice', text: '后台任务登记信息无效或已登记，请检查真实 PID、任务名和日志绝对路径。' })
         }
@@ -947,7 +1146,7 @@ export class CommandRunner {
     }
 
     this.deps.store.finishExecution(messageId, {
-      status: result.rejected
+      status: result.rejected || startup?.reused
         ? 'skipped'
         : result.interrupted
           ? 'interrupted'
@@ -967,7 +1166,15 @@ export class CommandRunner {
 
     // Dedicated creation/final notifications replace the ordinary startup result.
     // They explicitly tell the model that software owns monitoring.
-    if (backgroundTaskCount > 0) return
+    if (backgroundTaskCount > 0) {
+      this.taskEvent(record, { stage: 'background', execution: 'executed', resultText: this.taskResult(record, result.output) })
+      this.diagnostic({ event: 'delivery', messageId, ownerConversationId: conversationId, deliveryOutcome: 'background' })
+      return
+    }
+    this.taskEvent(record, { stage: 'result-ready', timedOut: Boolean(result.timedOut),
+      ...(!record.background ? { commandResult: { exitCode: result.exitCode, output: result.output, timedOut: !!result.timedOut, interrupted: !!result.interrupted, rejected: !!result.rejected, sessionLost: !!result.sessionLost } } : {}), execution: result.rejected || startup?.reused ? 'not_executed' : result.interrupted || result.sessionLost ? 'unknown' : 'executed',
+      message: '命令实际结果已记录，等待原对话回传。', resultText: this.taskResult(record, buildResultMessage(result)) })
+    if (!this.taskCurrent(record)) return
 
     if (request !== this.executionRequest) {
       this.diagnostic({ event: 'delivery', reason: 'superseded', messageId, ownerConversationId: conversationId })
@@ -976,6 +1183,7 @@ export class CommandRunner {
 
     // A command that never ran has no result to hand back.
     if (result.rejected || result.interrupted) {
+      this.taskEvent(record, { stage: 'cancelled', message: '命令被拒绝或中断，未自动重做。' })
       this.diagnostic({ event: 'delivery', reason: result.rejected ? 'rejected' : 'interrupted', messageId, ownerConversationId: conversationId })
       return
     }
@@ -1066,9 +1274,10 @@ export class CommandRunner {
       this.flushTerminal()
       return
     }
-    const message = buildResultMessage(result, messageId.startsWith('rerun:') ? record.command : undefined)
+    if (!this.taskCurrent(record) || !this.taskEvent(record, { stage: 'sending' })) return
+    const message = this.taskResult(record, buildResultMessage(result, messageId.startsWith('rerun:') ? record.command : undefined))
     this.appendLine({ kind: 'notice', text: '正在发送...' })
-    const outcome = await this.deps.sendRawToPage(message)
+    const outcome = record.taskContext ? await this.deliverTaskText(record, message) : await this.deps.sendRawToPage(message)
     this.diagnostic({ event: 'delivery', messageId, ownerConversationId: conversationId, deliveryOutcome: outcome })
     if (this.disposed) return
     if (outcome === 'ok') {
@@ -1206,39 +1415,49 @@ export class CommandRunner {
 
   /** End the whole model-driven task: invalidate queued work and stop the active command. */
   async endTask(): Promise<void> {
+    for (const entry of this.commandAdmissions.values()) entry.controller.abort()
+    this.clearTaskResults()
     this.executionRequest += 1
     this.fileAbort?.abort()
+    const shell = this.activeShell
+    // Dispatch interruption before any journal/cleanup work can fail.
+    const stopping = shell && shell.running ? this.interruptWithNotice(shell, '正在结束任务，等待当前命令停止…') : Promise.resolve(true)
+    let journalFailed = false
     for (const [id, result] of this.fileResults) {
-      this.deps.store.setFileDeliveryStatus(id, 'cancelled')
+      try {
+        const state = this.deps.store.getExecution(id)?.deliveryStatus
+        if (state !== 'sent' && state !== 'unknown') this.deps.store.setFileDeliveryStatus(id, state === 'uploading' ? 'unknown' : 'cancelled')
+      } catch { journalFailed = true }
       void result.cleanup().catch((error) => console.warn('[files] cleanup:', error.message))
     }
     this.fileResults.clear()
-
     const conversationId = this.deps.currentConversationId()
-    if (conversationId) {
-      let changed = false
-      for (const record of this.deps.store.listExecutions(conversationId)) {
-        if (record.status !== 'pending' && record.status !== 'blocked') continue
-        this.deps.store.setExecutionStatus(record.messageId, 'skipped')
-        changed = true
+    try {
+      if (conversationId) {
+        let changed = false
+        for (const record of this.deps.store.listExecutions(conversationId)) {
+          if (record.status !== 'pending' && record.status !== 'blocked') continue
+          this.deps.store.setExecutionStatus(record.messageId, 'skipped'); changed = true
+        }
+        if (changed) this.broadcastExecutions(conversationId)
       }
-      if (changed) this.broadcastExecutions(conversationId)
-    }
-
-    const shell = this.activeShell
-    if (shell && shell.running) await this.interruptWithNotice(shell, '正在结束任务，等待当前命令停止…')
-    this.appendLine({ kind: 'notice', text: '任务已手动结束' })
+    } catch { journalFailed = true }
+    const confirmed = await stopping
+    this.appendLine({ kind: 'notice', text: confirmed ? '已结束任务的自动推进与回传；后台进程保持独立运行，已发生的操作没有回滚。' : '后续自动执行已撤销，但当前命令停止尚未确认，请查看终端实际状态。' })
     this.flushTerminal()
+    if (!confirmed || journalFailed) throw new Error('任务停止或记录未能完全确认；后续自动执行已撤销。')
   }
   /** Stop the current command without clearing the transcript. */
   async interruptTerminal(silentWhenIdle = false): Promise<boolean> {
     if (this.fileAbort) { this.fileAbort.abort(); return true }
+    const queued = [...this.commandAdmissions.values()].filter(entry => !entry.started)
+    if (!this.activeShell && queued.length) {
+      for (const entry of queued) entry.controller.abort()
+      this.appendLine({ kind: 'notice', text: '已取消等待桌面协调的命令；未启动本机命令。' }); this.flushTerminal(); return true
+    }
     const shell = this.activeShell
-    /*
-     * Both branches are logged. The first is the one where 中断 visibly does nothing except
-     * print a notice, and the second is the one where it hangs — `shell.interrupt()` waits for
-     * the process to close, with no timeout, and its callers all await it.
-     */
+    // Returning true means this command handled the request, including a reported
+    // stop failure. The caller must not send Ctrl+C to an unrelated manual PTY.
     if (!shell || !shell.running) {
       // SSH manual input uses a separate PTY; let the caller interrupt that
       // channel without claiming that no command is running there.
@@ -1260,6 +1479,14 @@ export class CommandRunner {
 
 
   resetTerminal(): void {
+    for (const entry of this.commandAdmissions.values()) entry.controller.abort()
+    const pending = this.taskTextResult?.record ?? this.taskFileResult
+    if (pending) this.taskEvent(pending, { stage: 'cancelled', message: '终端已重置，原结果停止自动交付，不重跑原工具。' })
+    this.clearTaskResults()
+    // Reset is an explicit recovery action. Late output from the discarded
+    // command must not return to the model and trigger an automatic retry.
+    this.executionRequest += 1
+    this.fileAbort?.abort()
     // dispose(), not kill(): dropping the reference without tearing the shell
     // down would leave a running command orphaned. Dropping it first also stops
     // the dying session's onExit from posting "会话已结束" over the reset notice.
@@ -1276,6 +1503,8 @@ export class CommandRunner {
   disposeAll(): void {
     if (this.disposed) return
     this.disposed = true
+    for (const entry of this.commandAdmissions.values()) entry.controller.abort()
+    this.clearTaskResults()
     // runRecord intentionally ignores late shell results after disposal. Save the
     // interruption now so closing a session cannot leave its command at running.
     this.deps.store.interruptRunningCommands(this.inFlight)
@@ -1331,10 +1560,8 @@ export class CommandRunner {
   /**
    * Interrupt the command in flight, saying so on the pane while it happens.
    *
-   * `interrupt()` waits for the backend to confirm the command stopped, with no timeout, and every
-   * caller awaits it. Locally that is near-instant; over SSH it waits for the server to close the
-   * channel, which can take a long time or never come. Without these lines a click on 运行 or 中断
-   * during that wait looks like it did nothing at all.
+   * Remote interruption has a confirmation deadline. A failure leaves the original
+   * command unresolved, rather than claiming it stopped or allowing a replacement.
    */
   private async interruptWithNotice(shell: ExecutionShell, text: string): Promise<boolean> {
     this.appendLine({ kind: 'notice', text })
@@ -1344,12 +1571,16 @@ export class CommandRunner {
       this.appendLine({
         kind: 'notice',
         text: remote
-          ? `当前命令已等待 ${INTERRUPT_NOTICE_MS / 1000} 秒仍未停止，正在等待远端确认关闭；长时间没有结束时，可断开并重新连接这台主机。`
+          ? `正在确认远端命令及其子进程停止，已等待 ${INTERRUPT_NOTICE_MS / 1000} 秒；超时会提示重新连接。`
           : `当前命令已等待 ${INTERRUPT_NOTICE_MS / 1000} 秒仍未停止，正在等待它退出。`
       })
     }, INTERRUPT_NOTICE_MS)
     try {
       return await shell.interrupt()
+    } catch (error) {
+      this.appendLine({ kind: 'error', text: error instanceof Error ? error.message : String(error) })
+      this.flushTerminal()
+      return false
     } finally {
       clearTimeout(reminder)
     }
@@ -1377,7 +1608,12 @@ export class CommandRunner {
 
     const wasRemote = active !== this.localShell
     const interrupted = await this.interruptWithNotice(active, '检测到新指令，正在中断当前命令…')
-    if (!interrupted) return this.ensureShell()
+    if (!interrupted) {
+      if (!active.running) return this.ensureShell()
+      this.appendLine({ kind: 'error', text: '原命令尚未确认停止，新指令保持待执行；请重新连接并检查原命令状态。' })
+      this.flushTerminal()
+      return null
+    }
     // interrupt() waits for the backend to close; it is safe to release the old
     // identity now even if its awaiting caller has not reached finally yet.
     if (this.activeShell === active) this.activeShell = null

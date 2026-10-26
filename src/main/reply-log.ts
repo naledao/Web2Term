@@ -12,11 +12,12 @@ export interface ReplyDiagnosticContext {
   conversationId: string | null
   mainPendingQuestion: boolean
   questionAccepted?: boolean
+  computerAccepted?: boolean
 }
 
 const events = new Set([
   'installed', 'configured', 'sent', 'sent-raw', 'scan', 'reply-state', 'question',
-  'question-cleared', 'command', 'read-files', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
+  'question-cleared', 'command', 'read-files', 'computer-request', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
   'continue-generation', 'command-recovery'
 ])
 const reasons = new Set([
@@ -24,7 +25,8 @@ const reasons = new Set([
   'question-not-live', 'invalid-question', 'invalid-read-files', 'no-command', 'still-generating',
   'terminal-mode-off', 'result-sent', 'user-sent', 'question-detected', 'non-command-reply',
   'history-baseline', 'manual-resume', 'file-send-submitted', 'configured-baseline', 'task-ended',
-  'continue-clicked', 'continue-unreachable', 'continue-limit', 'duplicate-command', 'command-format-error'
+  'continue-clicked', 'continue-unreachable', 'continue-limit', 'duplicate-command', 'command-format-error',
+  'computer-quoted-content', 'computer-not-live', 'computer-reply-cut-off'
 ])
 
 function identifier(value: unknown): string | null {
@@ -67,7 +69,7 @@ export function replyDiagnosticMetadata(
     if (typeof payload[key] === 'boolean') details[key] = payload[key]!
   }
   for (const key of ['replyKind', 'lastVisibleReplyKind', 'visibleAnswerKind'] as const) {
-    if (['empty', 'questions', 'read-files', 'command', 'prose'].includes(payload[key] ?? '')) details[key] = payload[key]!
+    if (['empty', 'questions', 'read-files', 'command', 'computer', 'prose'].includes(payload[key] ?? '')) details[key] = payload[key]!
   }
   for (const key of ['lastScanAgeMs', 'lastMutationAgeMs'] as const) {
     if (payload[key] === null) details[key] = null
@@ -79,6 +81,16 @@ export function replyDiagnosticMetadata(
   if (payload.parseRepair === 'windows-path') details.parseRepair = payload.parseRepair
   if (['pending', 'sent', 'blocked', 'failed', 'uncertain'].includes(payload.recoveryStatus ?? '')) details.recoveryStatus = payload.recoveryStatus!
   if (typeof context.questionAccepted === 'boolean') details.questionAccepted = context.questionAccepted
+  if (typeof context.computerAccepted === 'boolean') details.computerAccepted = context.computerAccepted
+  if (payload.event === 'computer-request') {
+    if (['invalid_json', 'duplicate_field', 'unsafe_field', 'limit_exceeded', 'invalid_envelope', 'unsupported_version',
+      'unknown_action', 'invalid_parameters', 'invalid_step_token', 'stale_step_token', 'ambiguous_request'].includes(payload.computerProtocolCode ?? '')) {
+      details.computerProtocolCode = payload.computerProtocolCode!
+    }
+    if (['candidate', 'invalid'].includes(payload.computerOutcome ?? '')) details.computerOutcome = payload.computerOutcome!
+    if (['invalid-json', 'ambiguous-request', 'oversized-request'].includes(payload.computerIssue ?? '')) details.computerIssue = payload.computerIssue!
+    if (typeof payload.rawJson === 'string') details.computerRequestLength = payload.rawJson.length
+  }
   if (typeof payload.command === 'string') details.commandLength = payload.command.length
   if (typeof payload.text === 'string' && details.textLength === undefined) details.textLength = payload.text.length
   if (Array.isArray(payload.questions)) details.questionCount = payload.questions.length

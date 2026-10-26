@@ -175,11 +175,24 @@
     /** Dedupe for the "looked like a command but would not parse" report. */
     lastUnparsedMessageId: null,
     failedCommand: null,
-    commandRecoveryUsed: false
+    commandRecoveryUsed: false,
+    computerUseEnabled: false,
+    /** Main's reason to hold the user's own sends (computer use waiting for its Windows helper). */
+    sendBlock: null
   }
+
+  let computerSourceSubmissionId = null
+  let computerReplyWait = null
+  let computerReplySerial = 0
+  let pendingComputerRecognition = null
+  let computerProtocolContext = { definitions: [], stepToken: null }
+  let computerPageEpoch = null
 
   let taskPromptConfigured = false
   const resetTaskPrompt = () => {
+    computerReplyWait = null
+    computerSourceSubmissionId = null
+    pendingComputerRecognition = null
     state.taskPromptGeneration += 1
     state.taskPromptInjected = false
     state.failedCommand = null
@@ -196,10 +209,10 @@
   let lastDraftImagePromise = Promise.resolve([])
   const replyDiagnosticEvents = new Set([
     'installed', 'configured', 'sent', 'sent-raw', 'scan', 'reply-state', 'question',
-    'question-cleared', 'command', 'read-files', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
+    'question-cleared', 'command', 'read-files', 'computer-request', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
     'continue-generation', 'command-recovery'
   ])
-  const replyScanEvents = new Set(['scan', 'question', 'command', 'read-files', 'parse-failed', 'task-finished'])
+  const replyScanEvents = new Set(['scan', 'question', 'command', 'read-files', 'computer-request', 'parse-failed', 'task-finished'])
   let replyScanSnapshot = {}
   let focusReplyBaseline = null
   let focusBaselinePosition = null
@@ -225,8 +238,18 @@
     if (PAGE.focus.rowPositionAttr) return focusRowPosition(node)
     return PAGE.messageIdAttr ? node.getAttribute(PAGE.messageIdAttr) || null : null
   }
+  const userSubmissionScope = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  let userSubmissionSerial = 0
+  // Isolates desktop-result retries without changing the existing task prompt/protocol.
+  let computerResultToken = null
   const report = (payload) => {
     try {
+      if (payload.event === 'user-message') computerResultToken = null
+      // Only the confirmed human-send paths emit user-message. Automatic tool results do not.
+      const submission = payload.event === 'user-message' ? {
+        submissionId: `user:${userSubmissionScope}:${++userSubmissionSerial}`, submissionKind: 'goal',
+        taskPromptGeneration: state.taskPromptGeneration
+      } : {}
       const includeScan = replyScanEvents.has(payload.event) ||
         (payload.event === 'reply-state' && ['non-command-reply', 'question-detected'].includes(payload.reason))
       const diagnostic = replyDiagnosticEvents.has(payload.event) ? {
@@ -238,7 +261,12 @@
         pendingQuestionFound: state.pendingQuestion !== null,
         lastHandledMessageId: state.lastCommandMessageId
       } : {}
-      console.log(LOG_TAG + JSON.stringify({ ...diagnostic, ...payload }))
+      const event = { ...diagnostic, ...submission, ...payload }
+      if (event.event === 'user-message') {
+        if (event.submissionKind === 'goal') computerSourceSubmissionId = event.submissionId
+        if (computerReplyWait) computerReplyWait.sourceSubmissionId = computerSourceSubmissionId
+      }
+      console.log(LOG_TAG + JSON.stringify(event))
     } catch (_) {
       /* never break the page because reporting failed */
     }
@@ -349,14 +377,83 @@
   }
 
   let pendingAssistantCompletion = null
-  const setReplyWaiting = (since, reason, messageId = null) => {
+  const setReplyWaiting = (since, reason, messageId = null, computerBaseline = null) => {
     pendingAssistantCompletion = null
+    pendingComputerRecognition = null
+    // Manual checkNow is allowed for legacy commands, but cannot re-arm desktop history.
+    const confirmedSend = ['user-sent', 'result-sent', 'file-send-submitted', 'smart-ui-sent', 'user-edited'].includes(reason)
+    computerReplyWait = since && confirmedSend && PAGE.computerUseRequests === true ? {
+      serial: ++computerReplySerial, path: location.pathname, generation: state.taskPromptGeneration,
+      sourceSubmissionId: computerSourceSubmissionId, baseline: computerBaseline || computerBaselineOf(), reported: false,
+      pageEpoch: computerPageEpoch
+    } : null
+    if (reason === 'history-baseline' || reason === 'configured-baseline' || reason === 'task-ended') computerSourceSubmissionId = null
     const awaitingReplyBefore = state.awaitingReplySince !== 0
     state.awaitingReplySince = since
     report({ event: 'reply-state', reason, messageId, awaitingReplyBefore })
   }
 
-  const readReplyText = (node) => String(replyRootOf(node)?.innerText || '')
+  /**
+   * DeepSeek sometimes answers with its own native tool-call markup (DSML) instead of the
+   * JSON block the prompt asks for:
+   *
+   *   <｜DSML｜function_calls>
+   *   <｜DSML｜invoke name="read_files">
+   *   <｜DSML｜parameter name="files" string="false">[{"path": "C:\Users\a.png"}]</｜DSML｜parameter>
+   *   <｜DSML｜parameter name="description" string="true">查看截图</｜DSML｜parameter>
+   *   </｜DSML｜invoke>
+   *   </｜DSML｜function_calls>
+   *
+   * The page renders the bars as `| |` with spaces and may drop the `function_` prefix, so
+   * tags are matched by their DSML marker only. Each invoke of a known tool becomes the same
+   * JSON the prompt describes, and every later parser sees exactly that JSON. An invoke of an
+   * unknown tool is left alone, so it reads as prose rather than as an invented request.
+   */
+  const DSML_OPEN = String.raw`<\s*[\s|｜]*DSML[\s|｜]*`
+  const DSML_CLOSE = String.raw`<\s*\/[\s|｜]*DSML[\s|｜]*`
+  const DSML_INVOKE = new RegExp(`${DSML_OPEN}invoke\\s+name\\s*=\\s*"([^"]+)"\\s*>([\\s\\S]*?)${DSML_CLOSE}invoke\\s*>`, 'g')
+  const DSML_PARAMETER = new RegExp(`${DSML_OPEN}parameter\\s+name\\s*=\\s*"([^"]+)"([^>]*)>([\\s\\S]*?)${DSML_CLOSE}parameter\\s*>`, 'g')
+  const DSML_WRAPPER = new RegExp(`(?:${DSML_OPEN}|${DSML_CLOSE})\\w*calls\\s*>`, 'g')
+  const DSML_INVOKE_START = new RegExp(`${DSML_OPEN}invoke\\s+name\\s*=`)
+  const DSML_TOOLS = ['read_files', 'questions', 'question', 'computer']
+  const looksLikeDsmlToolCall = (text) => DSML_INVOKE_START.test(String(text || ''))
+  // string="false" is JSON. Models leave Windows paths unescaped (`"C:\Users\a"`), which is
+  // either invalid JSON or, worse, valid with `\t`/`\n` inside it; escape lone backslashes first then.
+  const dsmlJson = (raw) => {
+    const escaped = raw.replace(/\\(["\\/])|\\/g, (match, kept) => kept ? match : '\\\\')
+    const attempts = /[A-Za-z]:\\(?!\\)/.test(raw) ? [escaped, raw] : [raw, escaped]
+    for (const attempt of attempts) {
+      try { return { value: JSON.parse(attempt) } } catch (_) { /* next attempt */ }
+    }
+    return null
+  }
+  const dsmlRequest = (name, body) => {
+    const tool = name.trim()
+    const params = Object.create(null)
+    for (const [, key, attributes, rawValue] of body.matchAll(DSML_PARAMETER)) {
+      const raw = rawValue.trim()
+      const string = /string\s*=\s*"(true|false)"/.exec(attributes)?.[1]
+      const json = string === 'true' ? null : string === 'false' || /^[[{]/.test(raw) ? dsmlJson(raw) : null
+      params[key.trim()] = json ? json.value : raw
+    }
+    if (DSML_TOOLS.includes(tool)) return { type: tool, ...params }
+    // The command tool has no `type`; its discriminator is a leading `command` field.
+    if (typeof params.command === 'string') return { command: params.command, ...params }
+    return null
+  }
+  const normalizeDsmlToolCalls = (text) => {
+    if (!looksLikeDsmlToolCall(text)) return text
+    let converted = false
+    const replaced = text.replace(DSML_INVOKE, (match, name, body) => {
+      const request = dsmlRequest(name, body)
+      if (!request) return match
+      converted = true
+      return JSON.stringify(request)
+    })
+    return converted ? replaced.replace(DSML_WRAPPER, '').replace(/\n{3,}/g, '\n\n').trim() : text
+  }
+
+  const readReplyText = (node) => normalizeDsmlToolCalls(String(replyRootOf(node)?.innerText || ''))
 
   // Code preserves JSON escapes; prose has already passed through Markdown.
   // Read only the final-answer root, never the turn's reasoning or citations.
@@ -369,8 +466,43 @@
     const position = visible ? rendered.lastIndexOf(visible) : -1
     // Do not let an earlier code block hide a later malformed prose request.
     return block && position >= 0 && !/"(?:command|background)"/.test(rendered.slice(position + visible.length))
-      ? { text: String((block.querySelector('code') || block).textContent || ''), source: 'code' }
+      ? { text: normalizeDsmlToolCalls(String((block.querySelector('code') || block).textContent || '')), source: 'code' }
       : { text: rendered, source: 'rendered' }
+  }
+
+  /** Capture before clicking Send. Virtual row positions are a per-send baseline, never durable IDs. */
+  const computerBaselineOf = () => {
+    const nodes = queryAllAssistant()
+    const positions = nodes.map(node => PAGE.fileTurnPositionAttr ? node.getAttribute(PAGE.fileTurnPositionAttr) : null).filter(Boolean)
+    return { path: location.pathname, positions: new Set(positions), maxPosition: positions.length && positions.every(value => /^\d+$/.test(value))
+      ? Math.max(...positions.map(Number)) : null }
+  }
+
+  /**
+   * Preserve code bytes while excluding quoted material and the measured reasoning subtree.
+   *
+   * Code-block chrome is excluded too. DeepSeek's banner now labels its controls 复制／下载 and
+   * need not use `<button>` for them; on 2026-10-26 two valid requests were read longer than the
+   * visible reply and rejected as ambiguous, since a request with any extra text never runs.
+   */
+  const readComputerText = (node) => {
+    const root = PAGE.assistantReplySelectors.map(selector => node.matches(selector) ? node : node.querySelector(selector)).find(Boolean)
+    if (!root) return '' // Unlike legacy reads, there is no whole-turn fallback for desktop input.
+    const excluded = element => element.matches('blockquote, q, cite, script, style, button, [role="button"], svg') ||
+      (PAGE.focus?.reasoningSelectors || []).some(selector => element.matches(selector))
+    const visit = element => {
+      if (element.nodeType === 3) {
+        const text = element.nodeValue || ''
+        return /^(?:json|复制|复制代码|下载|copy|copy code|download)$/i.test(text.trim()) ? '' : text
+      }
+      if (element.nodeType !== 1 || excluded(element)) return ''
+      if (element.tagName === 'PRE') {
+        const code = element.querySelector('code')
+        return '\n' + (code ? code.textContent : [...element.childNodes].map(visit).join('')) + '\n'
+      }
+      return '\n' + [...element.childNodes].map(visit).join('') + '\n'
+    }
+    return normalizeDsmlToolCalls(visit(root).trim())
   }
 
   /**
@@ -510,19 +642,31 @@
       // Keep the list boundary, rather than swallowing the answer's headings and prose.
       return rows.length >= 2 && children.every(child => rows.includes(child) || separator(child))
     }
+    const layoutGroup = element => {
+      if (!['div', 'section', 'article'].includes(element.tagName.toLowerCase()) || element.getAttribute('data-d-component') === 'Text') return false
+      const style = getComputedStyle(element)
+      if (!style.display.includes('grid') && !(style.display === 'flex' && style.flexDirection.startsWith('row'))) return false
+      return [...element.children].filter(child => {
+        const css = getComputedStyle(child)
+        return css.display !== 'none' && !['hidden', 'collapse'].includes(css.visibility) && !child.hasAttribute('hidden') &&
+          (collapse(child.textContent) || child.querySelector('svg, input'))
+      }).length >= 2
+    }
     const geometry = { viewBox: 'viewBox', width: 'width', height: 'height', d: 'd', x: 'x', y: 'y', x1: 'x1', y1: 'y1', x2: 'x2', y2: 'y2',
       cx: 'cx', cy: 'cy', r: 'r', rx: 'rx', ry: 'ry', points: 'points', fill: 'fill', stroke: 'stroke',
       'stroke-width': 'strokeWidth', 'stroke-linecap': 'strokeLinecap', 'stroke-linejoin': 'strokeLinejoin', 'fill-rule': 'fillRule', 'clip-rule': 'clipRule' }
     return roots.flatMap(dil => {
       const sourceMessageId = dil.getAttribute(rules.sourceIdAttr)
       if (!sourceMessageId || sourceMessageId !== messageIdOf(node)) return []
-      const lists = new Set([dil, ...dil.querySelectorAll('[data-d-component], ul, ol')].filter(iconList))
-      let boxes = [...new Set([...(dil.matches(rules.cardSelector) ? [dil] : []), ...dil.querySelectorAll(rules.cardSelector), ...lists])].filter(element =>
+      const candidates = [dil, ...dil.querySelectorAll('[data-d-component], ul, ol')]
+      const lists = new Set(candidates.filter(iconList))
+      let boxes = [...new Set([...(dil.matches(rules.cardSelector) ? [dil] : []), ...dil.querySelectorAll(rules.cardSelector),
+        ...lists, ...candidates.filter(layoutGroup)])].filter(element =>
         element.closest(rules.rootSelector) === dil && !element.closest(rules.groupSelector) && !element.querySelector(rules.groupSelector) &&
         !(PAGE.answerCharts && (element.matches(PAGE.answerCharts.rootSelector) || element.querySelector(PAGE.answerCharts.rootSelector))))
       boxes = boxes.filter(element => !boxes.some(parent => parent !== element && parent.contains(element)))
-      if (!boxes.length && !dil.querySelector(rules.groupSelector) && dil.querySelector('[data-d-component]') &&
-        !(PAGE.answerCharts && dil.querySelector(PAGE.answerCharts.rootSelector))) boxes = [dil]
+      // DIL also wraps ordinary paragraphs and inline code. Text components alone
+      // are not a layout: keep them in Markdown, outside the presentation trees.
       return boxes.slice(0, 8).flatMap(element => {
         if (!isVisibleElement(element)) return []
         const base = getComputedStyle(element), baseColor = base.color
@@ -1595,13 +1739,23 @@
   }
   /** Passive between explicit refreshes; never opens a menu from the polling loop. */
   const focusModelSettingsOf = () => {
-    const parts = focusModelPickerParts()
-    if (!parts) { focusModelCache = null; return { model: null, effort: null, models: [], efforts: [] } }
-    const { trigger, menu, rules } = parts
-    if (!focusModelCache || focusModelCache.path !== location.pathname || focusModelCache.trigger !== trigger) {
-      focusModelCache = { path: location.pathname, trigger, data: { model: null, effort: null, models: [], efforts: [] } }
+    const rules = PAGE.focus?.modelSettings
+    if (!rules) { focusModelCache = null; return { model: null, effort: null, models: [], efforts: [] } }
+    // The first send binds the home draft to its new conversation. This is the
+    // only route transition allowed to inherit settings; other chats start fresh.
+    const firstSend = focusModelCache?.path === rules.newChatPath &&
+      (state.programmatic || state.awaitingReplySince !== 0 || fileSend?.submitted) &&
+      new RegExp(rules.conversationPathPattern).test(location.pathname)
+    if (!focusModelCache || (focusModelCache.path !== location.pathname && !firstSend)) {
+      focusModelCache = { path: location.pathname, data: { model: null, effort: null, models: [], efforts: [] } }
     }
+    focusModelCache.path = location.pathname
     const data = focusModelCache.data
+    // React can replace or briefly remove the trigger while sending. A missing
+    // DOM node is not evidence that the confirmed selection changed.
+    const parts = focusModelPickerParts()
+    if (!parts) return { ...data, models: data.models.slice(), efforts: data.efforts.slice() }
+    const { trigger, menu } = parts
     if (menu) {
       // Both tracks stay mounted. The inactive model track is aria-hidden, but
       // its radio selection is authoritative and lets reads avoid changing views.
@@ -1619,7 +1773,7 @@
         ? rules.efforts.map(({ value, label }) => ({ value, label })) : []
     }
     const effort = trigger.getAttribute(rules.effortAttribute)
-    data.effort = data.efforts.some(item => item.value === effort) ? effort : null
+    if (effort !== null || menu) data.effort = data.efforts.some(item => item.value === effort) ? effort : null
     return { ...data, models: data.models.slice(), efforts: data.efforts.slice() }
   }
 
@@ -1839,6 +1993,9 @@
   ) => {
     /** Which recovery action THIS pass used, so the report can name it. */
     let recoveryTried = null
+    if (!isRaw && sendContext.question === undefined) sendContext.question = state.pendingQuestion
+      ? { messageId: state.pendingQuestion.messageId, source: state.pendingQuestion.taskSource || null } : null
+    if (PAGE.computerUseRequests === true && !sendContext.computerBaseline) sendContext.computerBaseline = computerBaselineOf()
 
     // Capture the newest assistant turn BEFORE clicking Send. ChatGPT can create
     // the placeholder for the NEW assistant turn synchronously (or within the
@@ -1851,12 +2008,15 @@
 
     const finish = (ok) => {
       if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
+          (sendContext.computerResultToken !== undefined && sendContext.computerResultToken !== computerResultToken) ||
           (sendContext.path !== undefined && sendContext.path !== location.pathname)) {
         discardUserImageCapture(attachmentToken)
-        if (sendContext.taskPromptGeneration === state.taskPromptGeneration) state.programmatic = false
+        if (sendContext.taskPromptGeneration === state.taskPromptGeneration &&
+            (sendContext.computerResultToken === undefined || sendContext.computerResultToken === computerResultToken)) state.programmatic = false
         if (done) done('stuck')
         return
       }
+      const clarification = !isRaw && sendContext.question !== null
       state.programmatic = false
       if (ok) {
         focusReplyBaseline = replyBaselineId
@@ -1870,12 +2030,12 @@
           state.commandRecoveryUsed = false
         }
         // Once a message actually goes out, the next assistant turn is ours.
-        setReplyWaiting(Date.now(), isRaw ? 'result-sent' : 'user-sent')
+        setReplyWaiting(Date.now(), isRaw ? 'result-sent' : 'user-sent', null, sendContext.computerBaseline)
         state.taskActive = true
         // Ignore only the assistant turn that existed BEFORE this send. Never
         // baseline the new placeholder/reply that may already have appeared.
         state.lastCommandMessageId = replyBaselineId
-        if (state.pendingQuestion) {
+        if (state.pendingQuestion && (!sendContext.question || state.pendingQuestion.messageId === sendContext.question.messageId)) {
           report({ event: 'question-cleared', messageId: state.pendingQuestion.messageId })
           state.pendingQuestion = null
           state.answerDraft = null
@@ -1883,7 +2043,10 @@
         // The send landed, so the new turn is about to render below the fold.
         scheduleScrollToBottom()
       }
-      if (ok && !isRaw) report({ event: 'user-message', text: userTextOf(text), attachmentToken: attachmentToken || undefined })
+      if (ok && !isRaw) report({ event: 'user-message', text: userTextOf(text), attachmentToken: attachmentToken || undefined,
+        submissionKind: clarification ? 'clarification' : 'goal', ...(clarification ? {
+          answeredQuestionId: sendContext.question.messageId, questionSource: sendContext.question.source,
+          taskPromptGeneration: sendContext.taskPromptGeneration } : {}) })
       if (!ok) discardUserImageCapture(attachmentToken)
       report(
         ok
@@ -1906,6 +2069,7 @@
     // A task may end during the initial send delay, retry wait or confirmation poll.
     // Its old submission must never click Send or re-open the task afterwards.
     if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
+        (sendContext.computerResultToken !== undefined && sendContext.computerResultToken !== computerResultToken) ||
         (sendContext.path !== undefined && sendContext.path !== location.pathname)) {
       finish(false)
       return
@@ -1995,6 +2159,7 @@
     const confirmStartedAt = Date.now()
     const confirm = () => {
       if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
+          (sendContext.computerResultToken !== undefined && sendContext.computerResultToken !== computerResultToken) ||
           (sendContext.path !== undefined && sendContext.path !== location.pathname)) {
         finish(false)
         return
@@ -2440,12 +2605,51 @@
     })
   }
 
+  /*
+   * A short note above the composer, in the page itself: the user pressed Enter here, so this
+   * is where they look. The draft stays in the composer; nothing is sent or cleared.
+   */
+  let sendBlockNotice = null
+  let sendBlockNoticeTimer = null
+  const showSendBlockNotice = (message, ms) => {
+    try {
+      if (!sendBlockNotice || !sendBlockNotice.isConnected) {
+        sendBlockNotice = document.createElement('div')
+        sendBlockNotice.setAttribute('role', 'status')
+        sendBlockNotice.setAttribute('data-web2term-notice', 'send-block')
+        Object.assign(sendBlockNotice.style, {
+          position: 'fixed', left: '50%', bottom: '140px', transform: 'translateX(-50%)', zIndex: '2147483647',
+          maxWidth: 'min(560px, calc(100vw - 32px))', padding: '10px 16px', borderRadius: '10px',
+          background: 'rgba(30, 41, 59, 0.94)', color: '#fff', font: '13px/1.6 system-ui, sans-serif',
+          boxShadow: '0 6px 24px rgba(0, 0, 0, 0.18)', pointerEvents: 'none'
+        })
+        document.body.appendChild(sendBlockNotice)
+      }
+      sendBlockNotice.textContent = message
+      if (sendBlockNoticeTimer) clearTimeout(sendBlockNoticeTimer)
+      sendBlockNoticeTimer = setTimeout(() => {
+        sendBlockNoticeTimer = null
+        sendBlockNotice?.remove()
+        sendBlockNotice = null
+      }, ms)
+    } catch (_) { /* The send is still held; the notice is only a courtesy. */ }
+  }
+
   const intercept = (event) => {
     const element = getComposer(event.target)
     // Our own sends must pass through untouched: no prefix, no interception.
     if (state.programmatic) {
       noteUserSend(event, 'programmatic-send', element)
       return false
+    }
+    // Before the terminal-mode checks: with computer use on, every user send waits for the
+    // helper. An empty composer is left to the checks below, which ignore it.
+    if (state.sendBlock && element && (collapse(userTextOf(readComposer(element))) !== '' || hasDraftImageAttachment())) {
+      noteUserSend(event, 'computer-helper-not-ready', element)
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      showSendBlockNotice(state.sendBlock + ' 草稿已保留。', 6000)
+      return true
     }
     if (!state.enabled) {
       noteUserSend(event, 'terminal-disabled', element)
@@ -2470,7 +2674,7 @@
     // A failed submit can leave our full draft in the editor. Reuse it on a user retry,
     // while still confirming the send and recording only the user's words.
     const prefixedDraft = !!state.prefix && hasPrefix(element) && draft.includes(USER_TEXT_SENTINEL)
-    const text = collapse(userTextOf(draft))
+    const text = userTextOf(draft)
     const draftHasImage = hasDraftImageAttachment()
 
     /*
@@ -2486,7 +2690,7 @@
      * empty composer should do nothing, which is what the site does once we stop stealing the
      * event.
      */
-    if (text === '' && !draftHasImage) {
+    if (collapse(text) === '' && !draftHasImage) {
       noteUserSend(event, 'empty-draft', element)
       return false
     }
@@ -2687,6 +2891,109 @@
     }
     if (includeIncomplete && start >= 0 && depth > 0) found.push(text.slice(start))
     return found
+  }
+
+  // Recognition of the top-level discriminator only. Keep the bytes (including duplicate
+  // fields) intact for the later strict protocol validator; never use command JSON repair.
+  const hasComputerDiscriminator = (raw) => {
+    let depth = 0
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw[i]
+      if (ch === '"') {
+        const start = i++
+        for (; i < raw.length; i++) {
+          if (raw[i] === '\\') { i++; continue }
+          if (raw[i] === '"') break
+        }
+        if (depth !== 1) continue
+        let key
+        try { key = JSON.parse(raw.slice(start, i + 1)) } catch (_) { continue }
+        if (key !== 'type') continue
+        const tail = raw.slice(i + 1)
+        const value = /^\s*:\s*("(?:[^"\\]|\\.)*")/.exec(tail)
+        if (value) {
+          try { if (JSON.parse(value[1]) === 'computer') return true } catch (_) {}
+        } else if (/^\s*:\s*"computer(?:\s|$)/.test(tail)) return true
+      } else if (ch === '{' || ch === '[') depth++
+      else if (ch === '}' || ch === ']') depth--
+    }
+    return false
+  }
+  const looksLikeComputerReply = (text) => balancedObjects(String(text || ''), true).some(hasComputerDiscriminator)
+  const extractComputerRequest = (text) => {
+    const cleaned = String(text || '').trim().replace(/^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```$/i, '$1').trim()
+    const objects = balancedObjects(cleaned, true)
+    if (!objects.some(hasComputerDiscriminator)) return null
+    if (cleaned.length > 64_000) return { outcome: 'invalid', issue: 'oversized-request', rawJson: cleaned.slice(0, 64_000) }
+    if (objects.length !== 1 || objects[0] !== cleaned) return { outcome: 'invalid', issue: 'ambiguous-request', rawJson: cleaned }
+    try {
+      const value = JSON.parse(cleaned)
+      return { outcome: value?.type === 'computer' ? 'candidate' : 'invalid',
+        issue: value?.type === 'computer' ? null : 'ambiguous-request', rawJson: cleaned }
+    } catch (_) { return { outcome: 'invalid', issue: 'invalid-json', rawJson: cleaned } }
+  }
+
+  const computerWaitCurrent = (wait) => {
+    if (!wait || computerReplyWait !== wait || wait.reported || !state.enabled || !state.computerUseEnabled ||
+      !wait.sourceSubmissionId || state.awaitingReplySince === 0 || state.pendingQuestion ||
+      wait.pageEpoch !== computerPageEpoch ||
+      wait.generation !== state.taskPromptGeneration) return false
+    // The first confirmed send creates the SPA conversation route. Bind that once.
+    if (wait.path === '/' && /^\/a\/chat\/s\/[^/]+\/?$/.test(location.pathname)) wait.path = location.pathname
+    return wait.path === location.pathname
+  }
+  const computerTurnIsNew = (node, wait) => {
+    if (!node?.isConnected || !isVisibleElement(node)) return false
+    // An empty virtual list in an existing conversation proves no history boundary.
+    // Only a new chat's home route may start from an empty baseline.
+    if (!wait.baseline.positions.size && wait.baseline.path !== '/') return false
+    const position = PAGE.fileTurnPositionAttr ? node.getAttribute(PAGE.fileTurnPositionAttr) : null
+    if (!position || wait.baseline.positions.has(position)) return false
+    return wait.baseline.maxPosition === null || (/^\d+$/.test(position) && Number(position) > wait.baseline.maxPosition)
+  }
+  // Provenance is transport metadata only; command/read_files JSON and their execution rules stay unchanged.
+  const legacyTaskSource = (node) => {
+    const wait = computerReplyWait
+    if (PAGE.computerUseRequests !== true || !computerWaitCurrent(wait) || !computerTurnIsNew(node, wait)) return {}
+    wait.reported = true
+    return { sourceSubmissionId: wait.sourceSubmissionId, taskPromptGeneration: wait.generation, pagePath: wait.path }
+  }
+  const checkComputerRequest = (node, messageId) => {
+    if (PAGE.computerUseRequests !== true) return false
+    const input = readComputerText(node)
+    const request = extractComputerRequest(input)
+    if (!request && !looksLikeComputerReply(readReplyText(node))) return false
+    // Claim computer-shaped replies before the lenient command/read_files/questions branches.
+    // Quotes/examples can be ignored, but can never become a Shell request.
+    const wait = computerReplyWait
+    if (!request || !computerWaitCurrent(wait) || !computerTurnIsNew(node, wait)) {
+      noteScan(messageId, !request ? 'computer-quoted-content' : 'computer-not-live')
+      return true
+    }
+    if (findContinueButton(node)) { noteScan(messageId, 'computer-reply-cut-off'); return true }
+    if (pendingComputerRecognition?.wait === wait && pendingComputerRecognition.text === input) return true
+    const recognition = { wait, text: input, key: turnKeyOf(node) }
+    pendingComputerRecognition = recognition
+    setTimeout(() => {
+      if (pendingComputerRecognition !== recognition || !computerWaitCurrent(wait)) return
+      pendingComputerRecognition = null
+      const latest = latestReplyNode(queryAllAssistant())
+      if (!latest || !isAssistantTurn(latest) || !computerTurnIsNew(latest, wait) ||
+        replyIsGenerating(latest) || findContinueButton(latest) ||
+        turnKeyOf(latest) !== recognition.key || readComputerText(latest) !== input) { scheduleCheck(); return }
+      wait.reported = true
+      state.lastCommandMessageId = turnKeyOf(latest)
+      state.replyActionDetected = true
+      const checked = window.__computerUseProtocol?.check(request.rawJson, computerProtocolContext.definitions)
+      const protocolCode = !checked ? 'invalid_envelope' : !checked.ok ? checked.error.code
+        : computerProtocolContext.stepToken && checked.stepToken !== computerProtocolContext.stepToken ? 'stale_step_token' : null
+      report({ event: 'computer-request', messageId: `computer:${userSubmissionScope}:${wait.serial}`,
+        sourceSubmissionId: wait.sourceSubmissionId, taskPromptGeneration: wait.generation,
+        pagePath: wait.path, rawJson: request.rawJson, computerOutcome: request.outcome, computerIssue: request.issue,
+        computerPageEpoch: wait.pageEpoch,
+        computerProtocolCode: protocolCode, live: true })
+    }, 250)
+    return true
   }
 
   /**
@@ -2923,11 +3230,15 @@
     if (typeof parsed.command !== 'string') return commandIssue('invalid-command', 'command')
     if ('background' in parsed && typeof parsed.background !== 'boolean') return commandIssue('invalid-background', 'background')
     if (parsed.background === true && !parsed.command.trim()) return commandIssue('invalid-command', 'command')
+    if (('background_kind' in parsed || 'readiness' in parsed) && (parsed.background !== true ||
+      !['job', 'service'].includes(parsed.background_kind) ||
+      ('readiness' in parsed && (parsed.background_kind !== 'service' || !parsed.readiness || typeof parsed.readiness !== 'object' || Array.isArray(parsed.readiness))))) return commandIssue('invalid-background', 'background_kind')
     if (invalidCommandControls(parsed.command)) return commandIssue('invalid-command', 'command')
     commandParseIssue = null
     return {
       command: parsed.command.trim(),
       ...(parsed.background === true ? { background: true } : {}),
+      ...(parsed.background_kind ? { backgroundOptions: { kind: parsed.background_kind, ...(parsed.readiness ? { readiness: parsed.readiness } : {}) } } : {}),
       description: typeof parsed.description === 'string' ? parsed.description.trim() : '',
       timeoutSeconds: normalizeTimeoutSeconds(parsed.timeout_seconds, parsed.command),
       rawJson: JSON.stringify(parsed),
@@ -3086,7 +3397,7 @@
       const messageId = messageIdOf(node)
       if (!messageId) continue
       const text = readReplyMarkdown(node)
-      if (!text || looksLikeCommandReply(text) || looksLikeQuestionReply(text) || reportedHistoryMarkdown.get(messageId) === text) continue
+      if (!text || looksLikeCommandReply(text) || looksLikeQuestionReply(text) || looksLikeComputerReply(text) || looksLikeDsmlToolCall(text) || reportedHistoryMarkdown.get(messageId) === text) continue
       reportedHistoryMarkdown.set(messageId, text)
       report({ event: 'assistant-history-markdown', messageId, text })
     }
@@ -3136,7 +3447,7 @@
     report({ event: 'scan', reason, messageId, ...extra })
   }
 
-  const diagnosticReplyKind = (text) => !text.trim() ? 'empty' : looksLikeQuestionReply(text) ? 'questions' :
+  const diagnosticReplyKind = (text) => !text.trim() ? 'empty' : looksLikeComputerReply(text) ? 'computer' : looksLikeQuestionReply(text) ? 'questions' :
     looksLikeReadFilesReply(text) ? 'read-files' : looksLikeCommandReply(text) ? 'command' : 'prose'
 
   /** Compare the scanner's chosen node with rendered answers; never change its decisions. */
@@ -3344,7 +3655,9 @@
       noteScan('', 'no-key', { cls: String(node.className || '').slice(0, 120) })
       return
     }
-    if (messageId === state.lastCommandMessageId) {
+    if (messageId === state.lastCommandMessageId && !(PAGE.computerUseRequests === true &&
+      computerWaitCurrent(computerReplyWait) && computerTurnIsNew(node, computerReplyWait) &&
+      looksLikeComputerReply(readComputerText(node)))) {
       /*
        * Already dealt with — routinely correct, since the observer re-runs on every mutation.
        *
@@ -3369,6 +3682,7 @@
       noteScan(messageId, 'still-generating')
       return
     }
+    if (checkComputerRequest(node, messageId)) return
     if (looksLikeReadFilesReply(text)) {
       const parsed = extractReadFiles(text)
       if (!parsed) {
@@ -3380,7 +3694,8 @@
       }
       state.lastCommandMessageId = messageId
       state.replyActionDetected = state.enabled
-      if (state.enabled) report({ event: 'read-files', messageId, ...parsed, live: state.awaitingReplySince !== 0 })
+      if (state.enabled) report({ event: 'read-files', messageId, ...parsed, live: state.awaitingReplySince !== 0,
+        ...(state.awaitingReplySince !== 0 ? legacyTaskSource(node) : {}) })
       return
     }
     if (looksLikeQuestionReply(text)) {
@@ -3402,9 +3717,11 @@
         return
       }
       state.lastCommandMessageId = messageId
+      const provenance = legacyTaskSource(node)
+      const taskSource = provenance.sourceSubmissionId ? { ...provenance, pageEpoch: computerPageEpoch } : null
       setReplyWaiting(0, 'question-detected', messageId)
-      state.pendingQuestion = { messageId, ...question }
-      report({ event: 'question', messageId, ...question, live: true })
+      state.pendingQuestion = { messageId, ...question, taskSource }
+      report({ event: 'question', messageId, ...question, live: true, questionSource: taskSource })
       // Keep readable questions in the app transcript, rather than the transport JSON.
       report({
         event: 'assistant-message',
@@ -3537,7 +3854,7 @@
     if (live && lastLiveCommand && lastLiveCommand.since === state.awaitingReplySince &&
         (lastLiveCommand.node === node || (position && lastLiveCommand.position === position)) &&
         lastLiveCommand.command === parsed.command && lastLiveCommand.description === parsed.description &&
-        lastLiveCommand.background === (parsed.background === true)) {
+        lastLiveCommand.background === (parsed.background === true) && JSON.stringify(lastLiveCommand.backgroundOptions) === JSON.stringify(parsed.backgroundOptions)) {
       state.lastCommandMessageId = messageId
       noteScan(messageId, 'duplicate-command')
       return
@@ -3545,7 +3862,7 @@
     if (live) {
       lastLiveCommand = {
         since: state.awaitingReplySince, node, position, command: parsed.command, description: parsed.description,
-        background: parsed.background === true
+        background: parsed.background === true, backgroundOptions: parsed.backgroundOptions
       }
     }
     state.lastCommandMessageId = messageId
@@ -3558,12 +3875,14 @@
       messageId,
       command: parsed.command,
       background: parsed.background === true,
+      backgroundOptions: parsed.backgroundOptions,
       commandSource: commandInput.source,
       parseRepair: parsed.parseRepair,
       description: parsed.description,
       timeoutSeconds: parsed.timeoutSeconds,
       rawJson: parsed.rawJson,
-      live
+      live,
+      ...(live ? legacyTaskSource(node) : {})
     })
   }
 
@@ -4071,6 +4390,7 @@
   const fileSendStatus = (token) => {
     if (confirmedFileSends.has(token)) return { status: 'sent' }
     if (!fileSend || fileSend.token !== token) return { status: 'stale' }
+    if (fileSend.computer && (fileSend.computer.generation !== state.taskPromptGeneration || fileSend.computer.path !== location.pathname || !state.computerUseEnabled)) return { status: 'busy' }
     if (fileSend.focus && fileSend.focus.generation !== state.taskPromptGeneration) return { status: 'busy' }
     const composer = getComposer()
     if (!composer) return { status: 'no-composer' }
@@ -4091,6 +4411,7 @@
       const sent = !fileSend.edited && draftCleared && newTurnSeen && turnFilesSeen && captionSeen
       if (sent) {
         const focus = fileSend.focus
+        const computer = fileSend.computer
         const focusFiles = fileSend.files
         confirmedFileSends.add(token)
         if (confirmedFileSends.size > 8) confirmedFileSends.delete(confirmedFileSends.values().next().value)
@@ -4102,10 +4423,11 @@
           if (focus.promptInjected) state.taskPromptInjected = true
           draftRejected = false
           state.replyActionDetected = false
-          report({ event: 'user-message', text: focus.text, focusFiles, focusSendToken: token, attachmentToken: focus.attachmentToken })
+          report({ event: 'user-message', text: focus.text, focusFiles, focusSendToken: token, attachmentToken: focus.attachmentToken,
+            submissionKind: focus.submissionKind })
           report({ event: 'sent', text: focus.text.slice(0, 400), promptInjected: focus.promptInjected,
             taskPromptGeneration: focus.generation })
-        } else report({ event: 'sent-raw', text: '[read_files attachments]' })
+        } else report({ event: 'sent-raw', text: computer ? '[computer observation attachment]' : '[read_files attachments]' })
         if (state.enabled && state.awaitingReplySince !== 0) scheduleCheck()
         scheduleScrollToBottom()
         return { status: 'sent' }
@@ -4171,13 +4493,23 @@
       return 'ok'
     },
     fileSendStatus,
+    beginComputerFileSend(token, files, options) {
+      if (PAGE.computerUseRequests !== true || !state.enabled || !state.computerUseEnabled || !options ||
+        options.path !== location.pathname || options.generation !== state.taskPromptGeneration || state.pendingQuestion ||
+        (state.awaitingReplySince !== 0 && !state.replyActionDetected) || !Array.isArray(files) || files.length !== 1 ||
+        files[0].mimeType !== 'image/png' || typeof token !== 'string' || !token.startsWith('computer-image:img_')) return 'busy'
+      const result = this.beginFileSend(token, files)
+      if (result === 'ok' || result === 'resume') fileSend.computer = { path: options.path, generation: options.generation }
+      return result
+    },
     beginFocusFileSend(token, files, text, expectedPath) {
       if (location.pathname !== expectedPath || typeof text !== 'string' || text.length > 20000 ||
         !Array.isArray(files) || files.length < 1 || files.length > 3 || state.awaitingReplySince !== 0 || state.pendingQuestion) return 'busy'
       if (state.enabled && state.promptInjectionEnabled && !state.prefix) return 'busy'
       const result = this.beginFileSend(token, files)
       if (result === 'ok' || result === 'resume') {
-        fileSend.focus = { text: normalizeLineEndings(text), generation: state.taskPromptGeneration, prepared: false }
+        fileSend.focus = { text: normalizeLineEndings(text), generation: state.taskPromptGeneration, prepared: false,
+          submissionKind: state.pendingQuestion ? 'clarification' : 'goal' }
       }
       return result
     },
@@ -4349,7 +4681,7 @@
       }
     },
     prepareFileSendCaption(token, caption) {
-      if (typeof caption !== 'string' || !caption.trim() || caption.length > 50000 || fileSendStatus(token).status !== 'ready') return false
+      if (typeof caption !== 'string' || !caption.trim() || caption.length > (fileSend?.computer ? 200000 : 50000) || fileSendStatus(token).status !== 'ready') return false
       // Uploads wait on an empty draft. Add the owned question only once the
       // attachment is ready; subsequent user edits still invalidate this send.
       const composer = getComposer()
@@ -4377,6 +4709,7 @@
       // App-owned uploads retain the original image bytes in main, bound to this send token.
       // The acknowledgement records those bytes, without scraping a thumbnail from the page.
       // Mark the reply before clicking: a synchronous new assistant turn must not be baselined.
+      if (fileSend.computer) state.replyActionDetected = false
       setReplyWaiting(Date.now(), 'file-send-submitted')
       state.taskActive = true
       state.lastCommandMessageId = fileSend.baselineAssistant
@@ -4402,7 +4735,27 @@
     },
     configure(config) {
       if (!config) return { ...state }
+      if (typeof config.computerPageEpoch === 'string' && config.computerPageEpoch !== computerPageEpoch) {
+        computerPageEpoch = config.computerPageEpoch
+        computerReplyWait = null
+        pendingComputerRecognition = null
+        computerSourceSubmissionId = null
+      }
+      if (config.computerProtocol && Array.isArray(config.computerProtocol.definitions)) {
+        computerProtocolContext = { definitions: config.computerProtocol.definitions,
+          stepToken: typeof config.computerProtocol.stepToken === 'string' ? config.computerProtocol.stepToken : null }
+      }
       if (typeof config.enabled === 'boolean') state.enabled = config.enabled
+      if (typeof config.computerUseEnabled === 'boolean') {
+        state.computerUseEnabled = config.computerUseEnabled
+        if (!config.computerUseEnabled) { computerReplyWait = null; pendingComputerRecognition = null }
+      }
+      if (config.sendBlock === null || typeof config.sendBlock === 'string') {
+        const block = config.sendBlock || null
+        // Tell the user who just tried that the wait is over; never announce it unprompted.
+        if (state.sendBlock && !block && sendBlockNotice?.isConnected) showSendBlockNotice('Windows 桌面助手已就绪，现在可以发送了。', 3000)
+        state.sendBlock = block
+      }
       if (typeof config.promptInjectionEnabled === 'boolean') state.promptInjectionEnabled = config.promptInjectionEnabled
       if (typeof config.prefix === 'string') state.prefix = config.prefix
       // Restore main's snapshot after a full reload, or accept a NEW task boundary.
@@ -4412,6 +4765,9 @@
           config.taskPromptGeneration >= state.taskPromptGeneration &&
           (!taskPromptConfigured || config.taskPromptGeneration > state.taskPromptGeneration)) {
         if (config.taskPromptGeneration > state.taskPromptGeneration) {
+          computerReplyWait = null
+          computerSourceSubmissionId = null
+          pendingComputerRecognition = null
           state.programmatic = false
           draftRejected = false
           state.failedCommand = null
@@ -4432,7 +4788,7 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], focus: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, computerUseRequests: false, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], focus: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
         observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing
@@ -4836,13 +5192,16 @@
         if (!rendered.has(node)) rendered.set(node, readReplyMarkdown(node))
         return rendered.get(node)
       }
+      const protocolReply = raw => looksLikeCommandReply(raw) || looksLikeQuestionReply(raw) || extractCommand(raw) ||
+        (state.enabled && state.awaitingReplySince !== 0 &&
+          (raw.trim().startsWith('{') || raw.trim().startsWith(String.fromCharCode(96).repeat(3) + 'json')))
       const smartReplies = rules.smartUi ? queryAllAssistant().filter(node => isVisibleElement(node) &&
         (node.matches?.(rules.smartUi.rootSelector) || node.querySelector?.(rules.smartUi.rootSelector))).slice(-8)
         .flatMap(node => {
-          // DIL wrappers also contain ordinary code blocks. A live rich-content
-          // refresh must not overwrite a readable clarification with its protocol JSON.
-          const raw = readReplyText(node)
-          if (looksLikeCommandReply(raw) || looksLikeQuestionReply(raw)) return []
+          // Rich-content refreshes obey the same protocol filter as the live answer.
+          // Otherwise a saved command segment or a readable clarification can be
+          // overwritten with its protocol JSON. DIL wrappers also contain ordinary code blocks.
+          if (protocolReply(readReplyText(node))) return []
           const answer = markdownOf(node)
           if (looksLikeCommandReply(answer) || looksLikeQuestionReply(answer)) return []
           // Never replace a complete saved answer with a truncated live copy or cut
@@ -4909,9 +5268,7 @@
           } catch { return [] }
         })
         const raw = answer ? readReplyText(node) : ''
-        const protocol = looksLikeCommandReply(raw) || looksLikeQuestionReply(raw) || extractCommand(raw) ||
-          (state.enabled && state.awaitingReplySince !== 0 &&
-            (raw.trim().startsWith('{') || raw.trim().startsWith(String.fromCharCode(96).repeat(3) + 'json')))
+        const protocol = protocolReply(raw)
         reply = { sourceMessageId: node ? turnKeyOf(node) : '', parts,
           answer: answer && !protocol ? markdownOf(node).slice(0, 250000) : '' }
       }
@@ -4953,6 +5310,20 @@
       return outcome
     },
 
+    sendComputerResult(text, options) {
+      if (!options || typeof options.computerResultToken !== 'string') return Promise.resolve('busy')
+      computerResultToken = options.computerResultToken
+      return this.sendRaw(text, null, options).finally(() => {
+        if (computerResultToken === options.computerResultToken) computerResultToken = null
+      })
+    },
+
+    cancelComputerResult(token) {
+      if (computerResultToken !== token) return
+      computerResultToken = null
+      state.programmatic = false
+    },
+
     sendRaw(text, ownedDraft = null, options = null) {
       const element = getComposer()
       if (!element) return Promise.resolve('no-composer')
@@ -4963,6 +5334,7 @@
         return Promise.resolve('busy')
       }
       if (state.programmatic) return blocked('programmatic-send')
+      if (options?.computerResultToken !== undefined && options.computerResultToken !== computerResultToken) return blocked('computer-result-cancelled')
       if (options?.generation !== undefined && options.generation !== state.taskPromptGeneration) return blocked('task-changed')
       if (options?.path !== undefined && options.path !== location.pathname) return blocked('conversation-changed')
       if (options?.requireIdle && ((state.awaitingReplySince !== 0 && !state.replyActionDetected) || state.pendingQuestion)) return blocked('awaiting-reply')
@@ -5015,7 +5387,8 @@
         // a newer command result is being retried, flip programmatic=false, and
         // let the normal click interceptor prepend the system prompt to that raw result.
         timeout = setTimeout(() => {
-          if (taskPromptGeneration === state.taskPromptGeneration) state.programmatic = false
+          if (taskPromptGeneration === state.taskPromptGeneration &&
+              (options?.computerResultToken === undefined || options.computerResultToken === computerResultToken)) state.programmatic = false
           done('stuck')
         }, SEND_TIMEOUT_MS)
 
@@ -5034,7 +5407,9 @@
           0,
           Date.now() + SEND_BUTTON_GRACE_MS,
           null,
-          { taskPromptGeneration, promptInjected: false, ...(options?.path !== undefined ? { path: options.path } : {}) }
+          { taskPromptGeneration, promptInjected: false, ...(options?.path !== undefined ? { path: options.path } : {}),
+            ...(options?.question ? { question: options.question } : {}),
+            ...(options?.computerResultToken !== undefined ? { computerResultToken: options.computerResultToken } : {}) }
         )
       })
     },
@@ -5057,7 +5432,7 @@
     },
 
     /** Reopen a recorded question (from 重新执行指令) as if the model had just asked it. */
-    replayQuestion(messageId, payloadJson) {
+    replayQuestion(messageId, payloadJson, taskSource = null) {
       if (typeof messageId !== 'string' || !messageId) return 'invalid'
       let question = null
       try {
@@ -5065,20 +5440,28 @@
       } catch (_) { /* reported as invalid below */ }
       if (!question) return 'invalid'
       if (state.programmatic || state.awaitingReplySince !== 0) return 'busy'
-      state.pendingQuestion = { messageId, ...question }
+      if (taskSource && (taskSource.pageEpoch !== computerPageEpoch || taskSource.taskPromptGeneration !== state.taskPromptGeneration ||
+        taskSource.pagePath !== location.pathname || taskSource.sourceSubmissionId !== computerSourceSubmissionId)) return 'invalid'
+      state.pendingQuestion = { messageId, ...question, taskSource }
       state.answerDraft = null
-      report({ event: 'question', messageId, ...question, rawJson: String(payloadJson), live: true })
+      report({ event: 'question', messageId, ...question, rawJson: String(payloadJson), live: true, questionReplay: true, questionSource: taskSource })
       return 'ok'
     },
 
-    async answerQuestion(messageId, answer) {
+    async answerQuestion(messageId, answer, expectedSource = null) {
       // Answers belong to the conversation; terminal mode and execution flags do not expire them.
       if (!state.pendingQuestion || state.pendingQuestion.messageId !== messageId) return 'stale'
       if (typeof answer !== 'string' || !answer.trim() || answer.length > 20000) return 'invalid-answer'
+      const pending = state.pendingQuestion
+      const source = pending.taskSource || null
+      if (expectedSource && (!source || ['sourceSubmissionId', 'taskPromptGeneration', 'pagePath', 'pageEpoch'].some(key => source[key] !== expectedSource[key]) ||
+        source.pageEpoch !== computerPageEpoch || source.pagePath !== location.pathname || source.taskPromptGeneration !== state.taskPromptGeneration)) return 'stale'
       const ownedDraft = state.answerDraft?.messageId === messageId ? state.answerDraft.text : null
-      const outcome = await window[STATE_KEY].sendRaw(answer, ownedDraft)
+      const taskPromptGeneration = state.taskPromptGeneration
+      const outcome = await window[STATE_KEY].sendRaw(answer, ownedDraft, { generation: taskPromptGeneration, path: location.pathname, question: { messageId, source } })
       if (outcome === 'ok') {
-        report({ event: 'user-message', text: answer })
+        report({ event: 'user-message', text: answer, submissionKind: 'clarification', taskPromptGeneration,
+          answeredQuestionId: messageId, questionSource: source })
       } else if (outcome === 'stuck' || outcome === 'insert-failed') {
         // A retry may replace only the text that this submission left in the composer.
         const element = getComposer()

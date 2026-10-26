@@ -6,6 +6,7 @@ import { createRequire } from 'node:module'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
 import ts from 'typescript'
+import { taskContextModule } from './fixtures/task-context-module.mjs'
 
 const nodeRequire = createRequire(import.meta.url)
 function load(path, dependencies = {}, globals = {}) {
@@ -13,7 +14,7 @@ function load(path, dependencies = {}, globals = {}) {
   const compiled = ts.transpileModule(readFileSync(new URL(path, import.meta.url), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText
-  new Script(compiled).runInNewContext({ exports, Buffer, AbortController, ...globals, require(name) {
+  new Script(compiled).runInNewContext({ exports, Buffer, AbortController, URL, structuredClone, ...globals, require(name) {
     if (name.startsWith('node:')) return nodeRequire(name)
     assert.ok(Object.hasOwn(dependencies, name), `unexpected dependency: ${name}`)
     return dependencies[name]
@@ -21,7 +22,8 @@ function load(path, dependencies = {}, globals = {}) {
   return exports
 }
 
-const protocol = load('../src/shared/background-tasks.ts')
+const protocol = load('../src/shared/background-tasks.ts', { './autonomous-task': taskContextModule })
+const readiness = load('../src/main/background-readiness.ts')
 const marker = protocol.BACKGROUND_TASK_MARKER
 const registration = (overrides = {}) => marker + JSON.stringify({ pid: 12345, name: '开发服务', log_path: '/tmp/service.log', ...overrides })
 const record = { messageId: 'start-a', conversationId: 'conversation-a', command: 'start service' }
@@ -31,10 +33,10 @@ const sample = (overrides = {}) => ({ alive: true, identity: 'process-start-a', 
 const frame = (value) => '__W2T_BACKGROUND_SAMPLE__' + JSON.stringify(value)
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
-function fixture(t) {
+function fixture(t, { observeStartup = false } = {}) {
   const timers = new Set()
   let clock = Date.now()
-  const exports = load('../src/main/background-tasks.ts', { '../shared/background-tasks': protocol }, {
+  const exports = load('../src/main/background-tasks.ts', { '../shared/background-tasks': protocol, './background-readiness': readiness }, {
     Date: class extends Date { static now() { return clock } },
     setTimeout(callback) { const timer = { callback }; timers.add(timer); return timer },
     clearTimeout(timer) { timers.delete(timer) }
@@ -52,24 +54,115 @@ function fixture(t) {
         alive: true, running: false, kind: 'posix', cwd: '/project', probeCommand: '',
         async run(command) {
           calls.commands.push(command)
-          const next = pending.shift()
+          const queued = pending.shift()
+          const next = typeof queued === 'function' ? await queued(command) : queued
           if (next instanceof Error) throw next
           assert.ok(next, 'fixture needs a sample')
-          return { output: frame(next), exitCode: 0, rejected: false, interrupted: false, timedOut: false, sessionLost: false, cwd: '/project' }
+          return { output: typeof next === 'string' ? next : frame(next), exitCode: 0, rejected: false, interrupted: false, timedOut: false, sessionLost: false, cwd: '/project' }
         },
         dispose() { this.alive = false; calls.disposes += 1 }
       }
     }
   }
-  const manager = new exports.BackgroundTasks(state => pushes.push(state))
+  const startupEvents = []
+  const manager = new exports.BackgroundTasks(state => pushes.push(state), undefined,
+    observeStartup ? () => (task, kind) => startupEvents.push({ task: JSON.parse(JSON.stringify(task)), kind }) : undefined)
   t.after(() => manager.dispose())
   return {
-    manager, target, pending, calls, pushes, timers, exports,
+    manager, target, pending, calls, pushes, timers, exports, startupEvents,
     setAvailable(value) { available = value },
     advance(ms) { clock += ms },
     async tick() { const callbacks = [...timers]; timers.clear(); for (const timer of callbacks) timer.callback(); await flush() }
   }
 }
+
+test('manual stop shares the observer shell, deduplicates clicks, and settles with final logs', async t => {
+  const f = fixture(t), completed = []
+  f.pending.push(sample())
+  f.manager.register(registration(), record, f.target, task => completed.push(task))
+  await flush()
+  const id = f.manager.getState().tasks[0].id
+  f.pending.push(sample(), '__W2T_BACKGROUND_STOP__signalled', sample({ alive: false, stdout: log('shutdown\n', 'v2') }))
+  const results = await Promise.all([f.manager.stop(id), f.manager.stop(id)])
+  assert.ok(results.every(result => result.ok))
+  assert.equal(f.calls.commands.filter(command => command.includes('__W2T_BACKGROUND_STOP__')).length, 1)
+  assert.equal(f.calls.opens, 1, 'stop and polling must serialize on the same observer')
+  assert.equal(f.manager.getState().tasks[0].status, 'stopped')
+  assert.equal(typeof f.manager.getState().tasks[0].stopRequestedAt, 'number')
+  assert.equal(completed.length, 0, 'wait for the final log read before publishing')
+  f.pending.push(sample({ alive: false, stdout: log('shutdown complete\n', 'v3') }))
+  await f.tick()
+  assert.equal(completed.length, 1)
+  assert.equal(completed[0].status, 'stopped')
+  assert.equal(completed[0].output, 'shutdown complete\n')
+  const count = f.calls.commands.length
+  assert.equal((await f.manager.stop(id)).ok, true)
+  assert.equal(f.calls.commands.length, count, 'finished tasks never receive another kill command')
+})
+
+test('a stop waits for an in-flight observation rather than running commands concurrently', async t => {
+  const f = fixture(t)
+  let release
+  f.pending.push(() => new Promise(resolve => { release = resolve }))
+  f.manager.register(registration(), record, f.target)
+  await flush()
+  const pendingStop = f.manager.stop(f.manager.getState().tasks[0].id)
+  await flush()
+  assert.equal(f.calls.commands.length, 1)
+  f.pending.push(sample(), '__W2T_BACKGROUND_STOP__signalled', sample({ alive: false }))
+  release(sample())
+  assert.equal((await pendingStop).ok, true)
+  assert.equal(f.calls.opens, 1)
+})
+
+test('a reused PID or missing process is observed as ended without sending a stop', async t => {
+  const f = fixture(t)
+  f.pending.push(sample())
+  f.manager.register(registration(), record, f.target)
+  await flush()
+  f.pending.push(sample({ identity: 'another-process-start' }))
+  assert.equal((await f.manager.stop(f.manager.getState().tasks[0].id)).ok, true)
+  assert.equal(f.manager.getState().tasks[0].status, 'exited')
+  assert.ok(f.calls.commands.every(command => !command.includes('__W2T_BACKGROUND_STOP__')))
+  assert.equal(f.manager.getState().tasks[0].stopRequestedAt, undefined)
+})
+
+test('disconnects, unconfirmed identities and denied stops remain actionable instead of claiming success', async t => {
+  const f = fixture(t)
+  f.pending.push(sample({ identity: '' }))
+  f.manager.register(registration(), record, f.target)
+  await flush()
+  const id = f.manager.getState().tasks[0].id
+  f.setAvailable(false)
+  assert.equal((await f.manager.stop(id)).ok, false)
+  f.setAvailable(true)
+  f.pending.push(sample({ identity: '' }))
+  assert.equal((await f.manager.stop(id)).ok, false)
+  assert.ok(f.calls.commands.every(command => !command.includes('__W2T_BACKGROUND_STOP__')))
+  f.pending.push(sample(), '__W2T_BACKGROUND_STOP__failed')
+  const denied = await f.manager.stop(id)
+  assert.equal(denied.ok, false)
+  assert.match(denied.message, /权限/)
+  assert.equal(f.manager.getState().tasks[0].stopRequestedAt, undefined)
+  assert.equal(f.manager.getState().tasks[0].status, 'running')
+})
+
+test('stop commands reject unsafe PIDs and guard process trees with the captured start identity', t => {
+  const f = fixture(t)
+  for (const pid of [0, 1, -2, 2.5, '12345', 2147483648]) {
+    assert.throws(() => f.exports.backgroundStopCommand(pid, 'identity', 'windows'))
+  }
+  assert.throws(() => f.exports.backgroundStopCommand(12345, '', 'posix'))
+  const windows = f.exports.backgroundStopCommand(12345, '123456789', 'windows')
+  assert.ok(windows.indexOf('StartTime.ToUniversalTime().Ticks') < windows.indexOf('taskkill.exe'))
+  assert.match(windows, /\/PID 12345 \/T \/F/)
+  const posix = f.exports.backgroundStopCommand(12345, 'captured-start', 'posix')
+  assert.ok(posix.indexOf('captured-start') < posix.indexOf('kill -TERM'))
+  assert.match(posix, /kill -KILL "\$w2t_child"/)
+  assert.doesNotMatch(posix, /kill -\w+ -[0-9]/, 'legacy jobs may share a process group with the terminal')
+  assert.equal(f.exports.parseBackgroundStop('__W2T_BACKGROUND_STOP__signalled'), 'signalled')
+  assert.throws(() => f.exports.parseBackgroundStop('ordinary output'))
+})
 
 test('software registration survives an occupied log and includes later stderr in its creation notification', async t => {
   const f = fixture(t), created = []
@@ -441,12 +534,39 @@ test('restored tasks: a running one is observed again, an ended one is history, 
   assert.equal(f.manager.getState().tasks.length, 2)
 })
 
+test('monitor state exposes frozen launch provenance and confirms final results only after the last log read', async t => {
+  const f = fixture(t), context = { sessionId: 'session-a', platformId: 'deepseek', conversationId: record.conversationId,
+    taskId: 'goal-a', generation: 1, stepId: 'startup-a', sourceMessageId: 'source-a', tool: 'command',
+    machine: { id: 'machine-a', label: '本机', platform: 'win32', arch: 'x64', connection: 'local', workingDirectory: 'C:\\work' } }
+  const bound = { ...record, taskContext: context, backgroundOptions: { kind: 'job' } }
+  f.pending.push(sample())
+  f.manager.register(registration(), bound, f.target)
+  await flush()
+  let observed = f.manager.getState().tasks[0]
+  assert.equal(observed.resultSettled, false)
+  assert.equal(observed.taskContext.stepId, 'startup-a')
+  assert.equal(observed.launchOptions.kind, 'job')
+  observed.taskContext.machine.id = 'modified-external-copy'
+  assert.equal(f.manager.getState().tasks[0].taskContext.machine.id, 'machine-a')
+  context.machine.id = 'modified-original'
+  assert.equal(f.manager.getState().tasks[0].taskContext.machine.id, 'machine-a')
+  f.pending.push(sample({ alive: false, exitCode: 0, stdout: log('first final', 'v2') }))
+  await f.tick()
+  observed = f.manager.getState().tasks[0]
+  assert.equal(observed.status, 'completed'); assert.equal(observed.resultSettled, false)
+  f.pending.push(sample({ alive: false, exitCode: 0, stdout: log('last final', 'v3') }))
+  await f.tick()
+  observed = f.manager.getState().tasks[0]
+  assert.equal(observed.resultSettled, true); assert.equal(observed.output, 'last final')
+})
+
 test('stored rows that do not describe a usable task are rejected', () => {
   const good = { task: { id: 't', name: 'n', pid: 2, transport: 'local', targetLabel: '本机', conversationId: 'c', command: 'x', logPath: '/l',
     stderrPath: null, exitCodePath: null, status: 'running', exitCode: null, createdAt: 1, checkedAt: null, message: '', output: '', errorOutput: '',
-    outputTruncated: false, errorOutputTruncated: false }, target: { transport: 'local', key: 'local', label: '本机', kind: 'windows', cwd: 'C:\' },
+    outputTruncated: false, errorOutputTruncated: false }, target: { transport: 'local', key: 'local', label: '本机', kind: 'windows', cwd: 'C:\\' },
     messageId: 'm', identity: '', settled: false, owner: { platformId: 'chatgpt', conversationId: 'c' } }
   assert.ok(protocol.parseStoredBackgroundTask(JSON.stringify(good)))
+  assert.ok(protocol.parseStoredBackgroundTask(JSON.stringify({ ...good, task: { ...good.task, status: 'stopped', stopRequestedAt: 10 } })))
   for (const bad of [
     'not json', '{}',
     { ...good, owner: { platformId: 'chatgpt', conversationId: '' } },
@@ -454,6 +574,29 @@ test('stored rows that do not describe a usable task are rejected', () => {
     { ...good, task: { ...good.task, transport: 'ssh' } },
     { ...good, task: { ...good.task, status: 'weird' } },
     { ...good, task: { ...good.task, deliveryStatus: 'maybe' } },
+    { ...good, task: { ...good.task, stopRequestedAt: 'yesterday' } },
     { ...good, settled: 'yes' }
   ]) assert.equal(protocol.parseStoredBackgroundTask(typeof bad === 'string' ? bad : JSON.stringify(bad)), null)
+})
+
+test('a manual stop awaiting confirmation survives restart and settles as stopped', async t => {
+  const f = fixture(t), { manager, latest } = persisted(t, f)
+  f.pending.push(sample())
+  manager.register(registration(), record, { ...f.target, descriptor }, undefined, undefined, owner)
+  await flush()
+  f.pending.push(sample(), '__W2T_BACKGROUND_STOP__signalled', sample({ alive: true }))
+  assert.equal((await manager.stop(manager.getState().tasks[0].id)).ok, true)
+  const stored = latest()
+  assert.equal(stored.settled, false)
+  assert.equal(typeof stored.task.stopRequestedAt, 'number')
+  manager.dispose()
+  const completed = []
+  f.pending.push(sample({ alive: false, exitCode: 143 }))
+  f.manager.restore([stored], () => f.target, () => task => completed.push(task))
+  await flush()
+  assert.equal(f.manager.getState().tasks[0].status, 'stopped')
+  f.pending.push(sample({ alive: false, exitCode: 143 }))
+  await f.tick()
+  assert.equal(completed.length, 1)
+  assert.equal(completed[0].status, 'stopped')
 })

@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
 import ts from 'typescript'
+import { taskContextModule } from './fixtures/task-context-module.mjs'
 
 const source = readFileSync(new URL('../src/main/commands.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, {
@@ -14,7 +15,7 @@ const compiled = ts.transpileModule(source, {
 const protocol = {}
 new Script(ts.transpileModule(readFileSync(new URL('../src/shared/background-tasks.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
-}).outputText).runInNewContext({ exports: protocol })
+}).outputText).runInNewContext({ exports: protocol, require(name) { assert.equal(name, './autonomous-task'); return taskContextModule } })
 
 function fixture(t, options = {}) {
   const original = {
@@ -30,6 +31,7 @@ function fixture(t, options = {}) {
   const events = []
   const sent = []
   const calls = []
+  const diagnostics = []
   let currentConversationId = 'chat-a'
   let terminalMode = true
   let localShell
@@ -56,7 +58,12 @@ function fixture(t, options = {}) {
       events.push('finished')
       return outcome
     }
-    async interrupt() { this.running = false; events.push('interrupt'); return true }
+    async interrupt() {
+      events.push('interrupt')
+      if (options.interruptError) throw new Error(options.interruptError)
+      this.running = false
+      return true
+    }
     dispose() {}
   }
   const remoteShell = options.remote ? new FakeShell({ initialCwd: '/remote/current' }) : null
@@ -89,6 +96,7 @@ function fixture(t, options = {}) {
       interruptRunningCommands() {}
     },
     currentConversationId: () => currentConversationId,
+    onCommandDiagnostic: details => diagnostics.push(details),
     terminalModeEnabled: () => terminalMode,
     remoteShell: () => remoteShell,
     onTaskStarted: () => events.push('task-started'),
@@ -101,7 +109,7 @@ function fixture(t, options = {}) {
   runner.restoreMode(options.mode ?? 'manual')
   t.after(() => runner.disposeAll())
   return {
-    runner, records, original, recent, sent, events, calls, remoteShell,
+    runner, records, original, recent, sent, events, calls, diagnostics, remoteShell,
     get localShell() { return localShell },
     switchConversation(id) { currentConversationId = id },
     setTerminalMode(enabled) { terminalMode = enabled },
@@ -112,9 +120,51 @@ function fixture(t, options = {}) {
   }
 }
 
+test('unknown stored tools cannot run or replay through terminal controls', async t => {
+  const f = fixture(t, { original: { kind: 'invalid', status: 'pending' } })
+  await f.runner.runExecution('original'); await f.settled()
+  assert.equal(f.calls.length, 0); assert.equal(f.localShell, undefined)
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'unavailable')
+})
+
+test('an unconfirmed remote interruption keeps a replacement pending without running locally or in a busy remote shell', async t => {
+  const f = fixture(t, { remote: true, interruptError: '远端在 10 秒内未确认命令及其子进程停止' })
+  f.remoteShell.running = true
+  f.runner.activeShell = f.remoteShell
+  assert.equal(await f.runner.interruptTerminal(true), true, 'handled failures must not fall through to the manual SSH PTY')
+  const replay = { ...f.original, messageId: 'replacement', status: 'pending', output: '', exitCode: null }
+  f.records.set(replay.messageId, replay)
+  await f.runner.runExecution(replay.messageId)
+  await f.settled()
+  assert.equal(replay.status, 'pending')
+  assert.equal(f.calls.length, 0)
+  assert.equal(f.localShell, undefined)
+  assert.equal(f.runner.activeShell, f.remoteShell)
+  assert.equal(f.remoteShell.running, true)
+  assert.ok(f.runner.getTerminalState().lines.some(line => line.kind === 'error' && line.text.includes('新指令保持待执行')))
+  assert.equal(f.sent.length, 0)
+})
+
+test('reset recovery preserves a late remote result without returning it to AI for an automatic retry', async t => {
+  let finish
+  const f = fixture(t, { remote: true, pending: new Promise(resolve => { finish = resolve }) })
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'ok')
+  await new Promise(setImmediate)
+  assert.equal(f.calls.length, 1)
+  f.runner.resetTerminal()
+  finish({ output: '原远端命令停止状态未确认，会话已关闭。', exitCode: null, cwd: '/remote/current',
+    timedOut: false, interrupted: false, sessionLost: true })
+  await f.settled()
+  const replay = [...f.records.values()].find(record => record.messageId !== 'original')
+  assert.equal(replay.status, 'failed')
+  assert.match(replay.output, /未确认/)
+  assert.equal(f.sent.length, 0)
+})
+
 test('background history replay keeps its execution mode and goes through the software launcher', async t => {
   const starts = []
-  const f = fixture(t, { original: { background: true }, startBackgroundTask: async (record, shell, run) => {
+  const backgroundOptions = { kind: 'service', readiness: { type: 'tcp', port: 44301 } }
+  const f = fixture(t, { original: { background: true, backgroundOptions }, startBackgroundTask: async (record, shell, run) => {
     starts.push({ record, shell })
     return { result: await run('software-generated launcher'), registered: 1 }
   } })
@@ -122,9 +172,11 @@ test('background history replay keeps its execution mode and goes through the so
   await f.settled()
   assert.equal(starts.length, 1)
   assert.equal(starts[0].record.background, true)
+  assert.deepEqual(starts[0].record.backgroundOptions, backgroundOptions)
   assert.equal(f.calls[0].command, 'software-generated launcher')
   assert.equal(f.calls[0].timeoutMs, 30000)
   assert.equal(f.sent.length, 0, 'the background notification queue owns creation and completion')
+  assert.equal(f.diagnostics.find(item => item.event === 'delivery')?.deliveryOutcome, 'background')
 })
 
 test('captures background task ownership before execution and registers raw results after a conversation switch', async t => {
@@ -160,6 +212,8 @@ test('registered background startups are archived while dedicated notifications 
   assert.equal(f.sent.length, 0, 'creation and final notifications use the background delivery queue')
   assert.equal([...f.records.values()].at(-1).status, 'done')
   assert.equal([...f.records.values()].at(-1).output, 'fresh output')
+  assert.equal(f.diagnostics.find(item => item.event === 'delivery')?.deliveryOutcome, 'background',
+    'legacy registrations must also release the ordinary result-delivery wait')
   assert.equal(f.runner.canSendAutomaticResult(), true)
   f.runner.setPaused(true)
   assert.equal(f.runner.canSendAutomaticResult(), false)

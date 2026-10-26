@@ -1,4 +1,11 @@
 import { BrowserWindow, WebContentsView, session, shell } from 'electron'
+import { randomUUID } from 'node:crypto'
+import type { TaskSubmission } from '../shared/autonomous-task'
+import { validTaskQuestionSource, sameQuestionSource } from '../shared/task-clarification'
+import type { TaskQuestion, TaskQuestionSource, TaskQuestionRequest } from '../shared/task-clarification'
+import type { ComputerUseActionDefinition, ComputerUsePageRequest } from '../shared/computer-use'
+import { createComputerUseProtocol } from '../shared/computer-use-protocol'
+import type { TaskResultSendOutcome } from './task-progression'
 import interceptorSource from './injected/send-interceptor.js?raw'
 import themeSource from './injected/theme.js?raw'
 import selectionQuestionSource from './injected/selection-question.js?raw'
@@ -420,7 +427,7 @@ export interface EmbedHandlers {
   /** Terminal-mode interceptor changed state. */
   onInterceptor(status: InterceptorStatus): void
   /** Clean user text, with the injected system prefix already removed. */
-  onUserStarted?(text: string, files?: FocusAttachmentInfo[], editToken?: string): string | undefined
+  onUserStarted?(text: string, files?: FocusAttachmentInfo[], editToken?: string, submission?: TaskSubmission): string | undefined
   onUserMessage(text: string, attachments: ConversationImageAttachmentInput[], focusTurnId?: string, imageSource?: 'provided' | 'page'): void
   onRawSent?(): void
   /** An assistant message that belongs in the app's conversation transcript. */
@@ -429,10 +436,14 @@ export interface EmbedHandlers {
   onAssistantHistoryMarkdown(messageId: string, text: string): void
   /** The model's reply contained a command. */
   onCommand(command: ParsedAction): void
+  /** Raw desktop envelope recognition, kept separate from all executable command types. */
+  onComputerRequest?(request: ComputerUsePageRequest): boolean
+  onComputerDocumentChanged?(): void
   /** An explicitly marked plain-text reply reports that the task is complete. */
   onQuestion(question: string, count: number): void
   /** A question reply's JSON, live or from history, to keep for 重新执行指令. */
   onQuestionRecorded(messageId: string, rawJson: string): void
+  onTaskQuestion?(question: TaskQuestion, source: TaskQuestionSource): void
   onTaskCompleted(): void
   /**
    * This view finished loading its page for the first time since it was created.
@@ -494,8 +505,17 @@ export class ChatGptEmbed {
   /** Kept per view so a full page reload preserves the current task's injection. */
   private taskPromptInjected = false
   private taskPromptGeneration = 0
+  private computerUseRecognitionEnabled = false
+  /** The page holds the user's own sends while this is set; see computerUseSendBlock(). */
+  private sendBlock: string | null = null
+  private computerPageEpoch = randomUUID()
+  private taskQuestion: { messageId: string; source: TaskQuestionSource } | null = null
+  private taskQuestionBindings = new Map<string, TaskQuestionSource>()
+  private taskQuestionContext: { messageId: string; owner: TaskQuestionRequest } | null = null
+  private computerUseProtocolContext: { definitions: ComputerUseActionDefinition[]; stepToken: string | null } = { definitions: [], stepToken: null }
   private replyDiagnosticLogPath: string | null = null
   private readonly focusSendImages = new Map<string, ConversationImageAttachmentInput[]>()
+  private readonly userSubmissions = new Set<string>()
 
   /**
    * Replace the injected prompt.
@@ -654,6 +674,7 @@ export class ChatGptEmbed {
       )
     }
     contents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument) this.invalidateComputerDocument()
       if (details.isMainFrame) followGoogleAuthIdentity(details.url, details.isSameDocument, 'navigation')
     })
     contents.on('did-redirect-navigation', (details) => {
@@ -1024,29 +1045,38 @@ export class ChatGptEmbed {
     }
   }
 
+  setTaskQuestionContext(messageId: string, owner: TaskQuestionRequest): void {
+    this.taskQuestionContext = { messageId, owner: structuredClone(owner) }
+    if (this.interceptor.pendingQuestion?.messageId === messageId) this.interceptor.pendingQuestion.taskContext = structuredClone(owner)
+  }
+
   /** The page validates the question id again before touching the composer. */
-  async answerQuestion(messageId: string, answer: string): Promise<InterceptorStatus> {
+  async answerQuestion(messageId: string, answer: string, source?: TaskQuestionSource): Promise<InterceptorStatus> {
+    const rejection = (message: string, outcome: string): Error => Object.assign(new Error(message), { questionOutcome: outcome })
     if (this.interceptor.pendingQuestion?.messageId !== messageId) {
-      throw new Error('这个问题已失效，请查看当前会话。')
+      throw rejection('这个问题已失效，请查看当前会话。', 'stale')
     }
     if (typeof answer !== 'string' || !answer.trim() || answer.length > 20000) {
-      throw new Error('请输入回答（最多 20000 个字符）。')
+      throw rejection('请输入回答（最多 20000 个字符）。', 'invalid-answer')
     }
     const contents = this.liveContents()
-    if (!contents) throw new Error('模型页面尚未就绪，请稍后重试。')
+    if (!contents) throw rejection('模型页面尚未就绪，请稍后重试。', 'no-composer')
+    if (source && (!this.taskQuestion || messageId !== this.taskQuestion.messageId || !sameQuestionSource(source, this.taskQuestion.source) ||
+      source.pageEpoch !== this.computerPageEpoch || source.taskPromptGeneration !== this.taskPromptGeneration)) throw rejection('这个问题的页面上下文已失效，请查看原任务。', 'stale')
     const outcome: unknown = await contents.executeJavaScript(
-      `window.__cmdTerminalInterceptor ? window.__cmdTerminalInterceptor.answerQuestion(${JSON.stringify(messageId)}, ${JSON.stringify(answer)}) : 'no-composer'`
+      `window.__cmdTerminalInterceptor ? window.__cmdTerminalInterceptor.answerQuestion(${JSON.stringify(messageId)}, ${JSON.stringify(answer)}, ${JSON.stringify(source ?? null)}) : 'no-composer'`
     )
     console.info(`[embed:${this.platform.id}] question answer outcome=${String(outcome)} messageId=${messageId}`)
     if (outcome !== 'ok') {
       const messages: Record<string, string> = {
         busy: '模型仍在生成，或网页输入框已有内容。请稍后重试，或先处理网页中的草稿。',
-        stuck: '回答已写入网页输入框，但尚未确认发送。可重试，或关闭弹框后在网页中手动发送。',
+        stuck: source ? '回答提交尚未确认，请核对原对话；任务内回答不会自动重发或视为授权。' : '回答已写入网页输入框，但尚未确认发送。可重试，或关闭弹框后在网页中手动发送。',
         'insert-failed': '回答未能写入网页输入框，请稍后重试。',
         stale: '这个问题已失效，请查看当前会话。',
         'invalid-answer': '请输入回答（最多 20000 个字符）。'
       }
-      throw new Error(messages[String(outcome)] ?? '模型页面尚未就绪，请稍后重试。')
+      const error = new Error(messages[String(outcome)] ?? '模型页面尚未就绪，请稍后重试。') as Error & { questionOutcome?: string }
+      error.questionOutcome = String(outcome); throw error
     }
     // Do not clear a newer question that may have arrived while this send was awaited.
     if (this.interceptor.pendingQuestion?.messageId === messageId) {
@@ -1060,13 +1090,17 @@ export class ChatGptEmbed {
    * Ask a recorded question again. The page validates the JSON and reports it back as a live
    * `question`, which is what opens the app dialog; answering then works like the original.
    */
-  async replayQuestion(messageId: string, payloadJson: string): Promise<'ok' | 'busy' | 'invalid' | 'unavailable'> {
+  async replayQuestion(messageId: string, payloadJson: string, source?: TaskQuestionSource): Promise<'ok' | 'busy' | 'invalid' | 'unavailable'> {
     const contents = this.liveContents()
     if (!contents) return 'unavailable'
     const outcome: unknown = await contents.executeJavaScript(
-      `window.__cmdTerminalInterceptor && window.__cmdTerminalInterceptor.replayQuestion ? window.__cmdTerminalInterceptor.replayQuestion(${JSON.stringify(messageId)}, ${JSON.stringify(payloadJson)}) : 'unavailable'`
+      `window.__cmdTerminalInterceptor && window.__cmdTerminalInterceptor.replayQuestion ? window.__cmdTerminalInterceptor.replayQuestion(${JSON.stringify(messageId)}, ${JSON.stringify(payloadJson)}, ${JSON.stringify(source ?? null)}) : 'unavailable'`
     ).catch(() => 'unavailable')
     console.info(`[embed:${this.platform.id}] question replay outcome=${String(outcome)} messageId=${messageId}`)
+    if (outcome === 'ok' && source && (!this.taskQuestion || this.taskQuestion.messageId === messageId) && source.pageEpoch === this.computerPageEpoch) {
+      this.taskQuestion = { messageId, source: structuredClone(source) }
+      this.taskQuestionBindings?.set(messageId, structuredClone(source))
+    }
     return outcome === 'ok' || outcome === 'busy' || outcome === 'invalid' ? outcome : 'unavailable'
   }
 
@@ -1154,6 +1188,9 @@ export class ChatGptEmbed {
   }
   /** A completed task or a different conversation needs a fresh prompt on its next send. */
   resetTaskPrompt(): void {
+    this.taskQuestion = null
+    this.taskQuestionBindings?.clear()
+    this.taskQuestionContext = null
     this.interceptor.commandRecovery = null
     this.taskPromptInjected = false
     this.taskPromptGeneration += 1
@@ -1161,22 +1198,50 @@ export class ChatGptEmbed {
     // its reply when this configuration reaches the page.
     if (this.liveContents()) void this.installInterceptor(false)
   }
+  setComputerUseRecognitionEnabled(enabled: boolean): void {
+    if (this.computerUseRecognitionEnabled === enabled) return
+    this.computerUseRecognitionEnabled = enabled
+    if (this.liveContents()) void this.installInterceptor(false)
+  }
+  setSendBlock(message: string | null): void {
+    if (this.sendBlock === message) return
+    this.sendBlock = message
+    if (this.liveContents()) void this.installInterceptor(false)
+  }
+  setComputerUseProtocolContext(context: { definitions: ComputerUseActionDefinition[]; stepToken: string | null }): void {
+    if (JSON.stringify(this.computerUseProtocolContext) === JSON.stringify(context)) return
+    this.computerUseProtocolContext = structuredClone(context)
+    if (this.liveContents()) void this.installInterceptor(false)
+  }
   /** Stop the page-side task loop and publish a finished task state immediately. */
-  async endTask(): Promise<InterceptorStatus> {
+  async endTask(): Promise<InterceptorStatus & { stopRequestAcknowledged: boolean }> {
     const contents = this.liveContents()
+    // Revoke generation-bound sends and late page events before waiting for the renderer.
+    const status = this.completeTask()
+    let stopRequestAcknowledged = !contents
+    this.computerUseProtocolContext = { ...this.computerUseProtocolContext, stepToken: null }
     if (contents) {
+      let timeout: ReturnType<typeof setTimeout> | undefined
       try {
-        await contents.executeJavaScript(
-          `window.__cmdTerminalInterceptor
-             ? window.__cmdTerminalInterceptor.endTask()
-             : false`
-        )
-      } catch (error) {
-        console.warn('[embed] endTask failed:', (error as Error).message)
-      }
+        const acknowledged = await Promise.race([
+          contents.executeJavaScript(`window.__cmdTerminalInterceptor ? window.__cmdTerminalInterceptor.endTask() : false`),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error('page-stop-timeout')), 2000) })
+        ])
+        stopRequestAcknowledged = acknowledged === true
+      } catch { console.warn('[embed] page stop acknowledgement unavailable; automatic task authority has been revoked') }
+      finally { if (timeout) clearTimeout(timeout) }
     }
+    return { ...status, stopRequestAcknowledged }
+  }
 
-    return this.completeTask()
+  getComputerUsePageEpoch(): string { return this.computerPageEpoch }
+
+  private invalidateComputerDocument(): void {
+    this.computerPageEpoch = randomUUID()
+    this.taskQuestion = null
+    this.taskQuestionBindings?.clear()
+    this.taskQuestionContext = null
+    this.handlers.onComputerDocumentChanged?.()
   }
 
   /**
@@ -1194,6 +1259,10 @@ export class ChatGptEmbed {
     const config = JSON.stringify({
       enabled: this.interceptor.enabled,
       promptInjectionEnabled: this.interceptor.promptInjectionEnabled,
+      computerUseEnabled: this.platform.id === 'deepseek' && this.computerUseRecognitionEnabled,
+      computerPageEpoch: this.computerPageEpoch,
+      computerProtocol: this.computerUseProtocolContext,
+      sendBlock: this.sendBlock,
       prefix: this.interceptor.prefix,
       taskPromptInjected: this.taskPromptInjected,
       taskPromptGeneration: this.taskPromptGeneration,
@@ -1207,7 +1276,7 @@ export class ChatGptEmbed {
 
     try {
       await contents.executeJavaScript(
-        `${interceptorSource}\n;` +
+        `window.__computerUseProtocol = (${createComputerUseProtocol.toString()})();\n${interceptorSource}\n;` +
           `window.__cmdTerminalInterceptor && window.__cmdTerminalInterceptor.configure(${config});true`
       )
     } catch (error) {
@@ -1536,7 +1605,7 @@ export class ChatGptEmbed {
       const result = await contents.executeJavaScript(
         'window.__cmdTerminalInterceptor?.sendUser(' + JSON.stringify(text) + ', ' + JSON.stringify(url.pathname) + ') ?? "unavailable"'
       )
-      return ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed', 'unavailable', 'invalid'].includes(result) ? result : 'unavailable'
+      return ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed', 'unavailable', 'invalid'].includes(result) ? result : 'stuck'
     } catch { return attempted ? 'stuck' : 'unavailable' }
   }
 
@@ -1546,7 +1615,8 @@ export class ChatGptEmbed {
     if (!contents) return 'unavailable'
     try {
       this.focusSendImages.set(token, images)
-      return await sendPageFiles(contents, this.platform.id, files, token, current, signal, { userText: text, allowNewConversation: true })
+      const outcome = await sendPageFiles(contents, this.platform.id, files, token, current, signal, { userText: text, allowNewConversation: true })
+      return outcome === 'not-submitted' ? 'upload-failed' : outcome
     } catch { return 'upload-failed' }
     finally { this.focusSendImages.delete(token) }
   }
@@ -1580,6 +1650,64 @@ export class ChatGptEmbed {
       console.warn('[embed] sendRaw failed:', (error as Error).message)
       return 'no-composer'
     }
+  }
+
+  /** Strict outcome semantics for automatic desktop results; legacy sendRaw stays unchanged. */
+  async sendTaskObservation(text: string, conversationId: string, signal: AbortSignal, attachments: PreparedAttachment[], imageId: string, isCurrent: () => boolean): Promise<TaskResultSendOutcome> {
+    const contents = this.liveContents()
+    if (!contents) return 'no-composer'
+    if (this.platform.id !== 'deepseek' || attachments.length !== 1) return 'unknown'
+    const generation = this.taskPromptGeneration
+    const pageEpoch = this.computerPageEpoch
+    const current = (): boolean => {
+      if (signal.aborted || !isCurrent() || contents.isDestroyed() || generation !== this.taskPromptGeneration || pageEpoch !== this.computerPageEpoch) return false
+      try {
+        const url = new URL(contents.getURL())
+        return url.origin === new URL(this.platform.homeUrl).origin && this.platform.conversationIdFromPath(url.pathname) === conversationId
+      } catch { return false }
+    }
+    if (!current()) return 'stale'
+    const outcome = await sendPageFiles(contents, this.platform.id, attachments, 'computer-image:' + imageId, current, signal,
+      { caption: text, computerResult: { path: new URL(contents.getURL()).pathname, generation } })
+    if (outcome === 'ok') return 'ok'
+    if (signal.aborted || !current()) return 'stale'
+    if (outcome === 'not-submitted' || outcome === 'insert-failed' || outcome === 'unsupported-file-type') return 'failed'
+    return outcome === 'busy' || outcome === 'no-composer' ? outcome : 'unknown'
+  }
+
+  async sendTaskResult(text: string, conversationId: string, signal: AbortSignal, isCurrent: () => boolean = () => true): Promise<Exclude<TaskResultSendOutcome, 'failed'>> {
+    const contents = this.liveContents()
+    if (!contents) return 'no-composer'
+    const generation = this.taskPromptGeneration, pageEpoch = this.computerPageEpoch
+    const current = (): boolean => {
+      if (signal.aborted || !isCurrent() || contents.isDestroyed() || generation !== this.taskPromptGeneration || pageEpoch !== this.computerPageEpoch) return false
+      try {
+        const url = new URL(contents.getURL())
+        return url.origin === new URL(this.platform.homeUrl).origin && this.platform.conversationIdFromPath(url.pathname) === conversationId
+      } catch { return false }
+    }
+    if (!current()) return 'stale'
+    const token = `computer-result:${Date.now()}:${Math.random().toString(36).slice(2)}`
+    const cancel = (): void => {
+      if (!contents.isDestroyed()) void contents.executeJavaScript(
+        `window.__cmdTerminalInterceptor?.cancelComputerResult(${JSON.stringify(token)})`).catch(() => {})
+    }
+    signal.addEventListener('abort', cancel, { once: true })
+    try {
+      const path = new URL(contents.getURL()).pathname
+      if (!current()) return 'stale'
+      const options = { path, generation, requireIdle: true, computerResultToken: token }
+      const outcome: unknown = await contents.executeJavaScript(
+        `window.__cmdTerminalInterceptor?.sendComputerResult
+          ? window.__cmdTerminalInterceptor.sendComputerResult(${JSON.stringify(text)}, ${JSON.stringify(options)})
+          : 'no-composer'`)
+      if (!current()) return 'stale'
+      if (outcome === 'ok' || outcome === 'busy' || outcome === 'no-composer' || outcome === 'stuck' || outcome === 'insert-failed') return outcome
+      return 'unknown'
+    } catch {
+      // IPC/navigation can fail after clicking Send. It is unsafe to assume nothing was sent.
+      return !current() ? 'stale' : 'unknown'
+    } finally { signal.removeEventListener('abort', cancel) }
   }
 
   /** Page-side token, generation and path checks pin this to one unexecuted reply. */
@@ -1806,6 +1934,18 @@ export class ChatGptEmbed {
     }
     if (text.trim() !== '' || attachments.length > 0) this.handlers.onUserMessage(text, attachments, focusTurnId, 'page')
   }
+  private taskActionSource(payload: InterceptorPageEvent): import('../shared/types').TaskActionSource | undefined {
+    if (this.platform.id !== 'deepseek' || !this.computerUseRecognitionEnabled || payload.live !== true ||
+      payload.taskPromptGeneration !== this.taskPromptGeneration || typeof payload.sourceSubmissionId !== 'string' ||
+      !/^user:[a-zA-Z0-9:-]{1,150}$/.test(payload.sourceSubmissionId)) return undefined
+    try {
+      const url = new URL(this.liveContents()!.getURL())
+      if (this.platform.allowedOriginPattern.test(url.href) && payload.pagePath === url.pathname && this.platform.conversationIdFromPath(url.pathname))
+        return { sourceSubmissionId: payload.sourceSubmissionId, taskPromptGeneration: payload.taskPromptGeneration, pagePath: url.pathname }
+    } catch { /* Navigation or unavailable page cannot supply task provenance. */ }
+    return undefined
+  }
+
   private handlePageReport(message: string): void {
     if (typeof message !== 'string' || !message.startsWith(INTERCEPTOR_LOG_TAG)) return
 
@@ -1817,6 +1957,7 @@ export class ChatGptEmbed {
     }
 
     let questionAccepted: boolean | undefined
+    let computerAccepted: boolean | undefined
     switch (payload.event) {
       case 'installed':
         this.interceptor.installed = true
@@ -1864,6 +2005,17 @@ export class ChatGptEmbed {
         console.info(`[embed:${this.platform.id}] user send ${payload.trigger ?? '?'} ${payload.reason ?? 'unknown'}`)
         break
       case 'user-message': {
+        if (payload.taskPromptGeneration !== undefined && payload.taskPromptGeneration !== this.taskPromptGeneration) break
+        const submission: TaskSubmission | undefined = typeof payload.submissionId === 'string' && /^[\w:-]{1,160}$/.test(payload.submissionId) &&
+          (payload.submissionKind === 'goal' || payload.submissionKind === 'clarification')
+          ? { id: payload.submissionId, kind: payload.submissionKind } : undefined
+        const answerBinding = payload.answeredQuestionId ? this.taskQuestionBindings?.get(payload.answeredQuestionId) ??
+          (this.taskQuestion?.messageId === payload.answeredQuestionId ? this.taskQuestion.source : null) : null
+        if (submission?.kind === 'clarification' && payload.questionSource && answerBinding && validTaskQuestionSource(payload.questionSource) &&
+          payload.questionSource.pageEpoch === this.computerPageEpoch && payload.questionSource.taskPromptGeneration === this.taskPromptGeneration &&
+          sameQuestionSource(payload.questionSource, answerBinding))
+          submission.answerTo = { ...payload.questionSource, messageId: payload.answeredQuestionId! }
+        if (submission && this.userSubmissions.has(submission.id)) break
         const text = typeof payload.text === 'string' ? payload.text : ''
         const editToken = typeof payload.focusEditToken === 'string' ? payload.focusEditToken : undefined
         if (editToken && editToken !== this.focusEditToken) break
@@ -1881,11 +2033,16 @@ export class ChatGptEmbed {
             `attachmentToken=${attachmentToken ? 'yes' : 'no'}`
         )
         if (text.trim() !== '' || attachmentToken || providedImages) {
+          if (submission?.kind === 'goal') { this.taskQuestion = null; this.taskQuestionBindings?.clear(); this.taskQuestionContext = null }
           const files = Array.isArray(payload.focusFiles) ? payload.focusFiles.slice(0, 3).filter(file =>
             file && typeof file.fileName === 'string' && file.fileName.length <= 240 &&
             typeof file.mimeType === 'string' && file.mimeType.length <= 160 && Number.isSafeInteger(file.sizeBytes) && file.sizeBytes > 0) : []
-          const turnId = this.handlers.onUserStarted?.(text, files, editToken)
+          const turnId = this.handlers.onUserStarted?.(text, files, editToken, submission)
           if (editToken && !turnId) break
+          if (submission) {
+            this.userSubmissions.add(submission.id)
+            if (this.userSubmissions.size > 1000) this.userSubmissions.delete(this.userSubmissions.values().next().value!)
+          }
           if (providedImages) {
             this.focusSendImages.delete(focusSendToken!)
             this.handlers.onUserMessage(text, providedImages, turnId, 'provided')
@@ -1963,7 +2120,16 @@ export class ChatGptEmbed {
             const isNewQuestion = this.interceptor.pendingQuestion?.messageId !== messageId
             this.interceptor.pendingQuestion = {
               messageId,
-              questions
+              questions,
+              ...(this.taskQuestionContext?.messageId === messageId ? { taskContext: structuredClone(this.taskQuestionContext.owner) } : {})
+            }
+            if (isNewQuestion && payload.questionReplay !== true && payload.questionSource && validTaskQuestionSource(payload.questionSource) &&
+              payload.questionSource.pageEpoch === this.computerPageEpoch && this.taskActionSource({ ...payload, ...payload.questionSource })) {
+              this.taskQuestion = { messageId, source: structuredClone(payload.questionSource) }
+              this.taskQuestionBindings ??= new Map()
+              this.taskQuestionBindings.set(messageId, structuredClone(payload.questionSource))
+              if (this.taskQuestionBindings.size > 32) this.taskQuestionBindings.delete(this.taskQuestionBindings.keys().next().value!)
+              this.handlers.onTaskQuestion?.(this.interceptor.pendingQuestion, payload.questionSource)
             }
             console.info(`[embed:${this.platform.id}] question waiting messageId=${payload.messageId}`)
             // Capture the clarification immediately so the alternate conversation view
@@ -2003,7 +2169,33 @@ export class ChatGptEmbed {
           this.handlers.onTaskCompleted()
         }
         break
-      case 'command':
+      case 'computer-request': {
+        computerAccepted = false
+        // This is an untrusted recognition event, never an executable command or a Shell fallback.
+        const contents = this.liveContents()
+        if (this.platform.id !== 'deepseek' || !this.computerUseRecognitionEnabled || !contents || payload.live !== true ||
+          typeof payload.computerPageEpoch !== 'string' || payload.computerPageEpoch !== this.computerPageEpoch ||
+          payload.taskPromptGeneration !== this.taskPromptGeneration ||
+          typeof payload.messageId !== 'string' || !/^computer:[a-zA-Z0-9:-]{1,150}$/.test(payload.messageId) ||
+          typeof payload.sourceSubmissionId !== 'string' || !/^user:[a-zA-Z0-9:-]{1,150}$/.test(payload.sourceSubmissionId) ||
+          typeof payload.rawJson !== 'string' || !payload.rawJson.trim() || payload.rawJson.length > 64_000 ||
+          !['candidate', 'invalid'].includes(payload.computerOutcome ?? '') ||
+          ![null, 'invalid-json', 'ambiguous-request', 'oversized-request'].includes(payload.computerIssue ?? null) ||
+          (payload.computerOutcome === 'candidate' ? payload.computerIssue !== null : !payload.computerIssue)) break
+        try {
+          const url = new URL(contents.getURL())
+          if (!this.platform.allowedOriginPattern.test(url.href) || payload.pagePath !== url.pathname ||
+            !this.platform.conversationIdFromPath(url.pathname)) break
+        } catch { break }
+        computerAccepted = this.handlers.onComputerRequest?.({ messageId: payload.messageId, sourceSubmissionId: payload.sourceSubmissionId,
+          taskPromptGeneration: payload.taskPromptGeneration, pagePath: payload.pagePath!, rawJson: payload.rawJson,
+          pageEpoch: payload.computerPageEpoch,
+          outcome: payload.computerOutcome!, issue: payload.computerIssue ?? null }) === true
+        break
+      }
+      case 'command': {
+        const taskSource = this.taskActionSource(payload)
+        if (payload.sourceSubmissionId !== undefined && !taskSource) break
         if (payload.live === true) this.interceptor.commandRecovery = null
         console.info(
           `[embed:${this.platform.id}] command detected live=${payload.live === true} ` +
@@ -2019,17 +2211,22 @@ export class ChatGptEmbed {
             messageId: payload.messageId,
             command: payload.command,
             background: payload.background === true,
+            backgroundOptions: payload.backgroundOptions,
             description: payload.description ?? '',
             timeoutSeconds: Number(payload.timeoutSeconds ?? 120),
             rawJson: typeof payload.rawJson === 'string' ? payload.rawJson : undefined,
-            live: payload.live === true
+            live: payload.live === true,
+            ...(taskSource ? { taskSource } : {})
           })
         }
         break
+      }
       case 'read-files': {
+        const taskSource = this.taskActionSource(payload)
+        if (payload.sourceSubmissionId !== undefined && !taskSource) break
         const request = parseReadFilesRequest({ type: 'read_files', files: payload.files, description: payload.description })
         if (fileReadingPlatform(this.platform.id) && request && typeof payload.messageId === 'string' && payload.messageId) {
-          this.handlers.onCommand({ ...request, messageId: payload.messageId, live: payload.live === true })
+          this.handlers.onCommand({ ...request, messageId: payload.messageId, live: payload.live === true, ...(taskSource ? { taskSource } : {}) })
         }
         break
       }
@@ -2115,6 +2312,7 @@ export class ChatGptEmbed {
       viewId: contents?.id ?? null,
       conversationId: contents ? conversationIdOf(this.platform, contents.getURL()) : null,
       mainPendingQuestion: this.interceptor.pendingQuestion !== null,
+      computerAccepted,
       questionAccepted
     })
     if (replyLogPath && replyLogPath !== this.replyDiagnosticLogPath) {

@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
 import ts from 'typescript'
+import { taskContextModule } from './fixtures/task-context-module.mjs'
 
 const nodeRequire = createRequire(import.meta.url)
 function load(path, dependencies = {}) {
@@ -24,8 +25,9 @@ function load(path, dependencies = {}) {
   } })
   return exports
 }
-const protocol = load('../src/shared/background-tasks.ts')
-const { backgroundSampleCommand, parseBackgroundSample, BACKGROUND_LOG_BYTES } = load('../src/main/background-tasks.ts', { '../shared/background-tasks': protocol })
+const protocol = load('../src/shared/background-tasks.ts', { './autonomous-task': taskContextModule })
+const { backgroundSampleCommand, parseBackgroundSample, BACKGROUND_LOG_BYTES } = load('../src/main/background-tasks.ts', {
+  '../shared/background-tasks': protocol, './background-readiness': load('../src/main/background-readiness.ts') })
 
 function run(task, stdoutStamp = '', stderrStamp = '') {
   const windows = process.platform === 'win32'

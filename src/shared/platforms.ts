@@ -134,6 +134,8 @@ export interface PageAdapter {
    * behaviour on a site that marks nothing at all. Neither platform ships empty today.
    */
   assistantReplySelectors: string[]
+  /** Recognize desktop requests only on the supported control conversation. */
+  computerUseRequests?: boolean
   /** One element per turn of either role — used to locate the scroll container. */
   messageSelectors: string[]
   /**
@@ -216,6 +218,8 @@ export interface FocusPageRules {
   /** Native error text observed below a failed user message, outside its content. */
   sendFailure?: { messages: string[]; retryLabels: string[]; controlSelector: string }
   modelSettings?: {
+    newChatPath: string
+    conversationPathPattern: string
     triggerSelector: string
     modelSelector: string
     viewToggleSelector: string
@@ -661,6 +665,7 @@ export const CHATGPT_PAGE: PageAdapter = {
     // one shared Radix menu, hidden model track with aria-checked, visible
     // reasoning slider 0..2, and the trigger's selected effort even when closed.
     modelSettings: {
+      newChatPath: '/', conversationPathPattern: '^/(?:g/[^/?#]+/)?c/[^/?#]+/?$',
       triggerSelector: 'button[data-codex-intelligence-trigger][aria-label="选择 ChatGPT 模型"]',
       modelSelector: '[role="menuitemradio"]', viewToggleSelector: '[data-model-picker-view-toggle]',
       effortAttribute: 'data-selected-reasoning-effort', sliderSelector: '[data-reasoning-slider]',
@@ -733,6 +738,7 @@ export const CHATGPT_PLATFORM: ChatPlatform = {
  *    why it can be trusted where the hashed ones (`_9663006`, `_4f9bf79`) cannot.
  */
 export const DEEPSEEK_PAGE: PageAdapter = {
+  computerUseRequests: true,
   composerKind: 'textarea',
   composerSelectors: ['textarea[placeholder]', 'textarea'],
   disabledControlSelectors: ['.ds-button--disabled'],

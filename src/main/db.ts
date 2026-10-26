@@ -1,9 +1,18 @@
 import { DatabaseSync } from 'node:sqlite'
+import { parseAutonomousTask, parseTaskToolContext } from '../shared/autonomous-task'
+import type { AutonomousTask, TaskToolContext, TaskLease } from '../shared/autonomous-task'
+import { validComputerActionClaim } from '../shared/computer-actions'
+import type { ComputerActionClaim } from '../shared/computer-actions'
+import type { ComputerActionUpdate, ComputerActionRecord } from '../shared/computer-actions'
+import { insertComputerAction, writeComputerAction } from './computer-action-storage'
+import { recoverInterruptedComputerActions } from './computer-recovery'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join } from 'node:path'
 import { nativeImage } from 'electron'
 import { parseReadFilesRequest } from '../shared/file-requests'
+import { parseBackgroundOptions } from '../shared/background-tasks'
+import type { BackgroundCommandOptions } from '../shared/background-tasks'
 import { normalizeTerminalNotesDirectory } from './terminal-notes'
 import { interruptRunningCommands, recoverInterruptedExecutions } from './execution-recovery'
 import type { StoredFileReadRequest, FileDeliveryStatus } from '../shared/file-requests'
@@ -138,6 +147,71 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_messages_source
   ON conversation_messages (conversation_id, role, source_message_id)
   WHERE source_message_id IS NOT NULL;
 
+-- Goals submitted in autonomous mode; deliberately separate from executable commands.
+CREATE TABLE IF NOT EXISTS autonomous_tasks (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  platform_id TEXT NOT NULL,
+  conversation_id TEXT,
+  source_submission_id TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  UNIQUE(session_id, generation),
+  UNIQUE(session_id, platform_id, source_submission_id)
+);
+CREATE INDEX IF NOT EXISTS idx_autonomous_tasks_owner
+  ON autonomous_tasks(session_id, platform_id, conversation_id, generation DESC);
+
+-- Append-only admission journal, not an execution queue or restored authorization.
+CREATE TABLE IF NOT EXISTS computer_action_claims (
+  execution_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  platform_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  task_id TEXT NOT NULL REFERENCES autonomous_tasks(id) ON DELETE CASCADE,
+  generation INTEGER NOT NULL,
+  machine_id TEXT NOT NULL,
+  source_message_id TEXT NOT NULL,
+  grant_token TEXT NOT NULL,
+  received_token TEXT,
+  action TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('action', 'feedback')),
+  request_json TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(session_id, platform_id, conversation_id, task_id, generation, source_message_id),
+  UNIQUE(session_id, platform_id, conversation_id, task_id, generation, grant_token)
+);
+
+CREATE TABLE IF NOT EXISTS computer_actions (
+  execution_id TEXT PRIMARY KEY REFERENCES computer_action_claims(execution_id) ON DELETE CASCADE,
+  execution_state TEXT NOT NULL CHECK(execution_state IN ('queued','dispatching','completed','failed','cancelled','unknown')),
+  execution_fact TEXT NOT NULL CHECK(execution_fact IN ('not_executed','executed','unknown')),
+  delivery_state TEXT NOT NULL CHECK(delivery_state IN ('pending','uploading','sending','sent','failed','unknown','cancelled')),
+  result_json TEXT,
+  delivery_text TEXT,
+  delivery_attempts INTEGER NOT NULL DEFAULT 0,
+  active_attempt_id TEXT,
+  dispatched_at INTEGER,
+  finished_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS computer_observations (
+  execution_id TEXT NOT NULL REFERENCES computer_actions(execution_id) ON DELETE CASCADE,
+  image_id TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  mime_type TEXT NOT NULL CHECK(mime_type = 'image/png'),
+  delivery_state TEXT NOT NULL CHECK(delivery_state IN ('pending','uploading','sending','sent','failed','unknown','cancelled')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(execution_id, image_id)
+);
+-- Upgrade admission-only history conservatively; never reconstruct execution permission.
+INSERT OR IGNORE INTO computer_actions (execution_id, execution_state, execution_fact, delivery_state, created_at, updated_at)
+  SELECT execution_id, CASE WHEN kind = 'feedback' THEN 'failed' ELSE 'unknown' END,
+    CASE WHEN kind = 'feedback' THEN 'not_executed' ELSE 'unknown' END, 'unknown', created_at, created_at FROM computer_action_claims;
+
 CREATE TABLE IF NOT EXISTS focus_turns (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -190,7 +264,9 @@ CREATE TABLE IF NOT EXISTS executions (
   command         TEXT NOT NULL,
   kind            TEXT NOT NULL DEFAULT 'command',
   background      INTEGER NOT NULL DEFAULT 0,
+  background_options TEXT,
   file_request    TEXT,
+  task_context    TEXT,
   delivery_status TEXT,
   description     TEXT NOT NULL DEFAULT '',
   timeout_seconds INTEGER NOT NULL DEFAULT 120,
@@ -326,9 +402,11 @@ interface MessageAttachmentRow {
  * DeepSeek does not keep the same message identity between the streamed command event and
  * the later rendered Markdown, so matching only `executions.message_id` is not sufficient.
  * The command protocol is deliberately narrow: a JSON object with a string `command` field.
+ * DeepSeek's native DSML tool-call markup (`<｜DSML｜invoke name="…">`) is the same request.
  */
 function isAssistantCommandReply(content: string): boolean {
-  return /\{\s*["']command["']\s*:\s*["']/s.test(String(content || '')) || /"type"\s*:\s*"read_files"/.test(content)
+  return /\{\s*["']command["']\s*:\s*["']/s.test(String(content || '')) || /"type"\s*:\s*"read_files"/.test(content) ||
+    /<\s*[\s|｜]*DSML[\s|｜]*invoke\s+name\s*=/.test(content)
 }
 
 interface ExecutionRow {
@@ -336,8 +414,10 @@ interface ExecutionRow {
   conversation_id: string
   command: string
   background: number
+  background_options: string | null
   kind: string
   file_request: string | null
+  task_context?: string | null
   delivery_status: string | null
   description: string
   timeout_seconds: number
@@ -370,6 +450,11 @@ export interface ManagedSessionRecord {
 
 /** Map a raw SQLite row onto the shared shape. */
 function toExecutionRecord(row: ExecutionRow): ExecutionRecord {
+  let taskContext: TaskToolContext | null = null
+  try { taskContext = row.task_context ? parseTaskToolContext(JSON.parse(row.task_context)) : null } catch { /* Corrupt provenance blocks task-associated execution. */ }
+  if (taskContext && (taskContext.conversationId !== row.conversation_id || taskContext.tool !== (row.kind === 'read_files' ? 'read_files' : 'command'))) taskContext = null
+  let backgroundOptions: BackgroundCommandOptions | undefined
+  try { backgroundOptions = row.background_options ? parseBackgroundOptions(JSON.parse(row.background_options)) ?? undefined : undefined } catch { /* Invalid metadata never becomes a readiness check. */ }
   let fileRequest: StoredFileReadRequest | null = null
   try {
     const raw = row.file_request ? JSON.parse(row.file_request) : null
@@ -383,7 +468,8 @@ function toExecutionRecord(row: ExecutionRow): ExecutionRecord {
     conversationId: row.conversation_id,
     command: row.command,
     background: row.background === 1,
-    kind: row.kind === 'read_files' ? 'read_files' : 'command',
+    ...(backgroundOptions ? { backgroundOptions } : {}),
+    kind: row.kind === 'read_files' || row.kind === 'command' ? row.kind : 'invalid',
     fileRequest,
     deliveryStatus: row.delivery_status as FileDeliveryStatus | null,
     description: row.description,
@@ -393,7 +479,8 @@ function toExecutionRecord(row: ExecutionRow): ExecutionRecord {
     output: row.output,
     createdAt: row.created_at,
     startedAt: row.started_at,
-    finishedAt: row.finished_at
+    finishedAt: row.finished_at,
+    ...(row.task_context !== undefined && row.task_context !== null ? { taskContext } : {})
   }
 }
 
@@ -416,6 +503,8 @@ export class ConversationStore {
     this.db.exec('PRAGMA journal_mode = WAL;')
     this.db.exec(SCHEMA)
     this.migrate()
+    const computerInterrupted = recoverInterruptedComputerActions(this.db)
+    if (computerInterrupted > 0) console.info(`[db] recovered ${computerInterrupted} interrupted computer action(s) from the previous run`)
     const interrupted = recoverInterruptedExecutions(this.db)
     if (interrupted > 0) console.info(`[db] recovered ${interrupted} interrupted execution(s) from the previous run`)
     this.removeDuplicateMessageAttachments()
@@ -502,7 +591,7 @@ export class ConversationStore {
     if (!executionColumns.some((column) => column.name === 'timeout_seconds')) {
       this.db.exec('ALTER TABLE executions ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT 120')
     }
-    for (const [name, definition] of [['kind', "TEXT NOT NULL DEFAULT 'command'"], ['file_request', 'TEXT'], ['delivery_status', 'TEXT'], ['background', 'INTEGER NOT NULL DEFAULT 0']]) {
+    for (const [name, definition] of [['kind', "TEXT NOT NULL DEFAULT 'command'"], ['file_request', 'TEXT'], ['delivery_status', 'TEXT'], ['background', 'INTEGER NOT NULL DEFAULT 0'], ['background_options', 'TEXT'], ['task_context', 'TEXT']]) {
       if (!executionColumns.some((column) => column.name === name)) this.db.exec(`ALTER TABLE executions ADD COLUMN ${name} ${definition}`)
     }
     const conversationColumns = this.db
@@ -844,12 +933,18 @@ export class ConversationStore {
     conversationId: string
     command: string
     background?: boolean
+    backgroundOptions?: BackgroundCommandOptions
     fileRequest?: StoredFileReadRequest
+    taskContext?: TaskToolContext
     description: string
     timeoutSeconds: number
     status: ExecutionStatus
     createdAt: number
   }): boolean {
+    const discriminator = record as unknown as { kind?: unknown; type?: unknown }
+    if (discriminator.kind !== undefined && discriminator.kind !== (record.fileRequest ? 'read_files' : 'command') ||
+      discriminator.type !== undefined && (discriminator.type !== 'read_files' || !record.fileRequest)) throw new Error('invalid-execution-kind')
+    if (record.taskContext && (!parseTaskToolContext(record.taskContext) || record.taskContext.conversationId !== record.conversationId || record.taskContext.tool !== (record.fileRequest ? 'read_files' : 'command'))) throw new Error('Invalid task execution context')
     const existing = this.db
       .prepare('SELECT 1 AS ok FROM executions WHERE message_id = ?')
       .get(record.messageId)
@@ -858,8 +953,8 @@ export class ConversationStore {
     this.db
       .prepare(
         `INSERT INTO executions
-           (message_id, conversation_id, command, description, timeout_seconds, status, output, created_at, kind, file_request, delivery_status, background)
-         VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)`
+           (message_id, conversation_id, command, description, timeout_seconds, status, output, created_at, kind, file_request, delivery_status, background, background_options, task_context)
+         VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.messageId,
@@ -872,7 +967,9 @@ export class ConversationStore {
         record.fileRequest ? 'read_files' : 'command',
         record.fileRequest ? JSON.stringify(record.fileRequest) : null,
         record.fileRequest ? 'pending' : null,
-        record.background === true ? 1 : 0
+        record.background === true ? 1 : 0,
+        record.backgroundOptions ? JSON.stringify(record.backgroundOptions) : null,
+        record.taskContext ? JSON.stringify(record.taskContext) : null
       )
     return true
   }
@@ -900,6 +997,101 @@ export class ConversationStore {
       .all(conversationId) as unknown as Array<{ message_id: string; payload_json: string; created_at: number }>
     return rows.map((row) => ({ messageId: row.message_id, payloadJson: row.payload_json, createdAt: row.created_at }))
   }
+  autonomousTaskGeneration(sessionId: string): number {
+    const row = this.db.prepare('SELECT COALESCE(MAX(generation), 0) AS generation FROM autonomous_tasks WHERE session_id = ?')
+      .get(sessionId) as { generation: number }
+    return row.generation
+  }
+
+  latestAutonomousTask(sessionId: string, platformId: string, conversationId: string): AutonomousTask | null {
+    const row = this.db.prepare('SELECT payload FROM autonomous_tasks WHERE session_id = ? AND platform_id = ? AND conversation_id = ? ORDER BY generation DESC LIMIT 1')
+      .get(sessionId, platformId, conversationId) as { payload: string } | undefined
+    const task = row ? parseAutonomousTask(row.payload) : null
+    return task?.sessionId === sessionId && task.platformId === platformId && task.conversationId === conversationId ? task : null
+  }
+
+  autonomousTaskBySubmission(sessionId: string, platformId: string, submissionId: string): AutonomousTask | null {
+    const row = this.db.prepare('SELECT payload FROM autonomous_tasks WHERE session_id = ? AND platform_id = ? AND source_submission_id = ?')
+      .get(sessionId, platformId, submissionId) as { payload: string } | undefined
+    const task = row ? parseAutonomousTask(row.payload) : null
+    return task?.sessionId === sessionId && task.platformId === platformId && task.sourceSubmissionId === submissionId ? task : null
+  }
+
+  /** Superseding the previous goal and creating its replacement must commit together. */
+  saveAutonomousTasks(tasks: AutonomousTask[], claim?: ComputerActionClaim, update?: ComputerActionUpdate): void {
+    const rows = tasks.map(task => {
+      const encoded = JSON.stringify(task)
+      if (encoded.length > 4_000_000) throw new Error('invalid-autonomous-task')
+      const normalized = parseAutonomousTask(encoded)
+      if (!normalized) throw new Error('invalid-autonomous-task')
+      return { task: normalized, payload: JSON.stringify(normalized) }
+    })
+    if (claim) {
+      const task = rows.find(row => row.task.id === claim.taskId)?.task, step = task?.progress?.currentStep
+      if (!validComputerActionClaim(claim) || createHash('sha256').update(claim.requestJson).digest('hex') !== claim.requestHash ||
+        !task || task.status !== 'recorded' || task.sessionId !== claim.sessionId || task.platformId !== claim.platformId || task.conversationId !== claim.conversationId ||
+        task.generation !== claim.generation || task.machine.id !== claim.machineId || step?.machine?.id !== claim.machineId ||
+        step?.id !== claim.executionId || step.sourceMessageId !== claim.sourceMessageId || step.action !== claim.action || step.tool !== 'computer' ||
+        step.status !== 'queued' || step.execution !== 'not_executed' || step.delivery !== 'pending' || step.stepToken !== claim.receivedToken)
+        throw new Error('invalid-computer-action-claim')
+    }
+    if (update && rows.length && !rows.some(({ task }) => task.id === update.taskId && task.sessionId === update.sessionId &&
+      task.platformId === update.platformId && task.conversationId === update.conversationId && task.generation === update.generation &&
+      task.progress?.currentStep?.id === update.executionId)) throw new Error('computer-action-progress-mismatch')
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const statement = this.db.prepare(
+        'INSERT INTO autonomous_tasks (id, session_id, platform_id, conversation_id, source_submission_id, generation, payload) VALUES (?, ?, ?, ?, ?, ?, ?) ' +
+        'ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id, payload = excluded.payload ' +
+        'WHERE autonomous_tasks.session_id = excluded.session_id AND autonomous_tasks.platform_id = excluded.platform_id ' +
+        'AND autonomous_tasks.source_submission_id = excluded.source_submission_id AND autonomous_tasks.generation = excluded.generation ' +
+        'AND (autonomous_tasks.conversation_id IS NULL OR autonomous_tasks.conversation_id = excluded.conversation_id)'
+      )
+      for (const { task, payload } of rows) {
+        const result = statement.run(task.id, task.sessionId, task.platformId, task.conversationId, task.sourceSubmissionId, task.generation, payload)
+        if (!result.changes) throw new Error('autonomous-task-owner-mismatch')
+      }
+      if (claim) {
+        const inserted = this.db.prepare(`INSERT INTO computer_action_claims
+          (execution_id, session_id, platform_id, conversation_id, task_id, generation, machine_id, source_message_id,
+           grant_token, received_token, action, kind, request_json, request_hash, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+          .run(claim.executionId, claim.sessionId, claim.platformId, claim.conversationId, claim.taskId, claim.generation, claim.machineId,
+            claim.sourceMessageId, claim.grantToken, claim.receivedToken, claim.action, claim.kind, claim.requestJson, claim.requestHash, claim.createdAt)
+        if (!inserted.changes) throw new Error('computer-action-already-claimed')
+        insertComputerAction(this.db, claim)
+      }
+      if (update) writeComputerAction(this.db, update)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  hasComputerAction(lease: TaskLease, sourceMessageId: string, receivedToken: string | null): boolean {
+    const scope = [lease.sessionId, lease.platformId, lease.conversationId, lease.taskId, lease.generation]
+    // Separate indexed queries keep an old replay cheap even after many steps.
+    return !!this.db.prepare(`SELECT 1 FROM computer_action_claims WHERE session_id = ? AND platform_id = ? AND conversation_id = ?
+      AND task_id = ? AND generation = ? AND source_message_id = ? LIMIT 1`).get(...scope, sourceMessageId) ||
+      !!receivedToken && !!this.db.prepare(`SELECT 1 FROM computer_action_claims WHERE session_id = ? AND platform_id = ? AND conversation_id = ?
+      AND task_id = ? AND generation = ? AND grant_token = ? LIMIT 1`).get(...scope, receivedToken)
+  }
+
+  /** History only: reading these rows never recreates an executor or a step grant. */
+  listComputerActions(lease: TaskLease, limit = 50): ComputerActionRecord[] {
+    const rows = this.db.prepare(`SELECT a.*, c.session_id, c.platform_id, c.conversation_id, c.task_id, c.generation,
+      c.action, c.kind, c.machine_id, c.source_message_id FROM computer_actions a JOIN computer_action_claims c ON c.execution_id = a.execution_id
+      WHERE c.session_id = ? AND c.platform_id = ? AND c.conversation_id = ? AND c.task_id = ? AND c.generation = ?
+      ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?`)
+      .all(lease.sessionId, lease.platformId, lease.conversationId, lease.taskId, lease.generation,
+        Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 200)) : 50) as unknown as Array<Record<string, unknown>>
+    return rows.map(row => ({ sessionId: row.session_id, platformId: row.platform_id, conversationId: row.conversation_id,
+      taskId: row.task_id, generation: row.generation, executionId: row.execution_id, action: row.action, kind: row.kind, machineId: row.machine_id,
+      sourceMessageId: row.source_message_id, executionState: row.execution_state, execution: row.execution_fact, deliveryState: row.delivery_state,
+      resultJson: row.result_json, deliveryText: row.delivery_text, deliveryAttempts: row.delivery_attempts, createdAt: row.created_at, updatedAt: row.updated_at })) as ComputerActionRecord[]
+  }
+
   listFocusTurns(sessionId: string, platformId: string, conversationId: string): FocusTurn[] {
     const rows = this.db.prepare(
       'SELECT payload FROM focus_turns WHERE session_id = ? AND platform_id = ? AND conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 80'

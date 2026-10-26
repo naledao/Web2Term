@@ -1,3 +1,4 @@
+import { progressVmModules } from './fixtures/progress-vm-modules.mjs'
 // User-run offline regressions. No Electron launch or network.
 // Run: node --test tests/workspace-projects.test.mjs
 import assert from 'node:assert/strict'
@@ -19,12 +20,16 @@ function load(path, overrides = {}) {
   }).outputText
   new Script(code, { filename: path }).runInNewContext({
     module, exports: module.exports, Buffer, console,
-    require(name) { if (Object.hasOwn(overrides, name)) return overrides[name]; return require(name) }
+    require(name) { if (Object.hasOwn(progressVmModules, name)) return progressVmModules[name]; if (Object.hasOwn(overrides, name)) return overrides[name]; return require(name) }
   })
   return module.exports
 }
 const { workspaceProjectDraft, workspaceSessionOptions } = load('../src/main/workspace-projects.ts')
 const { ConversationStore } = load('../src/main/db.ts', {
+  './computer-action-storage': load('../src/main/computer-action-storage.ts'),
+  './computer-recovery': load('../src/main/computer-recovery.ts', { '../shared/autonomous-task': load('../src/shared/autonomous-task.ts') }),
+  '../shared/computer-actions': load('../src/shared/computer-actions.ts'),
+  '../shared/autonomous-task': load('../src/shared/autonomous-task.ts'),
   electron: { nativeImage: {} },
   '../shared/file-requests': { parseReadFilesRequest() { throw new Error('Unexpected file request') } },
   './terminal-notes': { normalizeTerminalNotesDirectory() { throw new Error('Unexpected terminal note') } },

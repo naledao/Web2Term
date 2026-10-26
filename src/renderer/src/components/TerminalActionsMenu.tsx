@@ -3,7 +3,7 @@ import type { JSX, ReactNode, RefObject } from 'react'
 import { Popover } from '@base-ui/react/popover'
 import './TerminalActionsMenu.css'
 
-export type TerminalActionId = 'interrupt' | 'reset' | 'close' | 'ssh' | 'web2term'
+export type TerminalActionId = 'interrupt' | 'reset' | 'close' | 'local' | 'ssh' | 'web2term'
   | 'directory' | 'edit-directory' | 'upload' | 'files'
 
 interface TerminalActionsMenuProps {
@@ -23,12 +23,13 @@ interface TerminalActionsMenuProps {
 
 type MenuPage = 'main' | 'connection'
 type IconName = 'down' | 'stop' | 'reset' | 'connection' | 'folder' | 'edit' | 'upload'
-  | 'files' | 'back' | 'next' | 'close'
+  | 'files' | 'back' | 'next' | 'close' | 'local'
 
 const ICON_PATHS: Record<IconName, string> = {
   down: 'm6 9 6 6 6-6',
   stop: 'M5 5h14v14H5z',
   reset: 'M3 11a9 9 0 1 1 2.6 7M3 4v7h7',
+  local: 'M4 4h16v12H4zM12 16v4m-4 0h8',
   connection: 'M7 3v4m10-4v4M5 7h14v4a7 7 0 0 1-14 0V7zm7 11v3',
   folder: 'M3 8V5h6l2 3h10v3M3 8h18l-3 11H1L3 8z',
   edit: 'm15 4 5 5M4 15 15 4a3.5 3.5 0 0 1 5 5L9 20H4v-5z',
@@ -99,7 +100,7 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
 
   const choose = (action: TerminalActionId): void => {
     // Dialogs and inline directory editors manage their own focus after selection.
-    suppressRestoreRef.current = action !== 'interrupt' && action !== 'reset'
+    suppressRestoreRef.current = action !== 'interrupt' && action !== 'reset' && action !== 'local'
     commitDelay()
     setOpen(false)
     onAction(action)
@@ -170,6 +171,7 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
               连接方式
             </button>
             <div className="terminal-actions__separator" />
+            <ActionButton icon={<ActionIcon name="local" />} disabled={mode === 'local'} onClick={() => choose('local')}>本地终端</ActionButton>
             <ActionButton icon={<ActionIcon name="connection" />} onClick={() => choose('ssh')}>SSH 连接</ActionButton>
             <ActionButton icon={<ActionIcon name="connection" />} onClick={() => choose('web2term')}>web2term 设备</ActionButton>
           </>}

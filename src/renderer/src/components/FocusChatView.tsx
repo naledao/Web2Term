@@ -88,6 +88,13 @@ function ProcessHint(): JSX.Element {
     <svg className="focus-process__chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="m6 4 4 4-4 4" /></svg>
   </span>
 }
+function ComposerPendingIcon(): JSX.Element {
+  return <svg className="focus-composer__pending-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false">
+    <circle cx="3" cy="8" r="1.25" />
+    <circle cx="8" cy="8" r="1.25" />
+    <circle cx="13" cy="8" r="1.25" />
+  </svg>
+}
 const labels: Record<string, string> = {
   pending: '等待确认', blocked: '等待确认', running: '正在执行', done: '执行完成',
   failed: '执行失败', timeout: '执行超时', interrupted: '已中断', skipped: '已跳过'
@@ -539,6 +546,7 @@ export default function FocusChatView(props: Props): JSX.Element {
     !hiddenMessageIds.has(message.id) &&
     !(message.sourceMessageId && represented.sources.has(message.sourceMessageId)) &&
     (message.role !== 'assistant' || !!cleanFocusAnswer(message.content).trim() || message.attachments.length > 0) &&
+    !(message.role === 'assistant' && message.sourceMessageId && recordsById.has(message.sourceMessageId)) &&
     !message.sourceMessageId?.startsWith('read-files:'))
   const entries = [...history.map(message => ({ at: message.createdAt, message, turn: null as FocusTurn | null })),
     ...turns.map(turn => ({ at: turn.createdAt, turn, message: null as ConversationMessage | null }))]
@@ -549,6 +557,8 @@ export default function FocusChatView(props: Props): JSX.Element {
   const linkedExecutions = new Set(turns.flatMap(turn => turn.executionIds))
   const unlinkedAttention = records.filter(record => !linkedExecutions.has(record.messageId) && executionNeedsAction(record, focusDelivery(record)))
   const ready = state?.ready === true
+  // Computer use waits for its Windows helper; the composer keeps the draft meanwhile.
+  const sendBlock = state?.sendBlock || ''
   const updateModelSettings = useCallback(async (kind: FocusModelSettingKind, value?: string): Promise<void> => {
     if (sendLock.current || working || editingId || !ready || !visible) return
     sendLock.current = true; settingBusy.current = true; readEpoch.current++
@@ -621,7 +631,7 @@ export default function FocusChatView(props: Props): JSX.Element {
     event.preventDefault()
     const text = draftRef.current
     const sourceFiles = filesRef.current
-    if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || working || sendFailure || !ready || state?.nativeDraft) return
+    if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || working || sendFailure || !ready || state?.nativeDraft || sendBlock) return
     sendLock.current = true
     sendCancelled.current = false
     setSending(true)
@@ -653,7 +663,8 @@ export default function FocusChatView(props: Props): JSX.Element {
           'upload-failed': '附件上传未完成，附件已保留。请到原始视图检查是否留有上传草稿后再重试。',
           'unsupported-file-type': modelLabel + ' 当前输入区不接受该附件类型，附件已保留。',
           unknown: '附件消息是否发送成功尚未确认，附件已保留。请先到原始视图核对，避免重复发送。',
-          cancelled: '发送已取消，文字和附件仍保留。'
+          cancelled: '发送已取消，文字和附件仍保留。',
+          'helper-not-ready': 'Windows 桌面助手尚未就绪，消息未发送，草稿已保留。就绪后再发送即可。'
         }
         setError(descriptions[result] || '消息未发送，草稿已保留。')
       }
@@ -746,7 +757,7 @@ export default function FocusChatView(props: Props): JSX.Element {
       <div className="focus-execution__head"><strong>{record.description || (record.kind === 'read_files' ? '读取文件' : '执行命令')}</strong><span>{labels[record.status] || record.status}</span></div>
       {actionable && ['pending', 'blocked'].includes(record.status) ? <pre>{record.command}</pre> : null}
       <details {...remembered('exec:' + record.messageId)}><summary>查看命令与输出{record.exitCode !== null ? ' · 退出码 ' + record.exitCode : ''}</summary><pre>{record.command}</pre>{record.output ? <pre className="focus-execution__output">{record.output}</pre> : null}
-        <div className="focus-execution__meta">{record.startedAt && record.finishedAt ? ((record.finishedAt - record.startedAt) / 1000).toFixed(1) + ' 秒 · ' : ''}{delivery === 'sent' ? '结果已回传' : delivery === 'pending' && record.status === 'done' ? '等待结果回传' : delivery === 'blocked' || delivery === 'failed' ? '结果尚未回传' : delivery === 'superseded' ? '结果未回传：已由后续执行接替' : ''}</div>
+        <div className="focus-execution__meta">{record.startedAt && record.finishedAt ? ((record.finishedAt - record.startedAt) / 1000).toFixed(1) + ' 秒 · ' : ''}{delivery === 'sent' ? '结果已回传' : delivery === 'background' ? '已交由后台任务处理，创建、就绪和结束结果单独回传' : delivery === 'pending' && record.status === 'done' ? '等待结果回传' : delivery === 'blocked' || delivery === 'failed' ? '结果尚未回传' : delivery === 'superseded' ? '结果未回传：已由后续执行接替' : ''}</div>
       </details>
       {actionable && ['pending', 'blocked'].includes(record.status) ? <div className="focus-chat__actions"><button type="button" disabled={!!actionId} onClick={() => void action(record.messageId)}>{actionId === record.messageId ? '处理中…' : '运行'}</button><button type="button" disabled={!!actionId} onClick={() => void action(record.messageId, true)}>跳过</button></div> : null}
       {actionable && (delivery === 'blocked' || delivery === 'failed' || ['failed', 'timeout'].includes(record.status)) ? <button type="button" onClick={props.onOpenTerminal}>打开执行控制</button> : null}
@@ -758,9 +769,17 @@ export default function FocusChatView(props: Props): JSX.Element {
     const deliveryOf = (record: ExecutionRecord): FocusDelivery | undefined => focusDelivery(record, turn.deliveries[record.messageId])
     const running = executions.some(record => record.status === 'running')
     const pending = executions.some(record => ['pending', 'blocked'].includes(record.status))
-    const deliveryPending = executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending')
-    const lastSegment = turn.segments.at(-1)
-    const answer = cleanFocusAnswer((lastSegment?.sourceMessageId ? richAnswers.get(lastSegment.sourceMessageId) : '') || lastSegment?.answer || '')
+    const deliveryPending = turn.status === 'working' && executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending')
+    // A new tool/result cycle must not move earlier prose into the process panel.
+    const answers = turn.segments.flatMap(segment => {
+      // Empty command answers are intentional. Rich content may enrich actual
+      // prose, but must never recreate a protocol response as an answer bubble.
+      if (!segment.answer.trim() ||
+        (segment.sourceMessageId && turn.executionIds.includes(segment.sourceMessageId))) return []
+      // Older versions saved raw question JSON; normalize it at display time too.
+      const text = cleanFocusAnswer((segment.sourceMessageId ? richAnswers.get(segment.sourceMessageId) : '') || segment.answer)
+      return text.trim() ? [{ cycle: segment.cycle, sourceMessageId: segment.sourceMessageId, text }] : []
+    })
     const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.parseFailures?.length
     const label = sendBlocked ? '消息发送失败 · 等待重试' : turn.commandRecovery ? (turn.status === 'working' ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : deliveryPending ? '正在回传执行结果…' :
       turn.status === 'stopped' ? '已停止 · 已有内容保留' : turn.status === 'working' ? '正在处理…' : '已回复'
@@ -777,13 +796,11 @@ export default function FocusChatView(props: Props): JSX.Element {
           <ProcessScroll follow={turn.status === 'working' && !sendBlocked}>
           {turn.segments.map(segment => {
             const segmentExecutions = executions.filter(record => turn.executionCycles?.[record.messageId] === segment.cycle)
-            const commentary = segment !== turn.segments.at(-1) ? segment.answer : ''
             // Empty cycles have margins and padding too; they must not push the placeholder down.
-            if (!segment.parts.length && !commentary && !segmentExecutions.length) return null
+            if (!segment.parts.length && !segmentExecutions.length) return null
             return <div className="focus-process__cycle" key={segment.cycle}>
               {segment.parts.map((part, index) => part.kind === 'reasoning' ? <details className="focus-reasoning" key={index} {...remembered('reasoning:' + turn.id + ':' + segment.cycle + ':' + index)}><summary>思考过程</summary><Markdown text={part.text} theme={theme} /></details> :
                 <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
-              {commentary ? <div className="focus-process__commentary"><Markdown text={commentary} theme={theme} /></div> : null}
               {segmentExecutions.map(record => renderExecution(record, deliveryOf(record), true))}
             </div>
           })}
@@ -800,8 +817,8 @@ export default function FocusChatView(props: Props): JSX.Element {
             ? <button type="button" disabled={!!actionId} onClick={() => void retryFormat(turn.commandRecovery!.token)}>重试修正</button> : null}
           <button type="button" onClick={props.onOpenTerminal}>查看执行控制</button>
         </div> : null}
-        {answer ? <div className="focus-answer" data-question-answer={turn.segments.at(-1)?.sourceMessageId ?? ''}><Markdown text={answer} theme={theme} /></div> : null}
-        {answer && turn.status !== 'working' ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(turn.id, answer)}>{copiedId === turn.id ? '已复制' : '复制回答'}</button></div> : null}
+        {answers.map(answer => <div className="focus-answer" key={answer.cycle} data-question-answer={answer.sourceMessageId ?? ''}><Markdown text={answer.text} theme={theme} /></div>)}
+        {answers.length > 0 && turn.status !== 'working' ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(turn.id, answers.map(answer => answer.text).join('\n\n'))}>{copiedId === turn.id ? '已复制' : '复制回答'}</button></div> : null}
       </div>
     </article>
   }
@@ -850,6 +867,7 @@ export default function FocusChatView(props: Props): JSX.Element {
     </div>
     <div className="focus-chat__bottom">
       {props.needsAnswer ? <div className="focus-chat__notice" role="status">{modelLabel} 需要你的回答，任务正在等待。<button type="button" onClick={props.onQuestion}>回答问题</button></div> : null}
+      {ready && sendBlock ? <div className="focus-chat__notice" role="status"><span className="focus-chat__pulse" aria-hidden="true" />{sendBlock} 可以先输入，草稿会保留。</div> : null}
       {!ready ? <div className="focus-chat__notice">网页尚未就绪。<button type="button" onClick={props.onOriginal}>切回原始视图完成登录或检查页面</button></div> : null}
       {state?.nativeDraft && !sending ? <div className="focus-chat__notice">原网页输入框中保留着内容，专注视图不会覆盖。<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       {sendFailure ? <div className="focus-send-failure" role="alert" aria-busy={actionId === 'native-send-retry'}>
@@ -889,15 +907,15 @@ export default function FocusChatView(props: Props): JSX.Element {
             if (text) insertPastedText(input, text)
           }}
           onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}
-          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composing.current && event.keyCode !== 229) { event.preventDefault(); if (!working && !sending && ready) event.currentTarget.form?.requestSubmit() } }} />
+          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composing.current && event.keyCode !== 229) { event.preventDefault(); if (!working && !sending && ready && !sendBlock) event.currentTarget.form?.requestSubmit() } }} />
         <input ref={fileInput} type="file" multiple hidden onChange={event => { addFiles([...event.currentTarget.files ?? []]); event.currentTarget.value = '' }} />
         <div className="focus-composer__tools"><div className="focus-composer__left">
           <button type="button" className="focus-composer__attachment" disabled={sending || !!editingId || changingMode !== null || settingPending !== null} onClick={() => fileInput.current?.click()} title="添加附件，也可直接粘贴截图或文件">＋ 附件</button>
           {owner.platformId === 'deepseek' ? <FocusComposerModes modes={state?.composerModes ?? []} disabled={sending || stopping || !!working || !!sendFailure || !!editingId || !ready}
             pending={changingMode} onChange={(id, active) => { void changeMode(id, active) }} /> : null}
         </div><span>{modelLabel}</span>
-          {working || sendFailure || stopping || (sending && draftFiles.length > 0) ? <button type="button" className="focus-composer__send" disabled={stopping} onClick={() => void stop()} aria-label="结束当前任务">{stopping ? '…' : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
-            <button type="submit" className="focus-composer__send" disabled={sending || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || (!draft.trim() && !draftFiles.length)} aria-label="发送消息">{sending ? '…' : '↑'}</button>}
+          {working || sendFailure || stopping || (sending && draftFiles.length > 0) ? <button type="button" className="focus-composer__send" disabled={stopping} onClick={() => void stop()} aria-label="结束当前任务">{stopping ? <ComposerPendingIcon /> : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
+            <button type="submit" className="focus-composer__send" disabled={sending || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || !!sendBlock || (!draft.trim() && !draftFiles.length)} aria-label="发送消息" title={sendBlock || undefined}>{sending ? <ComposerPendingIcon /> : '↑'}</button>}
         </div>
       </form><p className="focus-composer__hint">Enter 发送 · Shift+Enter 换行</p>
     </div>

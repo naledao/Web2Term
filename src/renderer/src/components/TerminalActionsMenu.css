@@ -1,19 +1,24 @@
 .terminal-actions__trigger {
+  --terminal-trigger-bg: #edf4fc;
+  --terminal-trigger-border: #c3d5ed;
+  --terminal-trigger-text: #25466c;
+  --terminal-trigger-chevron: #5d7da7;
   display: inline-flex;
   flex: none;
+  align-self: center;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  min-width: 88px;
-  height: 32px;
-  padding: 0 10px;
-  border: 1px solid color-mix(in srgb, var(--text-muted) 32%, var(--border));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--text) 4%, var(--bg-elevated));
-  color: var(--text);
+  gap: 8px;
+  min-width: 100px;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--terminal-trigger-border);
+  border-radius: 9px;
+  background: var(--terminal-trigger-bg);
+  color: var(--terminal-trigger-text);
   font: inherit;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
@@ -21,18 +26,29 @@
 
 .terminal-actions__trigger:hover,
 .terminal-actions__trigger[data-popup-open] {
-  border-color: color-mix(in srgb, var(--text-muted) 60%, var(--border));
-  background: color-mix(in srgb, var(--text) 7%, var(--bg-elevated));
+  border-color: color-mix(in srgb, var(--terminal-trigger-text) 24%, var(--terminal-trigger-border));
+  background: color-mix(in srgb, var(--terminal-trigger-border) 18%, var(--terminal-trigger-bg));
 }
 
 .terminal-actions__trigger[data-popup-open] {
-  background: color-mix(in srgb, var(--text) 10%, var(--bg-elevated));
+  background: color-mix(in srgb, var(--terminal-trigger-border) 32%, var(--terminal-trigger-bg));
 }
 
 .terminal-actions__trigger-chevron {
   display: inline-flex;
   flex: none;
-  color: var(--text-muted);
+  color: var(--terminal-trigger-chevron);
+}
+
+.terminal-actions__trigger[data-popup-open] .terminal-actions__trigger-chevron {
+  transform: rotate(180deg);
+}
+
+.workspace[data-theme='dark'] .terminal-actions__trigger {
+  --terminal-trigger-bg: #1b2d45;
+  --terminal-trigger-border: #3d5a7e;
+  --terminal-trigger-text: #d5e4f9;
+  --terminal-trigger-chevron: #a0bcdf;
 }
 
 .terminal-actions__trigger:focus-visible,

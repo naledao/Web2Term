@@ -1,10 +1,14 @@
+import type { EmergencyStopState, EmergencyStopResetResult } from './emergency-stop'
 import type { ToolboxInvocation } from './toolbox'
+import type { ComputerUsePreferences, ComputerUseCapability } from './computer-use'
+import type { AutonomousTaskState, TaskResumeRequest } from './autonomous-task'
+import type { TaskLease } from './autonomous-task'
+import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from './task-presentation'
 import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo, FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from './focus-chat'
 import type { FocusUiRequest } from './focus-smart-ui'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
-import { BACKGROUND_TASK_MARKER } from './background-tasks'
-import type { BackgroundTasksState } from './background-tasks'
+import type { BackgroundTasksState, BackgroundTaskStopResult, BackgroundCommandOptions } from './background-tasks'
 /**
  * Types shared between the Electron main process, the preload bridge and the
  * React renderer. Keep this module free of runtime dependencies on `electron`
@@ -84,6 +88,19 @@ export const IpcChannels = {
   interceptorEvent: 'interceptor:event',
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
+  computerUseGetCapability: 'computer-use:get-capability',
+  computerUseCapabilityChanged: 'computer-use:capability-changed',
+  emergencyStopGet: 'emergency-stop:get',
+  emergencyStopTrigger: 'emergency-stop:trigger',
+  emergencyStopReset: 'emergency-stop:reset',
+  emergencyStopChanged: 'emergency-stop:changed',
+  autonomousTaskGet: 'autonomous-task:get',
+  taskActivityGet: 'autonomous-task:activity',
+  taskObservationImageGet: 'autonomous-task:observation-image',
+  taskArtifactReveal: 'autonomous-task:artifact-reveal',
+  autonomousTaskResume: 'autonomous-task:resume',
+  autonomousTaskQuestionReopen: 'autonomous-task:question-reopen',
+  autonomousTaskChanged: 'autonomous-task:changed',
   backendAuthGet: 'backend-auth:get',
   backendLoginCode: 'backend-auth:send-code',
   backendLogin: 'backend-auth:login',
@@ -137,6 +154,7 @@ export const IpcChannels = {
   extraTerminalClose: 'extra-terminals:close',
   extraTerminalsChanged: 'extra-terminals:changed',
   backgroundTasksGet: 'background-tasks:get',
+  backgroundTaskStop: 'background-tasks:stop',
   backgroundTasksChanged: 'background-tasks:changed',
   terminalNotesGet: 'terminal-notes:get',
   terminalNotesSet: 'terminal-notes:set',
@@ -430,7 +448,7 @@ export interface AppInfo {
 /** Persisted user settings, edited from the in-app settings dialog. */
 export type AppTheme = 'light' | 'dark'
 
-export interface AppSettings {
+export interface AppSettings extends ComputerUsePreferences {
   /** Overall appearance of the application chrome. */
   theme: AppTheme
   /** web2term API base address. First use has a default; an explicit empty string clears it. */
@@ -847,7 +865,7 @@ const OUTPUT_FORMAT_SECTION = [
   '',
   '【执行方式】',
   '执行前判断任务的耗时和运行方式：预计超过 2 分钟、持续输出、等待外部事件，或需要脱离当前终端继续运行的非交互任务，使用 background_task 工具创建后台任务；短时、一次性命令直接执行。必须依赖 stdin/TTY 的明确交互任务保留前台执行。',
-  '后台任务由软件监控，结束后自动回传结果；不要自行发送命令轮询。具体启动、登记和等待约定见工具提示词中的 background_task 说明。',
+  '后台任务由软件监控：常驻服务就绪后回传启动成功，一次性任务结束后回传结果；不要自行发送命令轮询。具体约定见 background_task 工具说明。',
   '',
   '【读取结果】',
   '【上一条命令执行结果】对应你上一条请求执行的命令，回传消息不重复命令正文；以回传的结果、输出、当前目录和退出码为真实状态。',
@@ -864,13 +882,19 @@ const OUTPUT_FORMAT_SECTION = [
  */
 const backgroundTaskToolPrompt = [
   '【工具：background_task】',
-  '需要后台执行时，在 command JSON 中设置 background:true。command 直接填写实际任务命令，description 填任务名称；软件负责启动独立进程、取得 PID、创建独立日志和退出码文件，并登记监控。',
+  '在当前终端启动非交互后台任务（无 stdin/TTY）。command 直接写实际命令，软件负责启动、登记、日志和监控；不再用 Start-Process、nohup 或末尾 & 脱离进程，不手动登记。',
+  '',
   '```json',
-  '{"command":"实际任务命令","description":"任务名称","background":true,"timeout_seconds":30}',
+  '{"command":"实际命令","description":"任务名","background":true,"background_kind":"service","readiness":{"type":"auto"},"timeout_seconds":30}',
   '```',
-  '此入口支持当前本机、SSH 和 web2term 终端。后台任务 stdin 关闭，不支持 TTY 交互。不要再套 Start-Process、nohup 或 & 来脱离软件创建的任务进程；不要自己创建登记行、日志、退出码文件或读取运行中的日志。timeout_seconds 仅约束启动（最多 30 秒），任务生命周期由软件监控。',
-  '软件先发送【后台任务已创建】，携带 PID、日志路径和已取得的启动输出（stdout 与 stderr）；任务结束后发送【后台任务执行结果】。收到创建通知后根据启动信息引导用户并等待，不轮询、sleep、重复启动或提前报告【任务完成】。',
-  `兼容历史指令：已有启动脚本输出的 ${BACKGROUND_TASK_MARKER} 登记行仍会被识别；新任务使用 background:true。`
+  '',
+  'background_kind：一次性任务用 "job"，常驻服务必须用 "service"。',
+  '',
+  'service 的 readiness 默认 auto（ASP.NET Core/Vite）；tcp 配实际 port，http 配已有健康接口 url（目标机回环地址），不得臆造。',
+  '',
+  'readiness.timeout_seconds 默认 120 秒，超时保留进程；外层 timeout_seconds 只限启动，最多 30 秒，服务运行不限时。',
+  '',
+  '创建仅确认登记，之后等自动回传，勿轮询、sleep、读日志等待或重复启动。job 等【后台任务执行结果】；service 收到【后台服务已就绪】后继续原任务，不等退出。未确认就绪时按回传日志诊断；是否【任务完成】仍取决于用户目标。'
 ].join('\n')
 
 /** Keep terminal mode from turning every kind of request into a shell command. */
@@ -954,9 +978,10 @@ const readFilesToolPrompt = [
 ].join('\n')
 
 /** Only expose tools that the selected platform can execute. */
-export function toolPromptForPlatform(platformId: string, fileReading = true): string {
+export function toolPromptForPlatform(platformId: string, fileReading = true, capabilityPrompt = ''): string {
   const platform = fileReadingPlatform(platformId)
-  return platform ? [...(fileReading ? [readFilesToolPrompt] : []), backgroundTaskToolPrompt].join('\n\n') : ''
+  return platform ? [...(fileReading ? [readFilesToolPrompt] : []), backgroundTaskToolPrompt,
+    ...(capabilityPrompt ? [capabilityPrompt] : [])].join('\n\n') : ''
 }
 
 /** The parts of the prompt only true of a Windows PowerShell session. */
@@ -1214,6 +1239,8 @@ export interface PendingQuestion {
   messageId: string
   /** Questions shown one at a time in the paged app dialog. */
   questions: PendingQuestionItem[]
+  /** Main-issued owner for task-scoped dialogs. Not read from model JSON. */
+  taskContext?: import('./task-clarification').TaskQuestionRequest
 }
 
 /**
@@ -1257,6 +1284,7 @@ export interface InterceptorPageEvent {
     | 'inject-failed'
     | 'command'
     | 'read-files'
+    | 'computer-request'
     | 'parse-failed'
     | 'command-recovery'
     | 'scan'
@@ -1277,6 +1305,21 @@ export interface InterceptorPageEvent {
   attachmentToken?: string
   focusFiles?: FocusAttachmentInfo[]
   focusSendToken?: string
+  /** Correlation and origin of a confirmed human send, never an automatic result. */
+  submissionId?: string
+  submissionKind?: 'goal' | 'clarification'
+  /** Private question/answer provenance; never a model-facing questions parameter. */
+  questionSource?: import('./task-clarification').TaskQuestionSource
+  answeredQuestionId?: string
+  questionReplay?: boolean
+  /** Computer recognition provenance; not an executable tool call. */
+  sourceSubmissionId?: string
+  pagePath?: string
+  computerPageEpoch?: string
+  computerOutcome?: import('./computer-use').ComputerUsePageRequest['outcome']
+  computerIssue?: import('./computer-use').ComputerUsePageRequest['issue']
+  /** Diagnostic only; main always re-validates the raw request independently. */
+  computerProtocolCode?: import('./computer-use-protocol').ComputerUseProtocolErrorCode | null
   focusEditToken?: string
   focusModelToken?: string
   /** Capture diagnostics: where the image was found and how many were read. */
@@ -1286,7 +1329,7 @@ export interface InterceptorPageEvent {
   prefixLength?: number
   /** Present on `sent`: this confirmed user message carried the task's prompt. */
   promptInjected?: boolean
-  /** Present on `sent`: ignore confirmations from an already-ended task. */
+  /** Present on `sent` and `user-message`: ignore confirmations from an already-ended task. */
   taskPromptGeneration?: number
   /** User-send diagnostics contain flags/counts, never draft or prompt text. */
   taskPromptInjected?: boolean
@@ -1309,6 +1352,7 @@ export interface InterceptorPageEvent {
   messageId?: string
   command?: string
   background?: boolean
+  backgroundOptions?: BackgroundCommandOptions
   files?: import('./file-requests').ReadFileSpec[]
   description?: string
   /** Present on `question` events. */
@@ -1433,19 +1477,19 @@ export interface InterceptorPageEvent {
   selectedMatchesLastVisible?: boolean
   lastVisibleReplyTextLength?: number
   lastVisibleReplyCodeBlockCount?: number
-  lastVisibleReplyKind?: 'empty' | 'questions' | 'read-files' | 'command' | 'prose'
+  lastVisibleReplyKind?: 'empty' | 'questions' | 'read-files' | 'command' | 'computer' | 'prose'
   visibleAnswerMarkerCount?: number
   visibleAnswerOwnerMessageId?: string | null
   visibleAnswerTextLength?: number
   visibleAnswerCodeBlockCount?: number
-  visibleAnswerKind?: 'empty' | 'questions' | 'read-files' | 'command' | 'prose'
+  visibleAnswerKind?: 'empty' | 'questions' | 'read-files' | 'command' | 'computer' | 'prose'
   visibleCodeBlockCount?: number
   lastScanAgeMs?: number | null
   lastMutationAgeMs?: number | null
   replySettlePending?: boolean
   fileSendPending?: boolean
   codeBlockCount?: number
-  replyKind?: 'empty' | 'questions' | 'read-files' | 'command' | 'prose'
+  replyKind?: 'empty' | 'questions' | 'read-files' | 'command' | 'computer' | 'prose'
   answerMarkerFound?: boolean
   replyRootIsTurn?: boolean
   replyStreamingState?: 'true' | 'false' | 'missing' | 'unknown'
@@ -1538,9 +1582,10 @@ export interface ExecutionRecord {
   messageId: string
   conversationId: string
   command: string
-  kind: 'command' | 'read_files'
+  kind: 'command' | 'read_files' | 'invalid'
   /** Software-managed background startup rather than foreground shell execution. */
   background?: boolean
+  backgroundOptions?: BackgroundCommandOptions
   fileRequest: import('./file-requests').StoredFileReadRequest | null
   deliveryStatus: import('./file-requests').FileDeliveryStatus | null
   description: string
@@ -1553,6 +1598,8 @@ export interface ExecutionRecord {
   /** Epoch milliseconds when the command actually started running. */
   startedAt: number | null
   finishedAt: number | null
+  /** Durable provenance only; restored records do not grant live task execution. null means corrupt provenance. */
+  taskContext?: import('./autonomous-task').TaskToolContext | null
 }
 
 /** A command the injected script found in the page but main has not stored yet. */
@@ -1560,6 +1607,7 @@ export interface ParsedCommand {
   messageId: string
   command: string
   background?: boolean
+  backgroundOptions?: BackgroundCommandOptions
   description: string
   /** Absolute runtime limit selected for this command, in seconds. */
   timeoutSeconds: number
@@ -1573,11 +1621,16 @@ export interface ParsedCommand {
    * stored and shown, so the user can run it by hand.
    */
   live: boolean
+  taskSource?: TaskActionSource
 }
+
+/** Validated page-generation/route provenance, attached by the main bridge, never parsed from tool JSON. */
+export interface TaskActionSource { sourceSubmissionId: string; taskPromptGeneration: number; pagePath: string }
 
 export type ParsedReadFiles = import('./file-requests').ReadFilesRequest & {
   messageId: string
   live: boolean
+  taskSource?: TaskActionSource
 }
 
 export type ParsedAction = ParsedCommand | ParsedReadFiles
@@ -2303,9 +2356,9 @@ export interface AppApi {
   /** Save prompt injection for the current workspace session only. */
   setPromptInjectionEnabled(enabled: boolean): Promise<InterceptorStatus>
   /** Send the user's collected answers without re-injecting the prompt. */
-  answerQuestion(messageId: string, answer: string): Promise<InterceptorStatus>
+  answerQuestion(messageId: string, answer: string, owner?: import('./task-clarification').TaskQuestionRequest): Promise<InterceptorStatus>
   /** Dismiss the current question locally, preserving the task and sending no message. */
-  cancelQuestion(messageId: string): Promise<InterceptorStatus>
+  cancelQuestion(messageId: string, owner?: import('./task-clarification').TaskQuestionRequest): Promise<InterceptorStatus>
   /** Stop the current model/terminal loop and mark the task as manually ended. */
   endTask(): Promise<InterceptorStatus>
   retryCommandRecovery(owner: FocusOwner, token: number): Promise<string>
@@ -2314,6 +2367,19 @@ export interface AppApi {
   /** Persisted app settings, including the web2term backend address. */
   getSettings(): Promise<AppSettings>
   updateSettings(patch: AppSettingsPatch): Promise<AppSettings>
+  getComputerUseCapability(): Promise<ComputerUseCapability>
+  onComputerUseCapabilityChanged(listener: (capability: ComputerUseCapability) => void): () => void
+  getEmergencyStop(): Promise<EmergencyStopState>
+  triggerEmergencyStop(): Promise<EmergencyStopState>
+  resetEmergencyStop(): Promise<EmergencyStopResetResult>
+  onEmergencyStopChanged(listener: (state: EmergencyStopState) => void): () => void
+  getAutonomousTask(): Promise<AutonomousTaskState | null>
+  getTaskActivity(request: TaskLease): Promise<TaskActivity | null>
+  getTaskObservationImage(request: TaskObservationRequest): Promise<string | null>
+  revealTaskArtifact(request: TaskArtifactRequest): Promise<string>
+  resumeAutonomousTask(request: TaskResumeRequest): Promise<string>
+  reopenTaskQuestion(request: import('./task-clarification').TaskQuestionRequest): Promise<string>
+  onAutonomousTaskChanged(listener: (state: AutonomousTaskState) => void): () => void
   getBackendAuthState(): Promise<BackendAuthState>
   sendBackendLoginCode(draft: BackendLoginCodeDraft): Promise<BackendAuthResult<{ resendAfterSeconds: number }>>
   loginBackend(draft: BackendLoginDraft): Promise<BackendAuthResult<BackendAuthState>>
@@ -2404,6 +2470,7 @@ export interface AppApi {
   closeExtraTerminal(id: string): Promise<ExtraTerminalsState>
   onExtraTerminalsChanged(listener: (state: ExtraTerminalsState) => void): () => void
   getBackgroundTasks(sessionId: string): Promise<BackgroundTasksState>
+  stopBackgroundTask(sessionId: string, taskId: string): Promise<BackgroundTaskStopResult>
   onBackgroundTasksChanged(listener: (state: BackgroundTasksState, sessionId: string) => void): () => void
 
   /**

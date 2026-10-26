@@ -3,6 +3,10 @@ node_modules/
 
 # electron-vite build output
 out/
+native/**/bin/
+native/**/obj/
+tests/native-app-catalog/bin/
+tests/native-app-catalog/obj/
 
 # electron-builder output
 release/

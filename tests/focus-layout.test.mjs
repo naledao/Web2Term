@@ -17,6 +17,7 @@ function load(path, dependencies = {}) {
   return exports
 }
 const { parseFocusLayout } = load('../src/shared/focus-layout.ts')
+const { cleanFocusAnswer } = load('../src/shared/focus-chat.ts')
 const { default: FocusLayout } = load('../src/renderer/src/components/FocusLayout.tsx', { react: React, 'react/jsx-runtime': jsxRuntime })
 const source = readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8')
 const ast = ts.createSourceFile('page.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
@@ -152,6 +153,45 @@ test('Markdown stores the layout at its original position with a readable fallba
   assert.equal(marker.includes('<script>'), false)
 })
 
+test('a completion reply stays Markdown with inline paths, filenames and punctuation in the same paragraph', () => {
+  const f = fixture()
+  const code = text => new Element('code', {}, [text])
+  f.dil.childNodes = []
+  f.answer.childNodes = [f.dil]
+  append(f.dil,
+    new Element('p', { 'data-d-component': 'Text' }, ['【任务完成】']),
+    new Element('p', { 'data-d-component': 'Text' }, ['已成功解压至 ', code('/root/website-source-2/'), '。']),
+    new Element('p', { 'data-d-component': 'Text' }, ['验证通过：', code('package.json'), '、',
+      new Element('span', { 'data-markdown-copy': 'inline-code', 'data-d-component': 'Text' }, ['app/']), '、', code('public/'), ' 等项目文件均已存在。']),
+    new Element('p', { 'data-d-component': 'Text' }, ['解压过程未覆盖已有文件。']))
+  assert.equal(f.layouts({}).length, 0, 'ordinary Text components must not create a presentation tree')
+  const markdown = f.markdown({})
+  assert.equal(cleanFocusAnswer(markdown), [
+    '已成功解压至 `/root/website-source-2/`。',
+    '验证通过：`package.json`、`app/`、`public/` 等项目文件均已存在。',
+    '解压过程未覆盖已有文件。'
+  ].join('\n\n'))
+  assert.equal(markdown.includes('<!--focus-layout'), false)
+})
+
+test('an unbordered grid remains a layout while its surrounding completion prose stays Markdown', () => {
+  const f = fixture()
+  const grid = box([box([new Element('p', {}, ['文件列表'])]), box([new Element('p', {}, ['执行结果'])])],
+    { display: 'grid', gridTemplateColumns: '300px 300px', columnGap: '16px' })
+  f.dil.childNodes = []
+  f.answer.childNodes = [f.dil]
+  append(f.dil, new Element('p', { 'data-d-component': 'Text' }, ['【任务完成】']), grid,
+    new Element('p', { 'data-d-component': 'Text' }, ['文件已准备好。']))
+  const layouts = f.layouts({})
+  assert.equal(layouts.length, 1)
+  assert.equal(layouts[0].element, grid, 'capture the grid rather than swallowing the whole reply')
+  assert.ok(parseFocusLayout(JSON.stringify(layouts[0].data)))
+  const markdown = cleanFocusAnswer(f.markdown({}))
+  assert.equal(markdown.includes('【任务完成】'), false)
+  assert.equal((markdown.match(/<!--focus-layout /g) ?? []).length, 1)
+  assert.match(markdown, /文件已准备好。$/)
+})
+
 test('native DIL strong spans retain full-sentence and inline emphasis outside layout cards', () => {
   const f = fixture()
   const strong = text => new Element('span', { 'data-d-component': 'Text', 'data-d-default-strong': '' }, [text], { fontWeight: '600' })
@@ -247,7 +287,9 @@ test('an icon list within a dashboard stays in that dashboard, while ordinary te
   const h = fixture(), cards = stageList()
   cards.css.display = 'grid'
   append(h.dil, cards)
-  assert.equal(h.layouts({}).length, 1)
+  const layouts = h.layouts({})
+  assert.equal(layouts.length, 2)
+  assert.equal(layouts.find(layout => layout.element === cards).data.kind, undefined, 'a grid keeps its layout without becoming an icon list')
 })
 
 test('layout parser rejects executable tags, event attributes, remote references, unsafe CSS and excessive depth', () => {

@@ -1,14 +1,16 @@
+import { EmergencyStopController } from './emergency-stop'
+import { EMERGENCY_STOP_SHORTCUT } from '../shared/emergency-stop'
 import { ToolboxRouter } from './toolbox-router'
 import { TOOLBOX_METHODS } from '../shared/toolbox'
 import { DEFAULT_CHAT_VIEW, supportsFocusView } from '../shared/focus-chat'
 import type { FocusOwner } from '../shared/focus-chat'
 import type { ToolboxInvocation, ToolboxMethod } from '../shared/toolbox'
 import type { AppApi } from '../shared/types'
-import type { BackgroundTasksState } from '../shared/background-tasks'
+import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/background-tasks'
 import { join, posix } from 'node:path'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, Tray } from 'electron'
 import { APP_ID, APP_NAME, configureAppIdentity } from './app-identity'
 import { taskbarCountIcon } from './taskbar-badge'
 import { LINUX_AGENT_FILE_NAME, LinuxAgentDownloader } from './linux-agent-download'
@@ -29,6 +31,14 @@ import { sshWorkingDirectory } from '../shared/ssh-directory'
 import { nodeFallback } from './environment'
 import { DEFAULT_BACKEND_URL, normalizeBackendUrl, readBackendUrl } from '../shared/backend-url'
 import { BackendAuthService } from './backend-auth'
+import { DEFAULT_COMPUTER_USE_PREFERENCES, resolveComputerUseCapability } from '../shared/computer-use'
+import { parseComputerUsePreferencesPatch, readComputerUsePreferences, saveComputerUsePreferences } from './computer-use-settings'
+import { WindowsHelperManager } from './windows-helper'
+import { writeDesktopActivityDiagnostic } from './desktop-activity-log'
+import { WindowsAppCatalog } from './windows-app-catalog'
+import { WindowsObservationService } from './windows-observation'
+import { DesktopCoordinator } from './desktop-coordinator'
+import { WindowsWindowCatalog } from './windows-window-catalog'
 import { Web2termConnection } from './web2term-connection'
 import { disconnectUnusedWeb2term, parseWeb2termBinding, restoreWeb2termSessions, web2termHostId } from './web2term-shell'
 import type { Web2termSessionBinding } from './web2term-shell'
@@ -167,8 +177,38 @@ let store: ConversationStore | null = null
 let backendAuth: BackendAuthService | null = null
 let web2termConnection: Web2termConnection | null = null
 let localMachineId = ''
-let settings: AppSettings = { theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW }
+let settings: AppSettings = { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW }
 const runtimes = new Map<string, SessionRuntime>()
+const windowsHelper = new WindowsHelperManager({ executablePath: app.isPackaged
+  ? join(process.resourcesPath, 'windows-helper', 'Web2Term.WindowsHelper.exe')
+  : join(app.getAppPath(), 'out', 'windows-helper', 'Web2Term.WindowsHelper.exe') })
+const windowsApps = new WindowsAppCatalog(windowsHelper)
+const desktopWindows = new WindowsWindowCatalog(windowsHelper)
+const desktopObservations = new WindowsObservationService(windowsHelper, desktopWindows)
+const desktopCoordinator = new DesktopCoordinator(() => desktopObservations.invalidateAllInputs())
+desktopCoordinator.subscribe(() => {
+  const state = desktopCoordinator.getState()
+  windowsHelper.setDesktopOwner(state.draining ? null : state.owner)
+})
+windowsHelper.subscribeDesktopActivity(event => {
+  desktopObservations.invalidateAllInputs()
+  const takeover = event.kind === 'human-input' && desktopCoordinator.takeHumanControl(event.owner)
+  writeDesktopActivityDiagnostic(event, takeover)
+  if (takeover) void runtimes.get(event.owner.sessionId)?.humanTakeover(event.owner).catch(() => {
+    // The task gate is already closed. Do not log native input, titles or task contents.
+    console.warn('[desktop] human takeover cancellation acknowledgement incomplete')
+  })
+})
+windowsHelper.subscribe(() => {
+  const state = windowsHelper.getState()
+  desktopCoordinator.setNativeBlocked(state.pid !== null && state.phase !== 'ready')
+})
+const emergencyStop = new EmergencyStopController({ desktop: desktopCoordinator, helper: windowsHelper,
+  sessions: () => runtimes.values(), changed: state => {
+    if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.emergencyStopChanged, state)
+  } })
+windowsHelper.subscribe(() => emergencyStop.refresh())
+desktopCoordinator.subscribe(() => emergencyStop.refresh())
 let currentSessionId: string | null = null
 const unseenCompletedTasks = new Map<string, number>()
 const pendingQuestionsBySession = new Map<string, Map<string, number>>()
@@ -731,12 +771,12 @@ function selectSession(id: string, openSshDialog = false): boolean {
 }
 
 function runtimeForEvent(event: IpcMainEvent | IpcMainInvokeEvent): SessionRuntime | null {
-  if (!managerWindow || managerWindow.isDestroyed() || event.sender !== managerWindow.webContents) return null
+  if (!managerWindow || managerWindow.isDestroyed() || event.sender !== managerWindow.webContents || event.senderFrame !== event.sender.mainFrame) return null
   return currentSessionId ? runtimes.get(currentSessionId) ?? null : null
 }
 
 function isManagerEvent(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
-  return Boolean(managerWindow && !managerWindow.isDestroyed() && event.sender === managerWindow.webContents)
+  return Boolean(managerWindow && !managerWindow.isDestroyed() && event.sender === managerWindow.webContents && event.senderFrame === event.sender.mainFrame)
 }
 /**
  * One Nacos view per session, retained while that session's tool is minimized.
@@ -805,6 +845,21 @@ function createSession(
   const initialMode: ExecutionMode = savedMode === 'auto' ? 'auto' : 'manual'
   let runtime: SessionRuntime | null = null
   runtime = new SessionRuntime({
+    windowsHelper,
+    automationBlocked: () => emergencyStop.isActive(),
+    onAutomationSafetyChanged: () => emergencyStop.refresh(),
+    computerUseObservations: desktopObservations,
+    desktopCoordinator,
+    registerComputerUseTools: tool => {
+      const unregisterApps = windowsApps.register(tool)
+      try {
+        const unregisterWindows = desktopWindows.register(tool)
+        try {
+          const unregisterObservations = desktopObservations.register(tool)
+          return () => { unregisterObservations(); unregisterWindows(); unregisterApps() }
+        } catch (error) { unregisterWindows(); throw error }
+      } catch (error) { unregisterApps(); throw error }
+    },
     web2term: binding && web2termConnection ? { binding, connection: web2termConnection } : undefined,
     platform,
     id: restored?.id,
@@ -843,6 +898,7 @@ function createSession(
     onEmbedReady: () => closeSplashWindow()
   })
   runtimes.set(runtime.id, runtime)
+  emergencyStop.sessionAdded(runtime)
   if (runtime.web2term && web2termConnection) {
     const shell = runtime.web2term
     const connection = web2termConnection
@@ -1432,15 +1488,15 @@ function registerIpcHandlers(): void {
     if (!runtime || typeof enabled !== 'boolean') throw new Error('当前会话不可用。')
     return runtime.setPromptInjectionEnabled(enabled)
   })
-  ipcMain.handle(IpcChannels.interceptorAnswerQuestion, async (event, messageId: string, answer: string): Promise<InterceptorStatus> => {
+  ipcMain.handle(IpcChannels.interceptorAnswerQuestion, async (event, messageId: string, answer: string, owner): Promise<InterceptorStatus> => {
     const runtime = runtimeForEvent(event)
     if (!runtime || typeof messageId !== 'string' || typeof answer !== 'string') throw new Error('当前会话不可用。')
-    return runtime.embed.answerQuestion(messageId, answer)
+    return runtime.answerQuestion(messageId, answer, owner)
   })
-  ipcMain.handle(IpcChannels.interceptorCancelQuestion, async (event, messageId: string): Promise<InterceptorStatus> => {
+  ipcMain.handle(IpcChannels.interceptorCancelQuestion, async (event, messageId: string, owner): Promise<InterceptorStatus> => {
     const runtime = runtimeForEvent(event)
     if (!runtime || typeof messageId !== 'string') throw new Error('当前会话不可用。')
-    return runtime.embed.cancelQuestion(messageId)
+    return runtime.cancelQuestion(messageId, owner)
   })
   ipcMain.handle(IpcChannels.interceptorEndTask, async (event): Promise<InterceptorStatus> => {
     const runtime = runtimeForEvent(event)
@@ -1517,10 +1573,9 @@ function registerIpcHandlers(): void {
     /*
      * Logged on BOTH sides of the await, because the failure this instruments is a HANG.
      *
-     * `shell.interrupt()` waits for the process to close and has no timeout, so if 'close'
-     * never arrives the whole promise chain stays unsettled: no IPC reply, no state update, and
-     * a 中断 button that does nothing at all — with nothing in any log to say why. An
-     * "interrupt: requested" with no matching "interrupt: completed" is precisely that case.
+     * Remote interruption reports confirmation failures after its deadline. Keep
+     * both messages so a missing IPC reply can still be distinguished from a
+     * command whose remote stop was not confirmed.
      */
     console.info('[interrupt] requested from the renderer')
     const sshState = runtime.ssh.getState()
@@ -1574,6 +1629,13 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.backgroundTasksGet, (event, sessionId: string): BackgroundTasksState => {
     const runtime = runtimeForEvent(event)
     return runtime?.id === sessionId ? runtime.backgroundTasks.getState() : { tasks: [] }
+  })
+  ipcMain.handle(IpcChannels.backgroundTaskStop, async (event, sessionId: string, taskId: string): Promise<BackgroundTaskStopResult> => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime || runtime.id !== sessionId || typeof taskId !== 'string' || taskId.length > 128) {
+      return { ok: false, message: '后台任务不属于当前工作区。' }
+    }
+    return runtime.backgroundTasks.stop(taskId)
   })
   ipcMain.handle(IpcChannels.extraTerminalCreate, (event): { state: ExtraTerminalsState; id: string } | null =>
     runtimeForEvent(event)?.extraTerminals.create() ?? null)
@@ -1703,10 +1765,47 @@ function registerIpcHandlers(): void {
     return runtime.ssh.getState()
   })
 
-  ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { theme: 'light', backendUrl: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW })
+  ipcMain.handle(IpcChannels.computerUseGetCapability, (event) => {
+    if (!isManagerEvent(event) || event.senderFrame !== event.sender.mainFrame) throw new Error('当前页面无法读取桌面能力配置。')
+    return runtimeForEvent(event)?.getComputerUseCapability() ?? resolveComputerUseCapability(settings, {
+      sessionId: null, platformId: '', hostPlatform: process.platform, hostArch: process.arch, connection: 'none'
+    })
+  })
+  const requireEmergencyStopClient = (event: IpcMainInvokeEvent): void => {
+    if (!isManagerEvent(event) || event.senderFrame !== event.sender.mainFrame) throw new Error('只有客户端主界面可以操作全局急停。')
+  }
+  ipcMain.handle(IpcChannels.emergencyStopGet, event => { requireEmergencyStopClient(event); return emergencyStop.getState() })
+  ipcMain.handle(IpcChannels.emergencyStopTrigger, event => { requireEmergencyStopClient(event); return emergencyStop.trigger('button') })
+  ipcMain.handle(IpcChannels.emergencyStopReset, event => { requireEmergencyStopClient(event); return emergencyStop.reset() })
+  ipcMain.handle(IpcChannels.autonomousTaskGet, (event) => {
+    if (!isManagerEvent(event) || event.senderFrame !== event.sender.mainFrame) throw new Error('当前页面无法读取 computer use 任务上下文。')
+    return runtimeForEvent(event)?.getAutonomousTask() ?? null
+  })
+  const requireTaskPresentationClient = (event: IpcMainInvokeEvent): void => {
+    if (!isManagerEvent(event) || event.senderFrame !== event.sender.mainFrame) throw new Error('只有客户端主界面可以查看任务进度与产物。')
+  }
+  ipcMain.handle(IpcChannels.taskActivityGet, (event, request) => {
+    requireTaskPresentationClient(event)
+    return runtimeForEvent(event)?.getTaskActivity(request) ?? null
+  })
+  ipcMain.handle(IpcChannels.taskObservationImageGet, (event, request) => {
+    requireTaskPresentationClient(event)
+    return runtimeForEvent(event)?.getTaskObservationImage(request) ?? null
+  })
+  ipcMain.handle(IpcChannels.taskArtifactReveal, (event, request) => {
+    requireTaskPresentationClient(event)
+    return runtimeForEvent(event)?.revealTaskArtifact(request) ?? '原会话已关闭。'
+  })
+  ipcMain.handle(IpcChannels.autonomousTaskResume, (event, request) => {
+    if (!isManagerEvent(event) || event.senderFrame !== event.sender.mainFrame) throw new Error('当前页面无法恢复 computer use 任务。')
+    return runtimeForEvent(event)?.resumeAutonomousTask(request) ?? '原会话已关闭。'
+  })
+  ipcMain.handle(IpcChannels.autonomousTaskQuestionReopen, (event, request) => runtimeForEvent(event)?.reopenTaskQuestion(request) ?? '原会话已关闭。')
+  ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW })
   ipcMain.handle(IpcChannels.settingsUpdate, async (event, patch: AppSettingsPatch): Promise<AppSettings> => {
-    if (!isManagerEvent(event) || !store) return { ...settings }
+    if (!isManagerEvent(event) || event.senderFrame !== event.sender.mainFrame || !store) return { ...settings }
     // Validate before applying any setting so an invalid URL cannot partly save a patch.
+    const computerUsePatch = parseComputerUsePreferencesPatch(patch)
     const backendUrl = patch?.backendUrl === undefined ? undefined : normalizeBackendUrl(patch.backendUrl)
     if (patch?.theme === 'light' || patch?.theme === 'dark') {
       settings = { ...settings, theme: patch.theme }
@@ -1789,6 +1888,11 @@ function registerIpcHandlers(): void {
       if (backendAuth) backendAuth.setBackendUrl(backendUrl)
       else store.setSetting(SETTING_BACKEND_URL, backendUrl)
       settings = { ...settings, backendUrl }
+    }
+    if (Object.keys(computerUsePatch).length) {
+      saveComputerUsePreferences(store, computerUsePatch)
+      settings = { ...settings, ...computerUsePatch }
+      for (const runtime of runtimes.values()) runtime.refreshComputerUseCapabilities()
     }
     return { ...settings }
   })
@@ -1887,6 +1991,9 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     registerPdfAssetHandler()
+    let emergencyShortcutRegistered = false
+    try { emergencyShortcutRegistered = globalShortcut.register(EMERGENCY_STOP_SHORTCUT, () => { emergencyStop.trigger('shortcut') }) } catch { /* Visible client button remains available. */ }
+    emergencyStop.shortcutStatus(emergencyShortcutRegistered)
     if (process.platform === 'win32') app.setAppUserModelId(APP_ID)
 
     if (appLogFile) {
@@ -1919,6 +2026,7 @@ if (!app.requestSingleInstanceLock()) {
     if (purged > 0) console.info(`[db] removed ${purged} non-conversation row(s)`)
 
     settings = {
+      ...readComputerUsePreferences(conversationStore),
       theme: conversationStore.getSetting(SETTING_THEME) === 'dark' ? 'dark' : 'light',
       backendUrl: readBackendUrl(conversationStore.getSetting(SETTING_BACKEND_URL)),
       embedProxy: readEmbedProxies(conversationStore),
@@ -2010,11 +2118,17 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', () => {
   quitting = true
+  desktopCoordinator.dispose()
+  desktopWindows.dispose()
+  desktopObservations.dispose()
+  windowsApps.dispose()
+  windowsHelper.dispose()
   for (const runtime of runtimes.values()) persistManagedSession(runtime)
   web2termConnection?.dispose()
 })
 
 app.on('will-quit', () => {
+  globalShortcut.unregister(EMERGENCY_STOP_SHORTCUT)
   destroySplashWindow()
   tray?.destroy()
   tray = null

@@ -383,3 +383,53 @@ test('a chart whose only label is a type word ("图表 图表") gets no title of
   assert.match(text, /> 📊 图表（可在原始视图中交互查看）/)
   assert.equal(text.includes('图表 图表'), false)
 })
+
+// DeepSeek's native tool-call markup, as its page renders it: the bars come out as `| |`
+// with spaces, the wrapper loses its `function_` prefix, and Windows paths are unescaped.
+const dsmlTurn = (key, lines) => element('div', { 'data-virtual-list-item-key': key }, [
+  element('div', { class: 'ds-assistant-message-main-content' }, lines.map((line) => element('p', {}, line)))
+])
+
+test('a DSML read_files call from the DeepSeek page becomes a read_files request', () => {
+  const app = fixture([userTurn('1'), dsmlTurn('2', [
+    '< | | DSML | | calls>',
+    '< | | DSML | | invoke name="read_files">',
+    '< | | DSML | | parameter name="files" string="false">[{"path": "C:\Users\ksdy\qq_typed3.png"}]</ | | DSML | | parameter>',
+    '< | | DSML | | parameter name="description" string="true">查看第三次粘贴后的QQ窗口截图</ | | DSML | | parameter>',
+    '</ | | DSML | | invoke>',
+    '</ | | DSML | | calls>'
+  ])])
+  app.controller.checkNow()
+  const reads = app.events.filter((event) => event.event === 'read-files')
+  assert.equal(reads.length, 1)
+  assert.deepEqual(reads[0].files, [{ path: 'C:\Users\ksdy\qq_typed3.png' }])
+  assert.equal(reads[0].description, '查看第三次粘贴后的QQ窗口截图')
+  assert.equal(app.events.some((event) => event.event === 'parse-failed'), false)
+})
+
+test('a canonical DSML command call runs as a command with its typed parameters', () => {
+  const app = fixture([userTurn('1'), dsmlTurn('2', [
+    '<｜DSML｜function_calls>',
+    '<｜DSML｜invoke name="command">',
+    '<｜DSML｜parameter name="command" string="true">Get-ChildItem "C:\Users\ksdy"</｜DSML｜parameter>',
+    '<｜DSML｜parameter name="description" string="true">列出目录</｜DSML｜parameter>',
+    '<｜DSML｜parameter name="timeout_seconds" string="false">30</｜DSML｜parameter>',
+    '</｜DSML｜invoke>',
+    '</｜DSML｜function_calls>'
+  ])])
+  app.controller.checkNow()
+  assert.deepEqual(app.commands().map((event) => [event.command, event.description, event.timeoutSeconds]),
+    [['Get-ChildItem "C:\Users\ksdy"', '列出目录', 30]])
+})
+
+test('a DSML call to an unknown tool is not turned into a request', () => {
+  const app = fixture([userTurn('1'), dsmlTurn('2', [
+    '<｜DSML｜function_calls>',
+    '<｜DSML｜invoke name="web_search">',
+    '<｜DSML｜parameter name="query" string="true">天气</｜DSML｜parameter>',
+    '</｜DSML｜invoke>',
+    '</｜DSML｜function_calls>'
+  ])])
+  app.controller.checkNow()
+  assert.equal(app.events.some((event) => ['command', 'read-files', 'question'].includes(event.event)), false)
+})

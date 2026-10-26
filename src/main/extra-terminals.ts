@@ -140,7 +140,10 @@ export class ExtraTerminals {
       return
     }
     this.appendLine(id, { kind: 'notice', text: '正在中断当前命令…' })
-    await shell.interrupt()
+    try { await shell.interrupt() }
+    catch (error) {
+      this.appendLine(id, { kind: 'error', text: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   close(id: string): ExtraTerminalsState {
