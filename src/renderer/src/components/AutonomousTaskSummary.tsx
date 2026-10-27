@@ -1,6 +1,7 @@
 import type { AutonomousTaskState } from '@shared/autonomous-task'
 import { useState } from 'react'
 import { PROGRESS_STOP_MESSAGES } from '@shared/computer-progress'
+import { supportsComputerUsePlatform } from '@shared/computer-use'
 import { pendingTaskQuestion } from '@shared/task-clarification'
 import TaskActivityPanel, { TaskArtifactEntry } from './TaskActivityPanel'
 import './AutonomousTaskSummary.css'
@@ -18,7 +19,7 @@ function TaskDetails({ state }: { state: AutonomousTaskState }) {
   const [activityVisible, setActivityVisible] = useState(false)
   const question = task ? pendingTaskQuestion(task) : null
   const uncertainAnswer = task?.status === 'recorded' && question?.state === 'uncertain'
-  const canResume = state.platformId === 'deepseek' && !!state.conversationId && task && !task.control?.halted &&
+  const canResume = supportsComputerUsePlatform(state.platformId) && !!state.conversationId && task && !task.control?.halted &&
     (task.status === 'interrupted' || task.status === 'stopped' || uncertainAnswer || task.status === 'recorded' && task.progress?.phase === 'blocked')
   const openQuestion = async () => {
     if (!task || !question || !state.conversationId || openingQuestion) return

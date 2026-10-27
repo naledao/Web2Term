@@ -101,9 +101,9 @@ test('only registered actions become available and capability snapshots do not e
   assert.equal(shared.resolveComputerUseCapability(preferences, local, tool.definitions()).available, false)
 })
 
-test('disabled, remote, non-DeepSeek and unsupported hosts do not publish registered desktop actions', () => {
+test('disabled, remote, unsupported sites and unsupported hosts do not publish registered desktop actions', () => {
   const f = fixture()
-  for (const context of [{ connection: 'ssh' }, { connection: 'web2term' }, { platformId: 'chatgpt' },
+  for (const context of [{ connection: 'ssh' }, { connection: 'web2term' }, { platformId: 'claude' },
     { hostPlatform: 'darwin' }, { hostArch: 'arm64' }, { sessionId: null, connection: 'none' }]) {
     const capability = shared.resolveComputerUseCapability(preferences, { ...local, ...context }, f.tool.definitions())
     assert.equal(capability.available, false)

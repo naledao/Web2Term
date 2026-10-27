@@ -68,10 +68,10 @@ export default function ComputerUseSettings({ preferences, onChange, capability,
       <p className="computer-use-settings__hint">computer 动作返回后，等待这么多秒再把结果发给 AI，便于界面先稳定下来；0 表示立即回传。每个结果只等一次，重试回传不再等待，动作也不会重做。终端命令的回传等待仍在终端操作菜单中单独设置。</p>
     </fieldset>
     <dl className="computer-use-settings__facts">
-      <div><dt>首版支持范围</dt><dd>DeepSeek · Windows x64 · 本机会话</dd></div>
+      <div><dt>支持范围</dt><dd>DeepSeek、ChatGPT · Windows x64 · 本机会话</dd></div>
       <div><dt>当前客户端</dt><dd>{context ? `${host} ${context.hostArch}` : '正在读取…'}</dd></div>
       <div><dt>当前会话</dt><dd>{context ? `${platformById(context.platformId)?.label ?? '未选择模型'} · ${connection}` : '正在读取…'}</dd></div>
-      <div><dt>视觉理解</dt><dd>DeepSeek 网页视觉能力已确认，无需额外 API Key。</dd></div>
+      <div><dt>视觉理解</dt><dd>截图直接作为图片发给网页端模型，无需额外 API Key。</dd></div>
     </dl>
     {error ? <p className="settings-feedback" role="alert">{error}</p>
       : <p className="computer-use-settings__state" role="status">{preview?.message ?? '正在读取当前环境的能力状态…'}</p>}

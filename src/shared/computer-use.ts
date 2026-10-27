@@ -135,11 +135,19 @@ export function normalizeComputerUsePreferences(value: unknown): ComputerUsePref
   }
 }
 
+/**
+ * Sites whose page adapter recognizes desktop requests (`PageAdapter.computerUseRequests`).
+ * Kept here rather than read from platforms.ts so this module stays dependency-free for the VM tests.
+ */
+export const COMPUTER_USE_PLATFORM_IDS: readonly string[] = ['deepseek', 'chatgpt']
+export const supportsComputerUsePlatform = (platformId: string | null | undefined): boolean =>
+  typeof platformId === 'string' && COMPUTER_USE_PLATFORM_IDS.includes(platformId)
+
 const MESSAGES: Record<ComputerUseReason, string> = {
   'emergency-stopped': '全局急停已锁定自动操作，请在客户端明确解除。',
-  'no-session': '请在 DeepSeek 本机会话中查看桌面能力。',
-  'remote-session': '远程会话暂不提供本机桌面控制，请使用 DeepSeek 本机会话。',
-  'unsupported-platform': '桌面能力首版仅适配 DeepSeek，请切换到 DeepSeek 本机会话。',
+  'no-session': '请在 DeepSeek 或 ChatGPT 本机会话中查看桌面能力。',
+  'remote-session': '远程会话暂不提供本机桌面控制，请使用 DeepSeek 或 ChatGPT 本机会话。',
+  'unsupported-platform': '桌面能力目前仅适配 DeepSeek 和 ChatGPT，请切换到其中一个本机会话。',
   'unsupported-os': '桌面能力首版仅支持 Windows x64 本机环境。',
   'unsupported-arch': '当前客户端架构暂不支持桌面控制，首版仅支持 Windows x64。',
   'computer-use-disabled': 'computer use 已关闭。',
@@ -218,7 +226,7 @@ export function resolveComputerUseCapability(preferences: unknown, context: Comp
   const saved = normalizeComputerUsePreferences(preferences)
   const scopeReason: ComputerUseReason | null = context.connection === 'none' || !context.sessionId ? 'no-session'
     : context.connection !== 'local' ? 'remote-session'
-      : context.platformId !== 'deepseek' ? 'unsupported-platform'
+      : !supportsComputerUsePlatform(context.platformId) ? 'unsupported-platform'
         : context.hostPlatform !== 'win32' ? 'unsupported-os'
           : context.hostArch !== 'x64' ? 'unsupported-arch' : null
   const enabled = scopeReason === null && saved.computerUseEnabled && saved.desktopControlEnabled

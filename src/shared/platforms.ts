@@ -136,6 +136,11 @@ export interface PageAdapter {
   assistantReplySelectors: string[]
   /** Recognize desktop requests only on the supported control conversation. */
   computerUseRequests?: boolean
+  /**
+   * Path of a saved conversation, as a RegExp source. A desktop task started on the new-chat page
+   * (`/`) binds once to the route its first send creates; any other path change ends the wait.
+   */
+  conversationPathPattern?: string
   /** One element per turn of either role — used to locate the scroll container. */
   messageSelectors: string[]
   /**
@@ -539,6 +544,12 @@ const SIDEBAR_SCRIPT_BY_DEFAULT = (linkSelector: string, pathPrefix: string): st
  * the reply marker rejects them; if it does not, they were never in the list.
  */
 export const CHATGPT_PAGE: PageAdapter = {
+  /*
+   * Desktop requests use the same reply reads as commands. A reply is new when its
+   * `data-chatgpt-selection-message-id` was absent before the send (`computerBaselineOf`).
+   */
+  computerUseRequests: true,
+  conversationPathPattern: '^/(?:g/[^/?#]+/)?c/[^/?#]+/?$',
   composerKind: 'contenteditable',
   // The sidebar selector CHATGPT_PLATFORM.sidebarScript reads.
   conversationLinkSelectors: ['a[href^="/c/"]'],
@@ -762,6 +773,7 @@ export const CHATGPT_PLATFORM: ChatPlatform = {
  */
 export const DEEPSEEK_PAGE: PageAdapter = {
   computerUseRequests: true,
+  conversationPathPattern: '^/a/chat/s/[^/]+/?$',
   composerKind: 'textarea',
   composerSelectors: ['textarea[placeholder]', 'textarea'],
   disabledControlSelectors: ['.ds-button--disabled'],

@@ -41,9 +41,13 @@ test('saved intent never advertises a desktop driver or actions before they are 
   assert.match(state.message, /桌面执行器尚未接入/)
 })
 
-test('only DeepSeek on the Windows x64 local host is in scope', () => {
+test('only DeepSeek and ChatGPT on the Windows x64 local host are in scope', () => {
+  for (const platformId of ['deepseek', 'chatgpt']) {
+    const state = resolve(enabled, { platformId })
+    assert.equal(state.scopeSupported, true, platformId)
+    assert.equal(state.enabled, true, platformId)
+  }
   for (const [context, reason] of [
-    [{ platformId: 'chatgpt' }, 'unsupported-platform'],
     [{ platformId: 'claude' }, 'unsupported-platform'],
     [{ platformId: 'gemini' }, 'unsupported-platform'],
     [{ platformId: 'unknown' }, 'unsupported-platform'],

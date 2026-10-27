@@ -514,8 +514,12 @@
   const computerBaselineOf = () => {
     const nodes = queryAllAssistant()
     const positions = nodes.map(node => PAGE.fileTurnPositionAttr ? node.getAttribute(PAGE.fileTurnPositionAttr) : null).filter(Boolean)
+    // Without row positions (ChatGPT) a reply is new by a message id absent before the send. Every id
+    // on the page counts, hidden cached turns included, so no earlier message can come back as new.
+    const ids = !PAGE.fileTurnPositionAttr && PAGE.messageIdAttr
+      ? [...document.querySelectorAll('[' + PAGE.messageIdAttr + ']')].map(node => node.getAttribute(PAGE.messageIdAttr)).filter(Boolean) : []
     return { path: location.pathname, positions: new Set(positions), maxPosition: positions.length && positions.every(value => /^\d+$/.test(value))
-      ? Math.max(...positions.map(Number)) : null }
+      ? Math.max(...positions.map(Number)) : null, ids: new Set(ids) }
   }
 
   /**
@@ -3162,11 +3166,17 @@
       wait.pageEpoch !== computerPageEpoch ||
       wait.generation !== state.taskPromptGeneration) return false
     // The first confirmed send creates the SPA conversation route. Bind that once.
-    if (wait.path === '/' && /^\/a\/chat\/s\/[^/]+\/?$/.test(location.pathname)) wait.path = location.pathname
+    if (wait.path === '/' && PAGE.conversationPathPattern && new RegExp(PAGE.conversationPathPattern).test(location.pathname)) wait.path = location.pathname
     return wait.path === location.pathname
   }
   const computerTurnIsNew = (node, wait) => {
     if (!node?.isConnected || !isVisibleElement(node)) return false
+    if (!PAGE.fileTurnPositionAttr && PAGE.messageIdAttr) {
+      if (!wait.baseline.ids?.size && wait.baseline.path !== '/') return false
+      const id = messageIdOf(node)
+      // History rendered later lands above the newest turn; only the newest can be this send's reply.
+      return !!id && !wait.baseline.ids.has(id) && latestReplyNode(queryAllAssistant()) === node
+    }
     // An empty virtual list in an existing conversation proves no history boundary.
     // Only a new chat's home route may start from an empty baseline.
     if (!wait.baseline.positions.size && wait.baseline.path !== '/') return false
@@ -4704,6 +4714,8 @@
   }
   let fileSend = null
   const confirmedFileSends = new Set()
+  /** Non-whitespace characters of a long caption that must appear in a folded user message. */
+  const FILE_CAPTION_PREFIX = 300
   const fileSendStatus = (token) => {
     if (confirmedFileSends.has(token)) return { status: 'sent' }
     if (!fileSend || fileSend.token !== token) return { status: 'stale' }
@@ -4724,7 +4736,14 @@
       const newTurnSeen = isNewFileUserTurn(newest, turns, fileSend.baselineUser)
       const turnFilesSeen = turnShowsFiles(newest, fileSend.files)
       const captionToMatch = fileSend.focus ? fileSend.focus.text : fileSend.caption
-      const captionSeen = !captionToMatch || (!!newest && fileTurnText(newest).replace(/\s+/g, '').includes(captionToMatch.replace(/\s+/g, '')))
+      const turnText = newest ? fileTurnText(newest).replace(/\s+/g, '') : ''
+      const expectedCaption = captionToMatch ? captionToMatch.replace(/\s+/g, '') : ''
+      // ChatGPT folds a long user message (… 显示更多) and keeps only its start in the DOM
+      // (2026-10-27: an 11043-character result was sent but never confirmed). Its opening
+      // characters, together with the new turn, its files and the cleared draft, still identify it.
+      const captionPrefixSeen = expectedCaption.length > FILE_CAPTION_PREFIX && !turnText.includes(expectedCaption) &&
+        turnText.includes(expectedCaption.slice(0, FILE_CAPTION_PREFIX))
+      const captionSeen = !captionToMatch || (!!newest && (turnText.includes(expectedCaption) || captionPrefixSeen))
       const sent = !fileSend.edited && draftCleared && newTurnSeen && turnFilesSeen && captionSeen
       if (sent) {
         const focus = fileSend.focus
@@ -4750,7 +4769,8 @@
         return { status: 'sent' }
       }
       return {
-        status: 'confirming', draftCleared, newTurnSeen, turnFilesSeen, captionSeen, edited: fileSend.edited,
+        status: 'confirming', draftCleared, newTurnSeen, turnFilesSeen, captionSeen, captionPrefixSeen,
+        turnTextLength: turnText.length, captionLength: expectedCaption.length, edited: fileSend.edited,
         turnPosition: fileUserTurnPosition(newest), baselinePosition: fileSend.baselineUser.maxPosition,
         turnKeyPresent: !!fileUserTurnKey(newest), turnKeyKnown: fileSend.baselineUser.keys.has(fileUserTurnKey(newest)),
         baselineKeyCount: fileSend.baselineUser.keys.size, userTurnCount: turns.length,
@@ -4839,6 +4859,7 @@
       focus.promptInjected = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected
       if (focus.promptInjected && !state.prefix) return false
       fileSend.caption = focus.promptInjected ? state.prefix + USER_TEXT_SENTINEL + focus.text : focus.text
+      fileSend.captionComposer = composer
       if (fileSend.caption && !insertText(composer, fileSend.caption)) { fileSend.edited = true; return false }
       focus.prepared = true
       if (focus.promptInjected) {
@@ -5004,8 +5025,41 @@
       const composer = getComposer()
       if (!composer || !composerMatches(composer, '') || fileSend.caption) return false
       fileSend.caption = normalizeLineEndings(caption)
+      fileSend.captionComposer = composer
       if (!insertText(composer, fileSend.caption)) { fileSend.edited = true; return false }
       return true
+    },
+    /**
+     * Why an inserted caption stopped reading as ready. Lengths, flags and a few code points at the
+     * first difference only; the caption and draft text themselves are never returned.
+     */
+    fileSendCaptionDiagnostics(token) {
+      if (!fileSend || fileSend.token !== token) return { fileSendPresent: !!fileSend, tokenMatches: false }
+      const composer = getComposer()
+      const caption = fileSend.caption || ''
+      const actual = composer ? readComposer(composer) : ''
+      const expected = collapse(caption), seen = collapse(actual)
+      let firstDiffAt = -1
+      if (expected !== seen) { firstDiffAt = 0; while (firstDiffAt < expected.length && expected[firstDiffAt] === seen[firstDiffAt]) firstDiffAt++ }
+      const codes = (text) => firstDiffAt < 0 ? [] : [...text.slice(Math.max(0, firstDiffAt - 3), firstDiffAt + 3)].map(char => char.codePointAt(0))
+      const root = attachmentRoot()
+      const alerts = root ? [...root.querySelectorAll('[role="alert"]')] : []
+      const invalid = root ? [...root.querySelectorAll('[aria-invalid="true"]')] : []
+      const previous = fileSend.captionComposer || null
+      return {
+        tokenMatches: true, edited: fileSend.edited, submitted: fileSend.submitted,
+        computerStale: !!fileSend.computer && (fileSend.computer.generation !== state.taskPromptGeneration ||
+          fileSend.computer.path !== location.pathname || !state.computerUseEnabled),
+        composerFound: !!composer, composerSame: !!composer && composer === previous,
+        previousComposerConnected: previous ? previous.isConnected : null, composerTag: composer ? composer.tagName : null,
+        composerInvalid: composer?.getAttribute('aria-invalid') === 'true',
+        captionLength: caption.length, composerTextLength: actual.length, exactMatch: actual === caption,
+        collapsedMatch: expected === seen, collapsedCaptionLength: expected.length, collapsedComposerLength: seen.length,
+        firstDiffAt, captionCodesAtDiff: codes(expected), composerCodesAtDiff: codes(seen),
+        rootFound: !!root, alertCount: alerts.length,
+        alerts: alerts.slice(0, 3).map(element => collapse(element.innerText || element.textContent).slice(0, 80)),
+        invalidCount: invalid.length, invalidTags: invalid.slice(0, 3).map(element => element.tagName)
+      }
     },
     submitFileSend(token) {
       if (fileSendStatus(token).status !== 'ready') return false
@@ -5105,7 +5159,7 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, computerUseRequests: false, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, computerUseRequests: false, conversationPathPattern: '', ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
         observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing

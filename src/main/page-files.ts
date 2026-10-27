@@ -28,7 +28,7 @@ function diagnosticSnapshot(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object') return { available: false }
   const snapshot = value as Record<string, unknown>
   const result: Record<string, unknown> = {}
-  for (const key of ['status', 'rootFound', 'rootIsForm', 'images', 'imagesExpected', 'cards', 'namesSeen', 'nameSourceCount', 'missingNameCount', 'uploading', 'error', 'inputFiles', 'composerFound', 'sendFound', 'sendDisabled', 'draftEmpty', 'stopFound', 'draftCleared', 'newTurnSeen', 'turnFilesSeen', 'captionSeen', 'edited', 'turnPosition', 'baselinePosition', 'turnKeyPresent', 'turnKeyKnown', 'baselineKeyCount', 'userTurnCount', 'baselinePositionAvailable', 'menuCount', 'localEntryCount', 'captionEntryCount', 'entryAmbiguous', 'entryClicked']) {
+  for (const key of ['status', 'rootFound', 'rootIsForm', 'images', 'imagesExpected', 'cards', 'namesSeen', 'nameSourceCount', 'missingNameCount', 'uploading', 'error', 'inputFiles', 'composerFound', 'sendFound', 'sendDisabled', 'draftEmpty', 'stopFound', 'draftCleared', 'newTurnSeen', 'turnFilesSeen', 'captionSeen', 'captionPrefixSeen', 'turnTextLength', 'captionLength', 'edited', 'turnPosition', 'baselinePosition', 'turnKeyPresent', 'turnKeyKnown', 'baselineKeyCount', 'userTurnCount', 'baselinePositionAvailable', 'menuCount', 'localEntryCount', 'captionEntryCount', 'entryAmbiguous', 'entryClicked']) {
     if (typeof snapshot[key] === 'boolean' || typeof snapshot[key] === 'number' || (key === 'status' && typeof snapshot[key] === 'string')) result[key] = snapshot[key]
   }
   if (['', 'files-not-selected', 'attachment-root-missing', 'attachment-names-missing', 'upload-in-progress', 'send-button-missing', 'send-button-disabled', 'still-generating'].includes(String(snapshot.readyBlockReason))) {
@@ -324,9 +324,14 @@ export async function sendPageFiles(
       let ready = false
       while (Date.now() < captionDeadline) {
         if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
-        const status = await call('fileSendStatus', token) as { status?: string }
+        const status = await call('fileSendStatus', token) as { status?: string; error?: boolean }
         if (status?.status === 'ready') { ready = true; break }
-        if (status?.status !== 'uploading') return finish('busy', 'caption-draft-changed')
+        if (status?.status !== 'uploading') {
+          let details: unknown = null
+          try { details = await call('fileSendCaptionDiagnostics', token) } catch (error) { details = { unavailable: (error as Error).message } }
+          log('caption-check', { status: status?.status ?? null, snapshotError: status?.error ?? null, details })
+          return finish('busy', 'caption-draft-changed')
+        }
         await pause(100)
       }
       if (!ready) return finish('upload-failed', 'caption-ready-timeout')

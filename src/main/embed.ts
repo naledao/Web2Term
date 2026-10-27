@@ -1259,7 +1259,7 @@ export class ChatGptEmbed {
     const config = JSON.stringify({
       enabled: this.interceptor.enabled,
       promptInjectionEnabled: this.interceptor.promptInjectionEnabled,
-      computerUseEnabled: this.platform.id === 'deepseek' && this.computerUseRecognitionEnabled,
+      computerUseEnabled: this.platform.page.computerUseRequests === true && this.computerUseRecognitionEnabled,
       computerPageEpoch: this.computerPageEpoch,
       computerProtocol: this.computerUseProtocolContext,
       sendBlock: this.sendBlock,
@@ -1667,7 +1667,7 @@ export class ChatGptEmbed {
   async sendTaskObservation(text: string, conversationId: string, signal: AbortSignal, attachments: PreparedAttachment[], imageId: string, isCurrent: () => boolean): Promise<TaskResultSendOutcome> {
     const contents = this.liveContents()
     if (!contents) return 'no-composer'
-    if (this.platform.id !== 'deepseek' || attachments.length !== 1) return 'unknown'
+    if (this.platform.page.computerUseRequests !== true || attachments.length !== 1) return 'unknown'
     const generation = this.taskPromptGeneration
     const pageEpoch = this.computerPageEpoch
     const current = (): boolean => {
@@ -1946,7 +1946,7 @@ export class ChatGptEmbed {
     if (text.trim() !== '' || attachments.length > 0) this.handlers.onUserMessage(text, attachments, focusTurnId, 'page')
   }
   private taskActionSource(payload: InterceptorPageEvent): import('../shared/types').TaskActionSource | undefined {
-    if (this.platform.id !== 'deepseek' || !this.computerUseRecognitionEnabled || payload.live !== true ||
+    if (this.platform.page.computerUseRequests !== true || !this.computerUseRecognitionEnabled || payload.live !== true ||
       payload.taskPromptGeneration !== this.taskPromptGeneration || typeof payload.sourceSubmissionId !== 'string' ||
       !/^user:[a-zA-Z0-9:-]{1,150}$/.test(payload.sourceSubmissionId)) return undefined
     try {
@@ -2184,7 +2184,7 @@ export class ChatGptEmbed {
         )
         if (payload.completed === true && this.interceptor.taskFinishedAt === null) {
           const source = this.taskActionSource(payload)
-          if (this.computerUseRecognitionEnabled && this.platform.id === 'deepseek' &&
+          if (this.computerUseRecognitionEnabled && this.platform.page.computerUseRequests === true &&
             (!source || payload.computerPageEpoch !== this.computerPageEpoch ||
               typeof payload.messageId !== 'string' || !payload.messageId.trim() || payload.messageId.length > 512)) break
           const generation = this.taskPromptGeneration
@@ -2198,7 +2198,7 @@ export class ChatGptEmbed {
         computerAccepted = false
         // This is an untrusted recognition event, never an executable command or a Shell fallback.
         const contents = this.liveContents()
-        if (this.platform.id !== 'deepseek' || !this.computerUseRecognitionEnabled || !contents || payload.live !== true ||
+        if (this.platform.page.computerUseRequests !== true || !this.computerUseRecognitionEnabled || !contents || payload.live !== true ||
           typeof payload.computerPageEpoch !== 'string' || payload.computerPageEpoch !== this.computerPageEpoch ||
           payload.taskPromptGeneration !== this.taskPromptGeneration ||
           typeof payload.messageId !== 'string' || !/^computer:[a-zA-Z0-9:-]{1,150}$/.test(payload.messageId) ||

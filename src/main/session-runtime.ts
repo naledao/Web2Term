@@ -41,7 +41,7 @@ import {
 } from '../shared/types'
 import { CHAT_PLATFORMS, DEEPSEEK_PLATFORM } from '../shared/platforms'
 import { selectionQuestionConversation } from '../shared/deepseek-question'
-import { computerUseCapabilityPrompt, computerUseSendBlock, resolveComputerUseCapability } from '../shared/computer-use'
+import { computerUseCapabilityPrompt, computerUseSendBlock, resolveComputerUseCapability, supportsComputerUsePlatform } from '../shared/computer-use'
 import { normalizeComputerResultDelay } from '../shared/computer-progress'
 import { computerUseProtocol } from '../shared/computer-use-protocol'
 import type { ComputerUseProtocolError } from '../shared/computer-use-protocol'
@@ -1787,7 +1787,7 @@ export class SessionRuntime {
     if (typeof command.messageId !== 'string' || !command.messageId.trim() || command.messageId.length > 512) return true
     const platformId = this.activePlatformId, entry = this.embeds.get(platformId), source = command.taskSource
     const capability = this.getComputerUseCapability(platformId)
-    if (!command.live || this.disposed || !this.active || platformId !== 'deepseek' || !entry?.embed || !capability.scopeSupported || !capability.computerUseEnabled) return true
+    if (!command.live || this.disposed || !this.active || !supportsComputerUsePlatform(platformId) || !entry?.embed || !capability.scopeSupported || !capability.computerUseEnabled) return true
     const conversationId = entry.platform.conversationIdFromPath(source.pagePath)
     let task = this.taskCoordinator.current(platformId)
     if (!task || task.sourceSubmissionId !== source.sourceSubmissionId || !conversationId || entry.embed.getState().conversationId !== conversationId) return true
@@ -1878,7 +1878,7 @@ export class SessionRuntime {
 
   /** Page output is always re-parsed here; its claimed validity never authorizes dispatch. */
   private receiveComputerUseRequest(platformId: string, request: ComputerUsePageRequest): boolean {
-    if (this.disposed || !this.active || platformId !== 'deepseek' || this.activePlatformId !== platformId) return false
+    if (this.disposed || !this.active || !supportsComputerUsePlatform(platformId) || this.activePlatformId !== platformId) return false
     const capability = this.getComputerUseCapability(platformId)
     if (!capability.scopeSupported || !capability.computerUseEnabled) return false
     const entry = this.embeds.get(platformId)
@@ -2094,7 +2094,7 @@ export class SessionRuntime {
   async resumeAutonomousTask(request: TaskResumeRequest): Promise<string> {
     if (!request || typeof request !== 'object' || Array.isArray(request) || Object.keys(request).length !== 5 ||
       !['sessionId', 'platformId', 'conversationId', 'taskId', 'generation'].every(key => Object.hasOwn(request, key)) ||
-      !this.active || !this.ownsFocus(request) || request.platformId !== 'deepseek' || !request.conversationId) return '原会话已切换，请重新打开需要恢复的任务。'
+      !this.active || !this.ownsFocus(request) || !supportsComputerUsePlatform(request.platformId) || !request.conversationId) return '原会话已切换，请重新打开需要恢复的任务。'
     if (this.resumingTask) return '正在恢复原任务，请稍候。'
     this.resumingTask = true
     try { return await this.resumeAutonomousTaskNow(request) }
