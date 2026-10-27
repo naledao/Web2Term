@@ -1,7 +1,7 @@
 {
   "name": "web2term",
   "productName": "Web2Term",
-  "version": "0.1.181",
+  "version": "0.1.182",
   "private": true,
   "description": "React + Electron desktop application (electron-vite + TypeScript)",
   "license": "MIT",
