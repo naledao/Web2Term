@@ -181,10 +181,17 @@ export interface AutonomousTask extends TaskOwner {
   /** A live model completion marker ends the task without requiring an evidence report. */
   modelCompletion?: { messageId: string; receivedAt: number }
   clarifications?: TaskClarificationState
-  stop?: { reason: 'user-ended' | 'global-emergency' | 'human-takeover'; requestedAt: number }
+  /** `input-paused`: the user's own keyboard/mouse input paused computer use; their next message resumes it. */
+  stop?: { reason: TaskStopReason; requestedAt: number }
   createdAt: number
   updatedAt: number
 }
+
+export type TaskStopReason = 'user-ended' | 'global-emergency' | 'input-paused'
+
+/** A task paused by the user's input; their next goal message continues it in place. */
+export const taskPausedByInput = (task: Pick<AutonomousTask, 'status' | 'stop'> | null | undefined): boolean =>
+  task?.status === 'stopped' && task.stop?.reason === 'input-paused'
 
 export interface TaskRecovery {
   version: 1
@@ -232,7 +239,9 @@ export function parseAutonomousTask(payload: string): AutonomousTask | null {
           input.answerTo?.messageId === q.messageId && sameQuestionSource(input.answerTo, q.source)))) return null
       task.clarifications = questions
     }
-    if (task.stop !== undefined && (!task.stop || Object.keys(task.stop).length !== 2 || !['user-ended', 'global-emergency', 'human-takeover'].includes(task.stop.reason) || !Number.isSafeInteger(task.stop.requestedAt) || task.stop.requestedAt < 0)) return null
+    // Earlier versions stored the same pause as 'human-takeover'.
+    if (task.stop && (task.stop.reason as string) === 'human-takeover') task.stop.reason = 'input-paused'
+    if (task.stop !== undefined && (!task.stop || Object.keys(task.stop).length !== 2 || !['user-ended', 'global-emergency', 'input-paused'].includes(task.stop.reason) || !Number.isSafeInteger(task.stop.requestedAt) || task.stop.requestedAt < 0)) return null
     if (task.completion !== undefined) {
       const completion = parseTaskCompletionState(task.completion)
       if (!completion) return null

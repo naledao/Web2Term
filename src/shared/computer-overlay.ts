@@ -1,5 +1,6 @@
 import type { AutonomousTask } from './autonomous-task'
 import type { TaskActivity } from './task-presentation'
+import type { EmergencyStopState } from './emergency-stop'
 
 export const COMPUTER_OVERLAY_GET = 'computer-overlay:get'
 export const COMPUTER_OVERLAY_CHANGED = 'computer-overlay:changed'
@@ -12,6 +13,7 @@ export interface ComputerOverlaySnapshot {
   status: string
   tone: 'idle' | 'running' | 'waiting' | 'success' | 'error'
   completed: boolean
+  emergencyStopped?: boolean
   action: string
   actionStatus: string
   steps: number
@@ -26,6 +28,16 @@ export interface ComputerOverlayApi {
   getSnapshot(): Promise<ComputerOverlaySnapshot | null>
   onChanged(listener: (snapshot: ComputerOverlaySnapshot | null) => void): () => void
   fitContent(size: { width: number; height: number }): void
+}
+
+/** Keep the stop receipt visible briefly, without reviving a cancelled task or claiming it completed. */
+export function computerOverlayEmergencySnapshot(snapshot: ComputerOverlaySnapshot | null,
+  stop: Pick<EmergencyStopState, 'active' | 'source' | 'triggeredAt' | 'canReset'>, now = Date.now()): ComputerOverlaySnapshot | null {
+  if (!snapshot || !stop.active || stop.triggeredAt === null || now < stop.triggeredAt || now >= stop.triggeredAt + COMPUTER_OVERLAY_COMPLETION_MS) return null
+  return { ...snapshot, completed: false, emergencyStopped: true, tone: 'error',
+    status: stop.canReset ? '自动操作已停止' : '正在停止自动操作', actionStatus: '已急停',
+    result: stop.source === 'mouse-gesture' ? '检测到连续晃动鼠标，已触发所有会话的全局急停。' : '已触发所有会话的全局急停。',
+    resultTone: 'error', updatedAt: stop.triggeredAt }
 }
 
 const actionLabels: Record<string, string> = {
@@ -73,7 +85,7 @@ export function computerOverlaySnapshot(task: AutonomousTask, activity: TaskActi
   const phase = task.progress?.phase
   const active = task.status === 'recorded'
   const status = task.status === 'completed' ? '任务已完成'
-    : task.status === 'stopped' ? task.stop?.reason === 'human-takeover' ? '人工接管，已暂停' : '任务已停止'
+    : task.status === 'stopped' ? task.stop?.reason === 'input-paused' ? 'computer use 已暂停，发送新消息继续' : '任务已停止'
       : task.status === 'interrupted' ? '任务已中断' : task.status === 'superseded' ? '任务已替换'
         : task.control?.halted ? '自动操作已停止' : paused ? '自动执行已暂停' : phase ? phases[phase] : '等待模型指令'
   const tone: ComputerOverlaySnapshot['tone'] = task.status === 'completed' ? 'success'

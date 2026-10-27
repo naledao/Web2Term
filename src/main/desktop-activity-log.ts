@@ -9,9 +9,9 @@ let logPath: string | null = null
  * Why a desktop run stopped: the event kind and the kind of input (keyboard/click/wheel) only.
  * Never key values, positions, window titles or task text. Focus changes are routine and skipped.
  */
-export function writeDesktopActivityDiagnostic(event: DesktopActivityEvent, takeover: boolean): string | null {
+export function writeDesktopActivityDiagnostic(event: DesktopActivityEvent, paused: boolean): string | null {
   if (event.kind === 'focus-changed') return null
-  const details = { event: 'desktop-activity', kind: event.kind, input: event.input, strike: event.strike, takeover,
+  const details = { event: 'desktop-activity', kind: event.kind, input: event.input, strike: event.strike, paused,
     taskId: event.owner.taskId, taskGeneration: event.owner.generation, helperGeneration: event.generation }
   try {
     if (!logPath) {
@@ -22,7 +22,7 @@ export function writeDesktopActivityDiagnostic(event: DesktopActivityEvent, take
     appendFileSync(logPath, `${new Date().toISOString()} ${JSON.stringify(details)}\n`)
     return logPath
   } catch {
-    // A logging failure must not affect the takeover itself.
+    // A logging failure must not affect the pause itself.
     return null
   }
 }

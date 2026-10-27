@@ -24,10 +24,11 @@ function load(file, dependencies = {}) {
 const forbidden = () => { throw new Error('Real IO is forbidden') }
 const shared = load('../src/shared/windows-helper.ts')
 const version = shared.WINDOWS_HELPER_PROTOCOL_VERSION
-const { WindowsHelperManager, HUMAN_TAKEOVER_STRIKES, desktopActivityRequestsTakeover } = load('../src/main/windows-helper.ts', {
+const { WindowsHelperManager, HUMAN_PAUSE_STRIKES, HUMAN_STRIKE_BURST_MS, desktopActivityRequestsPause } = load('../src/main/windows-helper.ts', {
   'node:child_process': { spawn: forbidden }, 'node:fs/promises': { stat: forbidden },
   'node:path': path, 'node:crypto': { randomUUID }, '../shared/windows-helper': shared
 })
+const { EmergencyStopController } = load('../src/main/emergency-stop.ts')
 const flush = async () => { for (let count = 0; count < 16; count++) await Promise.resolve() }
 class Clock {
   time = 0
@@ -87,13 +88,13 @@ function fixture(patch = {}) {
 const desktopOwner = { sessionId: 'session-A', platformId: 'deepseek', conversationId: 'chat-A', taskId: 'goal-A', generation: 1, machineId: 'local' }
 const activity = (child, kind, patch = {}) => child.reply({ type: 'desktop_activity', version,
   epoch: child.last('watch_desktop').epoch, watch_id: child.last('watch_desktop').watch_id, kind,
-  input: ['human-stop', 'escape-pressed'].includes(kind) ? 'keyboard' : ['human-input', 'external-input'].includes(kind) ? 'click' : null, ...patch })
+  input: kind === 'human-stop' ? 'move' : ['human-input', 'external-input'].includes(kind) ? 'click' : null, ...patch })
 
 test('activity carries only its input category; a missing or invented category is rejected', async () => {
   for (const [kind, input, accepted] of [['human-input', 'wheel', true], ['human-input', 'keyboard', true], ['human-input', null, false],
     ['human-input', 'KeyA', false], ['focus-changed', 'click', false], ['monitor-unavailable', null, true],
-    ['escape-pressed', 'keyboard', true], ['human-stop', 'keyboard', true], ['human-stop', 'click', false],
-    ['human-stop', null, false], ['escape-pressed', 'wheel', false]]) {
+    ['escape-pressed', 'keyboard', false], ['human-stop', 'move', true], ['human-stop', 'keyboard', false], ['human-stop', 'click', false],
+    ['human-stop', null, false], ['human-input', 'move', false], ['external-input', 'move', false]]) {
     const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
     f.manager.subscribeDesktopActivity(event => events.push(event))
     const child = await f.start()
@@ -127,59 +128,82 @@ test('human activity cancels without replay and retains a final actual receipt b
   assert.equal(events[0].kind, 'human-input'); assert.equal(events[0].input, 'click'); assert.equal(f.manager.getState().phase, 'stopping')
   assert.equal(child.last('cancel').id, child.last('request').id)
   assert.equal((await f.manager.request('type_text', {})).execution, 'not_executed')
-  f.response(child, { ok: false, code: 'human_takeover', execution: 'executed', message: 'Actual partial effect' })
+  f.response(child, { ok: false, code: 'human_paused', execution: 'executed', message: 'Actual partial effect' })
   assert.equal((await pending).execution, 'executed')
   assert.equal(child.frames.filter(frame => frame.type === 'request').length, 1)
   f.manager.dispose()
 })
 
-test('the first physical Escape leaves the active run and request alive without a takeover strike', async () => {
+test('a native mouse shake stops the exact watch immediately and retains any accepted input receipt', async () => {
   const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
   f.manager.subscribeDesktopActivity(event => events.push(event))
   const child = await f.start(['press_key']), pending = f.manager.request('press_key', {}); await flush()
-  activity(child, 'escape-pressed')
-  assert.equal(events[0].kind, 'escape-pressed')
+  activity(child, 'human-stop')
+  assert.equal(desktopActivityRequestsPause(events[0]), false, 'mouse shake goes to global emergency stop, not the input-pause path')
   assert.equal(events[0].strike, null)
-  assert.equal(desktopActivityRequestsTakeover(events[0]), false)
-  assert.equal(f.manager.getState().phase, 'ready')
-  assert.equal(child.last('cancel'), undefined)
-  assert.equal(child.ended, false)
-  f.response(child)
-  assert.equal((await pending).execution, 'executed')
-  activity(child, 'human-input')
-  assert.equal(events[1].strike, 1, 'a single Escape does not consume an ordinary input strike')
-  f.manager.dispose()
-})
-
-test('a native double-Escape stops the exact watch immediately and retains any accepted input receipt', async () => {
-  const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
-  f.manager.subscribeDesktopActivity(event => events.push(event))
-  const child = await f.start(['press_key']), pending = f.manager.request('press_key', {}); await flush()
-  activity(child, 'escape-pressed'); activity(child, 'human-stop')
-  assert.deepEqual(events.map(event => desktopActivityRequestsTakeover(event)), [false, true])
-  assert.equal(events[1].strike, null)
-  assert.deepEqual(JSON.parse(JSON.stringify(events[1].owner)), desktopOwner)
+  assert.equal(events[0].input, 'move')
+  assert.deepEqual(JSON.parse(JSON.stringify(events[0].owner)), desktopOwner)
   assert.equal(f.manager.getState().phase, 'stopping')
   assert.equal(child.last('cancel').id, child.last('request').id)
   f.response(child, { ok: false, code: 'cancelled', execution: 'executed' })
   const result = await pending
-  assert.equal(result.code, 'human_takeover')
+  assert.equal(result.code, 'emergency_stopped')
   assert.equal(result.execution, 'executed')
   assert.equal(child.frames.filter(frame => frame.type === 'request').length, 1, 'the stopped step is never replayed')
   f.manager.dispose()
 })
 
-test('a double-Escape can still stop the task while an interrupted native step is draining', async () => {
+for (const snapshotFails of [false, true]) test(`mouse shake stops every session and receives native release acknowledgement (overlay failure: ${snapshotFails})`, async () => {
+  const f = fixture(), calls = [], sessions = ['A', 'B'].map(name => ({
+    emergencyStop: async () => { calls.push('stop-' + name) }, isAutomationDraining: () => false, releaseEmergencyStop() {}
+  }))
+  const emergencyStop = new EmergencyStopController({
+    desktop: { setEmergencyStopped: value => calls.push('block-' + value), getState: () => ({ executing: 0, nativeBlocked: false }) },
+    helper: f.manager, sessions: () => sessions, gestureAvailable: () => true, changed() {}
+  })
+  const source = ts.createSourceFile('index.ts', readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
+  const subscription = source.statements.find(node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
+    node.expression.expression.getText(source) === 'windowsHelper.subscribeDesktopActivity')
+  const listener = new Script(compile('(' + subscription.expression.arguments[0].getText(source) + ')')).runInNewContext({
+    emergencyStop, desktopActivityRequestsPause, HUMAN_PAUSE_STRIKES, managerWindow: null,
+    desktopObservations: { invalidateAllInputs: () => calls.push('invalidate') },
+    readComputerOverlaySnapshot: () => { calls.push('capture-overlay'); if (snapshotFails) throw new Error('display unavailable') },
+    writeDesktopActivityDiagnostic: (event, stopped) => calls.push([event.kind, stopped]),
+    desktopCoordinator: { takeHumanControl() { throw new Error('mouse shaking must use global emergency stop') } }
+  })
+  f.manager.setDesktopOwner(desktopOwner); f.manager.subscribeDesktopActivity(listener)
+  const child = await f.start(['click']), pending = f.manager.request('click', {}); await flush()
+  activity(child, 'human-stop')
+  assert.equal(emergencyStop.isActive(), true)
+  assert.equal(emergencyStop.getState().source, 'mouse-gesture')
+  assert.ok(calls.indexOf('capture-overlay') < calls.indexOf('block-true'))
+  assert.ok(calls.includes('stop-A') && calls.includes('stop-B'))
+  assert.equal(child.last('cancel'), undefined, 'global stop goes through the direct emergency control')
+  assert.ok(child.last('emergency_stop'))
+  assert.equal((await f.manager.request('click', {})).code, 'emergency_stopped')
+  f.response(child, { ok: false, code: 'cancelled', execution: 'executed' })
+  const result = await pending
+  assert.equal(result.code, 'emergency_stopped'); assert.equal(result.execution, 'executed')
+  const stop = child.last('emergency_stop')
+  child.reply({ type: 'emergency_stopped', version, id: stop.id, epoch: stop.epoch, attempted: 1, released: 1, remaining: 0 })
+  assert.equal(f.manager.inputReleaseStatus(), 'released')
+  child.close(); f.clock.advance(2000); await flush()
+  assert.equal(f.children.length, 1, 'an emergency never restarts the helper automatically')
+  assert.equal(child.frames.filter(frame => frame.type === 'request').length, 1)
+  f.manager.dispose()
+})
+
+test('a mouse shake can still stop the task while an interrupted native step is draining', async () => {
   const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
   f.manager.subscribeDesktopActivity(event => events.push(event))
   const child = await f.start(['press_key']), pending = f.manager.request('press_key', {}); await flush()
   activity(child, 'external-input')
   assert.equal(f.manager.getState().phase, 'stopping')
   activity(child, 'human-stop')
-  assert.equal(desktopActivityRequestsTakeover(events.at(-1)), true)
+  assert.equal(events.at(-1).kind, 'human-stop')
   f.response(child, { ok: false, code: 'cancelled', execution: 'executed' })
   const result = await pending
-  assert.equal(result.code, 'human_takeover')
+  assert.equal(result.code, 'emergency_stopped')
   assert.equal(result.execution, 'executed')
   f.manager.dispose()
 })
@@ -187,23 +211,39 @@ test('a double-Escape can still stop the task while an interrupted native step i
 // Each strike retires the latched process; the manager restarts it after the bounded delay.
 const restarted = async f => { f.clock.advance(500); await flush(); f.clock.advance(2000); await flush(); const child = f.children.at(-1); f.ready(child, ['click']); await flush(); return child }
 
-test('only the third physical input in a row is a takeover; earlier ones interrupt the step with human_input', async () => {
-  const f = fixture(), events = [], codes = []; f.manager.setDesktopOwner(desktopOwner)
+// Separate input bursts without running the virtual clock, which would also expire heartbeats.
+const burstFixture = () => { let f, skew = 0; f = fixture({ now: () => f.clock.time + skew }); return Object.assign(f, { nextBurst: () => { skew += HUMAN_STRIKE_BURST_MS + 1 } }) }
+
+test('only the third physical input burst in a row pauses computer use; earlier ones interrupt the step with human_input', async () => {
+  const f = burstFixture(), events = [], codes = []; f.manager.setDesktopOwner(desktopOwner)
   f.manager.subscribeDesktopActivity(event => events.push(event))
   let child = await f.start(['click'])
-  for (let strike = 1; strike <= HUMAN_TAKEOVER_STRIKES; strike++) {
-    if (strike > 1) child = await restarted(f)
+  for (let strike = 1; strike <= HUMAN_PAUSE_STRIKES; strike++) {
+    if (strike > 1) { child = await restarted(f); f.nextBurst() }
     const pending = f.manager.request('click', {}); await flush()
     activity(child, 'human-input')
     f.response(child, { ok: false, code: 'cancelled', execution: 'executed' })
     const result = await pending
     codes.push(result.code)
-    if (strike < HUMAN_TAKEOVER_STRIKES) assert.match(result.message, new RegExp(`第 ${strike}/3 次`))
+    if (strike < HUMAN_PAUSE_STRIKES) assert.match(result.message, new RegExp(`第 ${strike}/3 次`))
   }
   assert.deepEqual(events.map(event => [event.kind, event.strike]), [['human-input', 1], ['human-input', 2], ['human-input', 3]])
-  assert.deepEqual(events.map(event => desktopActivityRequestsTakeover(event)), [false, false, true])
-  assert.deepEqual(codes, ['human_input', 'human_input', 'human_takeover'])
+  assert.deepEqual(events.map(event => desktopActivityRequestsPause(event)), [false, false, true])
+  assert.deepEqual(codes, ['human_input', 'human_input', 'human_paused'])
   assert.equal(f.children.length, 3, 'two warnings fit inside the restart budget')
+  f.manager.dispose()
+})
+
+test('one continuous input burst is one strike, even across the helper restarts it causes', async () => {
+  const f = burstFixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
+  f.manager.subscribeDesktopActivity(event => events.push(event))
+  let child = await f.start()
+  // 2026-10-27: one burst of typing re-armed watch after watch and reached three strikes in 0.8 s.
+  for (let n = 0; n < 3; n++) { if (n) child = await restarted(f); activity(child, 'human-input', { input: 'keyboard' }) }
+  assert.deepEqual(events.map(event => event.strike), [1, 1, 1])
+  assert.equal(events.some(event => desktopActivityRequestsPause(event)), false)
+  child = await restarted(f); f.nextBurst(); activity(child, 'human-input', { input: 'keyboard' })
+  assert.equal(events.at(-1).strike, 2, 'a separate burst after the quiet gap is the next strike')
   f.manager.dispose()
 })
 
@@ -244,17 +284,15 @@ test('late activity from a previous watch cannot be attributed to a replacement 
   f.manager.dispose()
 })
 
-test('a double-Escape from a replaced watch cannot stop the replacement task', async () => {
+test('a mouse shake from a replaced watch cannot trigger global emergency stop', async () => {
   const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
   f.manager.subscribeDesktopActivity(event => events.push(event))
   const child = await f.start(), old = child.last('watch_desktop')
   f.manager.setDesktopOwner({ ...desktopOwner, taskId: 'replacement', generation: 2 })
-  activity(child, 'escape-pressed', { watch_id: old.watch_id })
-  assert.equal(events.length, 0)
   activity(child, 'human-stop', { watch_id: old.watch_id })
   assert.equal(events.length, 1)
   assert.equal(events[0].kind, 'external-input')
-  assert.equal(desktopActivityRequestsTakeover(events[0]), false)
+  assert.equal(desktopActivityRequestsPause(events[0]), false)
   assert.equal(events[0].owner.taskId, 'replacement')
   assert.equal(child.ended, true, 'an interrupted old helper still retires')
   f.manager.dispose()
@@ -268,7 +306,7 @@ test('a matching-watch event with the wrong helper generation is rejected', asyn
   assert.equal(events.length, 0); assert.equal(f.manager.getState().code, 'invalid_frame'); f.manager.dispose()
 })
 
-test('monitor failure stops the process without reporting physical human takeover or losing execution facts', async () => {
+test('monitor failure stops the process without reporting an input pause or losing execution facts', async () => {
   const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
   f.manager.subscribeDesktopActivity(event => events.push(event))
   const child = await f.start(['click']), pending = f.manager.request('click', {}); await flush()

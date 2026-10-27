@@ -1,7 +1,6 @@
 import { EmergencyStopController } from './emergency-stop'
-import { COMPUTER_OVERLAY_GET, COMPUTER_OVERLAY_CHANGED, COMPUTER_OVERLAY_FIT } from '../shared/computer-overlay'
+import { COMPUTER_OVERLAY_GET, COMPUTER_OVERLAY_CHANGED, COMPUTER_OVERLAY_FIT, computerOverlayEmergencySnapshot } from '../shared/computer-overlay'
 import type { ComputerOverlaySnapshot } from '../shared/computer-overlay'
-import { EMERGENCY_STOP_SHORTCUT } from '../shared/emergency-stop'
 import { ToolboxRouter } from './toolbox-router'
 import { TOOLBOX_METHODS } from '../shared/toolbox'
 import { DEFAULT_CHAT_VIEW, supportsFocusView } from '../shared/focus-chat'
@@ -12,7 +11,7 @@ import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/b
 import { join, posix } from 'node:path'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, Tray } from 'electron'
 import { APP_ID, APP_NAME, configureAppIdentity } from './app-identity'
 import { taskbarCountIcon } from './taskbar-badge'
 import { LINUX_AGENT_FILE_NAME, LinuxAgentDownloader } from './linux-agent-download'
@@ -35,7 +34,7 @@ import { DEFAULT_BACKEND_URL, normalizeBackendUrl, readBackendUrl } from '../sha
 import { BackendAuthService } from './backend-auth'
 import { DEFAULT_COMPUTER_USE_PREFERENCES, resolveComputerUseCapability } from '../shared/computer-use'
 import { parseComputerUsePreferencesPatch, readComputerUsePreferences, saveComputerUsePreferences } from './computer-use-settings'
-import { desktopActivityRequestsTakeover, HUMAN_TAKEOVER_STRIKES, WindowsHelperManager } from './windows-helper'
+import { desktopActivityRequestsPause, HUMAN_PAUSE_STRIKES, WindowsHelperManager } from './windows-helper'
 import { writeDesktopActivityDiagnostic } from './desktop-activity-log'
 import { WindowsAppCatalog } from './windows-app-catalog'
 import { WindowsObservationService } from './windows-observation'
@@ -195,15 +194,22 @@ desktopCoordinator.subscribe(() => {
   windowsHelper.setDesktopOwner(state.draining ? null : state.owner)
 })
 windowsHelper.subscribeDesktopActivity(event => {
+  if (event.kind === 'human-stop') {
+    // Capture the live goal before global cancellation clears it; the top overlay shows the stop receipt.
+    try { readComputerOverlaySnapshot() } catch { /* Display failure must never block emergency cancellation. */ }
+    emergencyStop.trigger('mouse-gesture')
+    writeDesktopActivityDiagnostic(event, true)
+    return
+  }
   desktopObservations.invalidateAllInputs()
-  const takeover = desktopActivityRequestsTakeover(event) && desktopCoordinator.takeHumanControl(event.owner)
-  writeDesktopActivityDiagnostic(event, takeover)
-  // Fewer strikes only interrupt the step; tell the user before the next one pauses the task.
-  if (event.kind === 'human-input' && event.strike !== null && event.strike < HUMAN_TAKEOVER_STRIKES && managerWindow && !managerWindow.isDestroyed())
-    managerWindow.webContents.send(IpcChannels.desktopInputWarning, { strike: event.strike, limit: HUMAN_TAKEOVER_STRIKES, input: event.input, at: Date.now() })
-  if (takeover) void runtimes.get(event.owner.sessionId)?.humanTakeover(event.owner).catch(() => {
+  const paused = desktopActivityRequestsPause(event) && desktopCoordinator.takeHumanControl(event.owner)
+  writeDesktopActivityDiagnostic(event, paused)
+  // Fewer strikes only interrupt the step; tell the user before the next one pauses computer use.
+  if (event.kind === 'human-input' && event.strike !== null && event.strike < HUMAN_PAUSE_STRIKES && managerWindow && !managerWindow.isDestroyed())
+    managerWindow.webContents.send(IpcChannels.desktopInputWarning, { strike: event.strike, limit: HUMAN_PAUSE_STRIKES, input: event.input, at: Date.now() })
+  if (paused) void runtimes.get(event.owner.sessionId)?.pauseForUserInput(event.owner).catch(() => {
     // The task gate is already closed. Do not log native input, titles or task contents.
-    console.warn('[desktop] human takeover cancellation acknowledgement incomplete')
+    console.warn('[desktop] computer use pause cancellation acknowledgement incomplete')
   })
 })
 windowsHelper.subscribe(() => {
@@ -211,6 +217,10 @@ windowsHelper.subscribe(() => {
   desktopCoordinator.setNativeBlocked(state.pid !== null && state.phase !== 'ready')
 })
 const emergencyStop = new EmergencyStopController({ desktop: desktopCoordinator, helper: windowsHelper,
+  gestureAvailable: () => {
+    const desktop = desktopCoordinator.getState(), helper = windowsHelper.getState()
+    return !!desktop.owner && !desktop.draining && helper.phase === 'ready' && helper.actions.includes('click')
+  },
   sessions: () => runtimes.values(), changed: state => {
     if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.emergencyStopChanged, state)
   } })
@@ -305,6 +315,7 @@ const COMPUTER_USE_OVERLAY_HEIGHT = 160
 const COMPUTER_USE_OVERLAY_MARGIN = 24
 let computerUseOverlayWidth = COMPUTER_USE_OVERLAY_WIDTH
 let computerUseOverlayHeight = COMPUTER_USE_OVERLAY_HEIGHT
+let lastActiveComputerOverlaySnapshot: ComputerOverlaySnapshot | null = null
 
 function positionComputerUseOverlay(window: BrowserWindow): void {
   if (!managerWindow || managerWindow.isDestroyed()) return
@@ -337,7 +348,11 @@ function hideComputerUseOverlay(): void {
 }
 
 function readComputerOverlaySnapshot(): ComputerOverlaySnapshot | null {
-  return currentSessionId ? runtimes.get(currentSessionId)?.getComputerOverlaySnapshot() ?? null : null
+  const stop = emergencyStop.getState()
+  if (stop.active) return computerOverlayEmergencySnapshot(lastActiveComputerOverlaySnapshot, stop)
+  const snapshot = currentSessionId ? runtimes.get(currentSessionId)?.getComputerOverlaySnapshot() ?? null : null
+  lastActiveComputerOverlaySnapshot = snapshot && !snapshot.completed ? snapshot : null
+  return snapshot
 }
 
 function createComputerUseOverlay(parent: BrowserWindow): void {
@@ -2133,9 +2148,6 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     registerPdfAssetHandler()
-    let emergencyShortcutRegistered = false
-    try { emergencyShortcutRegistered = globalShortcut.register(EMERGENCY_STOP_SHORTCUT, () => { emergencyStop.trigger('shortcut') }) } catch { /* Visible client button remains available. */ }
-    emergencyStop.shortcutStatus(emergencyShortcutRegistered)
     if (process.platform === 'win32') app.setAppUserModelId(APP_ID)
 
     if (appLogFile) {
@@ -2270,7 +2282,6 @@ app.on('before-quit', () => {
 })
 
 app.on('will-quit', () => {
-  globalShortcut.unregister(EMERGENCY_STOP_SHORTCUT)
   destroySplashWindow()
   tray?.destroy()
   tray = null

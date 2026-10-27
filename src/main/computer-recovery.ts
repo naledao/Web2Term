@@ -118,7 +118,7 @@ export function computerRecoveryMessage(task: AutonomousTask, records: ComputerA
     last_step: lastStep ? { id: lastStep.id, action: lastStep.action,
       execution: lastReceipt?.execution ?? lastStep.execution, delivery: lastReceipt?.deliveryState ?? lastStep.delivery } : null,
     recovery: task.recovery ?? null,
-    pause_reason: task.stop?.reason === 'human-takeover' ? 'human_takeover' : null,
+    pause_reason: task.stop?.reason === 'input-paused' ? 'human_paused' : null,
     clarification_history: task.clarifications ? { history_only: true, grants_permissions: false, truncated: task.clarifications.truncated || task.clarifications.items.length > 4,
       items: task.clarifications.items.slice(-4).map(q => ({ message_id: q.messageId, state: q.state,
         questions: q.questions.map(item => ({ excerpt: item.question.slice(0, 160), truncated: item.question.length > 160 })),

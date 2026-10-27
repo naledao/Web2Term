@@ -51,26 +51,29 @@ interface HelperProcess {
   emergencyId: string | null
   cancelEmergency: () => void
   activityStopped: boolean
-  activityCause: 'human_takeover' | 'human_input' | 'external_input' | 'input_monitor_unavailable' | null
-  /** Which consecutive physical input stopped this run (1..HUMAN_TAKEOVER_STRIKES); null for other causes. */
+  activityCause: 'emergency_stopped' | 'human_paused' | 'human_input' | 'external_input' | 'input_monitor_unavailable' | null
+  /** Which consecutive physical input stopped this run (1..HUMAN_PAUSE_STRIKES); null for other causes. */
   activityStrike: number | null
 }
 
-export const HUMAN_TAKEOVER_STRIKES = 3
+export const HUMAN_PAUSE_STRIKES = 3
 export const HUMAN_STRIKE_WINDOW_MS = 120_000
+/** Input within this long of the previous one belongs to the same burst and the same strike. */
+export const HUMAN_STRIKE_BURST_MS = 5_000
 
 export interface DesktopActivityEvent {
-  kind: 'human-input' | 'external-input' | 'focus-changed' | 'monitor-unavailable' | 'escape-pressed' | 'human-stop'
-  /** Input category; escape-pressed only notifies. Null for focus/monitor events; never a key or position. */
-  input: 'keyboard' | 'click' | 'wheel' | null
-  /** Ordinary physical input strikes; the explicit double-Escape gesture has no strike count. */
+  kind: 'human-input' | 'external-input' | 'focus-changed' | 'monitor-unavailable' | 'human-stop'
+  /** Input category only. Move is reserved for the explicit mouse-shake stop gesture. */
+  input: 'keyboard' | 'click' | 'wheel' | 'move' | null
+  /** Ordinary physical input strikes; the explicit shake gesture has no strike count. */
   strike: number | null
   owner: DesktopOwner
   generation: number
 }
 
-export function desktopActivityRequestsTakeover(event: DesktopActivityEvent): boolean {
-  return event.kind === 'human-stop' || event.kind === 'human-input' && (event.strike ?? 0) >= HUMAN_TAKEOVER_STRIKES
+/** Ordinary physical input bursts pause computer use; the shake gesture goes to global emergency stop. */
+export function desktopActivityRequestsPause(event: DesktopActivityEvent): boolean {
+  return event.kind === 'human-input' && (event.strike ?? 0) >= HUMAN_PAUSE_STRIKES
 }
 
 const messages: Record<WindowsHelperCode, string> = {
@@ -143,15 +146,19 @@ export class WindowsHelperManager {
   }
 
   /*
-   * A stray touch or accidental click should not end a task. Physical input under the live watch interrupts
-   * the current step every time, but only the HUMAN_TAKEOVER_STRIKES-th in a row is a takeover. "In a row":
-   * the same watch (same goal) with no more than HUMAN_STRIKE_WINDOW_MS between inputs.
+   * A stray touch or accidental click should not stop a task. Physical input under the live watch interrupts
+   * the current step every time, but only the HUMAN_PAUSE_STRIKES-th burst in a row pauses computer use.
+   * "In a row": the same watch (same goal) with no more than HUMAN_STRIKE_WINDOW_MS between bursts.
+   *
+   * A burst is one strike. Each strike retires the helper, and the restarted helper re-arms its watch within
+   * a second, so the same typing used to be counted again: three strikes in 0.8 s (2026-10-27 activity log).
    */
   private humanStrikes: { watchId: string; count: number; at: number } | null = null
   private humanStrike(watchId: string): number {
-    const now = this.now(), previous = this.humanStrikes
-    const count = previous && previous.watchId === watchId && now - previous.at <= HUMAN_STRIKE_WINDOW_MS ? previous.count + 1 : 1
-    this.humanStrikes = count >= HUMAN_TAKEOVER_STRIKES ? null : { watchId, count, at: now }
+    const now = this.now(), previous = this.humanStrikes?.watchId === watchId ? this.humanStrikes : null
+    if (previous && now - previous.at <= HUMAN_STRIKE_BURST_MS) { previous.at = now; return previous.count }
+    const count = previous && previous.count < HUMAN_PAUSE_STRIKES && now - previous.at <= HUMAN_STRIKE_WINDOW_MS ? previous.count + 1 : 1
+    this.humanStrikes = { watchId, count, at: now }
     return count
   }
   inputReleaseStatus(): InputReleaseStatus { return this.inputRelease }
@@ -398,10 +405,9 @@ export class WindowsHelperManager {
     }
     if (value.type === 'desktop_activity') {
       const inputKind = ['human-input', 'external-input'].includes(value.kind as string)
-      const escapeKind = ['escape-pressed', 'human-stop'].includes(value.kind as string)
-      const notification = ['focus-changed', 'escape-pressed'].includes(value.kind as string)
-      if (Object.keys(value).length !== 6 || !['human-input', 'external-input', 'focus-changed', 'monitor-unavailable', 'escape-pressed', 'human-stop'].includes(value.kind as string) ||
-        (escapeKind ? value.input !== 'keyboard' : inputKind ? !['keyboard', 'click', 'wheel'].includes(value.input as string) : value.input !== null) ||
+      const notification = value.kind === 'focus-changed'
+      if (Object.keys(value).length !== 6 || !['human-input', 'external-input', 'focus-changed', 'monitor-unavailable', 'human-stop'].includes(value.kind as string) ||
+        (value.kind === 'human-stop' ? value.input !== 'move' : inputKind ? !['keyboard', 'click', 'wheel'].includes(value.input as string) : value.input !== null) ||
         typeof value.watch_id !== 'string' || !/^[a-f0-9-]{36}$/i.test(value.watch_id) || value.epoch !== run.generation) return invalid()
       const watch = this.desktopWatch
       const matches = watch?.id === value.watch_id
@@ -409,12 +415,12 @@ export class WindowsHelperManager {
       if (!notification) {
         run.activityStopped = true
         run.activityCause = value.kind === 'monitor-unavailable' ? 'input_monitor_unavailable'
-          : matches && value.kind === 'human-stop' ? 'human_takeover'
-            : strike === null ? 'external_input' : strike >= HUMAN_TAKEOVER_STRIKES ? 'human_takeover' : 'human_input'
+          : matches && value.kind === 'human-stop' ? 'emergency_stopped'
+            : strike === null ? 'external_input' : strike >= HUMAN_PAUSE_STRIKES ? 'human_paused' : 'human_input'
         run.activityStrike = strike
       }
       if (watch && (matches || !notification)) for (const listener of this.activityListeners) {
-        // An old watch can retire a latched native process, but cannot label a new goal as human takeover.
+        // An old watch can retire a latched native process, but cannot pause a new goal.
         try { listener({ kind: matches || value.kind === 'monitor-unavailable' ? value.kind as DesktopActivityEvent['kind'] : 'external-input',
           input: value.input as DesktopActivityEvent['input'], strike, owner: structuredClone(watch.owner), generation: run.generation }) }
         catch { /* Native input is already latched off; one observer cannot suppress retirement. */ }
@@ -447,9 +453,10 @@ export class WindowsHelperManager {
     const pending = run.action
     if (!pending) return
     if (run.activityCause) result = { ...result, ok: false, code: run.activityCause,
-      message: run.activityCause === 'human_takeover' ? '检测到人工接管，已暂停原任务并保留实际执行回执。'
-        : run.activityCause === 'human_input' ? `检测到用户键鼠操作（第 ${run.activityStrike}/${HUMAN_TAKEOVER_STRIKES} 次），本步已中断；动作是否生效须重新观察核对，不重放原动作。请继续原任务，连续 ${HUMAN_TAKEOVER_STRIKES} 次将暂停并等待用户。`
-        : run.activityCause === 'input_monitor_unavailable' ? '桌面接管监测已不可用，本轮控制已停止；请核对实际状态。' : '其他来源输入已中断本轮控制，请重新观察真实界面后继续判断；不重放原动作。' }
+      message: run.activityCause === 'emergency_stopped' ? '用户连续晃动鼠标，已触发全局急停；实际执行回执已保留。停止所有自动操作与回传，等待用户解除急停并重新提交或恢复任务。'
+        : run.activityCause === 'human_paused' ? 'computer use 已因用户键鼠操作暂停，本步实际执行回执已保留；不要再发起 computer 请求，等待用户发送新消息后继续同一任务，继续时先重新观察。'
+        : run.activityCause === 'human_input' ? `检测到用户键鼠操作（第 ${run.activityStrike}/${HUMAN_PAUSE_STRIKES} 次），本步已中断；动作是否生效须重新观察核对，不重放原动作。请继续原任务，连续 ${HUMAN_PAUSE_STRIKES} 次将暂停 computer use，直到用户发送新消息。`
+        : run.activityCause === 'input_monitor_unavailable' ? '桌面输入监测已不可用，本轮控制已停止；请核对实际状态。' : '其他来源输入已中断本轮控制，请重新观察真实界面后继续判断；不重放原动作。' }
     run.action = null; pending.cancelTimer(); pending.detachAbort(); pending.resolve(result)
     if (pending.cancelled && !run.closing && !this.emergency) this.retire(run, 'cancelled', true)
   }

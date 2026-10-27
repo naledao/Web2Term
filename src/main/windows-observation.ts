@@ -44,6 +44,13 @@ const rect = (v: unknown): v is ObservationRect => object(v) && fields(v, ['x', 
 const sameRect = (a: ObservationRect, b: ObservationRect): boolean => ['x', 'y', 'width', 'height'].every(k => a[k as keyof ObservationRect] === b[k as keyof ObservationRect])
 const leaseKey = (lease: TaskLease): string => JSON.stringify([lease.sessionId, lease.platformId, lease.conversationId, lease.taskId, lease.generation])
 const MAX_BYTES = 8 * 1024 * 1024
+/**
+ * Pause between an input and its follow-up observation, so smooth scrolling, button feedback or a key's effect
+ * has finished drawing. The next input checks that same image again; one taken mid-animation is already stale.
+ */
+const POST_INPUT_SETTLE_MS: Record<'click' | 'type_text' | 'press_key' | 'scroll' | 'drag', number> = {
+  click: 500, type_text: 300, press_key: 400, scroll: 800, drag: 500
+}
 const crcTable = Uint32Array.from({ length: 256 }, (_, index) => {
   let value = index
   for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0)
@@ -329,18 +336,29 @@ export class WindowsObservationService {
         receipt = { result_unconfirmed: true }
       } else { code = response.code as ComputerUseToolResult['code']; execution = response.execution; message = response.message; receipt = structuredClone(response.data) }
     }
-    let after: Awaited<ReturnType<WindowsObservationService['observe']>> | undefined, observationError: unknown
+    let after: Awaited<ReturnType<WindowsObservationService['observe']>> | undefined, observationError: unknown, targetGone = false
+    // Let the screen settle first: an observation taken while a page was still smooth-scrolling went stale before
+    // the next step could use it (2026-10-27, scroll then stale_observation image_changed).
+    if (receipt !== undefined) await this.waitClock.sleep(POST_INPUT_SETTLE_MS[action], context.signal).catch(() => {})
     // Exactly one read after the attempt, including uncertain input. It never calls the input action again.
     try { after = await this.observe(tool, saved.source, context) }
     catch (error) { observationError = error instanceof ComputerUseActionError ? { code: error.result.code, execution: error.result.execution, message: error.result.message } : { code: 'capture_failed' } }
+    // The input closed its own window (a profile picker, a dialog): look at the whole desktop instead, so the next
+    // step sees what replaced it. A closed menu keeps its parent-window hint and is not widened.
+    if (!after && saved.source.window_id && !interaction && (observationError as { code?: string } | undefined)?.code === 'stale_window' && this.current(context)) {
+      try { after = await this.observe(tool, { target: 'desktop' }, context); targetGone = true; observationError = undefined }
+      catch { /* Keep the original stale_window error. */ }
+    }
     if (!this.current(context) || this.owners.get(tool) !== owner || this.helper.getState().generation !== owner.generation || !this.registrations.has(tool)) {
       if (after?.attachments) this.release(after.attachments, context.lease)
       throw new ComputerUseActionError({ code: context.signal?.aborted ? 'cancelled' : 'inactive_context', execution, message: '输入操作后的原任务或 helper 已失效，未向新任务发布结果；不重放输入操作。' })
     }
     const data = { ...(helperCode ? { helper_code: helperCode } : {}), ...(receipt === undefined ? { action_not_executed: true } : { [action]: receipt }),
       ...(after ? { observation: after.data } : { post_observation_error: observationError }),
+      ...(targetGone ? { post_observation_target_gone: true } : {}),
       ...(interaction ? { interaction_hint: { ...interaction, next_action: 'inspect_interactions' } } : {}), goal_verified: false }
-    message += after ? ' 已补取操作后的新观察，请据此判断下一步。' : ' 本次后续观察失败，请先重新发现／观察；不要为补截图重做输入操作。'
+    message += targetGone ? ' 操作后原窗口已关闭或失效，已改为补取整个桌面的新观察；请据此重新 list_windows 找到新窗口，不要重做原操作。'
+      : after ? ' 已补取操作后的新观察，请据此判断下一步。' : ' 本次后续观察失败，请先重新发现／观察；不要为补截图重做输入操作。'
     if (code !== 'ok') throw new ComputerUseActionError({ code, execution, message, data, attachments: after?.attachments })
     return { message, data, attachments: after?.attachments }
   }

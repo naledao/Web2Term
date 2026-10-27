@@ -14,9 +14,9 @@ import { TaskProgression } from './task-progression'
 import { TaskContinuityService } from './task-continuity'
 import { TaskBackgroundWait, backgroundBelongsTo, reusableBackgroundTask } from './task-background-wait'
 import type { ComputerUseStepRequest, StepAcceptance } from './task-progression'
-import type { AutonomousTask, AutonomousTaskState, TaskLease, TaskToolContext, TaskMachine, TaskResumeRequest } from '../shared/autonomous-task'
+import type { AutonomousTask, AutonomousTaskState, TaskLease, TaskToolContext, TaskMachine, TaskResumeRequest, TaskStopReason } from '../shared/autonomous-task'
 import { computerRecoveryMessage, recoverySendBlockedMessage } from './computer-recovery'
-import { taskToolResultContext, parseTaskToolContext } from '../shared/autonomous-task'
+import { taskToolResultContext, parseTaskToolContext, taskPausedByInput } from '../shared/autonomous-task'
 import { pendingTaskQuestion, validTaskQuestionRequest } from '../shared/task-clarification'
 import type { TaskQuestion, TaskQuestionSource, TaskQuestionRequest } from '../shared/task-clarification'
 import { validFocusUiAction } from '../shared/focus-smart-ui'
@@ -953,11 +953,18 @@ export class SessionRuntime {
             if (recovery) this.taskRecoverySend = null
             // A late recovery acknowledgement must not create a new goal after a switch/replacement.
             if (recoveryMessage && !resumes) return turnId
-            const task = this.taskCoordinator.submit({ platformId: platform.id, conversationId: record().conversationId,
-              submission, turnId, text, attachments: files ?? [], capability: this.getComputerUseCapability(platform.id),
-              ...(resumes ? { resume: { taskId: recovery.request.taskId, generation: recovery.request.generation } } : {}),
-              machine: { id: this.options.localMachineId, label: '本机', platform: process.platform, arch: process.arch,
-                connection: 'local', workingDirectory: this.runner.getTerminalState().cwd || this.environment.workingDirectory || this.lastPersistedLocalCwd } })
+            // After the user's input paused computer use, their next message continues that same task.
+            const paused = !recoveryMessage && submission.kind === 'goal' ? this.taskCoordinator.context(platform.id, record().conversationId).task : null
+            const continuesPause = !!paused && taskPausedByInput(paused) && !paused.control?.halted
+            const submit = (resume?: { taskId: string; generation: number; userText?: boolean }): AutonomousTask | null =>
+              this.taskCoordinator.submit({ platformId: platform.id, conversationId: record().conversationId,
+                submission, turnId, text, attachments: files ?? [], capability: this.getComputerUseCapability(platform.id),
+                ...(resume ? { resume } : {}),
+                machine: { id: this.options.localMachineId, label: '本机', platform: process.platform, arch: process.arch,
+                  connection: 'local', workingDirectory: this.runner.getTerminalState().cwd || this.environment.workingDirectory || this.lastPersistedLocalCwd } })
+            const task = resumes ? submit({ taskId: recovery.request.taskId, generation: recovery.request.generation })
+              // A pause that can no longer be continued (another machine, another conversation) leaves a fresh goal.
+              : continuesPause && paused ? submit({ taskId: paused.id, generation: paused.generation, userText: true }) ?? submit() : submit()
             if (resumes) {
               if (!task) this.taskCoordinator.fail(platform.id, record().conversationId)
               else recovery.acknowledged = true
@@ -1673,12 +1680,17 @@ export class SessionRuntime {
 
   endTask(): Promise<InterceptorStatus> { return this.stopAutomation('user-ended', false) }
 
-  /** Native watch identity is checked again against the live goal; old activity cannot pause a replacement. */
-  async humanTakeover(owner: DesktopOwner): Promise<void> {
+  /**
+   * The user's own input paused computer use. The task stays as it is; the user's next message continues it.
+   * Native watch identity is checked again against the live goal; old activity cannot pause a replacement.
+   */
+  async pauseForUserInput(owner: DesktopOwner): Promise<void> {
     if (this.disposed || !this.active || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId ||
       owner.machineId !== this.options.localMachineId || !this.taskCoordinator.owns(owner) ||
       this.embeds.get(owner.platformId)?.embed?.getState().conversationId !== owner.conversationId) return
-    await this.stopAutomation('human-takeover', false)
+    // Ending the page task resets its prompt boundary, so the next message re-sends the tool prompt; while the
+    // task is paused that prompt says so (toolPrompt), and the task-state change refreshes it.
+    await this.stopAutomation('input-paused', false)
   }
 
   emergencyStop(): Promise<InterceptorStatus> {
@@ -1691,13 +1703,13 @@ export class SessionRuntime {
     // taskEnded remains set. Only a new confirmed human send or explicit recovery may start work.
     this.refreshComputerUseCapabilities()
   }
-  private stopAutomation(reason: 'user-ended' | 'global-emergency' | 'human-takeover', allPlatforms: boolean): Promise<InterceptorStatus> {
+  private stopAutomation(reason: TaskStopReason, allPlatforms: boolean): Promise<InterceptorStatus> {
     this.taskEnded = true
     this.focusUploadAbort?.abort(); this.legacyToolSend?.abort.abort()
     this.taskRecoverySend = null; this.pendingTaskCommand = null; this.pendingTaskComputer = null; this.pendingTaskReply = null
     this.deferredCommands.clear()
     if (this.stoppingTask && !allPlatforms) {
-      if (reason !== 'human-takeover') this.stopAutonomousTask(this.activePlatformId, 'stopped', reason)
+      if (reason !== 'input-paused') this.stopAutonomousTask(this.activePlatformId, 'stopped', reason)
       return this.stoppingTask
     }
     const previousStop = this.stoppingTask, selected = this.embeds.get(this.activePlatformId)?.embed
@@ -2175,7 +2187,7 @@ export class SessionRuntime {
     }
   }
 
-  private stopAutonomousTask(platformId: string, status: 'stopped' | 'interrupted' = 'stopped', reason?: 'user-ended' | 'global-emergency' | 'human-takeover'): void {
+  private stopAutonomousTask(platformId: string, status: 'stopped' | 'interrupted' = 'stopped', reason?: TaskStopReason): void {
     const task = this.taskCoordinator.current(platformId)
     if (this.pendingTaskCommand?.lease.platformId === platformId) this.pendingTaskCommand = null
     if (this.pendingTaskComputer?.platformId === platformId) this.pendingTaskComputer = null
@@ -2247,7 +2259,8 @@ export class SessionRuntime {
   private toolPrompt(platformId: string): string {
     const capability = this.getComputerUseCapability(platformId)
     return toolPromptForPlatform(platformId, !this.web2term, computerUseCapabilityPrompt(capability,
-      capability.available ? this.taskCoordinator?.computerStepToken?.(platformId) ?? null : null))
+      capability.available ? this.taskCoordinator?.computerStepToken?.(platformId) ?? null : null,
+      taskPausedByInput(this.taskCoordinator?.latest(platformId))))
   }
 
   /** Only computer tool metadata changes; the base system prompt remains unchanged. */

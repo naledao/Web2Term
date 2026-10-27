@@ -66,7 +66,7 @@ export function diagnoseComputerResult(result: ComputerUseToolResult, context: C
   const external = ['external_input', 'human_input'].includes(result.code) || ['external_input', 'human_input'].includes(data?.helper_code as string)
   const monitorUnavailable = result.code === 'input_monitor_unavailable' || data?.helper_code === 'input_monitor_unavailable'
   if (result.ok && result.execution === 'executed' && !postFailed && !partial && !empty && !noProgress && !halted) return null
-  const ended = result.code === 'human_takeover' || !external && !timedOut && (result.code === 'cancelled' || result.code === 'inactive_context')
+  const ended = result.code === 'human_paused' || !external && !timedOut && (result.code === 'cancelled' || result.code === 'inactive_context')
   let category: ComputerDiagnosis['category']
   if (ended) category = 'context_ended'
   else if (halted || result.code === 'progress_limit') category = 'progress_limit'

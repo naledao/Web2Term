@@ -687,6 +687,18 @@ test('desktop coordinate clicks are off by default; enabled, they click a deskto
   assert.equal(regional.ok, true); assert.equal(regional.data.observation.target, 'region')
 })
 
+test('an input waits for the screen to settle, and observes the desktop when it closed its own window', async t => {
+  const f = fixture(t), shot = await f.invoke({ target: 'window', window_id: row.window_id })
+  f.clickMutate(() => f.setKnown(false)) // e.g. picking a Chrome profile closes the picker window
+  const result = await f.click({ observation_id: shot.data.observation_id, x: 1, y: 1 })
+  assert.equal(result.ok, true); assert.equal(result.data.click.click_completed, true)
+  assert.deepEqual(f.sleeps, [500], 'one settle pause before the follow-up observation')
+  assert.equal(result.data.post_observation_target_gone, true); assert.equal(result.data.post_observation_error, undefined)
+  assert.equal(result.data.observation.target, 'desktop'); assert.equal(result.attachments.length, 1)
+  assert.deepEqual(f.requests.map(r => r.action), ['observe', 'click', 'observe'], 'the closed window is never captured; the input is never replayed')
+  assert.match(result.message, /原窗口已关闭/)
+})
+
 test('mouse click dispatches once with trusted provenance and returns one new task-bound observation', async t => {
   const f = fixture(t), shot = await f.invoke({ target: 'window', window_id: row.window_id })
   const result = await f.click({ observation_id: shot.data.observation_id, x: 1, y: 1, button: 'right', click_count: 2 })

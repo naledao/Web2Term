@@ -1,10 +1,10 @@
-import { EMERGENCY_STOP_SHORTCUT } from '../shared/emergency-stop'
 import type { EmergencyStopResetResult, EmergencyStopState, InputReleaseStatus } from '../shared/emergency-stop'
 
 export interface EmergencyStopDependencies {
   desktop: { setEmergencyStopped(active: boolean): void; getState(): { executing: number; nativeBlocked: boolean } }
   helper: { emergencyStop(): void; resetEmergencyStop(): boolean; getState(): { pid: number | null }; inputReleaseStatus(): InputReleaseStatus }
   sessions(): Iterable<{ emergencyStop(): Promise<unknown>; isAutomationDraining(): boolean; releaseEmergencyStop(): void }>
+  gestureAvailable(): boolean
   changed(state: EmergencyStopState): void
 }
 /** A synchronous, application-wide latch. No renderer, page or UIA work is awaited to close admission. */
@@ -14,12 +14,10 @@ export class EmergencyStopController {
   private epoch = 0
   private triggeredAt: number | null = null
   private source: EmergencyStopState['source'] = null
-  private registered = false
   private pending = 0
   private failures = 0
   constructor(private readonly deps: EmergencyStopDependencies) {}
   isActive(): boolean { return this.active }
-  shortcutStatus(registered: boolean): void { this.registered = registered; this.refresh() }
   getState(): EmergencyStopState {
     const desktop = this.deps.desktop.getState(), helperRunning = this.deps.helper.getState().pid !== null
     const draining = [...this.deps.sessions()].some(session => session.isAutomationDraining())
@@ -29,12 +27,12 @@ export class EmergencyStopController {
       : !canReset ? '已阻止所有新动作与自动回传，正在取消页面生成、工具和输入；等待实际执行器退场。后台进程保持独立运行。'
         : inputRelease === 'unconfirmed' ? '自动操作已停止，helper 已退出；本次键鼠释放结果未确认。解除急停只允许新的用户任务，不会恢复旧任务。'
           : '自动操作已停止；后台进程保持独立运行。解除急停后，旧任务仍保持停止，需重新提交或显式恢复。'
-    return { active: this.active, revision: this.revision, epoch: this.epoch, triggeredAt: this.triggeredAt, source: this.source, shortcut: EMERGENCY_STOP_SHORTCUT,
-      shortcutRegistered: this.registered, pendingSessions: this.pending, failedSessions: this.failures, executing: desktop.executing,
+    return { active: this.active, revision: this.revision, epoch: this.epoch, triggeredAt: this.triggeredAt, source: this.source,
+      gestureAvailable: !this.active && this.deps.gestureAvailable(), pendingSessions: this.pending, failedSessions: this.failures, executing: desktop.executing,
       helperRunning, inputRelease, canReset, message }
   }
   refresh(): void { this.revision++; try { this.deps.changed(this.getState()) } catch { /* A view cannot disable cancellation. */ } }
-  trigger(source: 'button' | 'shortcut'): EmergencyStopState {
+  trigger(source: 'button' | 'mouse-gesture'): EmergencyStopState {
     if (this.active) return this.getState()
     this.active = true; this.epoch++; this.triggeredAt = Date.now(); this.source = source; this.failures = 0
     // Close admission before cancellation can synchronously publish state and wake a queue.

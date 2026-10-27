@@ -68,6 +68,40 @@ It sets `$env:LIB` to empty for its own process (an unexpanded `%LIB%` breaks `A
 
 Log: `%TEMP%\gpt-login-diag\mouse-extrainfo-<timestamp>-<pid>.log` (`PROBE_LOG_DIR` overrides).
 
+## injected-key-probe.ps1
+
+**The question this run answers:** which injected keyboard event interrupts a computer-use drag? On
+2026-10-27 three of four drags stopped ~0.9 s after the request with `external-input keyboard` in
+`desktop-activity-*.log`. The helper sends no keyboard input during a drag, so the key-down came from
+another program. The activity log deliberately keeps no key or source, so this probe names them.
+
+Not Electron: a standalone PowerShell script with inline C# and one `WH_KEYBOARD_LL` hook, the same
+injected test as `DesktopActivityPolicy.Classify` (`LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED`).
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\diag\injected-key-probe.ps1
+```
+
+1. Keep the app running as usual. Start the probe: a small topmost window **“注入按键探针”** opens at the
+   top-left and shows two counters.
+2. In Web2Term, ask the AI to drag in ZERO EX again (any drag that failed before). Do not touch the
+   keyboard while it runs.
+3. When the drag has failed (or succeeded), close the probe window. The terminal prints the log path.
+
+| Line | Meaning |
+| --- | --- |
+| `START … is64=` | must be `True` |
+| `HOOK keyboard=True` | the hook is installed; `False` means nothing was recorded |
+| `FOREIGN n= at= msg= vk= flags= extra= lowerIl= interrupts= foreground=` | one injected key event without Web2Term's marker. `interrupts=True` (keydown/syskeydown) is what stops the helper; compare `at` with the drag in `desktop-activity-*.log`. `vk=packet` is Unicode input; `foreground` is the process owning the foreground window then, not necessarily the injector |
+| `DONE foreignInjected= web2termMarked=` | totals; `web2termMarked` counts the helper's own marked keys (none expected during a drag) |
+
+Rules: physical keys are neither logged nor counted; a `VK_PACKET`'s character, window titles and
+coordinates are never written. Only Web2Term's marker (`0x5732xxxx`, `ClickInterop.Marker`) is filtered out.
+Writes happen on a background thread so the hook never delays real input; the hook is removed when the
+window closes. It sets `$env:LIB` to empty for its own process (an unexpanded `%LIB%` breaks `Add-Type`).
+
+Log: `%TEMP%\gpt-login-diag\injected-key-<timestamp>-<pid>.log` (`PROBE_LOG_DIR` overrides).
+
 ## web2term desktop/workspace checks
 
 Only the user runs these offline checks:

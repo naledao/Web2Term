@@ -130,6 +130,17 @@ test('parameter bounds, enums and mutually exclusive complete locator groups are
   }
 })
 
+test('invalid parameters name the offending fields and list the accepted ones', () => {
+  const coordinates = { ...click(), x: 0, y: 1080 }
+  delete coordinates.element_id
+  const unknown = check({ ...coordinates, scroll_amount: 778 })
+  assert.equal(unknown.error.code, 'invalid_parameters'); assert.equal(unknown.error.field, 'scroll_amount')
+  assert.match(unknown.error.message, /未知字段 scroll_amount/); assert.match(unknown.error.message, /可用参数：/)
+  const range = check({ ...coordinates, x: -1 })
+  assert.equal(range.error.field, 'x'); assert.match(range.error.message, /x 应为/)
+  assert.match(check(click({ x: 10, y: 10 })).error.message, /定位方式须且只能完整使用一组/)
+})
+
 test('unbounded or precision-losing inputs fail before any executor can see them', () => {
   const cases = [
     ['{"type":"computer","x":1e309}', 'invalid_parameters'],

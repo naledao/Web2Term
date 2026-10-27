@@ -38,8 +38,28 @@ internal static class DragTests
     }
     private static DragReceipt Receipt(ActionResult r) => (DragReceipt)r.Data!;
     internal static void RunAll() {
-        Geometry(); Complete(); Stale(); HoverRepaint(); Interrupted(); Receipts(); Cancellation(); Protocol();
-        Console.WriteLine("PASS drag bounded paths, guards, accepted prefixes, cancellation and cleanup (synthetic)");
+        Geometry(); Complete(); HoldAndHover(); Stale(); HoverRepaint(); Interrupted(); Receipts(); Cancellation(); Protocol();
+        Console.WriteLine("PASS drag bounded paths, hold and drop hover, guards, accepted prefixes, cancellation and cleanup (synthetic)");
+    }
+    // 2026-10-27: a WinUI drop target ignored a drag that moved right after the press and released on the last segment.
+    private static void HoldAndHover() {
+        var f = new Fixture(); var image = f.Publish();
+        var result = f.Drag(image); var r = Receipt(result); var log = f.Input.Log;
+        int down = log.IndexOf("down"), up = log.IndexOf("up");
+        Check(result.Ok && r.drag_completed && down > 0 && up == log.Count - 1, "hold/hover gesture did not complete");
+        Check(log[down + 1] == "pause:" + DragTiming.HoldMs, "no hold between press and the first path move");
+        string end = "move:" + r.end!.x + "," + r.end!.y;
+        var tail = log.Skip(up - 6).Take(6).ToArray();
+        Check(tail[0] == end && tail[1].StartsWith("pause:") && tail[2].StartsWith("move:") && tail[2] != end && tail[3].StartsWith("pause:") && tail[4] == end && tail[5].StartsWith("pause:"),
+            "no nudge and hover over the drop target before release: " + string.Join(" ", tail));
+        var nudge = tail[2]["move:".Length..].Split(',').Select(int.Parse).ToArray();
+        Check(Math.Abs(nudge[0] - r.end!.x) <= DragTiming.NudgePixels && Math.Abs(nudge[1] - r.end!.y) <= DragTiming.NudgePixels, "hover nudge left the drop point");
+        // A change while hovering stops and releases instead of dropping blindly.
+        var g = new Fixture(); var second = g.Publish(); int planned = 0;
+        g.Input.AfterMove = n => { if (planned > 0 && n == planned + 2) g.Input.Allowed = false; };
+        g.Input.AfterDown = () => planned = DragPath.Resolve(second, g.Images.Current, Path)!.Length - 1;
+        var stopped = g.Drag(second); var s = Receipt(stopped);
+        Check(!stopped.Ok && stopped.Execution == "unknown" && !s.drag_completed && s.release_attempted && g.Input.UpCalls == 1, "hover interruption dropped or kept the button held");
     }
     private static void Geometry() {
         using Stream data = Assembly.GetExecutingAssembly().GetManifestResourceStream("windows-drag-cases.json")!;
@@ -63,7 +83,8 @@ internal static class DragTests
             f.Input.AfterDown = () => { f.States.Current = f.States.Current with { Focus = "own-focus/capture", Revision = "own-canvas-change", InputTargetReady = false }; f.Images.Pixels.Bgra[0] = 255; };
             var result = f.Drag(image, new(Path, button, 3000)); var r = Receipt(result);
             Check(result.Ok && result.Execution == "executed" && r.drag_completed && !r.drag_verified && !r.goal_verified && !r.input_ready, "complete drag result wrong");
-            Check(f.Input.DownCalls == 1 && f.Input.UpCalls == 1 && f.Input.Moves == r.segments_planned + 1 && r.segments.Length == r.segments_planned && f.Input.Waited == 3000, "unbalanced/replayed gesture or duration");
+            Check(f.Input.DownCalls == 1 && f.Input.UpCalls == 1 && f.Input.Moves == r.segments_planned + 3 && r.segments.Length == r.segments_planned &&
+                f.Input.Waited == 3000 + DragTiming.HoldMs + DragTiming.HoverMs, "unbalanced/replayed gesture or duration");
             Check(r.start == new CoordinatePoint(15, 15) && r.end == new CoordinatePoint(15, 70) && !r.release_required && !r.release_attempted, "physical endpoint or cleanup wrong");
             Check(!f.Registry.Validate(Owner, new(image.observation_id), CancellationToken.None).valid, "drag left old observation live");
             Check(f.Input.LastButton == button, "button replaced");
@@ -159,17 +180,19 @@ internal sealed class FakeDragBackend(FakeObservationBackend images) : IDragBack
     internal int Moves, DownCalls, UpCalls, Waited, MoveAccepted = 1, DownAccepted = 1, UpAccepted = 1, ThrowMove;
     internal CoordinatePoint? Cursor; internal string? LastButton;
     internal Action<int>? AfterMove; internal Action? AfterDown, AfterPause;
+    /** The gesture as performed: "down", "pause:<ms>", "move:<x>,<y>", "up". */
+    internal readonly List<string> Log = [];
     public bool Guard(CaptureSource source, CoordinatePoint point, CoordinatePoint? cursor, string button, bool holding, CancellationToken cancellation) {
         cancellation.ThrowIfCancellationRequested();
         return Allowed && source.Bounds == images.Current.Bounds && source.WindowDpi == images.Current.WindowDpi && source.Monitors.SequenceEqual(images.Current.Monitors) && (cursor == null || cursor == Cursor);
     }
     public MouseMoveResult Move(DesktopPointResolution point, CancellationToken cancellation) {
-        cancellation.ThrowIfCancellationRequested(); Moves++; if (ThrowMove == Moves) throw new Exception("uncertain move");
+        cancellation.ThrowIfCancellationRequested(); Moves++; Log.Add("move:" + point.Desktop.x + "," + point.Desktop.y); if (ThrowMove == Moves) throw new Exception("uncertain move");
         if (MoveAccepted == 1) Cursor = point.Desktop;
         AfterMove?.Invoke(Moves); return new(MoveAccepted, MoveAccepted == 1 && Arrived);
     }
-    public int Down(CaptureSource source, DesktopPointResolution point, string button, CancellationToken cancellation) { DownCalls++; LastButton = button; if (ThrowDown) throw new Exception("uncertain down"); AfterDown?.Invoke(); return DownAccepted; }
+    public int Down(CaptureSource source, DesktopPointResolution point, string button, CancellationToken cancellation) { DownCalls++; LastButton = button; Log.Add("down"); if (ThrowDown) throw new Exception("uncertain down"); AfterDown?.Invoke(); return DownAccepted; }
     public bool ConfirmDown(string button, CancellationToken cancellation) { cancellation.ThrowIfCancellationRequested(); return Confirmed; }
-    public bool Pause(CaptureSource source, CoordinatePoint point, string button, int milliseconds, CancellationToken cancellation) { Waited += milliseconds; AfterPause?.Invoke(); return Guard(source, point, point, button, true, cancellation); }
-    public int Up(string button) { UpCalls++; if (ThrowUp) throw new Exception("uncertain up"); return UpAccepted; }
+    public bool Pause(CaptureSource source, CoordinatePoint point, string button, int milliseconds, CancellationToken cancellation) { Waited += milliseconds; Log.Add("pause:" + milliseconds); AfterPause?.Invoke(); return Guard(source, point, point, button, true, cancellation); }
+    public int Up(string button) { UpCalls++; Log.Add("up"); if (ThrowUp) throw new Exception("uncertain up"); return UpAccepted; }
 }

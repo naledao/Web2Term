@@ -50,7 +50,13 @@
   color: var(--cu-amber);
   font-size: 10px;
 }
-.computer-use-overlay__escape-hint { color: var(--cu-muted); font-size: 10px; white-space: nowrap; }
+.computer-use-overlay__stop-hint { color: var(--cu-amber); font-size: 11px; font-weight: 600; }
+.computer-use-overlay[data-completed] .computer-use-overlay__stop-hint,
+.computer-use-overlay[data-stopped] .computer-use-overlay__stop-hint { color: var(--cu-muted); font-weight: 400; }
+.computer-use-overlay[data-stopped] .computer-use-overlay__notice-dot { background: var(--cu-red); box-shadow: none; animation: none; }
+.computer-use-overlay[data-stopped] .computer-use-overlay__notice-status,
+.computer-use-overlay[data-stopped] .computer-use-overlay__lane--action .computer-use-overlay__label { color: var(--cu-red); }
+.computer-use-overlay[data-stopped] .computer-use-overlay__lane--action { background: rgba(241, 126, 114, .08); }
 .computer-use-overlay[data-completed] .computer-use-overlay__notice-dot { background: var(--cu-green); box-shadow: none; animation: none; }
 .computer-use-overlay[data-completed] .computer-use-overlay__notice-status,
 .computer-use-overlay[data-completed] .computer-use-overlay__lane--action .computer-use-overlay__label { color: var(--cu-green); }
@@ -86,6 +92,8 @@
 }
 .computer-use-overlay__result--idle { background: var(--cu-panel-soft); border-color: var(--cu-line); }
 @media (max-width: 560px) {
+  .computer-use-overlay__notice { flex-wrap: wrap; padding-block: 7px; }
+  .computer-use-overlay__stop-hint { flex-basis: 100%; }
   .computer-use-overlay__content { grid-template-columns: 1fr; }
   .computer-use-overlay__lane--goal { border-right: 0; border-bottom: 1px solid var(--cu-line); }
 }

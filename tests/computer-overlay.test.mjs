@@ -20,7 +20,7 @@ function load(path) {
   } })
   return exports
 }
-const { computerOverlaySnapshot: project, ComputerOverlayLifetime, COMPUTER_OVERLAY_COMPLETION_MS } = load('../src/shared/computer-overlay.ts')
+const { computerOverlaySnapshot: project, computerOverlayEmergencySnapshot, ComputerOverlayLifetime, COMPUTER_OVERLAY_COMPLETION_MS } = load('../src/shared/computer-overlay.ts')
 const { default: Overlay } = load('../src/renderer/src/components/ComputerUseOverlay.tsx')
 const task = () => ({ sessionId: 's', platformId: 'deepseek', conversationId: 'c', id: 'task', generation: 1,
   status: 'recorded', originalRequest: '查找联系人', updatedAt: 1000,
@@ -96,7 +96,35 @@ test('model completion displays a success notice instead of the running heading 
   assert.match(html, /Computer Use 任务已完成/)
   assert.match(html, /提示将自动收起/)
   assert.match(html, /模型已输出/)
-  assert.doesNotMatch(html, /正在操控|点击联系人入口|连续双击 ESC/)
+  assert.doesNotMatch(html, /正在操控|点击联系人入口|连续来回晃动鼠标/)
+})
+
+test('the live overlay explains the mouse-shake gesture and an emergency is never displayed as completion', () => {
+  const snapshot = project(task(), null)
+  const live = renderToStaticMarkup(jsx.jsx(Overlay, { snapshot }))
+  assert.match(live, /连续来回晃动鼠标，立即急停/)
+  assert.doesNotMatch(live, /ESC|F12/)
+  const state = { active: true, source: 'mouse-gesture', triggeredAt: 2000, canReset: false }
+  const stopped = computerOverlayEmergencySnapshot(snapshot, state, 2000)
+  assert.equal(stopped.completed, false)
+  assert.equal(stopped.emergencyStopped, true)
+  assert.equal(stopped.status, '正在停止自动操作')
+  const html = renderToStaticMarkup(jsx.jsx(Overlay, { snapshot: stopped }))
+  assert.match(html, /全局急停已触发/)
+  assert.match(html, /连续晃动鼠标/)
+  assert.match(html, /所有会话/)
+  assert.match(html, /解除急停后/)
+  assert.doesNotMatch(html, /任务已完成|正在操控|点击联系人入口/)
+  assert.equal(computerOverlayEmergencySnapshot(snapshot, { ...state, canReset: true }, 2100).status, '自动操作已停止')
+  assert.equal(snapshot.emergencyStopped, undefined, 'stop projection never mutates the live task')
+})
+
+test('the emergency overlay expires from the original trigger time without polling extending it', () => {
+  const snapshot = project(task(), null), state = { active: true, source: 'mouse-gesture', triggeredAt: 2000, canReset: false }
+  assert.ok(computerOverlayEmergencySnapshot(snapshot, state, 2000 + COMPUTER_OVERLAY_COMPLETION_MS - 1))
+  assert.equal(computerOverlayEmergencySnapshot(snapshot, state, 2000 + COMPUTER_OVERLAY_COMPLETION_MS), null)
+  assert.equal(computerOverlayEmergencySnapshot(snapshot, { ...state, active: false }, 2100), null)
+  assert.equal(computerOverlayEmergencySnapshot(null, state, 2100), null)
 })
 
 test('live completion expires once; polling and repeated completed events never renew it', () => {

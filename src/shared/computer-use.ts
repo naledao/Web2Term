@@ -96,7 +96,7 @@ export interface ComputerUseToolResult {
   ok: boolean
   execution: 'not_executed' | 'executed' | 'unknown'
   code: 'ok' | 'unavailable' | 'cancelled' | 'executor_error' | 'inactive_context' | 'no_progress' | 'progress_limit' | 'recovery_required' | 'verification_required' | 'stale_catalog' | 'stale_window' | 'invalid_result' | 'launch_failed' | 'open_failed'
-    | 'focus_denied' | 'focus_unconfirmed' | 'external_input' | 'human_input' | 'human_takeover' | 'input_monitor_unavailable' | 'window_blocked' | 'restore_required' | 'capture_failed' | 'capture_blocked' | 'stale_observation'
+    | 'focus_denied' | 'focus_unconfirmed' | 'external_input' | 'human_input' | 'human_paused' | 'input_monitor_unavailable' | 'window_blocked' | 'restore_required' | 'capture_failed' | 'capture_blocked' | 'stale_observation'
     | 'click_blocked' | 'click_failed' | 'type_text_blocked' | 'type_text_failed' | 'press_key_blocked' | 'press_key_failed' | 'scroll_blocked' | 'scroll_failed' | 'drag_blocked' | 'drag_failed' | 'wait_timeout' | 'wait_failed' | 'wait_ambiguous' | ComputerUseProtocolErrorCode
   message: string
   data?: unknown
@@ -165,6 +165,11 @@ const shortText = (value: unknown, limit: number): value is string => typeof val
 /** Structural argument types only; action-specific bounds and identities belong to its validator. */
 export function computerUseParametersMatch(definition: ComputerUseActionDefinition, value: unknown): value is Record<string, unknown> {
   return computerUseProtocol.parametersMatch(definition, value)
+}
+
+/** The fields that broke `computerUseParametersMatch`, with the action's accepted parameters. */
+export function computerUseParameterIssues(definition: ComputerUseActionDefinition, value: unknown): string {
+  return computerUseProtocol.parameterIssues(definition, value).message
 }
 
 /** Return an isolated, bounded definition so callers cannot change published capabilities. */
@@ -313,12 +318,20 @@ function compactAction(definition: ComputerUseActionDefinition): string {
   return `${definition.action}：${summary}${parameters ? ` 参数：${parameters}` : ''}${locator}`
 }
 
-export function computerUseCapabilityPrompt(capability: ComputerUseCapability, stepToken?: string | null): string {
+/**
+ * @param pausedByInput the conversation's task was paused by the user's keyboard/mouse input; this prompt
+ *   travels with the user's next message, which continues that task.
+ */
+export function computerUseCapabilityPrompt(capability: ComputerUseCapability, stepToken?: string | null, pausedByInput = false): string {
   if (!capability.computerUseEnabled && !capability.desktopControlEnabled) return ''
   return [
     '【工具能力：computer use】',
     '用于发现、观察和操作本机业务应用；命令、文件和后台任务继续使用对应工具。无需先提交计划，每次只推进一个可验证步骤。',
     `computer use：${capability.computerUseEnabled ? '已启用' : '已关闭'}；桌面控制：${capability.desktopControlEnabled ? '已允许' : '已关闭'}。`,
+    ...(pausedByInput ? [
+      '【computer use 暂停后继续】',
+      '上一轮 computer use 因用户在桌面上连续 3 次键鼠操作而暂停，暂停时那一步的结果没有回传。本条用户消息继续同一任务：先重新观察真实界面，核对暂停前最后一步是否已生效，不要盲目重做；再按用户本条消息和原要求继续。'
+    ] : []),
     ...(capability.context.platformId === 'deepseek' ? ['DeepSeek 网页视觉理解能力已由用户确认，无需再次确认或配置视觉模型 API Key。'] : []),
     capability.message,
     ...(!capability.available ? [
@@ -335,7 +348,7 @@ export function computerUseCapabilityPrompt(capability: ComputerUseCapability, s
       '每轮只发一个 JSON 请求，参数放顶层；不得混入 command、read_files 或 questions。只用当前 step_token；无令牌时等待 computer_result。',
       '每个 computer 请求必须带顶层 description：1–160 字的单行简短中文，说明本步准备操作的具体对象、动作及目的，例如“点击 QQ 的联系人入口，查找收件人”。仅用于向用户展示，不是执行参数；不要包含思考过程、敏感输入原文，也不要把尚未执行的操作描述成已完成。',
       '操作后根据新观察继续；unknown、可能已生效或结果未确认时先核对，禁止盲目重试。ok 不代表业务目标完成。',
-      'human_takeover 时暂停并等待用户明确继续；human_input/external_input 后重新观察。需要用户信息或不可逆决定时使用现有 questions 协议。',
+      'human_paused 表示 computer use 已因用户键鼠操作暂停，停止发起 computer 请求，等待用户发新消息；human_input/external_input 后重新观察。需要用户信息或不可逆决定时使用现有 questions 协议。',
       '任务结束时以“【任务完成】”开头回复，客户端收到该标记即结束任务并提示用户；可选用 complete_task 核对并交付详细结果。',
       '【computer 调用格式】',
       ...(stepToken === null ? ['当前步骤正在处理或令牌尚未就绪，等待 computer_result 返回 next_step_token 后再发起下一请求。'] : [

@@ -28,9 +28,11 @@ function diagnosticSnapshot(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object') return { available: false }
   const snapshot = value as Record<string, unknown>
   const result: Record<string, unknown> = {}
-  for (const key of ['status', 'rootFound', 'rootIsForm', 'images', 'imagesExpected', 'cards', 'namesSeen', 'nameSourceCount', 'missingNameCount', 'uploading', 'error', 'inputFiles', 'composerFound', 'sendFound', 'sendDisabled', 'draftEmpty', 'stopFound', 'draftCleared', 'newTurnSeen', 'turnFilesSeen', 'captionSeen', 'captionPrefixSeen', 'turnTextLength', 'captionLength', 'edited', 'turnPosition', 'baselinePosition', 'turnKeyPresent', 'turnKeyKnown', 'baselineKeyCount', 'userTurnCount', 'baselinePositionAvailable', 'menuCount', 'localEntryCount', 'captionEntryCount', 'entryAmbiguous', 'entryClicked']) {
+  for (const key of ['status', 'rootFound', 'rootIsForm', 'images', 'imagesExpected', 'cards', 'namesSeen', 'nameSourceCount', 'missingNameCount', 'uploading', 'error', 'inputFiles', 'composerFound', 'sendFound', 'sendDisabled', 'draftEmpty', 'stopFound', 'draftCleared', 'newTurnSeen', 'turnFilesSeen', 'captionSeen', 'captionPrefixSeen', 'turnTextLength', 'captionLength', 'edited',
+    'turnIdPresent', 'turnIdKnown', 'turnVisible', 'hiddenUserTurnCount', 'newTurnCount', 'baselineTurnIdCount', 'turnPosition', 'baselinePosition', 'turnKeyPresent', 'turnKeyKnown', 'baselineKeyCount', 'userTurnCount', 'baselinePositionAvailable', 'menuCount', 'localEntryCount', 'captionEntryCount', 'entryAmbiguous', 'entryClicked']) {
     if (typeof snapshot[key] === 'boolean' || typeof snapshot[key] === 'number' || (key === 'status' && typeof snapshot[key] === 'string')) result[key] = snapshot[key]
   }
+  if (['none', 'fallback', 'id', 'other'].includes(String(snapshot.turnKeyShape))) result.turnKeyShape = snapshot.turnKeyShape
   if (['', 'files-not-selected', 'attachment-root-missing', 'attachment-names-missing', 'upload-in-progress', 'send-button-missing', 'send-button-disabled', 'still-generating'].includes(String(snapshot.readyBlockReason))) {
     result.readyBlockReason = snapshot.readyBlockReason
   }

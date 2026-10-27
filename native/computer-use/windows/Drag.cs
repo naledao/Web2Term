@@ -8,6 +8,11 @@ internal sealed record DragOptions(CoordinatePoint[] Path, string Button = "left
     internal bool Valid => Path.Length is >= 2 and <= 33 && Path.All(p => p.x >= 0 && p.x < ObservationPng.MaximumDimension && p.y >= 0 && p.y < ObservationPng.MaximumDimension) &&
         Path.Skip(1).Where((p, i) => p == Path[i]).Count() == 0 && Button is "left" or "right" or "middle" && Duration is >= 100 and <= 3000;
 }
+/** Pauses around the path, beyond the caller's duration_ms: after the press, and over the drop target before release. */
+internal static class DragTiming
+{
+    internal const int HoldMs = 200, HoverMs = 400, NudgePixels = 2;
+}
 internal static class DragPath
 {
     internal static CoordinatePoint[]? Interpolate(CoordinatePoint[] anchors, int stride = 16)
@@ -100,6 +105,9 @@ internal sealed class DragService(ObservationRegistry observations, IDragBackend
             if (downAccepted != 1) return Fail(cancellation.IsCancellationRequested ? "cancelled" : "drag_failed", "按下未确认接收，未继续移动；仅尝试必要释放。");
             confirmed = backend.ConfirmDown(options.Button, cancellation);
             if (!confirmed) return Fail("drag_failed", "按钮按住状态未确认，停止轨迹并尝试释放。");
+            // Hold before moving, so the app registers the press and captures the pointer before the drag threshold is crossed.
+            if (!backend.Pause(source, plan[0].Desktop, options.Button, DragTiming.HoldMs, cancellation))
+                return Fail("drag_failed", "按住等待期间窗口、捕获、鼠标或输入状态变化，未开始移动并释放。");
             for (int i = 1; i < plan.Length; i++) {
                 cancellation.ThrowIfCancellationRequested();
                 int wait = options.Duration * i / (plan.Length - 1) - options.Duration * (i - 1) / (plan.Length - 1);
@@ -109,6 +117,23 @@ internal sealed class DragService(ObservationRegistry observations, IDragBackend
                 MouseMoveResult next = backend.Move(plan[i], cancellation); segments[^1] = new(i, next.Accepted, next.Arrived);
                 if (next.Accepted != 1 || !next.Arrived) return Fail("drag_failed", "轨迹分段未确认到达，停止后续移动，不补拖。");
             }
+            // Hover on the drop target before releasing: a WinUI/OLE target accepts a drop only after it has seen the
+            // pointer enter and move over it. Releasing on the last segment dropped nothing (2026-10-27, ZERO EX).
+            CoordinatePoint end = plan[^1].Desktop, back = plan[^2].Desktop;
+            DesktopPointResolution? nudge = CoordinateMapper.ResolvePhysical(source,
+                new(end.x + Math.Sign(back.x - end.x) * DragTiming.NudgePixels, end.y + Math.Sign(back.y - end.y) * DragTiming.NudgePixels));
+            if (nudge == null) return Fail("drag_failed", "终点附近无法悬停，停止并尝试释放本次按钮。");
+            CoordinatePoint cursor = end;
+            foreach (DesktopPointResolution hover in new[] { nudge, plan[^1] }) {
+                cancellation.ThrowIfCancellationRequested();
+                if (!backend.Pause(source, cursor, options.Button, DragTiming.HoverMs / 3, cancellation) ||
+                    !backend.Guard(source, hover.Desktop, cursor, options.Button, true, cancellation)) return Fail("drag_failed", "终点悬停期间窗口、捕获、鼠标或输入状态变化，停止并尝试释放。");
+                MouseMoveResult step = backend.Move(hover, cancellation);
+                if (step.Accepted != 1 || !step.Arrived) return Fail("drag_failed", "终点悬停移动未确认到达，停止并尝试释放。");
+                cursor = hover.Desktop;
+            }
+            if (!backend.Pause(source, end, options.Button, DragTiming.HoverMs - 2 * (DragTiming.HoverMs / 3), cancellation))
+                return Fail("drag_failed", "终点悬停期间状态变化，停止并尝试释放本次按钮。");
             cancellation.ThrowIfCancellationRequested();
             if (!backend.Guard(source, plan[^1].Desktop, plan[^1].Desktop, options.Button, true, cancellation)) return Fail("drag_failed", "终点状态变化，停止并尝试释放本次按钮。");
             up = true; upAccepted = backend.Up(options.Button); completed = upAccepted == 1;

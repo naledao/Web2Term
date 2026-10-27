@@ -36,7 +36,7 @@ const definition = () => ({ action: 'observe', description: '取得已定位窗�
   example: { window_id: 'window:example' } })
 const plain = value => JSON.parse(JSON.stringify(value))
 test('desktop interruptions retain execution facts and never publish unvalidated native payloads', () => {
-  for (const code of ['external_input', 'human_takeover', 'input_monitor_unavailable']) for (const execution of ['not_executed', 'executed', 'unknown']) {
+  for (const code of ['external_input', 'human_paused', 'input_monitor_unavailable']) for (const execution of ['not_executed', 'executed', 'unknown']) {
     assert.throws(() => throwIfDesktopInterrupted({ ok: false, code, execution, message: 'Actual receipt', data: { unvalidated: true } }), error => {
       assert.equal(error.result.code, code); assert.equal(error.result.execution, execution)
       assert.deepEqual(plain(error.result.data), { helper_code: code }); return true

@@ -6,7 +6,7 @@ namespace Web2Term.WindowsHelper;
 /** Hooks run on their own message thread. Never wait for UIA, the pipe, or SendInput inside a hook. */
 internal sealed class DesktopActivityMonitor : IDisposable
 {
-    private sealed class Watch(string id, long epoch) { internal readonly string Id = id; internal readonly long Epoch = epoch; internal readonly DesktopEscapeGesture Escape = new(); internal string? Interruption; }
+    private sealed class Watch(string id, long epoch) { internal readonly string Id = id; internal readonly long Epoch = epoch; internal readonly DesktopMouseShakeGesture Shake = new(); internal string? Interruption; }
     /** kind, input category (null for focus/monitor events), watch id, epoch. */
     private readonly Action<string, string?, string, long> changed;
     /** Web2Term's main process: it owns every top-level window of the control plane. */
@@ -38,30 +38,29 @@ internal sealed class DesktopActivityMonitor : IDisposable
     {
         if (code >= 0 && Volatile.Read(ref watch) is { } current)
         {
-            uint flags, key = 0; ulong extra; ClickInterop.Point point = default;
-            if (isKeyboard) { KeyboardEvent e = Marshal.PtrToStructure<KeyboardEvent>(data); flags = e.Flags; extra = e.Extra.ToUInt64(); key = e.Key; }
+            uint flags, key = 0, scan = 0; ulong extra; ClickInterop.Point point = default;
+            if (isKeyboard) { KeyboardEvent e = Marshal.PtrToStructure<KeyboardEvent>(data); flags = e.Flags; extra = e.Extra.ToUInt64(); key = e.Key; scan = e.Scan; }
             else { MouseEvent e = Marshal.PtrToStructure<MouseEvent>(data); flags = e.Flags; extra = e.Extra.ToUInt64(); point = e.Point; }
             uint kindMessage = (uint)message.ToUInt64();
-            bool physicalEscape = DesktopActivityPolicy.PhysicalEscape(isKeyboard, flags, key);
-            string? kind = physicalEscape ? current.Escape.Observe(kindMessage, Environment.TickCount64)
-                : DesktopActivityPolicy.Classify(isKeyboard, kindMessage, flags, extra, ClickInterop.Marker.ToUInt64());
-            if (!physicalEscape && kind != null) current.Escape.Reset();
-            // The explicit double-Esc gesture also works over Web2Term's own windows.
-            if (!physicalEscape && kind != null && DesktopActivityPolicy.OnControlPlane(TargetPid(isKeyboard, point), controlPid)) kind = null;
-            if (kind == "escape-pressed") {
-                // The first press passes through normally and invalidates old positioning in main.
-                // Keep this watch alive so the second physical press can complete the gesture.
-                if (Volatile.Read(ref current.Interruption) == null)
-                    ThreadPool.QueueUserWorkItem(_ => Publish(kind, "keyboard", current));
+            string? kind;
+            if (DesktopActivityPolicy.PhysicalPointerMove(isKeyboard, kindMessage, flags)) {
+                kind = current.Shake.Observe(point.X, point.Y, Environment.TickCount64) ? "human-stop" : null;
             }
-            else if (kind != null && (kind == "human-stop"
+            else {
+                kind = DesktopActivityPolicy.Classify(isKeyboard, kindMessage, flags, extra, ClickInterop.Marker.ToUInt64(), key, scan);
+                // Injected movement resets the baseline so the AI's cursor jumps cannot contribute.
+                if (kind != null || !isKeyboard && kindMessage == 0x200) current.Shake.Reset();
+                if (kind != null && DesktopActivityPolicy.OnControlPlane(TargetPid(isKeyboard, point), controlPid)) kind = null;
+            }
+            // The explicit gesture also works over Web2Term's own windows and while a step drains.
+            if (kind != null && (kind == "human-stop"
                 ? Interlocked.Exchange(ref current.Interruption, kind) != kind
                 : Interlocked.CompareExchange(ref current.Interruption, kind, null) == null))
             {
                 // Only a lock-free latch here: SendInput may itself be waiting for this hook to return.
                 HelperInputState.RequestStop();
                 Volatile.Write(ref interrupted, current);
-                string input = DesktopActivityPolicy.InputCategory(isKeyboard, kindMessage);
+                string input = kind == "human-stop" ? "move" : DesktopActivityPolicy.InputCategory(isKeyboard, kindMessage);
                 ThreadPool.QueueUserWorkItem(_ => Publish(kind, input, current));
             }
         }

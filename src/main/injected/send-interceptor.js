@@ -75,6 +75,7 @@
     fileUserTurnSelector: '[class~="group/user-message"][data-chatgpt-search-unit-key]',
     fileUserTurnFallbackSelector: '[data-content-search-unit-key$=":user"]',
     fileUserTurnKeyAttr: 'data-chatgpt-search-unit-key',
+    fileUserTurnIdAttr: 'data-turn-key',
     fileImagesMayUseNames: false,
     fileDuplicateNameSuffix: true,
     fileAttachmentCardSelector: ''
@@ -4756,8 +4757,15 @@
       return !!key && !baseline.keys.has(key)
     }
     const key = fileUserTurnKey(newest)
+    // A positional unit key can repeat; the turn's own message id cannot.
+    const turnId = fileUserTurnId(newest)
+    if (turnId && baseline.turnIds && !baseline.turnIds.has(turnId)) return true
     return key ? !baseline.keys.has(key) : newest !== baseline.node && turns.length > baseline.count
   }
+  const fileTurnKeyShape = (key) => !key ? 'none' : /^fallback-turn-/.test(key) ? 'fallback'
+    : /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(key) ? 'id' : 'other'
+  const fileUserTurnId = (node) => PAGE.fileUserTurnIdAttr
+    ? String(node?.closest?.(`[${PAGE.fileUserTurnIdAttr}]`)?.getAttribute(PAGE.fileUserTurnIdAttr) || '').trim() : ''
   const turnShowsFiles = (node, files) => {
     if (!node || !files.length) return false
     const root = fileAttachmentRoot(node)
@@ -4785,24 +4793,27 @@
     const snapshot = attachmentSnapshot()
     if (fileSend.submitted) {
       const turns = fileUserTurns()
-      // Prefer the new user row carrying the attachments, not a nested text
-      // node or an assistant placeholder without an answer marker yet.
-      const newest = turns.find((turn) => isNewFileUserTurn(turn, turns, fileSend.baselineUser) && turnShowsFiles(turn, fileSend.files)) ||
-        turns.find((turn) => isNewFileUserTurn(turn, turns, fileSend.baselineUser)) || turns.at(-1)
-      fileSend.lastCheckedTurn = newest
-      // Keep correlation in local state; never add a marker or status text to the message.
-      const draftCleared = composerMatches(composer, '') && !draftAttachmentEvidence()
-      const newTurnSeen = isNewFileUserTurn(newest, turns, fileSend.baselineUser)
-      const turnFilesSeen = turnShowsFiles(newest, fileSend.files)
       const captionToMatch = fileSend.focus ? fileSend.focus.text : fileSend.caption
-      const turnText = newest ? fileTurnText(newest).replace(/\s+/g, '') : ''
       const expectedCaption = captionToMatch ? captionToMatch.replace(/\s+/g, '') : ''
       // ChatGPT folds a long user message (… 显示更多) and keeps only its start in the DOM
       // (2026-10-27: an 11043-character result was sent but never confirmed). Its opening
       // characters, together with the new turn, its files and the cleared draft, still identify it.
-      const captionPrefixSeen = expectedCaption.length > FILE_CAPTION_PREFIX && !turnText.includes(expectedCaption) &&
-        turnText.includes(expectedCaption.slice(0, FILE_CAPTION_PREFIX))
-      const captionSeen = !captionToMatch || (!!newest && (turnText.includes(expectedCaption) || captionPrefixSeen))
+      const captionIn = (turn) => {
+        const text = turn ? fileTurnText(turn).replace(/\s+/g, '') : ''
+        const prefix = expectedCaption.length > FILE_CAPTION_PREFIX && !text.includes(expectedCaption) && text.includes(expectedCaption.slice(0, FILE_CAPTION_PREFIX))
+        return { text, prefix, seen: !captionToMatch || (!!turn && (text.includes(expectedCaption) || prefix)) }
+      }
+      const isNew = (turn) => isNewFileUserTurn(turn, turns, fileSend.baselineUser)
+      // Prefer the new user row carrying the attachments and this caption, not a nested text node, an
+      // assistant placeholder without an answer marker yet, or older history rendered after the send.
+      const newest = turns.find((turn) => isNew(turn) && turnShowsFiles(turn, fileSend.files) && captionIn(turn).seen) ||
+        turns.find((turn) => isNew(turn) && turnShowsFiles(turn, fileSend.files)) || turns.find(isNew) || turns.at(-1)
+      fileSend.lastCheckedTurn = newest
+      // Keep correlation in local state; never add a marker or status text to the message.
+      const draftCleared = composerMatches(composer, '') && !draftAttachmentEvidence()
+      const newTurnSeen = isNew(newest)
+      const turnFilesSeen = turnShowsFiles(newest, fileSend.files)
+      const { text: turnText, prefix: captionPrefixSeen, seen: captionSeen } = captionIn(newest)
       const sent = !fileSend.edited && draftCleared && newTurnSeen && turnFilesSeen && captionSeen
       if (sent) {
         const focus = fileSend.focus
@@ -4830,13 +4841,21 @@
       return {
         status: 'confirming', draftCleared, newTurnSeen, turnFilesSeen, captionSeen, captionPrefixSeen,
         turnTextLength: turnText.length, captionLength: expectedCaption.length, edited: fileSend.edited,
+        // Key shapes and visibility only; no key or id values leave the page.
+        turnKeyShape: fileTurnKeyShape(fileUserTurnKey(newest)), turnIdPresent: !!fileUserTurnId(newest),
+        turnIdKnown: !!fileUserTurnId(newest) && !!fileSend.baselineUser.turnIds?.has(fileUserTurnId(newest)),
+        turnVisible: !!newest && isVisibleElement(newest), hiddenUserTurnCount: turns.filter((turn) => !isVisibleElement(turn)).length,
+        newTurnCount: turns.filter(isNew).length, baselineTurnIdCount: fileSend.baselineUser.turnIds?.size ?? 0,
         turnPosition: fileUserTurnPosition(newest), baselinePosition: fileSend.baselineUser.maxPosition,
         turnKeyPresent: !!fileUserTurnKey(newest), turnKeyKnown: fileSend.baselineUser.keys.has(fileUserTurnKey(newest)),
         baselineKeyCount: fileSend.baselineUser.keys.size, userTurnCount: turns.length,
         baselinePositionAvailable: fileSend.baselineUser.maxPosition !== null
       }
     }
-    if (fileSend.edited || !composerMatches(composer, fileSend.caption || '')) return { status: 'busy' }
+    // Whitespace-blind, like the confirmation's captionSeen: ChatGPT's composer adds a space before a URL it
+    // links ("target":"https://… became "target":" https://…, 2026-10-27 caption-check log).
+    const draftText = readComposer(composer).replace(/\s+/g, '')
+    if (fileSend.edited || draftText !== String(fileSend.caption || '').replace(/\s+/g, '')) return { status: 'busy' }
     if (snapshot.error) return { status: 'upload-failed', ...snapshot }
     const imagesExpected = fileSend.files.filter((item) => item.mimeType.startsWith('image/')).length
     const nameEvidence = attachmentNameEvidence(snapshot.nameSources, fileSend.files)
@@ -5128,6 +5147,7 @@
       const positions = turns.map(fileUserTurnPosition).filter((position) => position !== null)
       fileSend.baselineUser = {
         node: turns.at(-1) || null, count: turns.length, keys: new Set(turns.map(fileUserTurnKey).filter(Boolean)),
+        turnIds: new Set(turns.map(fileUserTurnId).filter(Boolean)),
         maxPosition: positions.length ? Math.max(...positions) : turns.length ? null : -1
       }
       fileSend.baselineAssistant = lastAssistantId()
@@ -5218,7 +5238,7 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, computerUseRequests: false, conversationPathPattern: '', ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, computerUseRequests: false, conversationPathPattern: '', ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileUserTurnIdAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
         observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing

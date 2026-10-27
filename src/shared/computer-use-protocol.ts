@@ -35,6 +35,38 @@ export function createComputerUseProtocol() {
     return true
   }
 
+  /**
+   * Which fields broke `parametersMatch`, plus the action's accepted parameters. A bare "parameters invalid"
+   * left the model guessing: 2026-10-27 it sent scroll_direction/scroll_amount:778/window_id/target and was
+   * told only that something was wrong.
+   */
+  const parameterIssues = (definition: ComputerUseActionDefinition, value: unknown): { field: string; message: string } => {
+    const expected = (p: ComputerUseActionDefinition['parameters'][number]): string => p.enum ? p.enum.map(String).join('|')
+      : [p.type, p.minimum !== undefined || p.maximum !== undefined ? `${p.minimum ?? ''}–${p.maximum ?? ''}` : '',
+        p.maxLength !== undefined ? `≤${p.maxLength} 字` : '', p.maxItems !== undefined ? `≤${p.maxItems} 项` : ''].filter(Boolean).join(' ')
+    const issues: string[] = [], fields: string[] = []
+    if (!object(value)) issues.push('参数必须是 JSON 对象')
+    else {
+      const unknown = Object.keys(value).filter(key => !definition.parameters.some(p => p.name === key))
+      if (unknown.length) { issues.push(`未知字段 ${unknown.slice(0, 8).join('、')}`); fields.push(...unknown) }
+      const missing = definition.parameters.filter(p => p.required && !Object.hasOwn(value, p.name)).map(p => p.name)
+      if (missing.length) { issues.push(`缺少必填 ${missing.join('、')}`); fields.push(...missing) }
+      for (const p of definition.parameters) {
+        if (!Object.hasOwn(value, p.name) || parametersMatch({ ...definition, parameters: [p], locatorAlternatives: undefined }, { [p.name]: value[p.name] })) continue
+        issues.push(`${p.name} 应为 ${expected(p)}`); fields.push(p.name)
+      }
+      const groups = definition.locatorAlternatives
+      if (groups) {
+        const present = groups.filter(group => group.some(key => Object.hasOwn(value, key)))
+        if (present.length !== 1 || !present[0].every(key => Object.hasOwn(value, key)))
+          issues.push(`定位方式须且只能完整使用一组：${groups.map(group => group.join('+')).join(' 或 ')}`)
+      }
+    }
+    const accepted = definition.parameters.map(p => `${p.name}${p.required ? '（必填）' : ''}`).join('、')
+    return { field: fields[0] ?? '', message: (`${definition.action} 参数不符合定义：${issues.join('；') || '类型或范围不符'}。` +
+      `可用参数：${accepted}。参数名必须完全一致，放在请求顶层。`).slice(0, 1200) }
+  }
+
   const check = (raw: string, definitions: readonly ComputerUseActionDefinition[]): ComputerUseProtocolCheck => {
     let index = 0, nodes = 0, action = '', stepToken: string | null = null
     const fail = (code: ComputerUseProtocolErrorCode, message: string, field = '', offset = index): never => {
@@ -129,7 +161,10 @@ export function createComputerUseProtocol() {
         /[\x00-\x1f\x7f\u2028\u2029]/.test(description) || !/[\u3400-\u9fff]/.test(description))
         fail('invalid_description', 'description 必须是 1–160 字的单行中文动作描述，说明本步准备做什么；仅用于展示，不代表执行成功。', 'description')
       const parameters = Object.fromEntries(Object.entries(request).filter(([key]) => !['type', 'version', 'action', 'step_token', 'description'].includes(key)))
-      if (!parametersMatch(definition!, parameters)) fail('invalid_parameters', '参数包含未知字段、缺少必填项、类型或范围不符，或同时使用了冲突的定位方式。')
+      if (!parametersMatch(definition!, parameters)) {
+        const issue = parameterIssues(definition!, parameters)
+        fail('invalid_parameters', issue.message, issue.field)
+      }
       return { ok: true, request: request as ComputerUseWireRequest, call: { action, parameters, description: (description as string).trim() }, stepToken: stepToken! }
     } catch (error) {
       const issue = error as ComputerUseProtocolError
@@ -137,7 +172,7 @@ export function createComputerUseProtocol() {
         : { code: 'invalid_json', message: 'computer 请求解析失败，本次未执行。', field: '', offset: index } }
     }
   }
-  return { check, parametersMatch }
+  return { check, parametersMatch, parameterIssues }
 }
 
 export const computerUseProtocol = createComputerUseProtocol()

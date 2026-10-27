@@ -1,4 +1,4 @@
-import { COMPUTER_USE_PROTOCOL_VERSION, computerUseParametersMatch, normalizeComputerUseActionDefinition } from '../shared/computer-use'
+import { COMPUTER_USE_PROTOCOL_VERSION, computerUseParameterIssues, computerUseParametersMatch, normalizeComputerUseActionDefinition } from '../shared/computer-use'
 import type { ComputerUseActionDefinition, ComputerUseCapability, ComputerUseToolCall, ComputerUseToolResult, ComputerUseImageReference } from '../shared/computer-use'
 import type { TaskLease } from '../shared/autonomous-task'
 import type { DesktopCoordinator, DesktopPermit } from './desktop-coordinator'
@@ -32,7 +32,7 @@ export class ComputerUseActionError extends Error {
 
 /** Preserve an actual interruption receipt before success-payload or post-observation validation. */
 export function throwIfDesktopInterrupted(response: WindowsHelperActionResult): void {
-  if (['external_input', 'human_input', 'human_takeover', 'input_monitor_unavailable'].includes(response.code))
+  if (['external_input', 'human_input', 'human_paused', 'input_monitor_unavailable'].includes(response.code))
     throw new ComputerUseActionError({ code: response.code as ComputerUseToolResult['code'], execution: response.execution,
       message: response.message, data: { helper_code: response.code } })
 }
@@ -85,7 +85,7 @@ export class ComputerUseTool {
     let parameters: Record<string, unknown>
     try {
       parameters = structuredClone(call.parameters)
-      if (!computerUseParametersMatch(entry.definition, parameters)) return result('invalid_parameters', '动作参数缺失、包含未知字段或类型不匹配。')
+      if (!computerUseParametersMatch(entry.definition, parameters)) return result('invalid_parameters', computerUseParameterIssues(entry.definition, parameters))
       const invalid = entry.handler.validate(parameters)
       if (invalid !== null) return result('invalid_parameters', invalid || '动作参数未通过执行器校验。')
     } catch {

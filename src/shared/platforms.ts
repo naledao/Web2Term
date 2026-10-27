@@ -213,6 +213,11 @@ export interface PageAdapter {
   fileUserTurnFallbackSelector?: string
   /** Opaque full-user-wrapper identity for a single attachment acknowledgement. */
   fileUserTurnKeyAttr?: string
+  /**
+   * The message id of the turn holding a user message, on that message or an ancestor. A second identity
+   * beside `fileUserTurnKeyAttr` when that key is positional and can repeat.
+   */
+  fileUserTurnIdAttr?: string
   /** A site may render uploaded images as filename cards rather than thumbnails. */
   fileImagesMayUseNames?: boolean
   /** The native uploader can insert a positive duplicate counter before the extension. */
@@ -669,6 +674,12 @@ export const CHATGPT_PAGE: PageAdapter = {
   fileUserTurnSelector: '[class~="group/user-message"][data-chatgpt-search-unit-key]',
   fileUserTurnFallbackSelector: '[data-content-search-unit-key$=":user"]',
   fileUserTurnKeyAttr: 'data-chatgpt-search-unit-key',
+  /*
+   * That unit key is positional ("fallback-turn-N:…", measured 2026-09-26). On 2026-10-27 a sent result
+   * was never confirmed: 9 user turns shared 5 keys, and the new turn's key was already in the baseline.
+   * The turn's own message id (measured for the focus view's edit) identifies the new turn regardless.
+   */
+  fileUserTurnIdAttr: 'data-turn-key',
   // 2026-10-11 upload: user_login_api.md becomes user_login_api(1).md.
   fileDuplicateNameSuffix: true,
   // 2026-10-05 attachment capture: this button contains the selected model.

@@ -9,7 +9,7 @@ import { PROGRESS_STOP_MESSAGES } from '../shared/computer-progress'
 import type { ComputerProgressState, ProgressStopReason } from '../shared/computer-progress'
 import { diagnoseComputerResult } from '../shared/computer-diagnostics'
 import type { ComputerActionClaim, ComputerActionUpdate } from '../shared/computer-actions'
-import type { AutonomousTask, AutonomousTaskState, TaskLease, TaskMachine, TaskProgress, TaskSubmission, TaskToolContext, TaskToolEvent, TaskBackgroundDependency, TaskContinuity } from '../shared/autonomous-task'
+import type { AutonomousTask, AutonomousTaskState, TaskLease, TaskMachine, TaskProgress, TaskSubmission, TaskToolContext, TaskToolEvent, TaskBackgroundDependency, TaskContinuity, TaskStopReason } from '../shared/autonomous-task'
 import type { ComputerUseCapability, ComputerUsePageRequest, ComputerUseToolCall, ComputerUseToolResult } from '../shared/computer-use'
 import type { FocusAttachmentInfo } from '../shared/focus-chat'
 import { pendingTaskQuestion, sameQuestionSource, taskClarificationContext, validTaskQuestion, validTaskQuestionSource, validTaskAnswerSource } from '../shared/task-clarification'
@@ -225,8 +225,11 @@ export class TaskCoordinator {
   submit(input: {
     platformId: string; conversationId: string | null; submission: TaskSubmission; turnId?: string
     text: string; attachments: FocusAttachmentInfo[]; machine: TaskMachine; capability: ComputerUseCapability
-    /** Only supplied by the main-process, user-initiated recovery send. */
-    resume?: { taskId: string; generation: number }
+    /**
+     * Only supplied by the main-process, user-initiated recovery send, or by the user's own next message
+     * after an input pause (`userText`: that message is kept as the new requirement).
+     */
+    resume?: { taskId: string; generation: number; userText?: boolean }
   }): AutonomousTask | null {
     const { platformId, conversationId, submission, capability } = input
     if (this.dispatchBlocked) return null
@@ -274,7 +277,8 @@ export class TaskCoordinator {
       generation: this.store.autonomousTaskGeneration(this.sessionId) + 1,
       sourceSubmissionId: submission.id, sourceTurnId: input.turnId ?? null,
       originalRequest: resumed?.originalRequest ?? input.text,
-      inputs: resumed ? [...structuredClone(resumed.inputs), { ...entry, kind: 'clarification', text: '恢复原任务；先重新观察并核对实际状态。' }] : [entry],
+      inputs: resumed ? [...structuredClone(resumed.inputs), { ...entry, kind: 'clarification',
+        text: input.resume?.userText ? input.text : '恢复原任务；先重新观察并核对实际状态。' }] : [entry],
       machine: structuredClone(input.machine), status: 'recorded', createdAt: now, updatedAt: now,
       control: resumed ? { ...this.control(resumed), pending: null }
         : createProgressState(capability.computerUseLimits),
@@ -294,16 +298,16 @@ export class TaskCoordinator {
     return structuredClone(task)
   }
 
-  stop(platformId: string, status: 'stopped' | 'interrupted' = 'stopped', reason?: 'user-ended' | 'global-emergency' | 'human-takeover'): void {
+  stop(platformId: string, status: 'stopped' | 'interrupted' = 'stopped', reason?: TaskStopReason): void {
     const state = this.entries.get(platformId)
     const taskState = state?.task
-    const supersedesTakeover = taskState?.status === 'stopped' && taskState.stop?.reason === 'human-takeover' && reason && reason !== 'human-takeover'
-    if (!state || !taskState || taskState.status !== 'recorded' && !supersedesTakeover) return
+    const supersedesPause = taskState?.status === 'stopped' && taskState.stop?.reason === 'input-paused' && reason && reason !== 'input-paused'
+    if (!state || !taskState || taskState.status !== 'recorded' && !supersedesPause) return
     const task = taskState.status === 'recorded' ? this.interrupted(taskState, status) : { ...structuredClone(taskState), updatedAt: Date.now() }
     if (reason) {
       task.stop = { reason, requestedAt: Date.now() }
-      if (task.progress) task.progress.detail = reason === 'human-takeover'
-        ? '检测到真实人工输入，原任务已因人工接管暂停；保留要求和执行事实，等待用户明确继续并重新观察，不因焦点恢复或空闲而自动恢复。'
+      if (task.progress) task.progress.detail = reason === 'input-paused'
+        ? `检测到连续 3 次用户键鼠操作，computer use 已暂停；保留要求和执行事实，用户发送新消息后继续同一任务并先重新观察，不因焦点恢复或空闲而自动继续。`
         : reason === 'global-emergency' ? '用户触发全局急停；已撤销自动执行和回传，后台进程保持独立生命周期，已发生操作没有回滚。' : '用户结束任务；已撤销自动执行和回传，后台进程保持独立生命周期，已发生操作没有回滚。'
     }
     this.store.saveAutonomousTasks([task])
@@ -331,6 +335,11 @@ export class TaskCoordinator {
   }
 
   /** Does not restore history or bind a new conversation as a side effect. */
+  /** The platform's latest task in any status: history for prompts and resumption, never authority to act. */
+  latest(platformId: string): AutonomousTask | null {
+    const task = this.entries.get(platformId)?.task
+    return task ? structuredClone(task) : null
+  }
   current(platformId: string): AutonomousTask | null {
     const state = this.entries.get(platformId)
     return !this.dispatchBlocked && state?.task?.status === 'recorded' && !state.error ? structuredClone(state.task) : null

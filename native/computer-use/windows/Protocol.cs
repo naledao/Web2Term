@@ -5,7 +5,7 @@ namespace Web2Term.WindowsHelper;
 
 internal static class Protocol
 {
-    internal const int Version = 7; // Physical double-Escape gesture events; model protocol stays v1.
+    internal const int Version = 8; // Physical mouse-shake stop events; model protocol stays v1.
     internal const int MaxRequestBytes = 65_536;
     internal const int MaxFrameBytes = 262_144;
     private static readonly UTF8Encoding Utf8 = new(false, true);

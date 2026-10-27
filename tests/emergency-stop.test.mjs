@@ -17,7 +17,7 @@ const { EmergencyStopController } = load('../src/main/emergency-stop.ts', { '../
 const { DesktopCoordinator } = load('../src/main/desktop-coordinator.ts')
 function control(options = {}) {
   const calls = [], updates = []
-  const flags = { executing: 0, nativeBlocked: false, pid: null, draining: false, release: 'not-needed' }
+  const flags = { executing: 0, nativeBlocked: false, pid: null, draining: false, release: 'not-needed', gestureAvailable: true }
   let latch = false
   const session = { emergencyStop() { calls.push('session'); assert.equal(latch, true); return options.stop?.() ?? Promise.resolve() },
     isAutomationDraining: () => flags.draining, releaseEmergencyStop() { calls.push('release-session') } }
@@ -25,15 +25,17 @@ function control(options = {}) {
     desktop: { setEmergencyStopped(value) { latch = value; calls.push(value ? 'close-desktop' : 'open-desktop') }, getState: () => flags },
     helper: { emergencyStop() { calls.push('stop-helper'); flags.release = flags.pid === null ? 'not-needed' : 'pending' },
       resetEmergencyStop() { calls.push('reset-helper'); return flags.pid === null }, getState: () => flags, inputReleaseStatus: () => flags.release },
-    sessions: () => options.sessions ?? [session], changed(state) { updates.push(state) }
+    sessions: () => options.sessions ?? [session], gestureAvailable: () => flags.gestureAvailable, changed(state) { updates.push(state) }
   })
   return { controller, calls, updates, flags }
 }
 
 test('global admission closes synchronously, before cancelling helpers or sessions; repeated stop is idempotent', async () => {
   const held = deferred(), f = control({ stop: () => held.promise })
-  const stopped = f.controller.trigger('shortcut')
+  const stopped = f.controller.trigger('mouse-gesture')
   assert.equal(stopped.active, true)
+  assert.equal(stopped.source, 'mouse-gesture')
+  assert.equal(stopped.gestureAvailable, false)
   assert.deepEqual(f.calls, ['close-desktop', 'stop-helper', 'session'])
   assert.equal(stopped.pendingSessions, 1)
   assert.equal(f.controller.reset().ok, false)
@@ -67,8 +69,8 @@ test('one failed stop does not prevent other cancellations, and unknown input re
   assert.equal(called, 1); assert.equal(f.controller.getState().failedSessions, 1)
   f.flags.release = 'unconfirmed'
   assert.match(f.controller.getState().message, /释放结果未确认/)
-  f.controller.shortcutStatus(false)
-  assert.equal(f.controller.getState().shortcutRegistered, false)
+  f.flags.gestureAvailable = false
+  assert.equal(f.controller.getState().gestureAvailable, false)
 })
 
 test('global desktop stop cancels queued work, revokes the live credential, and retains it until actual finally', async () => {
@@ -191,7 +193,7 @@ test('state revisions keep an older reset response from replacing a later emerge
   const f = control()
   const stopped = f.controller.trigger('button'); await new Promise(setImmediate)
   const reset = f.controller.reset().state
-  const stoppedAgain = f.controller.trigger('shortcut')
+  const stoppedAgain = f.controller.trigger('mouse-gesture')
   assert.ok(reset.revision > stopped.revision)
   assert.ok(stoppedAgain.revision > reset.revision)
   assert.equal(stoppedAgain.active, true)
