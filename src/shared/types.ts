@@ -1498,6 +1498,8 @@ export interface InterceptorPageEvent {
   answerMarkerFound?: boolean
   replyRootIsTurn?: boolean
   replyStreamingState?: 'true' | 'false' | 'missing' | 'unknown'
+  /** `computer-not-live` only: which liveness check failed. Flags, counts and path shapes only. */
+  computerLive?: Record<string, unknown>
   stopButtonOnPage?: boolean
   toolbarRootFound?: boolean
 

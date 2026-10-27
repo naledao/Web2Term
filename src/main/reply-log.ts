@@ -88,6 +88,25 @@ export function replyDiagnosticMetadata(
   if (['command', 'description', 'background', 'timeout_seconds'].includes(payload.parseErrorField ?? '')) details.parseErrorField = payload.parseErrorField!
   if (payload.parseRepair === 'windows-path') details.parseRepair = payload.parseRepair
   if (['pending', 'sent', 'blocked', 'failed', 'uncertain'].includes(payload.recoveryStatus ?? '')) details.recoveryStatus = payload.recoveryStatus!
+  if (payload.reason === 'computer-not-live' && payload.computerLive && typeof payload.computerLive === 'object') {
+    const live = payload.computerLive
+    if (typeof live.failed === 'string' && /^[a-z-]{1,40}$/.test(live.failed)) details.liveFailed = live.failed
+    for (const key of ['waitPresent', 'waitIsCurrent', 'reported', 'enabled', 'computerUseEnabled', 'sourceSubmission', 'awaiting',
+      'pendingQuestion', 'epochMatch', 'pathBindable', 'pathMatch', 'nodeConnected', 'nodeVisible', 'latestIsNode', 'idPresent',
+      'idInBaseline', 'positionPresent', 'positionInBaseline']) {
+      if (typeof live[key] === 'boolean') details[`live${key[0].toUpperCase()}${key.slice(1)}`] = live[key] as boolean
+    }
+    for (const key of ['waitConversationId', 'locationConversationId']) {
+      if (live[key] !== undefined) details[`live${key[0].toUpperCase()}${key.slice(1)}`] = identifier(live[key])
+    }
+    for (const key of ['waitGeneration', 'stateGeneration', 'bindCount', 'baselineIdCount', 'baselinePositionCount', 'replyCandidateCount']) {
+      if (Number.isSafeInteger(live[key]) && Number(live[key]) >= 0) details[`live${key[0].toUpperCase()}${key.slice(1)}`] = Number(live[key])
+    }
+    // Shapes only: the page already replaced every long segment (ids) with :id.
+    for (const key of ['locationPath', 'waitPath', 'baselinePath']) {
+      if (typeof live[key] === 'string' && /^[a-z0-9/:_-]{1,60}$/i.test(live[key] as string)) details[`live${key[0].toUpperCase()}${key.slice(1)}`] = live[key] as string
+    }
+  }
   if (typeof context.questionAccepted === 'boolean') details.questionAccepted = context.questionAccepted
   if (typeof context.computerAccepted === 'boolean') details.computerAccepted = context.computerAccepted
   if (payload.event === 'computer-request') {

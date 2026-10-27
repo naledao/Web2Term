@@ -3160,13 +3160,17 @@
     } catch (_) { return { outcome: 'invalid', issue: 'invalid-json', rawJson: cleaned } }
   }
 
+  const computerWaitRebindable = (wait) => (wait.path === '/' || wait.baseline?.path === '/') && wait.path !== location.pathname &&
+    !!PAGE.conversationPathPattern && new RegExp(PAGE.conversationPathPattern).test(location.pathname)
   const computerWaitCurrent = (wait) => {
     if (!wait || computerReplyWait !== wait || wait.reported || !state.enabled || !state.computerUseEnabled ||
       !wait.sourceSubmissionId || state.awaitingReplySince === 0 || state.pendingQuestion ||
       wait.pageEpoch !== computerPageEpoch ||
       wait.generation !== state.taskPromptGeneration) return false
-    // The first confirmed send creates the SPA conversation route. Bind that once.
-    if (wait.path === '/' && PAGE.conversationPathPattern && new RegExp(PAGE.conversationPathPattern).test(location.pathname)) wait.path = location.pathname
+    // The first confirmed send creates the SPA conversation route. ChatGPT can pass through an interim
+    // /c/<uuid> before the real one (2026-10-27 reply log), so a send from the new-chat page follows the
+    // current conversation route until its request is reported; main still requires the task's own conversation.
+    if (computerWaitRebindable(wait)) { wait.path = location.pathname; wait.bindCount = (wait.bindCount || 0) + 1 }
     return wait.path === location.pathname
   }
   const computerTurnIsNew = (node, wait) => {
@@ -3184,6 +3188,60 @@
     if (!position || wait.baseline.positions.has(position)) return false
     return wait.baseline.maxPosition === null || (/^\d+$/.test(position) && Number(position) > wait.baseline.maxPosition)
   }
+  /**
+   * Why a computer-shaped reply was not this send's live reply, check by check, in the order
+   * computerWaitCurrent and computerTurnIsNew apply them. Read-only: it never binds wait.path.
+   * Flags, counts and path shapes (id segments replaced) only; no text or ids leave the page.
+   */
+  const computerPathShape = (path) => typeof path === 'string' ? path.replace(/[^/]{12,}/g, ':id').slice(0, 60) : null
+  const computerLiveDiagnostics = (node, wait) => {
+    const info = { waitPresent: !!wait, waitIsCurrent: !!wait && wait === computerReplyWait, locationPath: computerPathShape(location.pathname) }
+    const fail = (failed) => ({ failed, ...info })
+    if (!wait) return fail('no-wait')
+    const bindable = computerWaitRebindable(wait)
+    // Conversation ids already appear in the reply log; the rest of each path stays a shape.
+    const conversationOf = (path) => (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16}/i.exec(String(path || '')) || [null])[0]
+    Object.assign(info, {
+      waitConversationId: conversationOf(wait.path), locationConversationId: conversationOf(location.pathname), bindCount: wait.bindCount || 0,
+      reported: wait.reported, enabled: state.enabled, computerUseEnabled: state.computerUseEnabled,
+      sourceSubmission: !!wait.sourceSubmissionId, awaiting: state.awaitingReplySince !== 0, pendingQuestion: !!state.pendingQuestion,
+      epochMatch: wait.pageEpoch === computerPageEpoch, waitGeneration: wait.generation, stateGeneration: state.taskPromptGeneration,
+      waitPath: computerPathShape(wait.path), baselinePath: computerPathShape(wait.baseline?.path), pathBindable: bindable,
+      pathMatch: wait.path === location.pathname || bindable
+    })
+    if (!info.waitIsCurrent) return fail('stale-wait')
+    if (wait.reported) return fail('reported')
+    if (!state.enabled) return fail('disabled')
+    if (!state.computerUseEnabled) return fail('computer-off')
+    if (!wait.sourceSubmissionId) return fail('no-source')
+    if (!info.awaiting) return fail('not-awaiting')
+    if (info.pendingQuestion) return fail('pending-question')
+    if (!info.epochMatch) return fail('epoch')
+    if (wait.generation !== state.taskPromptGeneration) return fail('generation')
+    if (!info.pathMatch) return fail('path')
+    const candidates = replyCandidatesOf(queryAllAssistant())
+    Object.assign(info, {
+      nodeConnected: !!node?.isConnected, nodeVisible: !!node && isVisibleElement(node),
+      baselineIdCount: wait.baseline?.ids?.size ?? 0, baselinePositionCount: wait.baseline?.positions?.size ?? 0,
+      replyCandidateCount: candidates.length, latestIsNode: candidates[candidates.length - 1] === node
+    })
+    if (!info.nodeConnected || !info.nodeVisible) return fail('node-hidden')
+    if (!PAGE.fileTurnPositionAttr && PAGE.messageIdAttr) {
+      const id = messageIdOf(node)
+      Object.assign(info, { idPresent: !!id, idInBaseline: !!id && !!wait.baseline.ids?.has(id) })
+      if (!wait.baseline.ids?.size && wait.baseline.path !== '/') return fail('empty-baseline')
+      if (!id) return fail('no-id')
+      if (info.idInBaseline) return fail('id-in-baseline')
+      if (!info.latestIsNode) return fail('not-latest')
+      return fail('none')
+    }
+    const position = PAGE.fileTurnPositionAttr ? node.getAttribute(PAGE.fileTurnPositionAttr) : null
+    Object.assign(info, { positionPresent: !!position, positionInBaseline: !!position && wait.baseline.positions.has(position) })
+    if (!wait.baseline.positions.size && wait.baseline.path !== '/') return fail('empty-baseline')
+    if (!position) return fail('no-position')
+    if (info.positionInBaseline) return fail('position-in-baseline')
+    return fail(computerTurnIsNew(node, wait) ? 'none' : 'position-not-after-baseline')
+  }
   // Provenance is transport metadata only; command/read_files JSON and their execution rules stay unchanged.
   const legacyTaskSource = (node) => {
     const wait = computerReplyWait
@@ -3200,7 +3258,8 @@
     // Quotes/examples can be ignored, but can never become a Shell request.
     const wait = computerReplyWait
     if (!request || !computerWaitCurrent(wait) || !computerTurnIsNew(node, wait)) {
-      noteScan(messageId, !request ? 'computer-quoted-content' : 'computer-not-live')
+      noteScan(messageId, !request ? 'computer-quoted-content' : 'computer-not-live',
+        request ? { computerLive: computerLiveDiagnostics(node, wait) } : undefined)
       return true
     }
     if (findContinueButton(node)) { noteScan(messageId, 'computer-reply-cut-off'); return true }

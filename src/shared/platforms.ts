@@ -139,6 +139,8 @@ export interface PageAdapter {
   /**
    * Path of a saved conversation, as a RegExp source. A desktop task started on the new-chat page
    * (`/`) binds once to the route its first send creates; any other path change ends the wait.
+   * The id must have `isConversationId`'s shape: ChatGPT passes through an interim `/c/…` route
+   * before the real one (2026-10-27 reply log: bound /c/:id, then a different /c/:id).
    */
   conversationPathPattern?: string
   /** One element per turn of either role — used to locate the scroll container. */
@@ -316,6 +318,9 @@ export interface FocusPageRules {
  * wrong.
  */
 const THEME_UNMEASURED: PageThemeRules = { dark: [], light: [], storage: [] }
+
+/** `isConversationId`'s two shapes as a RegExp source, for patterns evaluated inside the page. */
+const CONVERSATION_ID_PATTERN = '(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{16})'
 
 /**
  * DeepSeek's theme — MEASURED, 2026-09-29, with `tools/diag/deepseek-theme-probe.js`.
@@ -549,7 +554,7 @@ export const CHATGPT_PAGE: PageAdapter = {
    * `data-chatgpt-selection-message-id` was absent before the send (`computerBaselineOf`).
    */
   computerUseRequests: true,
-  conversationPathPattern: '^/(?:g/[^/?#]+/)?c/[^/?#]+/?$',
+  conversationPathPattern: `^/(?:g/[^/?#]+/)?c/${CONVERSATION_ID_PATTERN}/?$`,
   composerKind: 'contenteditable',
   // The sidebar selector CHATGPT_PLATFORM.sidebarScript reads.
   conversationLinkSelectors: ['a[href^="/c/"]'],
@@ -773,7 +778,7 @@ export const CHATGPT_PLATFORM: ChatPlatform = {
  */
 export const DEEPSEEK_PAGE: PageAdapter = {
   computerUseRequests: true,
-  conversationPathPattern: '^/a/chat/s/[^/]+/?$',
+  conversationPathPattern: `^/a/chat/s/${CONVERSATION_ID_PATTERN}/?$`,
   composerKind: 'textarea',
   composerSelectors: ['textarea[placeholder]', 'textarea'],
   disabledControlSelectors: ['.ds-button--disabled'],
