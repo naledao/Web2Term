@@ -19,6 +19,10 @@ files:
   - package.json
   - node_modules/**
   - '!**/*.map'
+  # Helper builds live under out/ but ship only as the Windows extraResource below, never inside app.asar.
+  - '!out/windows-helper/**'
+  - '!out/windows-helper-package/**'
+  - '!out/windows-helper-offline-feed/**'
 
 asar: true
 extraResources:
@@ -28,9 +32,19 @@ extraResources:
 # 鈥?npm's allow-scripts gate skips them, and the pure-JS path is what runs. So
 # there is nothing to rebuild.
 npmRebuild: false
+# Fails a Windows package whose helper is missing, framework-dependent, or on another protocol version.
+afterPack: ./build/verify-windows-helper-package.cjs
 
 win:
   icon: build/icon.ico
+  # Merged with the top-level extraResources for Windows only; macOS/Linux packages carry no helper.
+  # Produced offline by `npm run helper:publish` (self-contained win-x64, no separate .NET install).
+  extraResources:
+    - from: out/windows-helper-package
+      to: windows-helper
+      filter:
+        - '**/*'
+        - '!**/*.pdb'
   target:
     - target: nsis
       arch:

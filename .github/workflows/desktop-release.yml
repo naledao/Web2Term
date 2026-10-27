@@ -65,8 +65,33 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Build-time only: the installer ships a self-contained helper, end users install no .NET.
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('native/computer-use/windows/*.csproj') }}
+
+      # The only networked helper step. `npm run build` and `helper:publish` stay offline after it.
+      - name: Restore Windows helper dependencies
+        run: npm run helper:restore
+
       - name: Build Windows installer
         run: npm run dist:win
+
+      - name: Check packaged Windows helper
+        shell: pwsh
+        run: |
+          $helper = "release/win-unpacked/resources/windows-helper"
+          foreach ($name in 'Web2Term.WindowsHelper.exe', 'web2term-helper.json', 'hostfxr.dll', 'coreclr.dll') {
+            if (-not (Test-Path "$helper/$name")) { throw "Packaged Windows helper is missing $name" }
+          }
+          Get-Content "$helper/web2term-helper.json"
 
       - name: Prepare stable Windows download alias
         shell: pwsh

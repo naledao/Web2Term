@@ -2,19 +2,22 @@ import type { InputReleaseStatus } from '../shared/emergency-stop'
 import type { DesktopOwner } from './desktop-coordinator'
 import { spawn } from 'node:child_process'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
-import { stat } from 'node:fs/promises'
-import { dirname, isAbsolute } from 'node:path'
+import { readFile, stat } from 'node:fs/promises'
+import { dirname, isAbsolute, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { WINDOWS_HELPER_MAX_FRAME_BYTES, WINDOWS_HELPER_MAX_REQUEST_BYTES, WINDOWS_HELPER_PROTOCOL_VERSION } from '../shared/windows-helper'
+import { WINDOWS_HELPER_MANIFEST, WINDOWS_HELPER_MAX_FRAME_BYTES, WINDOWS_HELPER_MAX_REQUEST_BYTES, WINDOWS_HELPER_PROTOCOL_VERSION } from '../shared/windows-helper'
 import type { WindowsHelperActionResult, WindowsHelperCode, WindowsHelperState } from '../shared/windows-helper'
 
 export interface WindowsHelperOptions {
   executablePath: string
+  /** Installed app: a missing helper is a damaged install, not a missing local build. */
+  packaged?: boolean
   platform?: string
   arch?: string
   /** Tests supply synthetic streams and a clock; production always uses spawn without a shell. */
   spawn?: typeof spawn
   exists?: (path: string) => Promise<boolean>
+  readText?: (path: string) => Promise<string>
   now?: () => number
   schedule?: (callback: () => void, milliseconds: number) => () => void
 }
@@ -88,6 +91,11 @@ const actionName = (value: unknown): value is string => typeof value === 'string
   !['command', 'read_files', 'questions', 'background_task', 'hello', 'ping', 'cancel', 'shutdown', 'emergency_stop', 'emergency_stopped', 'watch_desktop', 'desktop_activity'].includes(value)
 const failure = (code: WindowsHelperCode, execution: WindowsHelperActionResult['execution'] = 'not_executed'): WindowsHelperActionResult =>
   ({ ok: false, code, execution, message: messages[code] })
+const packagedMissing = 'Windows helper 安装资源缺失或不完整，请重新安装 Web2Term。'
+/** Names both versions when the helper reported one, so a stale build is distinguishable from a corrupt frame. */
+const mismatch = (found: unknown): string => Number.isSafeInteger(found)
+  ? `Windows helper 协议版本不兼容（helper v${found}，客户端需要 v${WINDOWS_HELPER_PROTOCOL_VERSION}），请使用配套版本或重新构建。`
+  : messages.protocol_mismatch
 
 /** One supervised helper per application. No HTTP endpoint, shell, automatic action retry, or page IPC. */
 export class WindowsHelperManager {
@@ -289,8 +297,14 @@ export class WindowsHelperManager {
     let exists = false
     try { exists = isAbsolute(this.options.executablePath) && await (this.options.exists?.(this.options.executablePath) ??
       stat(this.options.executablePath).then(value => value.isFile())) } catch { /* missing is an ordinary unavailable state */ }
+    const manifest = exists ? await this.readManifest() : null
     if (this.disposed || this.emergency || !this.owners.size) { this.update(this.disposed ? 'disposed' : this.emergency ? 'emergency_stopped' : 'not_started', 'stopped'); return false }
-    if (!exists) { this.update('executable_missing', 'error'); return false }
+    if (!exists) { this.update('executable_missing', 'error', this.options.packaged ? { message: packagedMissing } : {}); return false }
+    // A stale or foreign build is reported without spawning it; no restart, the files will not change by retrying.
+    if (manifest && (manifest.protocolVersion !== WINDOWS_HELPER_PROTOCOL_VERSION || manifest.arch !== 'x64')) {
+      this.update('protocol_mismatch', 'error', { message: mismatch(manifest.protocolVersion === WINDOWS_HELPER_PROTOCOL_VERSION ? null : manifest.protocolVersion) })
+      return false
+    }
     let child: ChildProcessWithoutNullStreams
     try {
       child = (this.options.spawn ?? spawn)(this.options.executablePath, ['--parent-pid', String(process.pid)], {
@@ -317,6 +331,15 @@ export class WindowsHelperManager {
     run.cancelStartup = this.schedule(() => this.retire(run, 'handshake_timeout', true), 5000)
     this.send(run, { type: 'hello', id: run.helloId, nonce: run.nonce, parent_pid: process.pid })
     return run.ready
+  }
+
+  /** Null when absent or unreadable: older local builds carry no manifest, and the handshake still decides. */
+  private async readManifest(): Promise<Record<string, unknown> | null> {
+    try {
+      const path = join(dirname(this.options.executablePath), WINDOWS_HELPER_MANIFEST)
+      const value: unknown = JSON.parse(await (this.options.readText ?? (file => readFile(file, 'utf8')))(path))
+      return record(value) ? value : null
+    } catch { return null }
   }
 
   private send(run: HelperProcess, value: Record<string, unknown>): void {
@@ -350,7 +373,10 @@ export class WindowsHelperManager {
 
   private frame(run: HelperProcess, value: unknown): boolean {
     if (!record(value) || value.version !== WINDOWS_HELPER_PROTOCOL_VERSION) {
-      this.retire(run, record(value) && value.version !== WINDOWS_HELPER_PROTOCOL_VERSION ? 'protocol_mismatch' : 'invalid_frame', false); return false
+      // A current helper answers a mismatched hello with `incompatible` carrying its own version before exiting.
+      if (record(value)) this.retire(run, 'protocol_mismatch', false, mismatch(value.version))
+      else this.retire(run, 'invalid_frame', false)
+      return false
     }
     const invalid = (): false => { this.retire(run, 'invalid_frame', false); return false }
     if (!run.handshaken) {
@@ -451,7 +477,7 @@ export class WindowsHelperManager {
     }, 3000)
   }
 
-  private retire(run: HelperProcess, code: WindowsHelperCode, restart: boolean): void {
+  private retire(run: HelperProcess, code: WindowsHelperCode, restart: boolean, message = messages[code]): void {
     if (this.run !== run || run.closing) return
     // Controls bypass the MTA action queue. Never wait for UIA before cancelling or stopping.
     run.closing = true
@@ -460,7 +486,7 @@ export class WindowsHelperManager {
     run.cancelEmergency(); run.cancelStartup(); run.cancelHeartbeat(); run.ping?.cancel(); run.ping = null
     run.settle(false)
     this.complete(run, failure(code, run.action?.dispatched ? 'unknown' : 'not_executed'))
-    this.update(code, code === 'stopping' || code === 'disposed' || code === 'emergency_stopped' ? 'stopping' : 'error', { actions: [], protocolVersion: null })
+    this.update(code, code === 'stopping' || code === 'disposed' || code === 'emergency_stopped' ? 'stopping' : 'error', { actions: [], protocolVersion: null, message })
     try { run.child.stdin.end() } catch { /* force termination below */ }
     run.cancelKill = this.schedule(() => { try { run.child.kill('SIGKILL') } catch { /* remain unavailable until confirmed exit */ } }, 500)
     if (restart) this.restartLater()
@@ -473,7 +499,7 @@ export class WindowsHelperManager {
     run.cancelEmergency(); run.cancelKill(); run.buffer = Buffer.alloc(0); this.run = null
     if (this.emergency) this.update('emergency_stopped', 'stopped', { pid: null, actions: [], protocolVersion: null })
     else if (this.state.code === 'stopping' || this.state.code === 'disposed') this.update(this.disposed ? 'disposed' : 'not_started', 'stopped', { pid: null })
-    else this.update(this.state.code, 'error', { pid: null })
+    else this.update(this.state.code, 'error', { pid: null, message: this.state.message }) // keep any version detail
     if (run.restartWhenClosed) this.restartLater()
   }
 

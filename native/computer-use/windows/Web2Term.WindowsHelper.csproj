@@ -13,5 +13,7 @@
     <SelfContained>false</SelfContained>
     <UseAppHost>true</UseAppHost>
     <NuGetAudit>false</NuGetAudit>
+    <!-- The installer flavour builds into obj/package and bin/package; neither flavour may compile the other's generated sources. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj/**;bin/**</DefaultItemExcludes>
   </PropertyGroup>
 </Project>

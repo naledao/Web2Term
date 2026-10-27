@@ -182,7 +182,8 @@ let web2termConnection: Web2termConnection | null = null
 let localMachineId = ''
 let settings: AppSettings = { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW }
 const runtimes = new Map<string, SessionRuntime>()
-const windowsHelper = new WindowsHelperManager({ executablePath: app.isPackaged
+// Installed: self-contained Windows-only extraResource outside app.asar. Development: `npm run build` output.
+const windowsHelper = new WindowsHelperManager({ packaged: app.isPackaged, executablePath: app.isPackaged
   ? join(process.resourcesPath, 'windows-helper', 'Web2Term.WindowsHelper.exe')
   : join(app.getAppPath(), 'out', 'windows-helper', 'Web2Term.WindowsHelper.exe') })
 const windowsApps = new WindowsAppCatalog(windowsHelper)

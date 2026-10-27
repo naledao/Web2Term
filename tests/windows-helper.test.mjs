@@ -63,7 +63,7 @@ class Child extends EventEmitter {
 function fixture(patch = {}) {
   const clock = new Clock(); const children = []; const starts = []
   const manager = new WindowsHelperManager({ executablePath: path.resolve('synthetic-helper.exe'),
-    platform: 'win32', arch: 'x64', exists: async () => true, now: () => clock.time, schedule: clock.schedule,
+    platform: 'win32', arch: 'x64', exists: async () => true, readText: async () => { throw new Error('ENOENT') }, now: () => clock.time, schedule: clock.schedule,
     spawn: (file, args, options) => {
       starts.push({ file, args, options })
       const child = new Child(9000 + children.length); children.push(child); return child
@@ -312,6 +312,46 @@ test('missing executable is an explicit state and does not spin a restart loop',
   const f = fixture({ exists: async () => false }); f.manager.setDemand('session-A', true); await flush()
   assert.equal(f.manager.getState().code, 'executable_missing'); f.clock.advance(60_000); await flush()
   assert.equal(f.children.length, 0); f.manager.dispose()
+})
+
+test('an installed app reports a missing helper as a damaged install, not a missing local build', async () => {
+  const f = fixture({ exists: async () => false, packaged: true }); f.manager.setDemand('session-A', true); await flush()
+  assert.equal(f.manager.getState().code, 'executable_missing'); assert.match(f.manager.getState().message, /重新安装/)
+  assert.equal(f.children.length, 0); f.manager.dispose()
+})
+
+test('a manifest from another protocol or architecture is rejected before spawning and never retried', async () => {
+  for (const [manifest, detail] of [[{ protocolVersion: version - 1, arch: 'x64' }, true], [{ protocolVersion: version, arch: 'arm64' }, false]]) {
+    const reads = []
+    const f = fixture({ readText: async file => { reads.push(file); return JSON.stringify(manifest) } })
+    f.manager.setDemand('session-A', true); await flush()
+    assert.equal(path.basename(reads[0]), shared.WINDOWS_HELPER_MANIFEST)
+    assert.equal(path.dirname(reads[0]), path.resolve('.'))
+    assert.equal(f.manager.getState().code, 'protocol_mismatch'); assert.equal(f.children.length, 0)
+    assert.equal(f.manager.getState().message.includes(`v${version - 1}`), detail)
+    f.clock.advance(60_000); await flush(); assert.equal(f.children.length, 0)
+    f.manager.dispose()
+  }
+})
+
+test('a matching or unreadable manifest leaves the decision to the handshake', async () => {
+  for (const text of [JSON.stringify({ protocolVersion: version, arch: 'x64', selfContained: true, appVersion: '0.0.0' }), '{not json', '[]']) {
+    const f = fixture({ readText: async () => text }); f.manager.setDemand('session-A', true); await flush()
+    assert.equal(f.children.length, 1); f.ready(f.children[0]); await flush()
+    assert.equal(f.manager.getState().phase, 'ready'); f.manager.dispose()
+  }
+})
+
+test('a helper answering hello with its own version is a protocol mismatch naming both versions', async () => {
+  const f = fixture(); f.manager.setDemand('session-A', true); await flush()
+  const child = f.children[0]
+  child.reply({ type: 'incompatible', version: version + 1, id: child.last('hello').id }); await flush()
+  assert.equal(f.manager.getState().code, 'protocol_mismatch')
+  assert.match(f.manager.getState().message, new RegExp(`v${version + 1}.*v${version}`))
+  f.clock.advance(500); await flush()
+  assert.equal(f.manager.getState().code, 'protocol_mismatch'); assert.match(f.manager.getState().message, new RegExp(`v${version + 1}`))
+  f.clock.advance(60_000); await flush(); assert.equal(f.children.length, 1)
+  f.manager.dispose()
 })
 
 test('an elevated helper (UAC off, or Web2Term run as administrator) is still accepted', async () => {

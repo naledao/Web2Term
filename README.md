@@ -250,7 +250,8 @@ npm run dev
 | `npm run dev` | 开发模式及热更新。 |
 | `npm run typecheck` | 主进程／preload 和渲染层的类型检查。 |
 | `npm run build` | 类型检查并构建 main、preload、renderer，输出到 `out/`，不启动客户端。 |
-| `npm run dist:win` | 构建 Windows x64 NSIS 安装包，输出到 `release/`。 |
+| `npm run helper:restore` | 联网恢复 Windows helper 的 NuGet 依赖（含 .NET 自包含运行时包）；仅打包前需要，`npm run build` 与 helper 发布本身不联网。 |
+| `npm run dist:win` | 构建 Windows x64 NSIS 安装包，输出到 `release/`；安装包内含自包含 helper，终端用户无需另装 .NET。需本机 .NET 8+ SDK，首次先运行 `npm run helper:restore`。 |
 | `npm run dist:mac` | 在 macOS 上构建 Apple Silicon DMG，输出到 `release/`。 |
 | `npm run dist:linux` | 仓库保留的 Linux 桌面 AppImage 打包入口，当前自动发布流程未包含它。 |
 
@@ -411,7 +412,7 @@ npm ci
 npm run dev
 ```
 
-Use `npm run dev` to run the client. `npm run build` performs type checks and builds main/preload/renderer into `out/` without starting the application. `npm run dist:win` and `npm run dist:mac` produce installers in `release/`; `npm run dist:linux` remains an AppImage packaging option outside the current automatic release workflow.
+Use `npm run dev` to run the client. `npm run build` performs type checks and builds main/preload/renderer into `out/` without starting the application. `npm run dist:win` and `npm run dist:mac` produce installers in `release/`; the Windows installer embeds a self-contained computer use helper and needs a one-time networked `npm run helper:restore` on the build machine; `npm run dist:linux` remains an AppImage packaging option outside the current automatic release workflow.
 
 The Linux tool requires Go 1.27.0 or later, as declared in its module:
 

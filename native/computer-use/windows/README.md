@@ -20,8 +20,23 @@
 - Windows x64 开发机需要 .NET 8 或更高版本 SDK，以及本机已有的 .NET 8 引用包、win-x64 宿主包和 `Microsoft.Windows.SDK.NET.Ref 10.0.19041.57`（WGC／C#/WinRT 投影）。构建使用缓存中的固定版本，不联网恢复；缺失依赖时应单独准备依赖后再构建。截图要求 Windows 10 2004（19041）或更新版本。
 - `npm run build` 会在现有类型检查与前端打包之后编译 helper 到 `out/windows-helper/`。构建脚本只使用本地 NuGet 源，随后以 `--no-restore` 编译，不启动 helper、不联网下载依赖。
 - 完成构建后，项目仍然只用 `npm run dev` 运行。开启 computer use 和桌面控制，并进入活动的本机 DeepSeek 会话时，由 Electron 主进程按需启动 helper，无需单独运行它。
-- 开发产物依赖本机 .NET 8 运行时。面向最终用户的自包含发布、Windows 安装资源与 CI 属于第 44 项；主进程已预留打包后的 `resources/windows-helper/` 路径，缺失时明确报告不可用，不回退到任意 PATH 程序。
+- 开发产物依赖本机 .NET 8 运行时。面向最终用户的安装包使用自包含发布（第 44 项），见下节。
 - 其他系统的 `npm run build` 跳过此项目，不影响既有 macOS/Linux 构建。
+
+## 打包与版本兼容（第 44 项）
+
+| 步骤 | 命令 | 联网 | 产物 |
+| --- | --- | --- | --- |
+| 依赖恢复 | `npm run helper:restore` | 是（nuget.org，唯一联网步骤） | 本机 NuGet 缓存：开发图与自包含图（含 `Microsoft.NETCore.App.Runtime.win-x64`） |
+| 开发构建 | `npm run build` | 否 | `out/windows-helper/`，依赖框架，开发机运行时 |
+| 自包含发布 | `npm run helper:publish` | 否 | `out/windows-helper-package/`，win-x64 自包含，终端用户无需安装 .NET 或 Python |
+| 安装包 | `npm run dist:win` | 否（helper 部分） | `build` → `helper:publish` → electron-builder |
+
+- 两种形态分别使用 `obj/`、`bin/` 与 `obj/package/`、`bin/package/`，互不共享 `project.assets.json` 或增量产物；发布前清空输出目录，不夹带旧文件。
+- electron-builder 只在 `win.extraResources` 中把 `out/windows-helper-package` 复制到 `resources/windows-helper/`（asar 之外，排除 `.pdb`）；`files` 排除所有 `out/windows-helper*` 目录，开发产物不进入 `app.asar`。macOS/Linux 包不含 helper，`dist:mac` 不变；非 Windows 主机上 `helper:publish` 直接跳过。
+- `afterPack` 钩子（`build/verify-windows-helper-package.cjs`）只检查 Windows 包：缺少 exe、`hostfxr.dll`／`hostpolicy.dll`／`coreclr.dll`、WinRT 投影，runtimeconfig 仍依赖框架，或清单协议／架构不符时直接让打包失败。CI 的 Windows 任务先 `setup-dotnet` 与 NuGet 缓存，运行 `helper:restore` 后执行 `dist:win`，再核对 `release/win-unpacked/resources/windows-helper/`。
+- 版本兼容分三层：构建脚本比对 `src/shared/windows-helper.ts` 与 `Protocol.cs` 的协议常量，不一致即构建失败；构建产物旁写入 `web2term-helper.json`（`protocolVersion`、`arch`、`selfContained`、`appVersion`），主进程启动前读取，协议或架构不符时报告 `protocol_mismatch` 且不启动、不重启，缺少或无法解析时交给握手；握手仍是最终判定，helper 收到不同版本的 `hello` 时回复 `incompatible`（携带自身版本）后退出，主进程据此给出含双方版本号的不兼容提示，而不是笼统的管道关闭。
+- 安装版缺少 helper 时提示重新安装；开发态缺少时提示先完成本机构建。主进程只使用 `process.resourcesPath/windows-helper/`（安装版）或 `out/windows-helper/`（开发态），不回退到 PATH 中的程序。不依赖 Codex 内部 SDK。
 
 ## 私有通信协议
 

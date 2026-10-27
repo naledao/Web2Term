@@ -89,6 +89,14 @@ internal sealed class HelperHost : IDisposable
         using JsonDocument? hello = await Protocol.ReadAsync(input, startup);
         if (hello == null) return;
         JsonElement first = hello.RootElement;
+        // A parent from another build learns this helper's version instead of seeing a bare pipe close.
+        if (first.TryGetProperty("type", out JsonElement kind) && kind.ValueKind == JsonValueKind.String && kind.GetString() == "hello" &&
+            first.TryGetProperty("version", out JsonElement requested) && (requested.ValueKind != JsonValueKind.Number ||
+            !requested.TryGetInt32(out int requestedVersion) || requestedVersion != Protocol.Version))
+        {
+            await writer.SendAsync(new { type = "incompatible", version = Protocol.Version, id = Protocol.Id(first) });
+            return;
+        }
         Protocol.Fields(first, "type", "version", "id", "nonce", "parent_pid");
         if (first.GetProperty("type").GetString() != "hello" || first.GetProperty("parent_pid").GetInt32() != parentPid) throw new InvalidDataException();
         using WindowsIdentity identity = WindowsIdentity.GetCurrent();
