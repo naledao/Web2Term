@@ -137,12 +137,12 @@ test('a live model completion finishes without a completion report and revokes a
   f.loop.dispose()
 })
 
-test('a model completion also ends a halted task without requiring a new observation', () => {
+test('a model completion also ends a long recovery without requiring a new observation', () => {
   const f = fixture(), lease = f.request(), task = f.coordinator.current('deepseek')
-  f.coordinator.updateProgress(lease, task.progress, undefined, { ...task.control, halted: 'recovery_limit' })
-  assert.equal(f.coordinator.isLimited('deepseek', 'conversation-A'), true)
+  f.coordinator.updateProgress(lease, task.progress, undefined, { ...task.control, recovering: true, recoverySteps: 1000 })
+  assert.equal(f.coordinator.hasError('deepseek', 'conversation-A'), false)
   assert.equal(f.coordinator.completeFromModel(lease, 'model-final'), true)
-  assert.equal(f.coordinator.isLimited('deepseek', 'conversation-A'), false)
+  assert.equal(f.coordinator.hasError('deepseek', 'conversation-A'), false)
   assert.equal(f.coordinator.completionNotificationAllowed('deepseek', 'conversation-A'), true)
   const saved = f.records.get(f.first.id)
   assert.equal(saved.status, 'completed')

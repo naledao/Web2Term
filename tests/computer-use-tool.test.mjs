@@ -117,7 +117,7 @@ test('disabled, remote, unsupported sites and unsupported hosts do not publish r
   }
 })
 
-test('tool descriptions include actual parameters, a valid computer envelope and real result semantics', () => {
+test('tool descriptions include actual parameters, request fields without examples and real result semantics', () => {
   const f = fixture()
   const declaration = shared.computerUseCapabilityPrompt(f.context.capability())
   assert.match(declaration, /用于发现、观察和操作本机业务应用/)
@@ -127,12 +127,11 @@ test('tool descriptions include actual parameters, a valid computer envelope and
   assert.match(declaration, /ok 不代表业务目标完成/)
   assert.match(declaration, /调用 complete_task/)
   assert.doesNotMatch(declaration, /当前没有可调用/)
-  const envelope = JSON.parse(declaration.match(/```json\n([^]*?)\n```/)[1])
-  assert.equal(envelope.type, 'computer')
-  assert.equal(envelope.version, 1)
-  assert.equal(envelope.action, 'observe')
-  assert.equal(envelope.window_id, 'window:example')
-  assert.equal(Object.hasOwn(envelope, 'command'), false)
+  assert.match(declaration, /type="computer"、version=1、action、step_token 和 description/)
+  assert.match(declaration, /action 使用当前可调用动作名/)
+  assert.match(declaration, /observe：/)
+  assert.match(declaration, /不得混入 command、read_files 或 questions/)
+  assert.doesNotMatch(declaration, /```json|示例|例如|window:example/)
   const originalTools = types.toolPromptForPlatform('deepseek')
   const currentTools = types.toolPromptForPlatform('deepseek', true, declaration)
   const environment = { ...types.FALLBACK_ENVIRONMENT, extraNotes: '沿用项目约定。' }

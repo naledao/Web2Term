@@ -90,11 +90,10 @@ test('all original and additional inputs require distinct checks, without accept
   assert.equal(wire.parseTaskCompletionClaim(c), null)
 })
 
-test('unconfirmed checks, missing evidence, unknown execution barriers and hard limits block completion', async () => {
+test('unconfirmed checks, missing evidence and unknown execution barriers block completion', async () => {
   const variants = [
     [task(), claim({ unconfirmed: ['正文中的一个数值仍未核实'] })],
     [task({ recovery: { requiresObservation: true } }), claim()],
-    [task({ control: { halted: 'step_limit' } }), claim()],
     [task({ completion: { version: 1, revision: 0, evidence: [], report: null } }), claim()],
     [task({ completion: { version: 1, revision: 0, evidence: [snapshot({ delivered: false })], report: null } }), claim()]
   ]

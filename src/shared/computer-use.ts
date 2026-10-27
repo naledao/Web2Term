@@ -1,6 +1,6 @@
 import type { ComputerDiagnosis } from './computer-diagnostics'
-import { normalizeComputerProgressLimits, normalizeComputerResultDelay } from './computer-progress'
-import type { ComputerProgressLimits, ComputerProgressReport } from './computer-progress'
+import { normalizeComputerResultDelay } from './computer-progress'
+import type { ComputerProgressReport } from './computer-progress'
 import { computerUseProtocol } from './computer-use-protocol'
 import type { ComputerUseProtocolErrorCode } from './computer-use-protocol'
 import type { WindowsHelperState } from './windows-helper'
@@ -9,7 +9,6 @@ import type { WindowsHelperState } from './windows-helper'
 export interface ComputerUsePreferences {
   computerUseEnabled: boolean
   desktopControlEnabled: boolean
-  computerUseLimits?: ComputerProgressLimits
   /** Seconds to wait after a computer action returns before its result is sent to the model. */
   computerResultDelaySeconds?: number
   /** Opt-in: click at x/y of a desktop or region screenshot, outside any observed business window. Off when absent. */
@@ -95,7 +94,7 @@ export interface ComputerUseToolResult {
   action: string
   ok: boolean
   execution: 'not_executed' | 'executed' | 'unknown'
-  code: 'ok' | 'unavailable' | 'cancelled' | 'executor_error' | 'inactive_context' | 'no_progress' | 'progress_limit' | 'recovery_required' | 'verification_required' | 'stale_catalog' | 'stale_window' | 'invalid_result' | 'launch_failed' | 'open_failed'
+  code: 'ok' | 'unavailable' | 'cancelled' | 'executor_error' | 'inactive_context' | 'no_progress' | 'recovery_required' | 'verification_required' | 'stale_catalog' | 'stale_window' | 'invalid_result' | 'launch_failed' | 'open_failed'
     | 'focus_denied' | 'focus_unconfirmed' | 'external_input' | 'human_input' | 'human_paused' | 'input_monitor_unavailable' | 'window_blocked' | 'restore_required' | 'capture_failed' | 'capture_blocked' | 'stale_observation'
     | 'click_blocked' | 'click_failed' | 'type_text_blocked' | 'type_text_failed' | 'press_key_blocked' | 'press_key_failed' | 'scroll_blocked' | 'scroll_failed' | 'drag_blocked' | 'drag_failed' | 'wait_timeout' | 'wait_failed' | 'wait_ambiguous' | ComputerUseProtocolErrorCode
   message: string
@@ -129,7 +128,6 @@ export function normalizeComputerUsePreferences(value: unknown): ComputerUsePref
   return {
     computerUseEnabled: input.computerUseEnabled === true,
     desktopControlEnabled: input.desktopControlEnabled === true,
-    ...(input.computerUseLimits !== undefined ? { computerUseLimits: normalizeComputerProgressLimits(input.computerUseLimits) } : {}),
     ...(input.computerResultDelaySeconds !== undefined ? { computerResultDelaySeconds: normalizeComputerResultDelay(input.computerResultDelaySeconds) } : {}),
     ...(input.desktopPointClickEnabled !== undefined ? { desktopPointClickEnabled: input.desktopPointClickEnabled === true } : {})
   }
@@ -346,20 +344,14 @@ export function computerUseCapabilityPrompt(capability: ComputerUseCapability, s
       '【computer 规则】',
       '先发现/激活/observe，再输入；输入必须引用当前任务最新观察。窗口、焦点、布局或观察失效后重新发现/observe。',
       '每轮只发一个 JSON 请求，参数放顶层；不得混入 command、read_files 或 questions。只用当前 step_token；无令牌时等待 computer_result。',
-      '每个 computer 请求必须带顶层 description：1–160 字的单行简短中文，说明本步准备操作的具体对象、动作及目的，例如“点击 QQ 的联系人入口，查找收件人”。仅用于向用户展示，不是执行参数；不要包含思考过程、敏感输入原文，也不要把尚未执行的操作描述成已完成。',
+      '每个 computer 请求必须带顶层 description：1–160 字的单行简短中文，说明本步准备操作的具体对象、动作及目的。仅用于向用户展示，不是执行参数；不要包含思考过程、敏感输入原文，也不要把尚未执行的操作描述成已完成。',
       '操作后根据新观察继续；unknown、可能已生效或结果未确认时先核对，禁止盲目重试。ok 不代表业务目标完成。',
       'human_paused 表示 computer use 已因用户键鼠操作暂停，停止发起 computer 请求，等待用户发新消息；human_input/external_input 后重新观察。需要用户信息或不可逆决定时使用现有 questions 协议。',
       '任务结束时以“【任务完成】”开头回复，客户端收到该标记即结束任务并提示用户；可选用 complete_task 核对并交付详细结果。',
       '【computer 调用格式】',
-      ...(stepToken === null ? ['当前步骤正在处理或令牌尚未就绪，等待 computer_result 返回 next_step_token 后再发起下一请求。'] : [
-      ...(stepToken ? [`当前 step_token：${stepToken}`] : []),
-      '格式示例（只替换为实际动作参数和令牌）：',
-      '```json',
-      JSON.stringify({ type: 'computer', version: COMPUTER_USE_PROTOCOL_VERSION,
-        action: capability.actionDefinitions[0].action, step_token: stepToken ?? '<当前有效步骤令牌>',
-        description: `准备${(COMPUTER_ACTION_SUMMARIES[capability.actionDefinitions[0].action] ?? '执行当前桌面操作').split(/[；。]/)[0]}`,
-        ...capability.actionDefinitions[0].example }),
-      '```']),
+      `用一个 json 代码块输出单个 JSON 对象，顶层必须包含 type="computer"、version=${COMPUTER_USE_PROTOCOL_VERSION}、action、step_token 和 description；action 使用当前可调用动作名，动作参数按上方定义放在同一顶层。`,
+      ...(stepToken === null ? ['当前步骤正在处理或令牌尚未就绪，等待 computer_result 返回 next_step_token 后再发起下一请求。']
+        : stepToken ? [`当前 step_token：${stepToken}`] : []),
       '返回结果包含 type/version/action/ok/execution/code/message/data。execution=not_executed 表示未执行，executed 表示执行器已返回，unknown 表示可能已生效但未确认；协议错误按结果修正请求，不重放未知动作。'
     ])
   ].join('\n')

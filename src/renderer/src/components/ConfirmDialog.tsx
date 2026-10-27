@@ -2,7 +2,7 @@ import { useToolSurface } from './ToolSurfaceContext'
 import { useRef } from 'react'
 import { Popover } from '@base-ui/react/popover'
 import AppPopover from './AppPopover'
-import type { ReactElement, ReactNode } from 'react'
+import type { ReactElement, ReactNode, RefObject } from 'react'
 import './ConfirmPopover.css'
 
 export interface ConfirmDialogItem {
@@ -24,6 +24,7 @@ interface ConfirmDialogProps {
   dismissOnBackdrop?: boolean
   dismissOnEscape?: boolean
   anchor?: HTMLElement | null
+  containerRef?: RefObject<HTMLElement | null>
   items?: ConfirmDialogItem[]
   onConfirm: () => void
   onCancel: () => void
@@ -40,6 +41,7 @@ export default function ConfirmDialog({
   dismissOnBackdrop = true,
   dismissOnEscape = true,
   anchor,
+  containerRef,
   items = [],
   onConfirm,
   onCancel
@@ -54,6 +56,7 @@ export default function ConfirmDialog({
       className="confirm-popover"
       aria-label={title}
       anchor={anchor}
+      containerRef={containerRef}
       open={visible} keepMounted busy={busy} onClose={onCancel}
       dismissOnOutside={dismissOnBackdrop} dismissOnEscape={dismissOnEscape} initialFocus={cancelButton}
     >

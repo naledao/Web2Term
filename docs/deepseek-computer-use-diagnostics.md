@@ -6,7 +6,7 @@
 
 ## 诊断从哪里来
 
-`TaskProgression` 取得执行器回执后，`TaskCoordinator` 在结果落盘和发送前结合运行预算信号生成诊断。分类依据是实际 `code`、`execution`、明确的空发现结果、操作后观察错误以及本次有效观察中的控件完整性。不解析错误消息里的自然语言来猜测根因，也不把网页／控件文本改写成客户端指令。
+`TaskProgression` 取得执行器回执后，`TaskCoordinator` 在结果落盘和发送前结合执行统计与可观察状态信号生成诊断。分类依据是实际 `code`、`execution`、明确的空发现结果、操作后观察错误以及本次有效观察中的控件完整性。不解析错误消息里的自然语言来猜测根因，也不把网页／控件文本改写成客户端指令。
 
 诊断不覆盖 `ok`、`code`、`execution`、原 `message`、`data` 或附件。输入已执行而截图失败时，执行事实仍为 executed；不能把缺图改成“未执行”。正常完整的成功结果不增加诊断，部分控件树、空发现结果和操作后观察失败即使 ok=true 也可以携带诊断。
 
@@ -67,7 +67,7 @@
 
 ## 范围和用户测试
 
-本项提供诊断证据、可用路径和必要的后状态核对规则。第 34 项已接入重复动作／无进展检测、执行期限和可配置运行上限，诊断同时使用 progress_control 信号，详见 [运行控制说明](deepseek-computer-use-progress.md)；第 35 项的业务完成判定与完整产物验证仍待实现。本项不把诊断生成、工具成功或模型自述当成任务完成。
+本项提供诊断证据、可用路径和必要的后状态核对规则。第 34 项保留重复动作／无进展与超时的诊断统计，已移除运行上限及其停机判断；诊断继续使用 progress_control 信号，详见 [运行控制说明](deepseek-computer-use-progress.md)；第 35 项的业务完成判定与完整产物验证仍待实现。本项不把诊断生成、工具成功或模型自述当成任务完成。
 
 实现主要位于 `src/shared/computer-diagnostics.ts`、`src/main/task-progression.ts`、`task-coordinator.ts`、`session-runtime.ts` 和 `computer-recovery.ts`。结果类型、检查点原因和序列化回退分别更新在共享 computer／任务类型及 `computer-action-storage.ts` 中。
 

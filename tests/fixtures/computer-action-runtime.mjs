@@ -39,7 +39,7 @@ export function fixture(t, options = {}) {
   const coordinator = new TaskCoordinator('session-a', store, () => loop?.reconcile(), options.clock)
   const submit = (patch = {}) => coordinator.submit({ platformId: 'deepseek', conversationId: 'chat-a', submission: { id: `user:goal:${++serial}`, kind: 'goal' },
     text: '发现并检查桌面应用。', attachments: [], machine: { id: 'machine-a', label: '本机', platform: 'win32', arch: 'x64', connection: 'local', workingDirectory: 'C:\\work' },
-    capability: { scopeSupported: true, computerUseEnabled: true, computerUseLimits: options.limits, context: { sessionId: 'session-a', platformId: 'deepseek' } }, ...patch })
+    capability: { scopeSupported: true, computerUseEnabled: true, context: { sessionId: 'session-a', platformId: 'deepseek' } }, ...patch })
   const first = submit()
   const lease = () => { const task = coordinator.current('deepseek'); return { sessionId: task.sessionId, platformId: task.platformId,
     conversationId: task.conversationId, taskId: task.id, generation: task.generation } }

@@ -45,7 +45,6 @@ interface Operation {
   deliveryFailures: number
   completionReady?: boolean
   executionAbort?: AbortController
-  cancelDeadline?: () => void
   /** Set while the saved result waits out the configured delay; delivery starts when it clears. */
   cancelResultDelay?: () => void
 }
@@ -91,12 +90,6 @@ export class TaskProgression {
       request = { ...owner, result: { type: 'computer_result', version: 1, action: call.action, ok: false, execution: 'not_executed',
         code: 'recovery_required', message: '当前任务需要先核对真实后状态，包括任务恢复、未知回执或操作后的观察失败；可先发现窗口/弹窗、只读复核或等待，必要时恢复已知窗口，再用observe核对；本次输入未派发，未知操作不得重放。',
         data: { recovery: task.recovery, history_only: true, requires_fresh_observation: true, goal_verified: false } } }
-    }
-    const progressBlocked = request.call ? this.deps.coordinator.inspectComputerStep(request, request.call) : null
-    if (!this.valid(request)) return 'inactive'
-    if (progressBlocked) {
-      const { call: _call, ...owner } = request
-      request = { ...owner, result: progressBlocked }
     }
     const now = Date.now()
     const next: TaskProgress = {
@@ -155,7 +148,7 @@ export class TaskProgression {
     this.deferred = null
     this.deferredReply = null
     op?.abort.abort()
-    op?.cancelDeadline?.(); op?.executionAbort?.abort(); op?.cancelResultDelay?.()
+    op?.executionAbort?.abort(); op?.cancelResultDelay?.()
     if (op?.attachments) this.deps.release?.(op.attachments, op.request)
     if (op) {
       try { this.record(op, { event: 'cancel' }) }
@@ -225,7 +218,6 @@ export class TaskProgression {
     const step = op.progress.currentStep!
     if (op.stage === 'queued') {
       let result: ComputerUseToolResult
-      let actionTimedOut = false
       if (op.request.result) result = structuredClone(op.request.result)
       else {
         let permit: DesktopPermit | null = null, admissionFailed = false
@@ -241,9 +233,6 @@ export class TaskProgression {
           if (!this.deps.canRun(op.request)) { this.retryLater(); return }
           if (admissionFailed) result = { type: 'computer_result', version: 1, action: step.action, ok: false, execution: 'not_executed', code: 'unavailable', message: '桌面排队已取消或未能接纳，本步未派发。' }
           else {
-            const waiting = op.request.call.action === 'wait_for'
-            const budget = this.deps.coordinator.actionBudget(op.request, waiting)
-            if (!budget || !this.current(op)) return
             op.stage = 'executing'
             op.progress.phase = 'executing-tool'; op.progress.detail = null
             step.status = 'executing'; step.execution = 'unknown'
@@ -251,15 +240,10 @@ export class TaskProgression {
             op.executionAbort = new AbortController()
             const stop = (): void => op.executionAbort?.abort()
             op.abort.signal.addEventListener('abort', stop, { once: true })
-            const schedule = this.deps.scheduleDeadline ?? ((callback, delay) => {
-              if (typeof setTimeout === 'undefined') return () => {}
-              const timer = setTimeout(callback, delay); timer.unref?.(); return () => clearTimeout(timer)
-            })
-            op.cancelDeadline = schedule(() => { actionTimedOut = true; op.executionAbort?.abort() }, budget)
             try { result = await this.deps.invoke(op.request.call, op.request, op.executionAbort.signal, { id: step.id, token: step.stepToken ?? op.request.stepToken ?? null, sourceMessageId: step.sourceMessageId }, permit ?? undefined) }
             catch { result = { type: 'computer_result', version: 1, action: step.action, ok: false,
               execution: 'unknown', code: 'executor_error', message: '执行器异常，操作是否生效尚未确认；应先观察实际状态。' } }
-            finally { op.cancelDeadline?.(); op.cancelDeadline = undefined; op.abort.signal.removeEventListener('abort', stop) }
+            finally { op.abort.signal.removeEventListener('abort', stop) }
           }
         } finally { permit?.release() }
       }
@@ -267,7 +251,7 @@ export class TaskProgression {
       // An obsolete executor must not read a newer goal's capabilities or observations.
       let context: ComputerDiagnosticContext | undefined
       try { context = this.current(op) ? this.deps.diagnosticContext?.(op.request) : undefined } catch { /* Diagnose with no advertised alternatives. */ }
-      try { result = this.record(op, { event: 'result', result, diagnosticContext: context, actionTimedOut }) ?? result }
+      try { result = this.record(op, { event: 'result', result, diagnosticContext: context }) ?? result }
       catch (error) { if (result.attachments) this.deps.release?.(result.attachments, op.request); throw error }
       if (!this.current(op)) { if (result.attachments) this.deps.release?.(result.attachments, op.request); return }
       op.attachments = result.attachments
@@ -283,7 +267,7 @@ export class TaskProgression {
           task_id: op.request.taskId, task_generation: op.request.generation, step_id: step.id, source_message_id: step.sourceMessageId, tool: 'computer',
           machine: { id: step.machine!.id, label: step.machine!.label, platform: step.machine!.platform, arch: step.machine!.arch,
             connection: step.machine!.connection, working_directory: step.machine!.workingDirectory } },
-        ...(step.nextStepToken && !result.progress_control?.halted && !(result.action === 'complete_task' && result.ok) ? { next_step_token: step.nextStepToken } : {}) }
+        ...(step.nextStepToken && !(result.action === 'complete_task' && result.ok) ? { next_step_token: step.nextStepToken } : {}) }
       let text: string
       try {
         text = JSON.stringify(envelope)
@@ -292,7 +276,7 @@ export class TaskProgression {
         if (result.action === 'complete_task') this.deps.coordinator.rejectCompletionDelivery(op.request, step.id)
         text = JSON.stringify({ type: 'computer_result', version: 1, action: result.action, execution: result.execution, ok: false, code: 'executor_error',
           task_id: op.request.taskId, task_generation: op.request.generation, step_id: step.id, source_message_id: step.sourceMessageId,
-          progress_control: result.progress_control, ...(step.nextStepToken && !result.progress_control?.halted ? { next_step_token: step.nextStepToken } : {}),
+          progress_control: result.progress_control, ...(step.nextStepToken ? { next_step_token: step.nextStepToken } : {}),
           message: '动作已返回，但完整结果无法作为本轮文字发送；已保留实际回执，任务没有标记完成。请核对实际状态并缩短回传，勿据此盲目重复动作。' })
       }
       step.execution = result.execution
@@ -346,7 +330,7 @@ export class TaskProgression {
       this.deferred = null
       this.deferredReply = null
       const live = this.deps.coordinator.current(op.request.platformId)
-      if (op.completionReady && live && !live.control?.halted && live.completion?.report?.state !== 'ready') {
+      if (op.completionReady && live && live.completion?.report?.state !== 'ready') {
         this.enqueue({ ...op.request, call: undefined, sourceMessageId: `completion-review:${step.id}`, receipt: undefined,
           stepToken: this.deps.coordinator.computerStepToken(op.request.platformId), result: { type: 'computer_result', version: 1, action: 'complete_task', ok: false, execution: 'not_executed',
             code: 'verification_required', message: '核对报告交付前，任务要求、依赖或完整报告可交付性发生变化；尚未标记任务完成，请基于最新上下文继续核对。',

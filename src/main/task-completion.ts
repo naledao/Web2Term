@@ -144,7 +144,6 @@ export async function assessTaskCompletion(task: AutonomousTask, claim: TaskComp
   const state = completionState(task), blockers = completionBackgroundBlockers(task, background, claim.superseded_backgrounds ?? [])
   const block = (message: string): void => { if (!blockers.includes(message) && blockers.length < 128) blockers.push(message) }
   if (task.status !== 'recorded' || task.progress?.currentStep?.id !== stepId || task.progress.currentStep.action !== 'complete_task' || task.progress.currentStep.status !== 'executing') block('完成请求不属于当前正在执行的步骤。')
-  if (task.control?.halted) block('任务已达到运行上限，保留未完成状态。')
   if (task.clarifications?.items.some(q => !['answered', 'cancelled'].includes(q.state))) block('必要澄清或任务内授权尚未获得真实回答，不能标记完成。')
   if (task.recovery?.requiresObservation) block('存在未核对的操作后状态，必须先重新观察。')
   const inputIds = new Set(task.inputs.map(i => i.id))

@@ -2,7 +2,6 @@ import type { DatabaseSync } from 'node:sqlite'
 import { parseAutonomousTask } from '../shared/autonomous-task'
 import type { AutonomousTask } from '../shared/autonomous-task'
 import type { ComputerActionRecord } from '../shared/computer-actions'
-import { PROGRESS_STOP_MESSAGES } from '../shared/computer-progress'
 
 // Restored advice never advertises capabilities from an older process.
 const objectDiagnosis = (v: unknown): unknown => v && typeof v === 'object' && 'category' in v && 'requires_fresh_observation' in v
@@ -19,7 +18,6 @@ function restoreProgressReport(task: AutonomousTask, raw: string | null | undefi
       task.control.unchangedObservations = r.unchanged_observations
       task.control.consecutiveTimeouts = r.consecutive_timeouts
       task.control.recoverySteps = r.recovery_steps
-      if (r.halted === true && typeof r.stop_reason === 'string' && Object.hasOwn(PROGRESS_STOP_MESSAGES, r.stop_reason)) task.control.halted = r.stop_reason
     }
   } catch { /* Original history remains readable without a valid progress report. */ }
 }
@@ -43,14 +41,13 @@ export function recoverInterruptedComputerActions(db: DatabaseSync, at = Date.no
       if (task.status === 'completed') continue // Completed by model marker or delivered report: history, never work to resume.
       if (task.status !== 'recorded') {
         // Graceful shutdown after a checkpoint error may already have interrupted this
-        // task using an older snapshot. A durable hard-limit receipt still takes priority.
+        // task using an older snapshot. Restore statistics from its durable receipt.
         if (task.control && task.progress?.currentStep) {
           const receipt = db.prepare(`SELECT a.result_json FROM computer_actions a JOIN computer_action_claims c ON c.execution_id = a.execution_id
             WHERE c.execution_id = ? AND c.task_id = ? AND c.generation = ? AND c.session_id = ? AND c.platform_id = ? AND c.conversation_id = ?`)
             .get(task.progress.currentStep.id, task.id, task.generation, task.sessionId, task.platformId, task.conversationId) as { result_json: string | null } | undefined
           const before = JSON.stringify(task)
           restoreProgressReport(task, receipt?.result_json)
-          if (task.control.halted) task.progress.detail = PROGRESS_STOP_MESSAGES[task.control.halted]
           if (JSON.stringify(task) !== before) db.prepare('UPDATE autonomous_tasks SET payload = ? WHERE id = ?').run(JSON.stringify(task), task.id)
         }
         continue
@@ -75,8 +72,8 @@ export function recoverInterruptedComputerActions(db: DatabaseSync, at = Date.no
           step.execution = action.execution_fact
           step.delivery = action.delivery_state === 'unknown' ? 'uncertain' : action.delivery_state as typeof step.delivery
           step.status = step.delivery === 'sent' ? 'delivered' : 'interrupted'
-          // A checkpoint-only failure may still have saved the real final limit receipt.
-          // Restore counters/reasons, never observations, timers or executable work.
+          // A checkpoint-only failure may still have saved the real final receipt.
+          // Restore counters, never observations, timers or executable work.
           restoreProgressReport(task, action.result_json)
         } else if (step.status !== 'delivered') {
           step.status = 'interrupted'
@@ -88,7 +85,6 @@ export function recoverInterruptedComputerActions(db: DatabaseSync, at = Date.no
       task.recovery = { version: 1, reason: 'client_restart', sourceTaskId: task.id, sourceGeneration: task.generation,
         checkpointAt: at, requiresObservation: true, unknownExecutionId: task.recovery?.unknownExecutionId ??
           (step?.execution === 'unknown' ? step.id : null), observationStepId: null }
-      if (task.control?.halted && task.progress) task.progress.detail = PROGRESS_STOP_MESSAGES[task.control.halted]
       db.prepare('UPDATE autonomous_tasks SET payload = ? WHERE id = ?').run(JSON.stringify(task), task.id)
     }
     db.exec('COMMIT')
@@ -123,7 +119,7 @@ export function computerRecoveryMessage(task: AutonomousTask, records: ComputerA
       items: task.clarifications.items.slice(-4).map(q => ({ message_id: q.messageId, state: q.state,
         questions: q.questions.map(item => ({ excerpt: item.question.slice(0, 160), truncated: item.question.length > 160 })),
         answer: q.answer ? { input_id: q.answer.submissionId, excerpt: q.answer.text.slice(0, 400), truncated: q.answer.text.length > 400 } : null })) } : null,
-    progress_control: task.control ? { steps: task.control.steps, elapsed_ms: task.control.elapsedMs, limits: task.control.limits, stop_reason: task.control.halted } : null,
+    progress_control: task.control ? { steps: task.control.steps, elapsed_ms: task.control.elapsedMs } : null,
     previous_completion: task.completion?.report ? { state: task.completion.report.state, summary: task.completion.report.summary.slice(0, 1000),
       artifacts: task.completion.report.artifacts.map(a => ({ path: a.path, label: a.label })), blockers: task.completion.report.blockers.slice(0, 16), history_only: true } : null,
     // Historical ids are hints only. Fresh catalogs/observations must issue usable references.

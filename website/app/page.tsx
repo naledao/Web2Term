@@ -13,6 +13,7 @@ import {
   LINUX_AGENT_CHECKSUM_URL,
   WEB2TERM_GUIDE_URL,
   LINUX_AGENT_GUIDE_URL,
+  COMPUTER_USE_GUIDE_URL,
 } from './site-config'
 
 type Step = {
@@ -126,7 +127,7 @@ const modelPlatforms = [
     id: 'chatgpt',
     name: 'ChatGPT',
     icon: '/models/chatgpt.svg',
-    detail: '内置网页会话 · 独立登录态',
+    detail: '内置网页会话 · Windows Computer Use',
     tone: 'blue',
   },
   {
@@ -140,7 +141,7 @@ const modelPlatforms = [
     id: 'deepseek',
     name: 'DeepSeek',
     icon: '/models/deepseek.svg',
-    detail: '内置网页会话 · 独立登录态',
+    detail: '内置网页会话 · Windows Computer Use',
     tone: 'mint',
   },
   {
@@ -263,6 +264,7 @@ export default function Home() {
         <nav id="site-navigation" className={menuOpen ? 'site-nav site-nav--open' : 'site-nav'} aria-label="主导航">
           <button onClick={() => scrollTo('models')}>AI 平台</button>
           <button onClick={() => scrollTo('workflow')}>工作流</button>
+          <button onClick={() => scrollTo('computer-use')}>Computer Use</button>
           <button onClick={() => scrollTo('macos')}>macOS</button>
           <button onClick={() => scrollTo('web2term')}>Linux 设备</button>
           <button onClick={() => scrollTo('toolbox')}>工具箱</button>
@@ -277,7 +279,7 @@ export default function Home() {
         <div className="hero-copy">
           <p className="hero-overline"><span className="live-dot" /> AI × 本机与远程终端</p>
           <h1>让对话<br /><em>抵达终端。</em></h1>
-          <p className="hero-lede">{PRODUCT_NAME} 把模型网页、项目对话与本机、SSH、Linux 设备上的命令执行放进同一个工作区。专注当前任务，让后台任务、GitHub 仓库和数据库工具随手可用。</p>
+          <p className="hero-lede">{PRODUCT_NAME} 把模型网页、项目对话与本机、SSH、Linux 设备上的命令执行放进同一个工作区。在 Windows 本机会话中，还能让 ChatGPT 或 DeepSeek 通过 Computer Use 查看界面、操作桌面应用。</p>
           <div className="hero-actions">
             <a className="button button--primary" href={WINDOWS_DOWNLOAD_URL} download>下载 Windows 版 <DownloadIcon /></a>
             <a className="button button--secondary" href={MACOS_DOWNLOAD_URL} download>下载 macOS 版 <DownloadIcon /></a>
@@ -343,6 +345,42 @@ export default function Home() {
             <div className="workflow-detail__copy"><p className="detail-overline">{step.eyebrow}</p><h3>{step.title}</h3><p>{step.body}</p><div className="detail-result"><span className="result-mark">↳</span><span>{step.result}</span></div></div>
             <div className="workflow-detail__terminal"><span className="terminal-label">LIVE TRANSCRIPT</span><p className="terminal-prompt">{step.command}</p><div className="terminal-cursor" /></div>
           </div>
+        </div>
+      </section>
+
+      <section className="computer-use section" id="computer-use" aria-labelledby="computer-use-title">
+        <div className="computer-use__intro">
+          <h2 id="computer-use-title">Computer Use，<br /><span>从对话到桌面。</span></h2>
+          <p className="computer-use__scope">Windows x64 · 本机会话 · ChatGPT / DeepSeek</p>
+          <p>把需要操作界面的步骤也交给模型。它可以发现和启动应用，查看真实窗口，再执行点击、输入、滚动或拖拽。截图与操作回执回到同一段对话，无需额外的视觉模型 API Key。</p>
+          <ol className="computer-use__setup" aria-label="开启 Computer Use">
+            <li><strong>打开本机会话</strong><span>选择 ChatGPT 或 DeepSeek，登录网页账号，并开启终端模式与提示词注入。</span></li>
+            <li><strong>在设置中启用</strong><span>进入「设置 → computer use」，打开「启用 computer use」并保存。</span></li>
+            <li><strong>描述目标，查看执行进度</strong><span>例如“打开 PowerPoint，新建一页标题为项目进度的幻灯片”。顶部居中浮层显示目标和当前动作。</span></li>
+          </ol>
+          <a className="text-link" href={COMPUTER_USE_GUIDE_URL} target="_blank" rel="noreferrer">阅读 Computer Use 使用说明 <ArrowIcon /></a>
+          <p className="computer-use__availability">桌面操作当前支持以上平台与本机连接。macOS、Claude、Gemini、SSH 和 Web2Term 设备连接仍使用各自已接入的终端能力。</p>
+        </div>
+        <div className="computer-use__guide">
+          <figure className="computer-use__overlay-example">
+            <div className="computer-use__overlay-notice"><strong>Web2Term 正在操控您的电脑</strong><span>执行中</span></div>
+            <dl className="computer-use__overlay-content">
+              <div><dt>任务目标</dt><dd>创建一页项目进度幻灯片</dd></div>
+              <div><dt>当前动作</dt><dd>输入幻灯片标题</dd></div>
+            </dl>
+            <p className="computer-use__gesture">连续来回晃动鼠标，立即急停</p>
+            <figcaption>顶部居中任务浮层 · 功能示意</figcaption>
+          </figure>
+          <dl className="computer-use__actions">
+            <div><dt>观察界面</dt><dd>单屏、窗口或区域截图，按需读取可访问性控件、焦点和文字选区。</dd></div>
+            <div><dt>操作目标</dt><dd>单击、双击、输入、组合键和滚动；在同一窗口内拖动选中文字、框选对象或操作画布。</dd></div>
+            <div><dt>等待条件</dt><dd>等待窗口、文字、控件或后台任务状态，结合新观察判断下一步。</dd></div>
+          </dl>
+          <div className="computer-use__stop">
+            <h3>随时通过晃动鼠标急停</h3>
+            <p>控制期间快速左右或上下来回晃动鼠标数次，即可停止所有会话的自动操作与回传；也可点击「全局急停」。浮层显示急停状态 6 秒，解除急停后需重新提交或恢复任务。</p>
+          </div>
+          <p className="computer-use__limit">拖拽与框选取决于目标应用，需根据操作后的界面确认结果。拖拽限于同一可见窗口；区域截图使用矩形坐标，尚无手动拉框截图入口。任务时限、步骤上限与结果回传间隔可在设置中调整。</p>
         </div>
       </section>
 
@@ -475,10 +513,10 @@ export default function Home() {
           </div>
           <small>桌面端：Windows x64 / macOS arm64 · 设备工具：Linux x86_64 · 下载源：GitHub 最新 Release</small>
         </div>
-        <div className="download-terminal"><div className="download-terminal__head"><span>SESSION SETUP</span><span>工作区入口</span></div><dl className="download-environments"><div><dt>本机终端</dt><dd>Windows · PowerShell / macOS · zsh</dd></div><div><dt>远程连接</dt><dd>SSH / web2term</dd></div><div><dt>工具箱</dt><dd>Git / MySQL / Redis / Nacos</dd></div><div><dt>模型</dt><dd>ChatGPT / Claude / Gemini / DeepSeek</dd></div></dl></div>
+        <div className="download-terminal"><div className="download-terminal__head"><span>SESSION SETUP</span><span>工作区入口</span></div><dl className="download-environments"><div><dt>本机终端</dt><dd>Windows · PowerShell / macOS · zsh</dd></div><div><dt>Computer Use</dt><dd>Windows x64 · ChatGPT / DeepSeek · 本机</dd></div><div><dt>远程连接</dt><dd>SSH / web2term</dd></div><div><dt>工具箱</dt><dd>Git / MySQL / Redis / Nacos</dd></div><div><dt>模型</dt><dd>ChatGPT / Claude / Gemini / DeepSeek</dd></div></dl></div>
       </section>
 
-      <footer className="site-footer"><div className="footer-brand"><Mark /><div><strong>{PRODUCT_NAME}</strong><span>CONVERSATION, MEET EXECUTION.</span></div></div><div className="footer-links"><button onClick={() => scrollTo('models')}>AI 平台</button><button onClick={() => scrollTo('workflow')}>工作流</button><button onClick={() => scrollTo('macos')}>macOS 安装</button><button onClick={() => scrollTo('web2term')}>Linux 设备</button><button onClick={() => scrollTo('toolbox')}>工具箱</button><button onClick={() => scrollTo('download')}>下载</button><a href={WINDOWS_DOWNLOAD_URL} download>Windows 下载 <ArrowIcon /></a><a href={MACOS_DOWNLOAD_URL} download>macOS 下载 <ArrowIcon /></a></div><span className="footer-note">© 2026 · Built for the next command.</span></footer>
+      <footer className="site-footer"><div className="footer-brand"><Mark /><div><strong>{PRODUCT_NAME}</strong><span>CONVERSATION, MEET EXECUTION.</span></div></div><div className="footer-links"><button onClick={() => scrollTo('models')}>AI 平台</button><button onClick={() => scrollTo('workflow')}>工作流</button><button onClick={() => scrollTo('computer-use')}>Computer Use</button><button onClick={() => scrollTo('macos')}>macOS 安装</button><button onClick={() => scrollTo('web2term')}>Linux 设备</button><button onClick={() => scrollTo('toolbox')}>工具箱</button><button onClick={() => scrollTo('download')}>下载</button><a href={WINDOWS_DOWNLOAD_URL} download>Windows 下载 <ArrowIcon /></a><a href={MACOS_DOWNLOAD_URL} download>macOS 下载 <ArrowIcon /></a></div><span className="footer-note">© 2026 · Built for the next command.</span></footer>
     </main>
   )
 }

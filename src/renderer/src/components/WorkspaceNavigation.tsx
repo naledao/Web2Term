@@ -13,14 +13,19 @@ function Icon({ kind }: { kind: 'folder' | 'open' | 'plus' | 'more' }): ReactEle
   </svg>
 }
 
-function Actions({ label, theme, children }: { label: string; theme: string; children: ReactNode }): ReactElement {
+function Actions({ label, theme, children }: {
+  label: string
+  theme: string
+  children: ReactNode | ((trigger: RefObject<HTMLButtonElement | null>) => ReactNode)
+}): ReactElement {
   const actionSelected = useRef(false)
+  const trigger = useRef<HTMLButtonElement>(null)
   return <Menu.Root modal={false} onOpenChange={open => { if (open) actionSelected.current = false }}>
-    <Menu.Trigger className="workspace-navigation__icon workspace-navigation__more" aria-label={label} title={label}><Icon kind="more" /></Menu.Trigger>
+    <Menu.Trigger ref={trigger} className="workspace-navigation__icon workspace-navigation__more" aria-label={label} title={label}><Icon kind="more" /></Menu.Trigger>
     <Menu.Portal>
       <Menu.Positioner side="bottom" align="end" positionMethod="fixed" sideOffset={4} collisionPadding={6} className="workspace-navigation-menu-positioner">
         <Menu.Popup className="workspace-navigation-menu" data-theme={theme} onClickCapture={() => { actionSelected.current = true }}
-          finalFocus={() => !actionSelected.current}>{children}</Menu.Popup>
+          finalFocus={() => !actionSelected.current}>{typeof children === 'function' ? children(trigger) : children}</Menu.Popup>
       </Menu.Positioner>
     </Menu.Portal>
   </Menu.Root>
@@ -37,9 +42,9 @@ export default function WorkspaceNavigation({ sessions, projects, activeId, them
   onNewChat(projectId: string | null): void
   onNewProject(): void
   onEditProject(project: WorkspaceProject): void
-  onRemoveProject(project: WorkspaceProject): void
+  onRemoveProject(project: WorkspaceProject, anchor: HTMLButtonElement | null): void
   onMoveSession(session: ManagedSessionSummary): void
-  onDeleteSession(session: ManagedSessionSummary): void
+  onDeleteSession(session: ManagedSessionSummary, anchor: HTMLButtonElement | null): void
 }): ReactElement {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
     try {
@@ -98,9 +103,11 @@ export default function WorkspaceNavigation({ sessions, projects, activeId, them
         {item.unseenCompletedCount ? <span className="workspace-navigation__unseen" aria-label={`${item.unseenCompletedCount} 个任务已完成`}>{item.unseenCompletedCount}</span> : null}
       </button>
       <Actions label={`${item.title}的操作`} theme={theme}>
-        <Menu.Item onClick={() => rename(item)}>重命名</Menu.Item>
-        <Menu.Item onClick={() => onMoveSession(item)}>移动到项目…</Menu.Item>
-        <Menu.Item className="is-danger" onClick={() => onDeleteSession(item)}>删除对话…</Menu.Item>
+        {trigger => <>
+          <Menu.Item onClick={() => rename(item)}>重命名</Menu.Item>
+          <Menu.Item onClick={() => onMoveSession(item)}>移动到项目…</Menu.Item>
+          <Menu.Item className="is-danger" onClick={() => onDeleteSession(item, trigger.current)}>删除对话…</Menu.Item>
+        </>}
       </Actions>
     </>}
   </div>
@@ -132,9 +139,11 @@ export default function WorkspaceNavigation({ sessions, projects, activeId, them
           <button type="button" className="workspace-navigation__icon workspace-navigation__add" disabled={creating} aria-label={`在${project.name}中新建对话`} title="新建对话"
             onClick={() => { setCollapsed(current => ({ ...current, [project.id]: false })); onNewChat(project.id) }}><Icon kind="plus" /></button>
           <Actions label={`${project.name}的项目操作`} theme={theme}>
-            <Menu.Item disabled={creating} onClick={() => onNewChat(project.id)}>新建对话</Menu.Item>
-            <Menu.Item onClick={() => onEditProject(project)}>编辑项目…</Menu.Item>
-            <Menu.Item className="is-danger" onClick={() => onRemoveProject(project)}>移除项目…</Menu.Item>
+            {trigger => <>
+              <Menu.Item disabled={creating} onClick={() => onNewChat(project.id)}>新建对话</Menu.Item>
+              <Menu.Item onClick={() => onEditProject(project)}>编辑项目…</Menu.Item>
+              <Menu.Item className="is-danger" onClick={() => onRemoveProject(project, trigger.current)}>移除项目…</Menu.Item>
+            </>}
           </Actions>
         </div>
         <div id={`workspace-project-${project.id}`} className="workspace-navigation__children" hidden={!!collapsed[project.id]}>

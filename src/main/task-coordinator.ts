@@ -4,9 +4,8 @@ import { parseTaskCompletionState } from '../shared/task-completion'
 import type { TaskCompletionClaim, TaskCompletionReport, TaskCompletionState } from '../shared/task-completion'
 import type { BackgroundTask } from '../shared/background-tasks'
 import { computerActionRequest } from '../shared/computer-actions'
-import { createProgressState, admitProgressStep, inspectProgressAdmission, recordProgressResult, recordFileEvidence } from './task-progress-guard'
-import { PROGRESS_STOP_MESSAGES } from '../shared/computer-progress'
-import type { ComputerProgressState, ProgressStopReason } from '../shared/computer-progress'
+import { createProgressState, admitProgressStep, recordProgressResult, recordFileEvidence } from './task-progress-guard'
+import type { ComputerProgressState } from '../shared/computer-progress'
 import { diagnoseComputerResult } from '../shared/computer-diagnostics'
 import type { ComputerActionClaim, ComputerActionUpdate } from '../shared/computer-actions'
 import type { AutonomousTask, AutonomousTaskState, TaskLease, TaskMachine, TaskProgress, TaskSubmission, TaskToolContext, TaskToolEvent, TaskBackgroundDependency, TaskContinuity, TaskStopReason } from '../shared/autonomous-task'
@@ -30,13 +29,13 @@ export class TaskCoordinator {
   private readonly computerTokens = new Map<string, { value: string; taskId: string | null; generation: number | null; pending: boolean }>()
   // Also protect synthetic/in-memory stores; production adds the durable unique constraints.
   private readonly computerClaims = new Map<string, { answers: Set<string>; tokens: Set<string> }>()
-  private readonly clocks = new Map<string, { last: number; elapsed: number; suspended: boolean; cancel: (() => void) | null }>()
+  private readonly clocks = new Map<string, { last: number; elapsed: number; suspended: boolean }>()
   private dispatchBlocked = false
   private paused = false
 
   constructor(private readonly sessionId: string, private readonly store: AutonomousTaskStore,
     private readonly changed: (state: AutonomousTaskState) => void,
-    private readonly timing: { now?(): number; schedule?(callback: () => void, delay: number): () => void } = {}) {}
+    private readonly timing: { now?(): number } = {}) {}
 
   setDispatchBlocked(blocked: boolean): void { this.dispatchBlocked = blocked; if (blocked) this.computerTokens.clear() }
 
@@ -45,7 +44,7 @@ export class TaskCoordinator {
     const control = structuredClone(task.control ?? createProgressState())
     if (!task.control) control.steps = task.progress?.stepCount ?? 0
     let clock = this.clocks.get(task.id)
-    if (!clock) { clock = { last: this.now(), elapsed: control.elapsedMs, suspended: this.paused || task.progress?.phase === 'waiting-user', cancel: null }; this.clocks.set(task.id, clock) }
+    if (!clock) { clock = { last: this.now(), elapsed: control.elapsedMs, suspended: this.paused || task.progress?.phase === 'waiting-user' }; this.clocks.set(task.id, clock) }
     const now = Math.max(clock.last, this.now())
     if (!clock.suspended) clock.elapsed += now - clock.last
     clock.last = now
@@ -53,57 +52,19 @@ export class TaskCoordinator {
     control.elapsedMs = Math.floor(clock.elapsed)
     return control
   }
-  private arm(task: AutonomousTask): void {
-    const control = this.control(task), clock = this.clocks.get(task.id)!
-    clock.cancel?.(); clock.cancel = null
-    if (task.status !== 'recorded' || this.paused || task.progress?.phase === 'waiting-user') return
-    const schedule = this.timing.schedule ?? ((callback, delay) => {
-      if (typeof setTimeout === 'undefined') return () => {}
-      const timer = setTimeout(callback, delay); timer.unref?.(); return () => clearTimeout(timer)
-    })
-    clock.cancel = schedule(() => {
-      clock.cancel = null
-      const state = this.entries.get(task.platformId)
-      if (state?.task?.id !== task.id || state.task.status !== 'recorded') return
-      if (this.paused || state.task.progress?.phase === 'waiting-user') return
-      try {
-        if (this.control(state.task).elapsedMs < control.limits.taskTimeoutMs) this.arm(state.task)
-        else this.haltProgress(state.task, 'task_timeout')
-      } catch { this.fail(state.platformId, state.conversationId) }
-    }, Math.max(1, control.limits.taskTimeoutMs - control.elapsedMs))
-  }
   setPaused(paused: boolean): void {
     for (const state of this.entries.values()) if (state.task?.status === 'recorded') {
       const task = { ...state.task, control: this.control(state.task), updatedAt: Date.now() }
       this.store.saveAutonomousTasks([task]); this.entries.set(state.platformId, { ...state, task })
     }
     this.paused = paused
-    for (const state of this.entries.values()) if (state.task?.status === 'recorded') this.arm(state.task)
-  }
-  private haltProgress(task: AutonomousTask, reason: ProgressStopReason): void {
-    const state = this.entries.get(task.platformId)
-    if (!state || state.task?.id !== task.id || task.status !== 'recorded') return
-    const finalReason = task.control?.halted ?? reason
-    const stopped = this.interrupted(task, 'stopped')
-    stopped.control = { ...this.control(task), halted: finalReason, pending: null }
-    if (stopped.progress) stopped.progress.detail = PROGRESS_STOP_MESSAGES[finalReason]
-    this.store.saveAutonomousTasks([stopped])
-    this.computerTokens.delete(task.platformId); this.computerClaims.delete(task.id)
-    this.publish({ ...state, task: stopped })
-  }
-  actionBudget(lease: TaskLease, wait = false): number {
-    const task = this.current(lease.platformId)
-    if (!task || !this.owns(lease)) return 0
-    const c = this.control(task), remaining = c.limits.taskTimeoutMs - c.elapsedMs
-    if (c.halted) { this.haltProgress(task, c.halted); return 0 }
-    if (remaining <= 0) { this.haltProgress(task, 'task_timeout'); return 0 }
-    return Math.max(1, Math.floor(Math.min(remaining, wait ? c.limits.waitTimeoutMs : c.limits.actionTimeoutMs)))
+    for (const state of this.entries.values()) if (state.task?.status === 'recorded') this.control(state.task)
   }
   progressSummary(lease: TaskLease): unknown {
     const task = this.current(lease.platformId)
     if (!task || !this.owns(lease)) return undefined
     const c = this.control(task)
-    return { steps: c.steps, elapsed_ms: c.elapsedMs, limits: c.limits, halted: !!c.halted, stop_reason: c.halted, goal_verified: false }
+    return { steps: c.steps, elapsed_ms: c.elapsedMs, goal_verified: false }
   }
   completionSummary(lease: TaskLease): unknown {
     const task = this.current(lease.platformId)
@@ -187,22 +148,10 @@ export class TaskCoordinator {
     const report = await assessTaskCompletion(task, claim, stepId, background(), e => recheckCompletionFile(e, signal))
     const live = this.current(lease.platformId)
     if (!live || !this.owns(lease) || signal?.aborted || this.paused || live.progress?.currentStep?.id !== stepId ||
-      live.inputs.length !== task.inputs.length || live.completion?.revision !== task.completion?.revision || !this.actionBudget(lease)) return null
+      live.inputs.length !== task.inputs.length || live.completion?.revision !== task.completion?.revision) return null
     report.blockers = [...new Set([...report.blockers, ...completionBackgroundBlockers(live, background(), report.backgroundResolutions)])].slice(0, 128)
     if (report.blockers.length) report.state = 'rejected'
     return report
-  }
-
-  inspectComputerStep(lease: TaskLease, call: ComputerUseToolCall): ComputerUseToolResult | null {
-    const task = this.current(lease.platformId)
-    if (!task || !this.owns(lease)) return null
-    const c = this.control(task), admission = inspectProgressAdmission(task, c, call)
-    if (admission.hard && ['task_timeout', 'step_limit', 'recovery_limit'].includes(admission.hard)) {
-      this.haltProgress(task, admission.hard); return null
-    }
-    return admission.blocked ? { type: 'computer_result', version: 1, action: call.action, ok: false, execution: 'not_executed',
-      code: admission.hard ? 'progress_limit' : 'no_progress', message: admission.hard ? PROGRESS_STOP_MESSAGES[admission.hard]
-        : '相同输入／启动动作在没有新状态证据时再次请求，本次未派发；请核对后状态、调整方法或换路径，不能盲目重复。' } : null
   }
 
   context(platformId: string, conversationId: string | null): AutonomousTaskState {
@@ -243,7 +192,6 @@ export class TaskCoordinator {
     const entry = { ...submission, text: input.text, attachments: structuredClone(input.attachments), receivedAt: now }
     const resumed = input.resume ? state.task : null
     if (input.resume && (!resumed || submission.kind !== 'goal' || resumed.id !== input.resume.taskId || resumed.generation !== input.resume.generation ||
-      resumed.control?.halted ||
       resumed.conversationId !== conversationId || resumed.machine.id !== input.machine.id || resumed.machine.platform !== input.machine.platform || resumed.machine.arch !== input.machine.arch ||
       !(['interrupted', 'stopped'].includes(resumed.status) || resumed.status === 'recorded' && resumed.progress?.phase === 'blocked'))) return null
     if (submission.kind === 'clarification') {
@@ -281,7 +229,7 @@ export class TaskCoordinator {
         text: input.resume?.userText ? input.text : '恢复原任务；先重新观察并核对实际状态。' }] : [entry],
       machine: structuredClone(input.machine), status: 'recorded', createdAt: now, updatedAt: now,
       control: resumed ? { ...this.control(resumed), pending: null }
-        : createProgressState(capability.computerUseLimits),
+        : createProgressState(),
       ...(resumed ? { continuity: structuredClone(resumed.continuity),
         recovery: { version: 1 as const, reason: 'resumed' as const, sourceTaskId: resumed.id, sourceGeneration: resumed.generation,
           checkpointAt: now, requiresObservation: true, unknownExecutionId: resumed.recovery?.unknownExecutionId ??
@@ -344,9 +292,9 @@ export class TaskCoordinator {
     const state = this.entries.get(platformId)
     return !this.dispatchBlocked && state?.task?.status === 'recorded' && !state.error ? structuredClone(state.task) : null
   }
-  isLimited(platformId: string, conversationId: string | null): boolean {
+  hasError(platformId: string, conversationId: string | null): boolean {
     const state = this.entries.get(platformId)
-    return state?.conversationId === conversationId && (!!state.task?.control?.halted && !state.task.modelCompletion || !!state.error)
+    return state?.conversationId === conversationId && !!state.error
   }
 
   owns(lease: TaskLease): boolean {
@@ -361,8 +309,7 @@ export class TaskCoordinator {
     const task = this.current(lease.platformId), p = task?.progress
     if (!this.owns(lease) || this.waitingForUser(lease.platformId) || !p || !sourceMessageId || sourceMessageId.length > 512 || p.handledMessageIds.includes(sourceMessageId) ||
       !['waiting-model', 'responded'].includes(p.phase) || machine.id !== task!.machine.id || machine.platform !== task!.machine.platform || machine.arch !== task!.machine.arch || machine.connection !== 'local') return null
-    const control = this.control(task!), admission = inspectProgressAdmission(task!, control)
-    if (admission.hard) { this.haltProgress(task!, admission.hard); return null }
+    const control = this.control(task!)
     const now = Date.now(), stepId = randomUUID()
     const nextControl = admitProgressStep(task!, control, stepId); nextControl.pending = null
     if (!this.updateProgress(lease, { ...p, phase: 'waiting-tool', stepCount: p.stepCount + 1,
@@ -375,7 +322,7 @@ export class TaskCoordinator {
 
   ownsToolStep(context: TaskToolContext): boolean {
     const task = this.current(context.platformId), step = task?.progress?.currentStep
-    return this.owns(context) && !task?.control?.halted && step?.id === context.stepId && step.tool === context.tool && step.sourceMessageId === context.sourceMessageId &&
+    return this.owns(context) && step?.id === context.stepId && step.tool === context.tool && step.sourceMessageId === context.sourceMessageId &&
       step.machine?.id === context.machine.id && step.machine.connection === context.machine.connection && step.machine.platform === context.machine.platform && step.machine.arch === context.machine.arch
   }
 
@@ -400,8 +347,6 @@ export class TaskCoordinator {
     if (event.stage === 'result-ready' && event.timedOut !== undefined) {
       control.consecutiveTimeouts = event.timedOut ? control.consecutiveTimeouts + 1 : 0
       if (event.timedOut) control.recovering = true
-      if (control.consecutiveTimeouts >= control.limits.maxConsecutiveTimeouts) control.halted = 'consecutive_timeouts'
-      if (control.halted) { p.phase = 'blocked'; p.detail = PROGRESS_STOP_MESSAGES[control.halted] }
     }
     const completion = context.tool === 'command' && event.stage === 'result-ready' && event.execution === 'executed' && event.commandResult
       ? captureCompletionCommand(this.current(context.platformId)!, context.stepId, event.commandResult, Date.now()) : undefined
@@ -450,9 +395,7 @@ export class TaskCoordinator {
     next.currentStep!.stepToken = receivedToken && /^cu_[a-f0-9]{32}$/.test(receivedToken) ? receivedToken : null
     next.currentStep!.nextStepToken = nextToken
     const state = this.entries.get(lease.platformId)!
-    const control = this.control(state.task!), admission = inspectProgressAdmission(state.task!, control, originalCall ?? request?.call)
-    if (control.halted) { this.haltProgress(state.task!, control.halted); return false }
-    if (admission.hard && ['task_timeout', 'step_limit', 'recovery_limit'].includes(admission.hard)) { this.haltProgress(state.task!, admission.hard); return false }
+    const control = this.control(state.task!)
     const task = { ...state.task!, progress: next, updatedAt: Date.now(), control: admitProgressStep(state.task!, control, next.currentStep!.id, originalCall ?? request?.call) }
     let claim: ComputerActionClaim | undefined
     if (request) {
@@ -531,10 +474,6 @@ export class TaskCoordinator {
     const state = this.entries.get(lease.platformId)!
     const timed = this.control(state.task!)
     const task = { ...state.task!, ...(completionOverride ? { completion: completionOverride } : {}), progress: structuredClone(progress), updatedAt: Date.now(), control: controlOverride ? { ...controlOverride, elapsedMs: timed.elapsedMs } : timed }
-    if (progress.currentStep?.delivery === 'sent' && task.control.elapsedMs >= task.control.limits.taskTimeoutMs) task.control.halted ??= 'task_timeout'
-    if (task.control.halted && progress.currentStep?.delivery === 'sent') {
-      task.progress.phase = 'blocked'; task.progress.detail = PROGRESS_STOP_MESSAGES[task.control.halted]
-    }
     if (pendingTaskQuestion(task)) { task.progress.phase = 'waiting-user'; task.progress.detail = state.task!.progress?.detail ?? '等待必要澄清，尚未取得真实回答。' }
     if (update?.event === 'dispatch' || progress.currentStep?.tool === 'command' && progress.currentStep.status === 'executing' && state.task!.progress?.currentStep?.status !== 'executing')
       task.completion = advanceCompletion(state.task!, progress.currentStep!.action, update?.event === 'dispatch' ? update.observationId : undefined)
@@ -542,7 +481,7 @@ export class TaskCoordinator {
       task.completion = structuredClone(task.completion)
       for (const e of task.completion.evidence) if (e.stepId === progress.currentStep.id) e.delivered = true
       const report = task.completion.report
-      if (report?.state === 'ready' && report.stepId === progress.currentStep.id && !pendingTaskQuestion(task) && !task.control.halted && task.control.elapsedMs < task.control.limits.taskTimeoutMs && !task.recovery?.requiresObservation) {
+      if (report?.state === 'ready' && report.stepId === progress.currentStep.id && !pendingTaskQuestion(task) && !task.recovery?.requiresObservation) {
         report.state = 'delivered'
         task.status = 'completed'
         task.progress.phase = 'completed'
@@ -649,17 +588,16 @@ export class TaskCoordinator {
   dispose(): void {
     for (const platformId of this.entries.keys()) this.stop(platformId, 'interrupted')
     this.computerClaims.clear()
-    for (const clock of this.clocks.values()) clock.cancel?.()
     this.clocks.clear()
   }
 
   private publish(state: AutonomousTaskState): AutonomousTaskState {
-    for (const [id, clock] of this.clocks) if (id !== state.task?.id && ![...this.entries.values()].some(s => s.platformId !== state.platformId && s.task?.id === id && s.task.status === 'recorded')) {
-      clock.cancel?.(); this.clocks.delete(id)
+    for (const id of this.clocks.keys()) if (id !== state.task?.id && ![...this.entries.values()].some(s => s.platformId !== state.platformId && s.task?.id === id && s.task.status === 'recorded')) {
+      this.clocks.delete(id)
     }
     this.entries.set(state.platformId, structuredClone(state))
-    if (state.task?.status === 'recorded' && !state.error) this.arm(state.task)
-    else if (state.task) { this.clocks.get(state.task.id)?.cancel?.(); this.clocks.delete(state.task.id) }
+    if (state.task?.status === 'recorded' && !state.error) this.control(state.task)
+    else if (state.task) this.clocks.delete(state.task.id)
     this.changed(structuredClone(state))
     return structuredClone(state)
   }

@@ -5,6 +5,9 @@ import { reportedArtifactEvidence, samePresentationLease, taskActivity, taskPres
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from '../shared/task-presentation'
 import { recheckCompletionFile } from './task-completion'
 import { TaskCoordinator } from './task-coordinator'
+import { ConversationTools } from './conversation-tools'
+import { sameConversationToolsOwner } from '../shared/conversation-tools'
+import type { ConversationToolsOwner, ConversationToolsState, ConversationToolsUpdate } from '../shared/conversation-tools'
 import { COMPLETE_TASK_ACTION, parseTaskCompletionClaim } from '../shared/task-completion'
 import { ComputerUseTool, ComputerUseActionError } from './computer-use-tool'
 import type { WindowsHelperManager } from './windows-helper'
@@ -35,6 +38,8 @@ import {
   IpcChannels,
   buildTerminalPromptParts,
   toolPromptForPlatform,
+  readFilesToolPrompt,
+  backgroundTaskToolPrompt,
   fileReadingPlatform,
   canEditTerminalNotes,
   terminalNotesOwnerKey
@@ -310,6 +315,7 @@ function normalizeProxy(raw: string): string {
 }
 
 export class SessionRuntime {
+  private readonly conversationTools: ConversationTools
   /** Main-process backends register only the desktop actions they can actually execute. */
   readonly computerUseTool: ComputerUseTool
   private readonly redisReader = new RedisReader()
@@ -466,6 +472,7 @@ export class SessionRuntime {
       this.environmentScope = { scope: 'ssh', hostId: this.web2term.hostId, label: this.web2term.binding.deviceName || this.web2term.binding.agentId }
     }
     this.id = options.id ?? randomUUID()
+    this.conversationTools = new ConversationTools(this.id, options.store)
     this.computerUseTool = new ComputerUseTool(() => this.refreshComputerUseCapabilities(), options.desktopCoordinator)
     this.focusChat = new FocusChat(this.id, options.store)
     this.taskCoordinator = new TaskCoordinator(this.id, options.store, state => {
@@ -528,7 +535,7 @@ export class SessionRuntime {
         const live = this.taskCoordinator.owns(lease) && this.active && !this.disposed && this.activePlatformId === lease.platformId &&
           capability.scopeSupported && capability.computerUseEnabled && this.embed.getInterceptorStatus().enabled
         return { actions: live && capability.available ? capability.actions : [],
-          otherTools: live ? fileReadingPlatform(lease.platformId) ? ['command', 'read_files'] : ['command'] : [] }
+          otherTools: live ? fileReadingPlatform(lease.platformId) && !this.web2term && this.toolPreferences(lease.platformId).fileReadingEnabled ? ['command', 'read_files'] : ['command'] : [] }
       },
       send: async (text, lease, signal, references) => {
         const embed = this.embeds.get(lease.platformId)?.embed
@@ -544,7 +551,7 @@ export class SessionRuntime {
         return embed.sendTaskObservation(text, lease.conversationId, signal, attachments, references[0].id, () =>
           current() && this.getComputerUseCapability(lease.platformId).enabled)
       },
-      resultDelaySeconds: () => normalizeComputerResultDelay(this.options.settings?.().computerResultDelaySeconds),
+      resultDelaySeconds: () => normalizeComputerResultDelay(this.toolPreferences().computerResultDelaySeconds),
       release: (references, lease) => options.computerUseObservations?.release(references, lease),
       onError: lease => this.taskCoordinator.fail(lease.platformId, lease.conversationId)
     })
@@ -600,6 +607,10 @@ export class SessionRuntime {
           eligible: conditions.eligible, keep: () => false, waiting: conditions.waiting })
       } : undefined,
       currentConversationId: () => this.disposed ? null : this.embed.getState().conversationId,
+      toolEnabled: (tool, conversationId) => {
+        const preferences = this.conversationTools.read(this.activePlatformId, conversationId)
+        return tool === 'files' ? preferences.fileReadingEnabled && !this.web2term : preferences.backgroundTasksEnabled
+      },
       onCommandDiagnostic: (details) => {
         const owner = details.ownerConversationId
         const platform = (owner && this.commandDiagnosticPlatforms.get(owner)) || this.activePlatform
@@ -624,7 +635,6 @@ export class SessionRuntime {
         finally { if (this.legacyToolSend === operation) this.legacyToolSend = null }
       },
       taskTools: {
-        timeoutMs: context => this.taskCoordinator.actionBudget(context),
         current: context => this.taskToolCurrent(context),
         event: (context, event) => {
           try {
@@ -644,7 +654,7 @@ export class SessionRuntime {
       },
       onIdle: () => { options.onAutomationSafetyChanged?.(); options.desktopCoordinator?.reconcile(); this.flushTaskTools(); void this.taskProgression.wake() },
       fileContext: () => this.fileReadContext(),
-      filePlatform: () => this.web2term ? null : fileReadingPlatform(this.activePlatform.id),
+      filePlatform: () => this.web2term || !this.toolPreferences().fileReadingEnabled ? null : fileReadingPlatform(this.activePlatform.id),
       prepareFiles: (request, signal) => prepareFiles(request, signal, (path, limit, abort) => this.ssh.readFileForModel(path, request.context.hostId, limit, abort), fileReadingPlatform(this.activePlatform.id)?.id),
       sendFilesToPage: (result, token, current, signal) => this.embed.sendFileResult(result, token, current, signal),
       executionAllowed: () => !this.stoppingTask && options.automationBlocked?.() !== true,
@@ -655,13 +665,15 @@ export class SessionRuntime {
       onRemoteOutput: (chunk) => { if (!this.web2term) this.ssh.pushModelOutput(chunk) },
       onExecutionChanged: (records) => this.send(IpcChannels.executionChanged, records),
       captureBackgroundTasks: (record, shell) => {
+        if (!this.conversationTools.read(this.activePlatformId, record.conversationId).backgroundTasksEnabled) return () => 0
         const target = this.backgroundTaskTarget(shell)
         const owner = { platformId: this.activePlatformId, conversationId: record.conversationId }
         const ready = (): boolean => this.backgroundTargetCurrent(target)
         const settled = this.backgroundTaskResults.capture(owner, ready)
         const registered = this.backgroundTaskResults.capture(owner, ready, 'created')
         const startup = this.backgroundStartupNotification(owner, target)
-        return output => this.backgroundTasks.register(output, record, target, settled, registered, owner, startup)
+        return output => this.conversationTools.read(owner.platformId, owner.conversationId).backgroundTasksEnabled
+          ? this.backgroundTasks.register(output, record, target, settled, registered, owner, startup) : 0
       },
       startBackgroundTask: async (record, shell, run) => {
         if (record.taskContext) {
@@ -882,12 +894,14 @@ export class SessionRuntime {
           const previousConversationId = entry.conversationId
           const createdNewChat = previousConversationId === null && state.conversationId !== null
           if (!createdNewChat) this.interruptTaskControl(platform.id)
+          this.conversationTools.bind(platform.id, previousConversationId, state.conversationId)
           entry.conversationId = state.conversationId
           this.syncAutonomousTask(platform.id, state.conversationId)
           if (supportsFocusView(platform.id)) this.focusChat.context(platform.id, state.conversationId)
           // The first send creates its conversation id; keep that task's injection.
           // A real conversation change starts with an unused prompt in every execution mode.
           if (!createdNewChat) entry.embed?.resetTaskPrompt()
+          this.refreshComputerUseCapabilities()
           /*
            * Arming the baseline on a background view would be wasted work, and skipping it
            * is safe: showing a platform again re-arms through `switchPlatform`.
@@ -923,6 +937,7 @@ export class SessionRuntime {
       onUserStarted: (text, files, editToken, submission) => {
         if (this.disposed) return undefined
         const controlsCurrent = !this.disposed && this.active && isActive()
+        if (controlsCurrent && record().conversationId === null) this.conversationTools.submitted(platform.id)
         if (controlsCurrent && this.options.automationBlocked?.() !== true && !this.stoppingTask && this.options.desktopCoordinator?.canReleaseHumanControl() !== false &&
           (submission?.kind !== 'clarification' || !!submission.answerTo && this.taskCoordinator.waitingForUser(platform.id))) this.taskEnded = false
         const revision = this.focusRevision
@@ -955,7 +970,7 @@ export class SessionRuntime {
             if (recoveryMessage && !resumes) return turnId
             // After the user's input paused computer use, their next message continues that same task.
             const paused = !recoveryMessage && submission.kind === 'goal' ? this.taskCoordinator.context(platform.id, record().conversationId).task : null
-            const continuesPause = !!paused && taskPausedByInput(paused) && !paused.control?.halted
+            const continuesPause = !!paused && taskPausedByInput(paused)
             const submit = (resume?: { taskId: string; generation: number; userText?: boolean }): AutonomousTask | null =>
               this.taskCoordinator.submit({ platformId: platform.id, conversationId: record().conversationId,
                 submission, turnId, text, attachments: files ?? [], capability: this.getComputerUseCapability(platform.id),
@@ -1787,6 +1802,7 @@ export class SessionRuntime {
   private taskToolCurrent(context: TaskToolContext): boolean {
     const capability = this.getComputerUseCapability(context.platformId)
     return !this.disposed && !this.taskEnded && this.active && this.activePlatformId === context.platformId && context.sessionId === this.id &&
+      (context.tool !== 'read_files' || this.toolPreferences(context.platformId).fileReadingEnabled) &&
       this.embeds.get(context.platformId)?.embed?.getState().conversationId === context.conversationId &&
       capability.scopeSupported && capability.computerUseEnabled && capability.context.connection === 'local' &&
       !this.taskCoordinator.waitingForUser(context.platformId) && context.machine.id === this.options.localMachineId && context.machine.platform === process.platform && context.machine.arch === process.arch && this.taskCoordinator.ownsToolStep(context)
@@ -1795,6 +1811,8 @@ export class SessionRuntime {
   /** A tagged reply is never downgraded to an unowned command when its task is stale or busy. */
   private routeTaskCommand(command: ParsedAction, conversationIdOverride?: string): boolean {
     if (this.taskEnded || this.options.automationBlocked?.() === true || this.taskCoordinator.waitingForUser(this.activePlatformId)) return true
+    const preferences = this.toolPreferences(this.activePlatformId, conversationIdOverride ?? this.embeds.get(this.activePlatformId)?.conversationId ?? null)
+    if ('type' in command ? !preferences.fileReadingEnabled || !!this.web2term : command.background === true && !preferences.backgroundTasksEnabled) return true
     if (!command.taskSource) return this.runner.handleDetected(command, conversationIdOverride)
     if (typeof command.messageId !== 'string' || !command.messageId.trim() || command.messageId.length > 512) return true
     const platformId = this.activePlatformId, entry = this.embeds.get(platformId), source = command.taskSource
@@ -1858,7 +1876,7 @@ export class SessionRuntime {
   getComputerUseCapability(platformId = this.activePlatformId): ComputerUseCapability {
     const connection = this.web2term ? 'web2term'
       : this.remoteShell || this.ssh?.getState().attached || (!this.ssh && this.options.initialSshAttached) ? 'ssh' : 'local'
-    const capability = resolveComputerUseCapability(this.options.settings?.(), {
+    const capability = resolveComputerUseCapability(this.toolPreferences(platformId), {
       sessionId: this.id, platformId, hostPlatform: process.platform, hostArch: process.arch, connection
     }, this.computerUseTool.definitions(), this.options.windowsHelper?.getState())
     return this.options.automationBlocked?.() ? { ...capability, enabled: false, available: false, actions: [], actionDefinitions: [], reason: 'emergency-stopped', message: '全局急停已锁定自动操作，请先在客户端明确解除；旧任务不会自动恢复。' } : capability
@@ -2117,7 +2135,7 @@ export class SessionRuntime {
    * 继续原任务 is the user's explicit decision to go on. Clear what the app itself holds (pause, a
    * switched-off terminal mode or prompt injection, an open question, an unconfirmed earlier recovery),
    * wait briefly for work it is finishing, and let the page stop a streaming reply and end a stale wait.
-   * Only the user's own unsent draft, a changed or halted task and an unavailable desktop still stop it.
+   * Only the user's own unsent draft, a changed task and an unavailable desktop still stop it.
    */
   private async resumeAutonomousTaskNow(request: TaskResumeRequest): Promise<string> {
     const until = async (ready: () => boolean, ms: number): Promise<boolean> => {
@@ -2144,7 +2162,6 @@ export class SessionRuntime {
     const capability = this.getComputerUseCapability(request.platformId)
     if (!capability.available) return capability.message
     const state = this.getAutonomousTask(), task = state?.task
-    if (task?.control?.halted) return '原任务已达到运行上限并保留未完成状态；如需继续，请调整运行上限后重新提交目标。'
     if (state?.error || !task || task.id !== request.taskId || task.generation !== request.generation ||
       task.machine.id !== this.options.localMachineId || task.machine.platform !== process.platform || task.machine.arch !== process.arch ||
       !(['interrupted', 'stopped'].includes(task.status) || task.status === 'recorded' && (task.progress?.phase === 'blocked' || pendingTaskQuestion(task)?.state === 'uncertain'))) return '任务状态已变化，无法恢复这份历史记录。'
@@ -2237,7 +2254,7 @@ export class SessionRuntime {
   }
 
   /** Refresh tool metadata; helper startup is async and never dispatches a desktop action. */
-  refreshComputerUseCapabilities(): void {
+  refreshComputerUseCapabilities(changed?: Pick<ConversationToolsOwner, 'platformId' | 'conversationId'>): void {
     if (this.disposed) return
     this.options.desktopCoordinator?.reconcile()
     this.syncWindowsHelperDemand?.()
@@ -2248,19 +2265,65 @@ export class SessionRuntime {
       const currentStep = this.taskCoordinator?.current(entry.platform.id)?.progress?.currentStep
       if (!capability.computerUseEnabled || !capability.scopeSupported ||
         (!capability.desktopControlEnabled && currentStep && (currentStep.tool ?? 'computer') === 'computer' && currentStep.status !== 'delivered')) this.stopAutonomousTask(entry.platform.id, 'interrupted')
-      entry.embed?.setPromptParts(buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id)))
+      entry.embed?.setPromptParts(buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id)),
+        !!changed && changed.platformId === entry.platform.id && changed.conversationId === entry.conversationId)
       entry.embed?.setComputerUseProtocolContext?.({ definitions: capability.actionDefinitions,
         stepToken: capability.available ? this.taskCoordinator?.computerStepToken?.(entry.platform.id) ?? null : null })
     }
     this.taskProgression?.reconcile()
+    this.runner?.reconcileTaskTools()
     this.send(IpcChannels.computerUseCapabilityChanged, this.getComputerUseCapability())
+    if (this.embeds.has(this.activePlatformId)) this.send(IpcChannels.conversationToolsChanged, this.getConversationTools())
+  }
+
+  private toolPreferences(platformId = this.activePlatformId, conversationId = this.embeds.get(platformId)?.conversationId ?? null) {
+    return this.conversationTools.read(platformId, conversationId)
+  }
+
+  private toolsOwner(): ConversationToolsOwner {
+    return { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.activeEmbed().conversationId }
+  }
+
+  getConversationTools(owner?: ConversationToolsOwner): ConversationToolsState {
+    const current = this.toolsOwner()
+    if (owner !== undefined && (!owner || !sameConversationToolsOwner(owner, current))) throw new Error('当前对话已变化，请重新打开工具设置。')
+    const preferences = this.toolPreferences(), capability = this.getComputerUseCapability()
+    const platformSupported = !!fileReadingPlatform(current.platformId)
+    const preview = preferences.computerUseEnabled ? capability : resolveComputerUseCapability({ ...preferences,
+      computerUseEnabled: true, desktopControlEnabled: true, desktopPointClickEnabled: true }, capability.context,
+      this.computerUseTool.definitions(), capability.helper)
+    return { owner: current, preferences, computerUseCapability: capability, tools: [
+      { id: 'files', name: '文件读取', enabled: preferences.fileReadingEnabled, available: platformSupported && !this.web2term,
+        message: this.web2term ? '当前远程设备暂不支持文件读取工具。' : platformSupported ? '' : '当前平台暂不支持文件读取工具。', prompt: readFilesToolPrompt },
+      { id: 'background', name: '后台任务', enabled: preferences.backgroundTasksEnabled, available: platformSupported,
+        message: platformSupported ? '' : '当前平台暂不支持后台任务工具。', prompt: backgroundTaskToolPrompt },
+      { id: 'computer', name: '电脑操作（computer use）', enabled: preferences.computerUseEnabled, available: capability.scopeSupported,
+        message: capability.scopeSupported ? '' : capability.message,
+        prompt: computerUseCapabilityPrompt(preview, preferences.computerUseEnabled && capability.available
+          ? this.taskCoordinator?.computerStepToken?.(current.platformId) ?? null : undefined,
+        taskPausedByInput(this.taskCoordinator?.latest(current.platformId))) }
+    ] }
+  }
+
+  updateConversationTools(request: ConversationToolsUpdate): ConversationToolsState {
+    if (this.disposed || !request || !sameConversationToolsOwner(request, this.toolsOwner())) throw new Error('当前对话已变化，工具设置未保存。')
+    this.conversationTools.update(request.platformId, request.conversationId, request.patch)
+    this.refreshComputerUseCapabilities(request)
+    return this.getConversationTools()
   }
 
   private toolPrompt(platformId: string): string {
     const capability = this.getComputerUseCapability(platformId)
-    return toolPromptForPlatform(platformId, !this.web2term, computerUseCapabilityPrompt(capability,
+    const preferences = this.toolPreferences(platformId)
+    const computerPrompt = computerUseCapabilityPrompt(capability,
       capability.available ? this.taskCoordinator?.computerStepToken?.(platformId) ?? null : null,
-      taskPausedByInput(this.taskCoordinator?.latest(platformId))))
+      taskPausedByInput(this.taskCoordinator?.latest(platformId)))
+    const disabled = [
+      ...(!preferences.fileReadingEnabled ? ['当前对话已关闭文件读取工具，不要输出 read_files 请求。'] : []),
+      ...(!preferences.backgroundTasksEnabled ? ['当前对话已关闭后台任务工具，不要输出 background:true 或后台登记标记。'] : [])
+    ]
+    return toolPromptForPlatform(platformId, !this.web2term && preferences.fileReadingEnabled,
+      [computerPrompt, ...disabled].filter(Boolean).join('\n\n'), preferences.backgroundTasksEnabled)
   }
 
   /** Only computer tool metadata changes; the base system prompt remains unchanged. */
@@ -3400,7 +3463,7 @@ export class SessionRuntime {
   }
   private notifyTaskCompleted(body: string): void {
     if (this.taskEnded || this.options.automationBlocked?.()) return
-    if (this.taskCoordinator.isLimited(this.activePlatformId, this.embed.getState().conversationId) ||
+    if (this.taskCoordinator.hasError(this.activePlatformId, this.embed.getState().conversationId) ||
       !this.taskCoordinator.completionNotificationAllowed(this.activePlatformId, this.embed.getState().conversationId)) return
     const completedTaskId = this.taskCoordinator.completedTaskId(this.activePlatformId, this.embed.getState().conversationId)
     if (completedTaskId) {

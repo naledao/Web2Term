@@ -137,6 +137,7 @@ export interface CommandRunnerDeps {
   store: ConversationStore
   /** Current conversation id, or null when the page is not on a conversation. */
   currentConversationId: () => string | null
+  toolEnabled?(tool: 'files' | 'background', conversationId: string): boolean
   /** Content-free, always-on command lifecycle diagnostics. */
   onCommandDiagnostic?: (details: CommandDiagnostic) => void
   /** Push text into the composer and submit it without the system prompt. */
@@ -144,7 +145,6 @@ export interface CommandRunnerDeps {
     text: string, task?: TaskToolContext
   ) => Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'>
   taskTools?: {
-    timeoutMs?(context: TaskToolContext): number
     current(context: TaskToolContext): boolean
     event(context: TaskToolContext, event: TaskToolEvent): boolean
     format(context: TaskToolContext, text: string): string
@@ -446,12 +446,18 @@ export class CommandRunner {
   reconcileTaskTools(): void {
     for (const { record, controller } of this.commandAdmissions.values()) if (!this.taskCurrent(record) || this.deps.currentConversationId() !== record.conversationId) controller.abort()
     if (this.fileTaskContext && !this.deps.taskTools?.current(this.fileTaskContext)) this.fileAbort?.abort()
+    const conversationId = this.deps.currentConversationId()
+    if (conversationId && this.deps.toolEnabled?.('files', conversationId) === false) this.fileAbort?.abort()
     if (this.taskTextResult && !this.taskCurrent(this.taskTextResult.record)) this.clearTaskResults()
     if (this.taskFileResult && !this.taskCurrent(this.taskFileResult)) this.clearTaskResults()
   }
   private taskCurrent(record: ExecutionRecord, shell?: ExecutionShell): boolean {
-    return record.taskContext === undefined || !!record.taskContext && !!this.deps.taskTools?.current(record.taskContext) &&
-      !this.deps.remoteShell() && (!shell || shell === this.localShell)
+    return this.toolEnabled(record) && (record.taskContext === undefined || !!record.taskContext && !!this.deps.taskTools?.current(record.taskContext) &&
+      !this.deps.remoteShell() && (!shell || shell === this.localShell))
+  }
+  private toolEnabled(record: ExecutionRecord): boolean {
+    const tool = record.kind === 'read_files' ? 'files' : record.background ? 'background' : null
+    return tool === null || this.deps.toolEnabled?.(tool, record.conversationId) !== false
   }
   private taskEvent(record: Pick<ExecutionRecord, 'taskContext'>, event: TaskToolEvent): boolean {
     return record.taskContext === undefined || !!record.taskContext && !!this.deps.taskTools?.event(record.taskContext, event)
@@ -615,6 +621,10 @@ export class CommandRunner {
     // it instead of silently dropping it.
     if (!conversationId) return false
 
+    if (parsed.background && this.deps.toolEnabled?.('background', conversationId) === false) {
+      this.taskEvent({ taskContext }, { stage: 'skipped', message: '当前对话已关闭后台任务工具，未执行。' })
+      return true
+    }
     const danger = findDanger(parsed.command)
     // Never the raw `parsed.messageId`: an empty key would make the primary key collide
     // with itself and drop every command after the first.
@@ -860,6 +870,11 @@ export class CommandRunner {
       this.diagnostic({ event: 'skipped', reason: 'missing-record', messageId })
       return
     }
+    if (!this.toolEnabled(record)) {
+      this.appendLine({ kind: 'notice', text: `当前对话已关闭${record.kind === 'read_files' ? '文件读取' : '后台任务'}工具，未执行。` })
+      this.skipExecution(messageId)
+      return
+    }
     if (record.kind !== 'command' && record.kind !== 'read_files') {
       this.appendLine({ kind: 'error', text: '这条记录的工具类型不受终端支持，未执行；桌面动作不能作为命令运行。' })
       return
@@ -933,6 +948,10 @@ export class CommandRunner {
     if (!this.terminalModeOn()) return true
     const conversationId = conversationIdOverride ?? this.deps.currentConversationId()
     if (!conversationId) return false
+    if (this.deps.toolEnabled?.('files', conversationId) === false) {
+      this.taskEvent({ taskContext }, { stage: 'skipped', message: '当前对话已关闭文件读取工具，未读取或上传。' })
+      return true
+    }
     const validated = parseReadFilesRequest(parsed)
     if (!validated) { this.noteParseFailure('read_files 参数无效'); this.taskEvent({ taskContext }, { stage: 'skipped', message: '文件请求无效，未读取。' }); return true }
     let context: FileReadContext
@@ -1097,12 +1116,7 @@ export class CommandRunner {
       return
     }
 
-    const taskBudget = record.taskContext ? this.deps.taskTools?.timeoutMs?.(record.taskContext) : undefined
-    if (taskBudget !== undefined && taskBudget <= 0) {
-      this.deps.store.setExecutionStatus(messageId, 'skipped'); this.broadcastExecutions(conversationId); return
-    }
-    const timeoutSeconds = taskBudget === undefined ? record.timeoutSeconds
-      : Math.min(record.timeoutSeconds > 0 ? record.timeoutSeconds : Infinity, Math.max(1, Math.ceil(taskBudget / 1000)))
+    const timeoutSeconds = record.timeoutSeconds
     if (!this.taskEvent(record, { stage: 'executing' })) return
     this.deps.store.setExecutionStatus(messageId, 'running')
     this.diagnostic({

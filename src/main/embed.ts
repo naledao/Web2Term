@@ -503,6 +503,7 @@ export class ChatGptEmbed {
   }
   /** Kept per view so a full page reload preserves the current task's injection. */
   private taskPromptInjected = false
+  private toolPromptRevision = 0
   private taskPromptGeneration = 0
   private computerUseRecognitionEnabled = false
   /** The page holds the user's own sends while this is set; see computerUseSendBlock(). */
@@ -523,10 +524,12 @@ export class ChatGptEmbed {
    * so it cannot be a compile-time constant. Re-installs into a live page so the
    * change takes effect on the next send rather than the next reload.
    */
-  setPromptParts(parts: TerminalPromptParts): void {
-    if (this.interceptor.prefix === parts.prefix &&
+  setPromptParts(parts: TerminalPromptParts, refreshTools = false): void {
+    if (!refreshTools && this.interceptor.prefix === parts.prefix &&
         this.interceptor.basePrompt === parts.basePrompt &&
         this.interceptor.toolPrompt === parts.toolPrompt) return
+    // New tool choices apply to the next human send without invalidating a live step or question.
+    if (refreshTools) { this.taskPromptInjected = false; this.toolPromptRevision += 1 }
     Object.assign(this.interceptor, parts)
     this.handlers.onInterceptor(this.getInterceptorStatus())
     // Machine/prompt changes keep the current conversation and pending answer alive.
@@ -1265,6 +1268,7 @@ export class ChatGptEmbed {
       sendBlock: this.sendBlock,
       prefix: this.interceptor.prefix,
       taskPromptInjected: this.taskPromptInjected,
+      toolPromptRevision: this.toolPromptRevision,
       taskPromptGeneration: this.taskPromptGeneration,
       // A full page (re)load must also suppress whatever it restores from
       // history, otherwise an old reply would look like a fresh command.

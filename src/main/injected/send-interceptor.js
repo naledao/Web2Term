@@ -167,6 +167,7 @@
     taskActive: false,
     /** Only a confirmed user send carrying the prompt consumes this task's injection. */
     taskPromptInjected: false,
+    toolPromptRevision: null,
     /** Reject late sends/configuration from a task that has already ended. */
     taskPromptGeneration: 0,
     /** A live question pauses the command loop until an explicit user answer. */
@@ -5226,6 +5227,14 @@
         state.taskPromptGeneration = config.taskPromptGeneration
         state.taskPromptInjected = config.taskPromptInjected === true
         taskPromptConfigured = true
+      }
+      // Tool choices change inside the same task: refresh the next human prompt without
+      // changing its generation, live question, or outstanding computer request.
+      if (Number.isSafeInteger(config.toolPromptRevision) && config.toolPromptRevision >= 0 &&
+          (state.toolPromptRevision === null || config.toolPromptRevision >= state.toolPromptRevision)) {
+        const changed = state.toolPromptRevision !== null && config.toolPromptRevision > state.toolPromptRevision
+        state.toolPromptRevision = config.toolPromptRevision
+        if (changed) state.taskPromptInjected = false
       }
       /*
        * The site's selectors arrive with the config, because this script is injected as

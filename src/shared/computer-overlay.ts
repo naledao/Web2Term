@@ -87,12 +87,12 @@ export function computerOverlaySnapshot(task: AutonomousTask, activity: TaskActi
   const status = task.status === 'completed' ? '任务已完成'
     : task.status === 'stopped' ? task.stop?.reason === 'input-paused' ? 'computer use 已暂停，发送新消息继续' : '任务已停止'
       : task.status === 'interrupted' ? '任务已中断' : task.status === 'superseded' ? '任务已替换'
-        : task.control?.halted ? '自动操作已停止' : paused ? '自动执行已暂停' : phase ? phases[phase] : '等待模型指令'
+        : paused ? '自动执行已暂停' : phase ? phases[phase] : '等待模型指令'
   const tone: ComputerOverlaySnapshot['tone'] = task.status === 'completed' ? 'success'
-    : task.control?.halted || phase === 'blocked' || task.status === 'interrupted' ? 'error'
+    : phase === 'blocked' || task.status === 'interrupted' ? 'error'
       : !active ? 'idle' : paused || phase !== 'executing-tool' ? 'waiting' : 'running'
   const currentRecord = activity?.actions.find(record => record.id === step?.id)
-  const actionStatus = !step ? '尚未开始' : !active || paused || task.control?.halted ? status
+  const actionStatus = !step ? '尚未开始' : !active || paused ? status
     : currentRecord?.state === 'failed' ? '执行失败' : step.status === 'executing' ? '执行中'
       : step.status === 'queued' ? '待执行' : step.status === 'interrupted' ? '已中断'
         : step.execution === 'unknown' ? '结果未确认' : step.execution === 'not_executed' ? '未执行'

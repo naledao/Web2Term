@@ -188,6 +188,8 @@ test('runtime uses the live connection and refreshes cached platform prompts wit
     id: 'task-session', activePlatformId: 'deepseek', disposed: false, remoteShell: null, web2term: null,
     environment: { ...types.FALLBACK_ENVIRONMENT, kind: 'posix', osCaption: 'Remote Linux' },
     options: { settings: () => preferences }, ssh: { getState: () => ({ attached }) },
+    toolPreferences: () => ({ fileReadingEnabled: true, backgroundTasksEnabled: true, ...preferences }),
+    getConversationTools: () => ({}),
     computerUseTool: { definitions: () => [] },
     stopAutonomousTask() {}, send() {},
     embeds: new Map(['deepseek', 'chatgpt'].map(id => [id, {

@@ -38,6 +38,7 @@ const path = '/a/chat/s/chat-a'
 
 function fixture(t, options = {}) {
   let runtime, runner, serial = 0, remote = null, activeConversation = 'chat-a', enabled = true
+  const toolPreferences = { fileReadingEnabled: true, backgroundTasksEnabled: true, ...options.tools }
   const tasks = new Map(), records = new Map(), history = [], shells = [], runs = [], sends = [], uploads = [], prepared = [], cleaned = [], desktop = [], computerSends = [], fileSources = []
   const store = {
     autonomousTaskGeneration: () => Math.max(0, ...[...tasks.values()].map(task => task.generation)),
@@ -77,6 +78,7 @@ function fixture(t, options = {}) {
   const { CommandRunner } = load('../src/main/commands.ts', { 'node:crypto': crypto, './shell': { ConversationShell: Shell, IDLE_TIMEOUT_MS: 300000, MAX_RUNTIME_MS: 1800000 },
     '../shared/file-requests': files, '../shared/background-tasks': background })
   runner = new CommandRunner({ store, currentConversationId: () => activeConversation, terminalModeEnabled: () => enabled, remoteShell: () => remote,
+    toolEnabled: tool => tool === 'files' ? toolPreferences.fileReadingEnabled : toolPreferences.backgroundTasksEnabled,
     acquireLocalCommand: options.acquireLocalCommand,
     onAdmissionChanged: options.onAdmissionChanged,
     startBackgroundTask: options.startBackgroundTask,
@@ -100,7 +102,8 @@ function fixture(t, options = {}) {
   runtime = Object.assign(new Runtime(), { id: 'session-a', active: true, disposed: false, activePlatformId: 'deepseek', options: { store, localMachineId: 'machine-a' },
     environment: { workingDirectory: 'C:\\work' }, lastPersistedLocalCwd: 'C:\\work', runner, taskCoordinator: coordinator, pendingTaskCommand: null, pendingTaskComputer: null, pendingTaskReply: null,
     backgroundTaskResults: { isSending: false },
-    embed, embeds: new Map([['deepseek', { platform, embed, conversationId: 'chat-a' }]]), getComputerUseCapability: capability })
+    embed, embeds: new Map([['deepseek', { platform, embed, conversationId: 'chat-a' }]]), getComputerUseCapability: capability,
+    toolPreferences: () => toolPreferences })
   const progression = new TaskProgression({ coordinator, isCurrent: () => runtime.active && !runtime.disposed, canRun: () => runner.canSendAutomaticResult(),
     machine: () => runtime.taskToolMachine('deepseek'),
     invoke: async (call, lease, signal, step) => { desktop.push({ call, lease, signal, step }); return { type: 'computer_result', version: 1, action: call.action, ok: true, execution: 'executed', code: 'ok', message: 'Observed synthetic report' } },
@@ -122,10 +125,51 @@ function fixture(t, options = {}) {
   t.after(() => { progression.dispose(); runner.disposeAll() })
   return { runtime, runner, coordinator, store, records, tasks, history, shells, runs, sends, uploads, prepared, cleaned, desktop, computerSends, fileSources, command, computer, submit,
     route: action => runtime.routeTaskCommand(action), progress: () => coordinator.current('deepseek').progress,
+    setTools(patch) { Object.assign(toolPreferences, patch); runner.reconcileTaskTools() },
     remote: () => { remote = { running: false, alive: true, kind: 'posix', cwd: '/remote', run: async () => ({ output: 'Synthetic remote result', exitCode: 0, cwd: '/remote' }) } }, switchConversation: () => { activeConversation = 'chat-b' }, disable: () => { enabled = false },
     async settled() { for (let n = 0; n < 30; n++) { await new Promise(resolve => setImmediate(resolve)); if (!runner.hasInFlightWork()) break } }
   }
 }
+
+test('conversation switches reject disabled task tools before reserving a step, while ordinary commands still work', async t => {
+  const f = fixture(t, { tools: { fileReadingEnabled: false, backgroundTasksEnabled: false } })
+  assert.equal(f.route(f.command('files-off', { type: 'read_files', files: [{ path: 'report.xlsx' }] })), true)
+  assert.equal(f.route(f.command('background-off', { background: true })), true)
+  assert.equal(f.progress().stepCount, 0)
+  assert.equal(f.records.size, 0); assert.equal(f.prepared.length, 0); assert.equal(f.runs.length, 0)
+  assert.equal(f.route(f.command('ordinary-command')), true)
+  await f.settled()
+  assert.equal(f.runs.length, 1)
+})
+
+test('legacy file and background requests also obey the conversation switches', async t => {
+  const f = fixture(t, { tools: { fileReadingEnabled: false, backgroundTasksEnabled: false } })
+  f.runner.handleDetected(f.command('legacy-files-off', { type: 'read_files', files: [{ path: 'report.xlsx' }], taskSource: undefined }))
+  f.runner.handleDetected(f.command('legacy-background-off', { background: true, taskSource: undefined }))
+  await f.settled()
+  assert.equal(f.records.size, 0); assert.equal(f.prepared.length, 0); assert.equal(f.uploads.length, 0); assert.equal(f.runs.length, 0)
+})
+
+test('a file request queued before disabling its tool cannot execute through the manual run button', async t => {
+  const f = fixture(t, { mode: 'manual' })
+  f.route(f.command('queued-files', { type: 'read_files', files: [{ path: 'report.xlsx' }] }))
+  assert.equal(f.records.get('queued-files').status, 'pending')
+  f.setTools({ fileReadingEnabled: false })
+  await f.runner.runExecution('queued-files')
+  assert.equal(f.prepared.length, 0); assert.equal(f.uploads.length, 0)
+  assert.equal(f.records.get('queued-files').status, 'skipped')
+})
+
+test('disabling files during preparation aborts its work and prevents attachment delivery', async t => {
+  const gate = deferred(), f = fixture(t, { prepare: () => gate.promise })
+  f.route(f.command('preparing-files', { type: 'read_files', files: [{ path: 'report.xlsx' }] }))
+  for (let n = 0; n < 10 && !f.prepared.length; n++) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.prepared.length, 1)
+  f.setTools({ fileReadingEnabled: false })
+  assert.equal(f.prepared[0].signal.aborted, true)
+  gate.resolve(); await f.settled()
+  assert.equal(f.uploads.length, 0)
+})
 
 function admissionFixture(t, options = {}) {
   const desktop = new DesktopCoordinator()

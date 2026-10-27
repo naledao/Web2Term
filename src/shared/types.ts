@@ -1,6 +1,7 @@
 import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult } from './emergency-stop'
 import type { ToolboxInvocation } from './toolbox'
 import type { ComputerUsePreferences, ComputerUseCapability } from './computer-use'
+import type { ConversationToolsOwner, ConversationToolsState, ConversationToolsUpdate } from './conversation-tools'
 import type { AutonomousTaskState, TaskResumeRequest } from './autonomous-task'
 import type { TaskLease } from './autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from './task-presentation'
@@ -90,6 +91,9 @@ export const IpcChannels = {
   settingsUpdate: 'settings:update',
   computerUseGetCapability: 'computer-use:get-capability',
   computerUseCapabilityChanged: 'computer-use:capability-changed',
+  conversationToolsGet: 'conversation-tools:get',
+  conversationToolsUpdate: 'conversation-tools:update',
+  conversationToolsChanged: 'conversation-tools:changed',
   emergencyStopGet: 'emergency-stop:get',
   emergencyStopTrigger: 'emergency-stop:trigger',
   emergencyStopReset: 'emergency-stop:reset',
@@ -881,7 +885,7 @@ const OUTPUT_FORMAT_SECTION = [
  * The background flag is an executable API: software owns startup, registration,
  * logs and exit codes. The old output marker remains a compatibility protocol.
  */
-const backgroundTaskToolPrompt = [
+export const backgroundTaskToolPrompt = [
   '【工具：background_task】',
   '在当前终端启动非交互后台任务（无 stdin/TTY）。command 直接写实际命令，软件负责启动、登记、日志和监控；不再用 Start-Process、nohup 或末尾 & 脱离进程，不手动登记。',
   '',
@@ -955,7 +959,7 @@ export function fileReadingPlatform(platformId: string): FileReadingPlatform | n
 }
 
 /** Tool descriptions live alongside the system prompt, with a separate preview. */
-const readFilesToolPrompt = [
+export const readFilesToolPrompt = [
   '【工具：read_files】',
   '将当前终端对应机器上的文件，作为完整附件上传到当前会话。支持文本、源码、图片及文档；保留文件原始内容，不修改源文件。',
   '',
@@ -979,9 +983,9 @@ const readFilesToolPrompt = [
 ].join('\n')
 
 /** Only expose tools that the selected platform can execute. */
-export function toolPromptForPlatform(platformId: string, fileReading = true, capabilityPrompt = ''): string {
+export function toolPromptForPlatform(platformId: string, fileReading = true, capabilityPrompt = '', backgroundTasks = true): string {
   const platform = fileReadingPlatform(platformId)
-  return platform ? [...(fileReading ? [readFilesToolPrompt] : []), backgroundTaskToolPrompt,
+  return platform ? [...(fileReading ? [readFilesToolPrompt] : []), ...(backgroundTasks ? [backgroundTaskToolPrompt] : []),
     ...(capabilityPrompt ? [capabilityPrompt] : [])].join('\n\n') : ''
 }
 
@@ -2376,6 +2380,9 @@ export interface AppApi {
   updateSettings(patch: AppSettingsPatch): Promise<AppSettings>
   getComputerUseCapability(): Promise<ComputerUseCapability>
   onComputerUseCapabilityChanged(listener: (capability: ComputerUseCapability) => void): () => void
+  getConversationTools(owner: ConversationToolsOwner): Promise<ConversationToolsState>
+  updateConversationTools(request: ConversationToolsUpdate): Promise<ConversationToolsState>
+  onConversationToolsChanged(listener: (state: ConversationToolsState) => void): () => void
   getEmergencyStop(): Promise<EmergencyStopState>
   triggerEmergencyStop(): Promise<EmergencyStopState>
   resetEmergencyStop(): Promise<EmergencyStopResetResult>

@@ -13,10 +13,8 @@ import { useToolWindows, ToolWindowDock } from './components/ToolWindows'
 import type { PdfPreviewTarget } from './components/PdfPreviewDialog'
 import BackendLoginForm from './components/BackendLoginForm'
 import Web2termDevicesSettings from './components/Web2termDevicesSettings'
-import ComputerUseSettings from './components/ComputerUseSettings'
+import ToolPromptsDialog from './components/ToolPromptsDialog'
 import type { AutonomousTaskState } from '@shared/autonomous-task'
-import { DEFAULT_COMPUTER_USE_PREFERENCES, normalizeComputerUsePreferences } from '@shared/computer-use'
-import type { ComputerUseCapability, ComputerUsePreferences } from '@shared/computer-use'
 import TerminalActionsMenu from './components/TerminalActionsMenu'
 import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
@@ -104,7 +102,6 @@ function adjacentPanelTab(ids: PanelTab[], removed: PanelTab, remaining = ids.fi
 const SETTINGS_SECTIONS = [
   { id: 'appearance', label: '外观' },
   { id: 'chat', label: '对话' },
-  { id: 'automation', label: 'computer use' },
   { id: 'backend', label: '后端服务' },
   { id: 'devices', label: 'web2term 设备' },
   { id: 'proxy', label: '网络代理' },
@@ -119,7 +116,6 @@ function SettingsSectionIcon({ section }: { section: SettingsSection }): JSX.Ele
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       {section === 'appearance' ? <><circle cx="12" cy="12" r="8" /><path d="M12 4v16" /><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none" /></> : null}
       {section === 'chat' ? <><path d="M4 5h16v11H9l-5 4V5z" /><path d="M8 9h8M8 12h5" /></> : null}
-      {section === 'automation' ? <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4M8 9l3 3 5-5" /></> : null}
       {section === 'backend' ? <><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M12 10v4" /></> : null}
       {section === 'devices' ? <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8m-4-4v4M7 9l2 2-2 2m5 0h4" /></> : null}
       {section === 'proxy' ? <><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></> : null}
@@ -508,9 +504,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance')
   const settingsBodyRef = useRef<HTMLDivElement>(null)
   const [settings, setSettings] = useState<AppSettings | null>(null)
-  const [computerUseDraft, setComputerUseDraft] = useState<ComputerUsePreferences>({ ...DEFAULT_COMPUTER_USE_PREFERENCES })
-  const [computerUseCapability, setComputerUseCapability] = useState<ComputerUseCapability | null>(null)
-  const [computerUseError, setComputerUseError] = useState('')
   // After `settings` is declared: reading it earlier is a TDZ ReferenceError that blanks the window.
   useEffect(() => {
     setChatView(readChatView(sessionId, platformId, settings?.defaultChatView ?? DEFAULT_CHAT_VIEW))
@@ -581,14 +574,15 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [notesError, setNotesError] = useState('')
   const tools = useToolWindows()
   const toolWindowOpen = tools.windows.some((item) => item.sessionId === sessionId && !item.minimized)
-  /** One viewer with separate base-prompt and tool-prompt content. */
-  const [promptView, setPromptView] = useState<'base' | 'tools' | null>(null)
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const toolsTriggerRef = useRef<HTMLButtonElement>(null)
+  const [promptView, setPromptView] = useState<'base' | null>(null)
   const promptOpen = promptView !== null
-  const promptTitle = promptView === 'tools' ? '工具提示词' : '系统提示词'
-  const promptSource = (promptView === 'tools' ? interceptor?.toolPrompt : interceptor?.basePrompt)?.trim() ?? ''
+  const promptTitle = '系统提示词'
+  const promptSource = interceptor?.basePrompt?.trim() ?? ''
   const promptEmptyText = interceptor === null
     ? '正在加载提示词…'
-    : promptView === 'tools' ? '当前平台暂无工具提示词。' : '（暂无提示词内容）'
+    : '（暂无提示词内容）'
   const [promptSearchOpen, setPromptSearchOpen] = useState(false)
   const [promptSearch, setPromptSearch] = useState('')
   const [promptCopied, setPromptCopied] = useState(false)
@@ -645,30 +639,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const sshActive = ssh !== null && ssh.attached
   const web2termActive = sessionKind === 'web2term' || terminal?.transport?.kind === 'web2term'
   const remoteTerminal = sshActive || web2termActive
-  useEffect(() => {
-    if (!settingsOpen) return
-    let cancelled = false
-    let updates = 0
-    setComputerUseCapability(null)
-    setComputerUseError('')
-    const unsubscribe = window.api.onComputerUseCapabilityChanged(value => {
-      if (cancelled || value.context.sessionId !== sessionId || value.context.platformId !== platformId) return
-      updates += 1
-      setComputerUseError('')
-      setComputerUseCapability(value)
-    })
-    void window.api.getComputerUseCapability().then(value => {
-      if (cancelled || updates) return
-      if (value.context.sessionId !== sessionId || value.context.platformId !== platformId) {
-        setComputerUseError('当前会话已变化，请重新打开设置。')
-        return
-      }
-      setComputerUseCapability(value)
-    }).catch(() => {
-      if (!cancelled && !updates) setComputerUseError('读取桌面能力状态失败，请重新打开设置。')
-    })
-    return () => { cancelled = true; unsubscribe() }
-  }, [settingsOpen, sessionId, platformId, sshActive, web2termActive])
   const commandHistoryTarget = sshActive
     ? `ssh:${ssh.hostId || ssh.target}`
     : web2termActive ? `web2term:${terminal?.transport?.deviceId ?? ''}` : 'local'
@@ -1850,7 +1820,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       .then((value) => {
         if (cancelled) return
         setSettings(value)
-        setComputerUseDraft(normalizeComputerUsePreferences(value))
         setBackendUrlDraft(value.backendUrl ?? '')
         setProxyDrafts(value.embedProxy ?? {})
         setThemeDraft(value.theme)
@@ -1930,7 +1899,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * as is the pending-question widget, so both leave the chat page usable underneath.
    */
   const terminalModalOpen = terminalVisible && sshFilesOpen
-  const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolWindowOpen && !commandPreviewOpen
+  const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen
   const nativeEmbedVisible = !placeholderToggle && !isFocusView && !leavingView && chatSurfaceVisible
   useEffect(() => {
     window.api.setEmbedVisible(nativeEmbedVisible)
@@ -2137,7 +2106,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       // Show back what main actually stored — it normalises a bare "host:port"
       // into a URL, and the user should see that rather than be surprised later.
       const next = await window.api.updateSettings({
-        ...computerUseDraft,
         theme: themeDraft,
         backendUrl,
         embedProxy: proxyDrafts,
@@ -2152,7 +2120,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         userAvatarScale: userAvatarScaleDraft
       })
       setSettings(next)
-      setComputerUseDraft(normalizeComputerUsePreferences(next))
       setBackendUrlDraft(next.backendUrl)
       onThemeChange(next.theme)
       setThemeDraft(next.theme)
@@ -2173,7 +2140,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     } finally {
       setSavingSettings(false)
     }
-  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, computerUseDraft, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
+  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
 
   /** Drag the shared sidebar's left edge to resize it. */
   const startPanelResize = useCallback(
@@ -2687,7 +2654,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               type="button"
               className="terminal__prompt-link"
               aria-haspopup="dialog"
-              onClick={event => { promptTriggerRef.current = event.currentTarget; setPromptView('tools') }}
+              ref={toolsTriggerRef}
+              onClick={() => setToolsOpen(true)}
             >
               查看工具提示词
             </button>
@@ -3359,7 +3327,10 @@ ${record.command}`
           </Dialog.Root>
         ) : null}
 
-        {/* Separate injected-prompt sections, using the same Markdown viewer. */}
+        {toolsOpen && appContainer ? <ToolPromptsDialog key={JSON.stringify([sessionId, platformId, embed.conversationId])}
+          owner={{ sessionId, platformId, conversationId: embed.conversationId }} container={appContainer} theme={theme}
+          trigger={toolsTriggerRef} onClose={() => setToolsOpen(false)} /> : null}
+        {/* System prompt keeps its searchable, read-only viewer. */}
         {promptOpen && appContainer ? (
           <Dialog.Root open modal onOpenChange={(open, details) => {
             if (open) return
@@ -3658,23 +3629,6 @@ ${record.command}`
                 </section>
 
                 <section
-                  id="settings-panel-automation"
-                  role="tabpanel"
-                  aria-labelledby="settings-tab-automation"
-                  tabIndex={0}
-                  hidden={settingsSection !== 'automation'}
-                  className="settings-card settings-appearance-card"
-                >
-                  <div className="settings-card__heading">
-                    <span className="settings-card__icon"><SettingsSectionIcon section="automation" /></span>
-                    <h2>computer use</h2>
-                  </div>
-                  <ComputerUseSettings preferences={computerUseDraft} onChange={setComputerUseDraft}
-                    capability={computerUseCapability} error={computerUseError}
-                    disabled={settingsLoading || settingsLoadFailed || savingSettings || settings === null} />
-                </section>
-
-                <section
                   id="settings-panel-backend"
                   role="tabpanel"
                   aria-labelledby="settings-tab-backend"
@@ -3934,7 +3888,7 @@ ${record.command}`
               {settingsError ? <p className="settings-feedback settings-feedback--save" role="alert">{settingsError}</p> : null}
               <span className="panel__spacer" />
               <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setDefaultPlatformDraft(settings?.defaultPlatformId ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' ? '关闭' : '取消'}</button>
-              {settingsSection !== 'devices' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' || settingsSection === 'chat' || settingsSection === 'automation' ? '保存' : '保存并重新加载'}</button> : null}
+              {settingsSection !== 'devices' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' || settingsSection === 'chat' ? '保存' : '保存并重新加载'}</button> : null}
             </div>
           </div>
         </div>

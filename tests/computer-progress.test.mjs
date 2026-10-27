@@ -10,7 +10,6 @@ import { progressVmModules } from './fixtures/progress-vm-modules.mjs'
 import { fixture, plain, deferred, shared, TaskCoordinator, recovery } from './fixtures/computer-action-runtime.mjs'
 
 const policy = progressVmModules['./computer-progress'], guard = progressVmModules['./task-progress-guard']
-const limits = patch => ({ ...plain(policy.normalizeComputerProgressLimits()), ...patch })
 const receipt = (patch = {}) => ({ type: 'computer_result', version: 1, action: 'observe', ok: true, code: 'ok', execution: 'executed', message: 'Synthetic real receipt', ...patch })
 const observed = (serial, changed = false) => ({ observation_id: 'obs_' + serial.toString(16).padStart(32, '0'), target: 'window',
   window_id: 'win_' + serial.toString(16).padStart(32, '0'), observed_at: new Date(1000 + serial).toISOString(),
@@ -38,33 +37,32 @@ class Clock {
 }
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
-test('limits are strict, bounded and default safely for legacy or malformed settings', () => {
-  const defaults = policy.normalizeComputerProgressLimits()
-  assert.ok(policy.parseComputerProgressLimits(defaults))
-  for (const key of policy.COMPUTER_PROGRESS_LIMIT_KEYS) {
-    const rule = policy.COMPUTER_PROGRESS_LIMIT_FIELDS[key]
-    for (const value of [rule.min - 1, rule.max + 1, NaN, Infinity, '3', null]) {
-      assert.equal(policy.parseComputerProgressLimits({ ...defaults, [key]: value }), null)
-    }
+test('legacy checkpoints drop all removed limits and stop flags while retaining execution statistics', () => {
+  for (const halted of ['task_timeout', 'step_limit', 'repeated_action', 'unchanged_observations', 'consecutive_timeouts', 'recovery_limit']) {
+    const old = { ...plain(guard.createProgressState()), version: 1, limits: { maxSteps: 1 }, halted, steps: 2500,
+      pending: { stepId: 'old-step', fingerprint: 'a'.repeat(64), repeat: 21, blocked: true, hard: halted } }
+    const migrated = policy.parseComputerProgressState(old)
+    assert.equal(migrated.version, 2); assert.equal(migrated.steps, 2500)
+    assert.deepEqual(plain(migrated.pending), { stepId: 'old-step', fingerprint: 'a'.repeat(64), repeat: 21 })
+    assert.equal('limits' in migrated, false); assert.equal('halted' in migrated, false)
+    assert.ok(policy.parseComputerProgressState(migrated))
   }
-  assert.equal(policy.parseComputerProgressLimits({ ...defaults, unexpected: 1 }), null)
-  assert.deepEqual(plain(policy.normalizeComputerProgressLimits({ maxSteps: 0 })), plain(defaults))
 })
 
 test('new timestamps, references and step tokens do not establish observable progress', () => {
   const task = {}, call = { action: 'observe', parameters: { target: 'window', window_id: 'win_' + 'a'.repeat(32) } }
-  let c = guard.createProgressState(limits({ maxRepeatedAction: 20, maxUnchangedObservations: 3 }))
+  let c = guard.createProgressState()
   for (let n = 1; n <= 4; n++) {
     c = guard.admitProgressStep(task, c, 'step-' + n, call)
     const result = guard.recordProgressResult(c, 'step-' + n, receipt({ data: observed(n) }))
     c = result.state
     assert.equal(result.report.goal_verified, false)
   }
-  assert.equal(c.epoch, 1); assert.equal(c.unchangedObservations, 3); assert.equal(c.halted, null)
+  assert.equal(c.epoch, 1); assert.equal(c.unchangedObservations, 3); assert.equal('halted' in c, false)
   assert.ok(policy.parseComputerProgressState(c))
 })
 
-test('same input is blocked before dispatch without new evidence, including fresh observation and element ids', () => {
+test('same input is counted across fresh observation and element ids without rejecting it', () => {
   let c = guard.createProgressState(), task = {}
   const first = observed(1)
   first.controls = { complete: true, elements: [{ element_id: 'el_' + '1'.repeat(32), role: 'button', name: 'Save', enabled: true, focused: false, bounds: { x: 10, y: 20 } }] }
@@ -76,21 +74,22 @@ test('same input is blocked before dispatch without new evidence, including fres
   next.controls = { ...first.controls, elements: [{ ...first.controls.elements[0], element_id: 'el_' + '2'.repeat(32) }] }
   c = guard.recordProgressResult(c, 'refresh', receipt({ data: next })).state
   const decision = guard.inspectProgressAdmission(task, c, { action: 'click', parameters: { observation_id: next.observation_id, element_id: next.controls.elements[0].element_id } })
-  assert.equal(decision.blocked, true); assert.equal(decision.repeat, 2)
+  assert.equal(decision.repeat, 2)
+  assert.equal(guard.admitProgressStep(task, c, 'click-2', call).steps, 2)
   assert.equal(JSON.stringify(c).includes('Save'), false, 'stored control state contains hashes, not control text')
 })
-test('bounded navigation can repeat while an unverified submit remains blocked', () => {
+test('navigation and submit actions both remain available after repeated requests', () => {
   const task = {}
   for (const call of [{ action: 'scroll', parameters: { direction: 'down', amount: 3 } }, { action: 'press_key', parameters: { key: 'Control+Right' } }]) {
     let c = guard.createProgressState()
     c = guard.admitProgressStep(task, c, 'first', call)
     c = guard.recordProgressResult(c, 'first', receipt({ action: call.action })).state
-    assert.equal(guard.inspectProgressAdmission(task, c, call).blocked, false)
+    assert.equal(guard.inspectProgressAdmission(task, c, call).repeat, 2)
   }
   const submit = { action: 'press_key', parameters: { key: 'Enter' } }
   let c = guard.admitProgressStep(task, guard.createProgressState(), 'submit', submit)
   c = guard.recordProgressResult(c, 'submit', receipt({ action: 'press_key' })).state
-  assert.equal(guard.inspectProgressAdmission(task, c, submit).blocked, true)
+  assert.equal(guard.admitProgressStep(task, c, 'submit-again', submit).steps, 2)
 })
 
 test('actual changed image evidence allows a new attempt, while exit success alone does not reset recovery', () => {
@@ -111,7 +110,7 @@ test('application rediscovery does not make repeated startup a new semantic acti
   c = guard.recordProgressResult(c, 'launch', receipt({ action: 'launch_app' })).state
   task.continuity.apps[0].appId = 'app_new'
   const again = guard.inspectProgressAdmission(task, c, { action: 'launch_app', parameters: { app_id: 'app_new', launch_reference_id: 'launch_new' } })
-  assert.equal(again.blocked, true); assert.equal(again.repeat, 2)
+  assert.equal(again.repeat, 2)
 })
 
 test('only current-step actual read snapshots reset recovery; historical file indexes do not', () => {
@@ -124,69 +123,113 @@ test('only current-step actual read snapshots reset recovery; historical file in
   assert.equal(guard.recordFileEvidence(c, continuity, 'file-step').recoverySteps, 2)
 })
 
-test('repeated input receives a not-executed diagnostic and eventually halts; it is never replayed', async t => {
-  const f = fixture(t, { action: 'launch_app', parameters: { app_id: 'synthetic', launch_reference_id: 'synthetic' }, limits: limits({ maxRepeatedAction: 3 }) })
-  await f.run(); assert.equal(f.executions.length, 1)
-  await f.run(); assert.equal(f.executions.length, 1); assert.equal(f.sends.at(-1).code, 'no_progress')
-  assert.equal(f.state().execution_fact, 'not_executed')
-  await f.run(); assert.equal(f.executions.length, 1); assert.equal(f.sends.at(-1).code, 'progress_limit')
-  const task = f.coordinator.current('deepseek')
-  assert.equal(task.control.halted, 'repeated_action'); assert.equal(task.progress.phase, 'blocked')
+test('new model requests can repeat an action beyond its former ceiling; duplicate receipts still cannot execute twice', async t => {
+  const f = fixture(t, { action: 'launch_app', parameters: { app_id: 'synthetic', launch_reference_id: 'synthetic' } })
+  let request
+  for (let n = 0; n < 24; n++) { request = f.request(); assert.equal(await f.run(request), 'accepted') }
+  assert.equal(f.executions.length, 24); assert.equal(f.state().execution_fact, 'executed')
+  assert.equal(f.coordinator.current('deepseek').progress.phase, 'waiting-model')
+  assert.equal(f.sends.at(-1).progress_control.repeated_action_count, 24)
   assert.equal(f.sends.at(-1).progress_control.goal_verified, false)
-  assert.equal(f.sends.at(-1).next_step_token, undefined)
-  assert.equal(f.loop.enqueue(f.request()), 'busy'); assert.equal(f.executions.length, 1)
+  assert.ok(f.sends.at(-1).next_step_token)
+  assert.equal(await f.run(request), 'duplicate'); assert.equal(f.executions.length, 24)
 })
 
-test('task deadline stops model-waiting goals and invalidates old leases without discarding the goal', t => {
-  const clock = new Clock(), f = fixture(t, { clock, limits: limits({ taskTimeoutMs: 60_000 }) }), owner = f.lease()
-  clock.advance(60_000)
-  assert.equal(f.coordinator.owns(owner), false); assert.equal(f.coordinator.current('deepseek'), null)
-  const stored = f.store.latestAutonomousTask('session-a', 'deepseek', 'chat-a')
-  assert.equal(stored.control.halted, 'task_timeout'); assert.equal(stored.originalRequest, f.first.originalRequest)
-  assert.equal(stored.status, 'stopped'); assert.match(stored.progress.detail, /未完成/)
-  assert.equal(f.executions.length, 0); assert.equal(f.sends.length, 0)
+test('unchanged observations remain diagnostics beyond the former configurable threshold', async t => {
+  let serial = 0
+  const f = fixture(t, { execute: () => receipt({ data: observed(++serial) }) })
+  for (let n = 0; n < 55; n++) assert.equal(await f.run(), 'accepted')
+  assert.equal(f.executions.length, 55)
+  assert.equal(f.coordinator.current('deepseek').control.unchangedObservations, 54)
+  assert.ok(f.sends.at(-1).progress_control.signals.includes('unchanged_observations'))
+  assert.ok(f.sends.at(-1).next_step_token)
+})
+
+test('computer steps continue across the former total-step ceiling', async t => {
+  const f = fixture(t), current = f.coordinator.current('deepseek')
+  f.coordinator.updateProgress(f.lease(), current.progress, undefined, { ...current.control, steps: 1999 })
+  for (let n = 0; n < 4; n++) assert.equal(await f.run(), 'accepted')
+  assert.equal(f.coordinator.current('deepseek').control.steps, 2003)
+  assert.equal(f.executions.length, 4); assert.ok(f.sends.at(-1).next_step_token)
+})
+
+test('model-waiting goals remain active past the former maximum task duration without scheduling a stop', async t => {
+  const clock = new Clock(), f = fixture(t, { clock }), owner = f.lease()
+  clock.advance(2 * 86_400_000)
+  assert.equal(clock.events.size, 0); assert.equal(f.coordinator.owns(owner), true)
+  assert.equal(f.coordinator.progressSummary(owner).elapsed_ms, 2 * 86_400_000)
+  assert.equal(await f.run(), 'accepted'); assert.equal(f.executions.length, 1)
+  assert.equal(f.coordinator.current('deepseek').originalRequest, f.first.originalRequest)
 })
 
 test('pause and waiting-user intervals do not consume the task clock', t => {
-  const clock = new Clock(), f = fixture(t, { clock, limits: limits({ taskTimeoutMs: 60_000 }) })
+  const clock = new Clock(), f = fixture(t, { clock })
   f.coordinator.setPaused(true); clock.advance(120_000); f.coordinator.setPaused(false)
   assert.ok(f.coordinator.current('deepseek'))
   f.coordinator.noteReply('deepseek', 'question-1', 'question'); clock.advance(120_000)
   f.submit({ submission: { id: 'user:answer:1', kind: 'clarification' }, text: '补充缺失资料。' })
   assert.ok(f.coordinator.current('deepseek'))
-  clock.advance(59_999); assert.ok(f.coordinator.current('deepseek'))
-  clock.advance(1); assert.equal(f.coordinator.current('deepseek'), null)
+  assert.equal(f.coordinator.progressSummary(f.lease()).elapsed_ms, 0)
+  clock.advance(86_400_000)
+  assert.equal(f.coordinator.progressSummary(f.lease()).elapsed_ms, 86_400_000)
+  assert.ok(f.coordinator.current('deepseek'))
 })
 
-test('action expiry requests cancellation and keeps the desktop permit until the actual executor returns', async t => {
+test('long actions keep running and retain the desktop permit until their real executor returns', async t => {
   const clock = new Clock(), done = deferred(); let released = 0
-  const f = fixture(t, { clock, limits: limits({ actionTimeoutMs: 1000 }), execute: () => done.promise,
+  const f = fixture(t, { clock, execute: () => done.promise,
     acquire: async () => ({ release() { released++ } }) })
   f.loop.enqueue(f.request()); await tick()
-  clock.advance(1000)
-  assert.equal(f.executions[0].signal.aborted, true); assert.equal(released, 0)
+  clock.advance(3_600_001)
+  assert.equal(clock.events.size, 0)
+  assert.equal(f.executions[0].signal.aborted, false); assert.equal(released, 0)
   assert.equal(f.sends.length, 0)
   done.resolve(receipt({ execution: 'executed' })); await f.loop.wake()
   assert.equal(released, 1); assert.equal(f.state().execution_fact, 'executed')
-  assert.equal(f.sends[0].progress_control.action_timed_out, true)
+  assert.equal(f.sends[0].progress_control.action_timed_out, false)
   assert.equal(f.sends[0].code, 'ok', 'a late real success receipt is not changed into a fictitious failure')
 })
 
-test('consecutive executor timeouts halt with their actual result facts and a final report', async t => {
-  const f = fixture(t, { action: 'wait_for', parameters: { condition: 'delay', timeout_ms: 1000 }, limits: limits({ maxConsecutiveTimeouts: 2 }),
-    execute: () => receipt({ action: 'wait_for', ok: false, code: 'wait_failed', data: { helper_code: 'action_timeout' } }) })
-  await f.run(); await f.run()
-  assert.equal(f.executions.length, 2); assert.equal(f.state().execution_fact, 'executed')
-  assert.equal(f.coordinator.current('deepseek').control.halted, 'consecutive_timeouts')
-  assert.equal(f.sends.at(-1).diagnosis.same_action_retry, 'stop')
-  assert.equal(f.sends.at(-1).progress_control.stop_reason, 'consecutive_timeouts')
+test('user stop still cancels a long action and holds its permit until actual executor exit', async t => {
+  const done = deferred(); let released = 0
+  const f = fixture(t, { execute: () => done.promise, acquire: async () => ({ release() { released++ } }) })
+  const owner = f.lease()
+  f.loop.enqueue(f.request()); await tick()
+  f.coordinator.stop('deepseek', 'stopped', 'user-ended')
+  assert.equal(f.executions[0].signal.aborted, true)
+  assert.equal(f.coordinator.owns(owner), false); assert.equal(released, 0)
+  done.resolve(receipt()); await f.loop.wake()
+  assert.equal(released, 1); assert.equal(f.sends.length, 0)
+  assert.equal(f.state().execution_fact, 'executed', 'late actual facts remain history')
 })
-test('normal condition timeouts do not consume the executor fault budget', async t => {
+
+test('condition waits use the action request without a separate task-level wait deadline', async t => {
+  const clock = new Clock(), done = deferred()
+  const parameters = { condition: 'window_present', query: 'Large document', timeout_ms: 3_600_000 }
+  const f = fixture(t, { clock, action: 'wait_for', parameters, execute: () => done.promise })
+  f.loop.enqueue(f.request()); await tick()
+  clock.advance(3_600_001)
+  assert.deepEqual(plain(f.executions[0].call.parameters), parameters)
+  assert.equal(clock.events.size, 0); assert.equal(f.executions[0].signal.aborted, false)
+  done.resolve(receipt({ action: 'wait_for', ok: false, code: 'wait_timeout' })); await f.loop.wake()
+  assert.equal(f.sends[0].code, 'wait_timeout'); assert.ok(f.sends[0].next_step_token)
+})
+
+test('consecutive executor timeouts remain diagnostic facts and do not stop later requests', async t => {
+  const f = fixture(t, { action: 'wait_for', parameters: { condition: 'delay', timeout_ms: 1000 },
+    execute: () => receipt({ action: 'wait_for', ok: false, code: 'wait_failed', data: { helper_code: 'action_timeout' } }) })
+  for (let n = 0; n < 25; n++) assert.equal(await f.run(), 'accepted')
+  assert.equal(f.executions.length, 25); assert.equal(f.state().execution_fact, 'executed')
+  assert.equal(f.coordinator.current('deepseek').control.consecutiveTimeouts, 25)
+  assert.notEqual(f.sends.at(-1).diagnosis.same_action_retry, 'stop')
+  assert.ok(f.sends.at(-1).next_step_token)
+})
+test('normal condition timeouts do not count as executor faults', async t => {
   const f = fixture(t, { action: 'wait_for', parameters: { condition: 'window_present', query: 'Large document', timeout_ms: 180000 },
-    limits: limits({ maxConsecutiveTimeouts: 1 }), execute: () => receipt({ action: 'wait_for', ok: false, code: 'wait_timeout' }) })
+    execute: () => receipt({ action: 'wait_for', ok: false, code: 'wait_timeout' }) })
   await f.run(); await f.run(); await f.run()
   const c = f.coordinator.current('deepseek').control
-  assert.equal(f.executions.length, 3); assert.equal(c.consecutiveTimeouts, 0); assert.equal(c.halted, null)
+  assert.equal(f.executions.length, 3); assert.equal(c.consecutiveTimeouts, 0)
   assert.equal(f.sends.at(-1).progress_control.action_timed_out, false)
 })
 
@@ -199,14 +242,15 @@ test('native helper timeout codes survive adapter context errors and count as ti
   assert.equal(f.state().execution_fact, 'unknown')
 })
 
-test('recovery is bounded even when the model keeps choosing different requests', async t => {
-  const f = fixture(t, { limits: limits({ maxRecoverySteps: 2 }), execute: call => receipt({ action: call.action, ok: false, code: 'invalid_parameters', execution: 'not_executed' }) })
-  for (let n = 0; n < 3; n++) await f.run(f.request({ call: { action: 'observe', parameters: { target: 'region', x: n, y: 0, width: 100, height: 100 } } }))
-  assert.equal(f.coordinator.current('deepseek').control.halted, 'recovery_limit')
-  assert.equal(f.executions.length, 3); assert.equal(f.sends.at(-1).progress_control.goal_verified, false)
+test('diagnostic recovery can continue beyond its former maximum without marking the goal complete', async t => {
+  const f = fixture(t, { execute: call => receipt({ action: call.action, ok: false, code: 'invalid_parameters', execution: 'not_executed' }) })
+  for (let n = 0; n < 105; n++) assert.equal(await f.run(f.request({ call: { action: 'observe', parameters: { target: 'region', x: n, y: 0, width: 100, height: 100 } } })), 'accepted')
+  assert.equal(f.coordinator.current('deepseek').control.recoverySteps, 104)
+  assert.equal(f.executions.length, 105); assert.equal(f.sends.at(-1).progress_control.goal_verified, false)
+  assert.ok(f.sends.at(-1).next_step_token)
 })
 
-test('delivery busy retries do not consume steps, repeats, timeout or recovery budgets', async t => {
+test('delivery busy retries do not inflate execution statistics or rerun the action', async t => {
   let attempts = 0
   const f = fixture(t, { send: () => ++attempts < 3 ? 'busy' : 'ok' })
   await f.run(); const before = plain(f.coordinator.current('deepseek').control), text = f.deliveries[0].text
@@ -217,24 +261,44 @@ test('delivery busy retries do not consume steps, repeats, timeout or recovery b
   assert.equal(f.executions.length, 1); assert.ok(f.deliveries.every(d => d.text === text))
 })
 
-test('legacy terminal/file steps share the quota and resumed goals retain the original policy/counters', t => {
-  const f = fixture(t, { limits: limits({ maxSteps: 5 }) })
-  const originalPolicy = plain(f.first.control.limits)
+test('terminal/file steps continue beyond the former maximum and resumed goals retain counters', t => {
+  const f = fixture(t)
   for (let n = 0; n < 2; n++) {
     const step = f.coordinator.reserveToolStep(f.lease(), 'file-' + n, 'read_files', f.first.machine)
     f.coordinator.noteToolStep(step, { stage: 'delivered', execution: 'executed' })
   }
+  const before = f.coordinator.current('deepseek')
+  f.coordinator.updateProgress(f.lease(), before.progress, undefined, { ...before.control, steps: 1999 })
   f.coordinator.stop('deepseek', 'interrupted')
   const resumed = f.submit({ resume: { taskId: f.first.id, generation: f.first.generation } })
-  assert.equal(resumed.control.steps, 2); assert.deepEqual(plain(resumed.control.limits), originalPolicy)
+  assert.equal(resumed.control.steps, 1999); assert.equal('limits' in resumed.control, false)
   const lease = f.lease()
-  for (let n = 2; n < 5; n++) {
+  for (let n = 1999; n < 2005; n++) {
     const step = f.coordinator.reserveToolStep(lease, 'file-' + n, 'read_files', f.first.machine)
     assert.ok(step); f.coordinator.noteToolStep(step, { stage: 'delivered', execution: 'executed' })
   }
-  assert.equal(f.coordinator.reserveToolStep(lease, 'one-too-many', 'command', f.first.machine), null)
-  assert.equal(f.coordinator.current('deepseek'), null)
-  assert.equal(f.store.latestAutonomousTask('session-a', 'deepseek', 'chat-a').control.halted, 'step_limit')
+  assert.ok(f.coordinator.reserveToolStep(lease, 'another-command', 'command', f.first.machine))
+  assert.equal(f.coordinator.current('deepseek').control.steps, 2006)
+})
+
+test('a persisted goal stopped by an old limit can resume with its original facts and a fresh observation gate', t => {
+  const f = fixture(t)
+  f.coordinator.stop('deepseek', 'stopped')
+  const old = f.store.latestAutonomousTask('session-a', 'deepseek', 'chat-a')
+  old.control = { ...old.control, version: 1, limits: { maxSteps: 200 }, halted: 'step_limit', steps: 200 }
+  f.db.prepare('UPDATE autonomous_tasks SET payload = ? WHERE id = ?').run(JSON.stringify(old), old.id)
+  const coordinator = new TaskCoordinator('session-a', f.store, () => {})
+  try {
+    const state = coordinator.context('deepseek', 'chat-a')
+    assert.equal(state.task.control.steps, 200); assert.equal('halted' in state.task.control, false)
+    assert.equal(coordinator.current('deepseek'), null, 'opening history never starts work')
+    const resumed = coordinator.submit({ platformId: 'deepseek', conversationId: 'chat-a',
+      submission: { id: 'user:resume:old-limit', kind: 'goal' }, text: '继续原任务', attachments: [], machine: old.machine,
+      capability: { scopeSupported: true, computerUseEnabled: true, context: { sessionId: 'session-a', platformId: 'deepseek' } },
+      resume: { taskId: old.id, generation: old.generation } })
+    assert.ok(resumed); assert.equal(resumed.control.version, 2); assert.equal(resumed.control.steps, 200)
+    assert.equal(resumed.originalRequest, old.originalRequest); assert.equal(resumed.recovery.requiresObservation, true)
+  } finally { coordinator.dispose() }
 })
 
 test('restoring checkpoints never restores timers, work or grants, and malformed counters fail closed', async t => {
@@ -251,35 +315,40 @@ test('restoring checkpoints never restores timers, work or grants, and malformed
   assert.equal(JSON.parse(summary.slice(summary.indexOf('\n') + 1)).progress_control.steps, stepCount)
 })
 
-test('actual settings persistence validates before writes and falls back safely on corrupt saved JSON', () => {
+test('settings ignore obsolete saved limits and patches while still validating current settings before writes', () => {
   const exports = {}
   new Script(ts.transpileModule(readFileSync(new URL('../src/main/computer-use-settings.ts', import.meta.url), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText).runInNewContext({ exports, require: name => progressVmModules[name] })
   const values = new Map(), writes = []
   const store = { getSetting: key => values.get(key) ?? null, setSetting: (key, value) => { writes.push(key); values.set(key, value) } }
-  assert.throws(() => exports.saveComputerUsePreferences(store, { computerUseEnabled: true, computerUseLimits: { maxSteps: 0 } }), /运行上限/)
+  assert.throws(() => exports.saveComputerUsePreferences(store, { computerUseEnabled: true, computerResultDelaySeconds: -1 }), /回传间隔/)
   assert.equal(writes.length, 0)
-  exports.saveComputerUsePreferences(store, { computerUseLimits: limits({ maxSteps: 25 }) })
-  assert.equal(exports.readComputerUsePreferences(store).computerUseLimits.maxSteps, 25)
+  const patch = exports.saveComputerUsePreferences(store, { computerUseEnabled: true, computerUseLimits: { maxSteps: 1 } })
+  assert.equal(patch.computerUseEnabled, true); assert.equal('computerUseLimits' in patch, false)
+  assert.equal(writes.includes('computerUseLimits'), false)
   values.set('computerUseLimits', 'broken-json')
-  assert.deepEqual(plain(exports.readComputerUsePreferences(store).computerUseLimits), plain(policy.normalizeComputerProgressLimits()))
+  assert.equal('computerUseLimits' in exports.readComputerUsePreferences(store), false)
 })
 
-test('a separately saved hard-limit receipt restores its stop reason after checkpoint failure', async t => {
-  const f = fixture(t, { action: 'wait_for', parameters: { condition: 'delay' }, limits: limits({ maxConsecutiveTimeouts: 1 }),
+test('a separately saved receipt restores statistics after checkpoint failure without restoring legacy stop flags', async t => {
+  const f = fixture(t, { action: 'wait_for', parameters: { condition: 'delay' },
     execute: () => receipt({ action: 'wait_for', ok: false, code: 'wait_failed', data: { helper_code: 'action_timeout' } }) })
   f.db.exec(`CREATE TRIGGER reject_limit_checkpoint BEFORE UPDATE ON autonomous_tasks
-    WHEN json_extract(NEW.payload, '$.control.halted') = 'consecutive_timeouts'
+    WHEN json_extract(NEW.payload, '$.control.consecutiveTimeouts') = 1
     BEGIN SELECT RAISE(FAIL, 'synthetic checkpoint failure'); END`)
   await f.run(); assert.equal(f.state().execution_fact, 'executed')
-  assert.equal(JSON.parse(f.state().result_json).progress_control.halted, true)
+  assert.equal(JSON.parse(f.state().result_json).progress_control.consecutive_timeouts, 1)
   assert.equal(f.sends.length, 0)
   f.db.exec('DROP TRIGGER reject_limit_checkpoint')
+  const saved = f.state(), legacyReceipt = JSON.parse(saved.result_json)
+  legacyReceipt.progress_control.halted = true
+  legacyReceipt.progress_control.stop_reason = 'consecutive_timeouts'
+  f.db.prepare('UPDATE computer_actions SET result_json = ? WHERE execution_id = ?').run(JSON.stringify(legacyReceipt), saved.execution_id)
   f.coordinator.stop('deepseek', 'interrupted') // Graceful close can save an older task snapshot after the error.
   recovery.recoverInterruptedComputerActions(f.db)
   const restored = f.store.latestAutonomousTask('session-a', 'deepseek', 'chat-a')
-  assert.equal(restored.control.halted, 'consecutive_timeouts'); assert.equal(restored.control.consecutiveTimeouts, 1)
+  assert.equal('halted' in restored.control, false); assert.equal(restored.control.consecutiveTimeouts, 1)
   assert.equal(restored.status, 'interrupted')
 })
 
@@ -291,7 +360,7 @@ test('completion notifications are delivered once for the completed task even wh
   let completed = 0
   const subject = Object.assign(new Subject(), {
     id: 'session-a', active: true, completedTaskNotifications: new Set(), activePlatformId: 'deepseek',
-    taskCoordinator: { isLimited: () => false, completionNotificationAllowed: () => true, completedTaskId: () => 'finished-task' },
+    taskCoordinator: { hasError: () => false, completionNotificationAllowed: () => true, completedTaskId: () => 'finished-task' },
     window: { isDestroyed: () => false, isFocused: () => true },
     embed: { getState: () => ({ conversationId: 'chat-a' }) }, options: { onTaskCompleted: () => completed++ }
   })
@@ -300,13 +369,13 @@ test('completion notifications are delivered once for the completed task even wh
   assert.equal(completed, 1)
 })
 
-test('completion notifications are suppressed for a task stopped by its limits', () => {
+test('completion notifications are suppressed when task persistence has failed', () => {
   const ast = ts.createSourceFile('runtime.ts', readFileSync(new URL('../src/main/session-runtime.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
   const cls = ast.statements.find(n => ts.isClassDeclaration(n) && n.name?.text === 'SessionRuntime')
   const method = cls.members.find(n => n.name?.getText(ast) === 'notifyTaskCompleted').getText(ast)
   const Subject = new Script(ts.transpileModule(`class Subject { ${method} }; Subject`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText).runInNewContext({})
   let completed = 0
-  const subject = Object.assign(new Subject(), { taskCoordinator: { isLimited: () => true }, activePlatformId: 'deepseek',
+  const subject = Object.assign(new Subject(), { taskCoordinator: { hasError: () => true }, activePlatformId: 'deepseek',
     embed: { getState: () => ({ conversationId: 'chat-a' }) }, options: { onTaskCompleted: () => completed++ } })
   subject.notifyTaskCompleted('模型称已完成')
   assert.equal(completed, 0)

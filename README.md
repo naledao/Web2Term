@@ -4,13 +4,13 @@
 
 ## 中文
 
-Web2Term 把模型网页、项目对话和本机／远程终端放进同一个桌面工作区。使用 ChatGPT、DeepSeek、Claude 或 Gemini 的网页账号描述目标，由模型提出命令，客户端执行并把真实输出、退出码和工作目录回传，继续下一步。
+Web2Term 把模型网页、项目对话和本机／远程终端放进同一个桌面工作区。使用 ChatGPT、DeepSeek、Claude 或 Gemini 的网页账号描述目标，由模型提出命令，客户端执行并把真实输出、退出码和工作目录回传，继续下一步。Windows x64 本机会话还可启用 **Computer Use**，让 ChatGPT 或 DeepSeek 通过截图和键鼠动作操作桌面应用。
 
 仓库包含两个面向使用者的程序：
 
 | 程序 | 用途 | 当前发布目标 |
 | --- | --- | --- |
-| Web2Term 桌面客户端 | 管理项目与对话、嵌入模型网页、执行命令、使用工具箱和连接远程设备。 | Windows x64 安装包、macOS Apple Silicon DMG。 |
+| Web2Term 桌面客户端 | 管理项目与对话、嵌入模型网页、执行命令、使用工具箱和连接远程设备；Windows x64 另支持 Computer Use。 | Windows x64 安装包、macOS Apple Silicon DMG。 |
 | `web2term` 小工具 | 在 Linux 设备上保持后端连接，供桌面客户端打开远程终端；无需设备运行 sshd。 | Linux x86_64（amd64）单文件程序。 |
 
 客户端直接使用模型网站，不需要配置模型 API Key；模型账号、可用功能和附件额度由相应网站决定。仅使用本机或 SSH 终端时，无需登录 Web2Term 后端。本文描述当前仓库实现，已发布安装包包含的功能以对应版本为准。
@@ -42,11 +42,14 @@ Windows 支持应用内检查、下载和安装更新；macOS 检查到更新后
 ```mermaid
 flowchart LR
   U[用户目标] --> M[模型网页]
-  M --> R[命令 / 文件读取 / 澄清问题]
+  M --> R[命令 / 文件读取 / 桌面动作 / 澄清问题]
   R --> C[桌面客户端]
   C --> T[本机 / SSH / Web2Term]
   T --> O[真实结果与退出码]
   O --> M
+  C --> D[Windows 本机桌面]
+  D --> S[截图与操作回执]
+  S --> M
 ```
 
 ![Web2Term 工作区示意](docs/screenshots/workspace.png)
@@ -68,6 +71,7 @@ flowchart LR
 | 原始网页、终端命令与结果回传 | 支持 | 支持 | 支持 | 支持 |
 | 本地会话摘要 | 支持 | 支持 | 支持 | 支持 |
 | 专注对话 | 支持 | 支持 | — | — |
+| Computer Use（Windows x64 本机） | 支持 | 支持 | — | — |
 | 侧边聊天、选区追问 | 支持 | 支持 | 支持 | 支持 |
 | `read_files` 完整附件回传（本机／SSH） | 已接入 | 已接入 | 已接入 | 已接入，自动回传待用户验收 |
 | `background: true` 后台任务 | 支持 | 支持 | 支持 | 支持 |
@@ -75,6 +79,36 @@ flowchart LR
 专注对话仍通过原模型网页发送消息和读取答复，沿用其账号与登录态；支持添加附件和粘贴截图。第三方页面变化可能影响适配。
 
 右侧页签栏的 **＋** 可添加“终端”“后台任务”“GitHub 仓库管理”或“侧边聊天”。新增终端是用户独立操作的 Shell，不把其输出自动发送给模型。每次新建侧边聊天会替换原侧边实例；选区追问从本地已保存的对话生成上下文 Markdown，发到同平台的新聊天中，侧边聊天不执行终端命令。
+
+### Computer Use
+
+Computer Use 让模型在对话中发现和启动应用、查看真实窗口，并执行点击、输入、按键、滚动与拖拽。截图直接作为图片发送给当前网页端模型，操作回执与后续观察回到同一段对话，无需额外配置视觉模型 API Key。
+
+**当前支持 Windows x64 上的 ChatGPT、DeepSeek 本机会话。** macOS、SSH／Web2Term 远程会话及 Claude、Gemini 尚未接入这组桌面动作；它们仍可使用原有终端能力。Windows 安装包包含桌面执行器，源码开发的构建要求见下文。
+
+#### 开启与使用
+
+1. 新建或选择一个**本机会话**，切换到 ChatGPT 或 DeepSeek 并登录模型网页。
+2. 在“执行控制”中确认终端模式与提示词注入已开启，再进入 **设置 → computer use**，打开 **启用 computer use** 并保存。此开关同时允许桌面控制，以及点击任务栏、系统托盘等窗口外位置。
+3. 在对话中描述目标，例如“打开 PowerPoint，新建一页标题为项目进度的幻灯片”。模型可发现应用、观察窗口，再按实际界面执行后续步骤。
+4. 在对话和屏幕顶部居中的任务浮层查看目标、当前动作与步骤进度；模型根据返回的截图和回执继续判断，任务完成后浮层短暂显示完成提示再收起。
+
+| 能力 | 当前范围 |
+| --- | --- |
+| 应用与窗口 | 发现和启动应用，打开文件、目录或网页，查找并激活业务窗口，识别关联菜单与弹窗。 |
+| 界面观察 | 获取单屏概览、窗口或区域截图；按需读取 Windows 可访问性控件树、焦点及支持的文字选区。 |
+| 键鼠操作 | 单击／双击、文字输入、按键／组合键、滚动，以及同一窗口内的鼠标拖拽。 |
+| 拖动选区 | 通过按住鼠标、沿路径移动再松开，在支持的应用中选中文字、拉框选择对象或操作画布；是否选中需核对操作后的界面。 |
+| 等待与任务推进 | 等待窗口、文字、控件或已登记后台任务的条件，保留任务目标、执行步骤与实际回执。 |
+
+拖拽使用最近窗口截图上的坐标，路径需位于同一窗口的可见内容区域内；不支持跨窗口拖拽或跨多次调用持续按住鼠标。区域截图可按矩形坐标裁剪，但尚未提供让用户手动拉框后将选区交给 AI 的专门入口。输入成功只表示动作已发出，保存、发送、拖放等业务结果仍需核对。
+
+#### 停止、恢复与运行设置
+
+- **连续来回晃动鼠标可触发全局急停。** 在 Computer Use 控制期间，快速左右或上下来回晃动数次，会停止所有会话的自动操作与回传；顶部浮层显示急停状态 6 秒。当前识别条件为 1.2 秒内至少 4 次反向，每次反向移动至少 40 个物理像素。普通单向移动、轻微抖动及程序注入的移动不计入手势。
+- 界面上的 **全局急停** 按钮同样有效；原双击 Esc 和 `Ctrl+Alt+Shift+F12` 急停入口已移除。急停后需在客户端等待执行器退出并 **解除急停**，再重新提交或恢复任务，旧任务不会自行重启。后台进程保持独立运行。
+- **结束任务** 只停止当前会话。普通键鼠干预可能中断当前步骤，多次干预会暂停 Computer Use；因用户输入暂停的任务，可在同一对话发送新消息继续，继续时先重新观察。
+- **设置 → computer use** 可调整任务时限、单步执行时限、条件等待时限、步骤等运行上限，以及结果回传间隔。达到上限会保留未完成状态；恢复原任务沿用原预算。动作返回后可等待界面稳定再向模型回传结果，等待期间不会重做该动作。
 
 ### 本机、SSH 与 Web2Term
 
@@ -218,13 +252,14 @@ web2term autostart disable  # 关闭自启并停止系统服务
 
 ### 设置、数据与排查
 
-设置包含外观、对话、后端服务、web2term 设备、网络代理、应用更新和浏览器登录态。可分别配置模型网页、SSH、更新下载所用代理；Linux 小工具下载沿用更新代理。网页登录遇到限制时，可使用支持的平台登录态导入入口。
+设置包含外观、对话、computer use、后端服务、web2term 设备、网络代理、应用更新和浏览器登录态。可分别配置模型网页、SSH、更新下载所用代理；Linux 小工具下载沿用更新代理。网页登录遇到限制时，可使用支持的平台登录态导入入口。
 
 客户端在 Electron 用户数据目录的 `conversations.db` 中保存项目、对话、执行记录、任务、连接配置与设置；模型网页和 Nacos 使用持久网页分区保存各自登录态。数据库密码等凭据通过 Electron `safeStorage` 加密，导入的网页登录凭据仍需按密码保护。
 
 | 问题 | 先检查 |
 | --- | --- |
 | 模型网页无法加载／登录 | 当前网络、网页代理、网站登录状态；真实页面行为由用户操作确认。 |
+| Computer Use 不可用 | 是否为 Windows x64、本机会话与 ChatGPT／DeepSeek；功能开关及提示词注入是否开启，桌面执行器是否就绪，全局急停是否已解除。 |
 | 设备列表为空 | 两端后端地址和账号是否一致；在设备运行 `web2term status`，确认心跳已获服务端确认。 |
 | 设备在线但终端不可用 | 设备是否启用、是否被其他客户端占用、3 个终端名额是否已满，以及终端是否真正创建成功。 |
 | 数据库地址可从远端访问、客户端却连不上 | 数据库工具从客户端电脑发起连接，检查该电脑到服务的网络路径。 |
@@ -296,7 +331,7 @@ MIT
 
 ## English
 
-Web2Term brings model websites, project conversations, and local or remote terminals into one desktop workspace. Describe a goal in ChatGPT, DeepSeek, Claude, or Gemini; the model proposes a command, the client runs it on the selected machine, and the actual output, exit code, and working directory return to the conversation.
+Web2Term brings model websites, project conversations, and local or remote terminals into one desktop workspace. Describe a goal in ChatGPT, DeepSeek, Claude, or Gemini; the model proposes a command, the client runs it on the selected machine, and the actual output, exit code, and working directory return to the conversation. Local Windows x64 sessions can also enable **Computer Use**, allowing ChatGPT or DeepSeek to operate desktop applications through screenshots and mouse/keyboard actions.
 
 The repository contains the Web2Term desktop client and a separate Linux device tool, `web2term`. The client uses your model website accounts without requiring model API keys. Web2Term backend login is needed for device connections; local and SSH use do not require it. This README describes the current source; features in a published installer depend on its release version.
 
@@ -329,6 +364,7 @@ Projects group conversations and share supplementary Markdown instructions. Remo
 | Original website, terminal execution, result delivery | Yes | Yes | Yes | Yes |
 | Locally saved conversation summary | Yes | Yes | Yes | Yes |
 | Focus conversation view | Yes | Yes | — | — |
+| Computer Use, local Windows x64 sessions | Yes | Yes | — | — |
 | Side chat and questions about selected answer text | Yes | Yes | Yes | Yes |
 | Full-file attachments through `read_files`, local / SSH | Integrated | Integrated | Integrated | Integrated; automatic delivery awaits user acceptance |
 | Managed background commands | Yes | Yes | Yes | Yes |
@@ -336,6 +372,33 @@ Projects group conversations and share supplementary Markdown instructions. Remo
 The focus view presents messages, reasoning/search activity, and execution records in the client's UI while still using the original website account. It supports attachments and pasted screenshots. Side chats use the same platform login, open separate conversations, and do not execute terminal commands. Selection questions attach context exported from locally saved messages.
 
 The right panel's **＋** menu adds personal terminals, background tasks, GitHub repository management, or a side chat. Personal terminals are independent shells whose output is not automatically sent to the model.
+
+### Computer Use on Windows
+
+Computer Use discovers and launches applications, observes real windows, and performs clicks, text entry, key combinations, scrolling, and dragging. Screenshots are uploaded as images to the current model website; operation receipts and subsequent observations return to the same conversation. No separate vision-model API key is required.
+
+**Desktop actions currently support ChatGPT and DeepSeek in local Windows x64 sessions.** They are not available on macOS, through SSH or Web2Term device connections, or with Claude and Gemini. Existing terminal features remain available on those platforms and connections. Windows installers include the desktop helper.
+
+1. Open a **local session**, select ChatGPT or DeepSeek, and sign in to the model website.
+2. Enable terminal mode and prompt injection in “执行控制”. Under **设置 → computer use**, turn on **启用 computer use** and save. This also permits desktop control and coordinate clicks on the taskbar, system tray, and other locations outside application windows.
+3. Describe a goal, such as opening PowerPoint and creating a slide. The model can discover the application, inspect its window, and operate the current interface.
+4. Follow the goal, current action, and step count in the top-center desktop overlay and the conversation. Completed tasks briefly show a completion notice before the overlay closes.
+
+| Capability | Current scope |
+| --- | --- |
+| Applications and windows | Discover/launch applications, open files, folders or URLs, find/focus windows, and inspect associated menus and dialogs. |
+| Observation | Single-display, window, or cropped-region screenshots; optional Windows accessibility controls, focus, and supported text selections. |
+| Mouse and keyboard | Single/double clicks, text entry, keys and key combinations, scrolling, and bounded dragging within one visible application window. |
+| Selection through dragging | Hold, move, and release the mouse to select text, draw a selection rectangle, or operate a canvas in applications that support it. Check the resulting interface to confirm selection. |
+| Waiting and progress | Wait for window, text, control, or registered background-task conditions while retaining the task goal, steps, and actual receipts. |
+
+Drag coordinates refer to the latest window screenshot. Cross-window paths and holding a button across separate requests are not supported. Region screenshots accept rectangle coordinates, but there is no dedicated user-operated drag-to-crop entry point. Successful input delivery alone does not establish that a file was saved, a message sent, or a drop accepted.
+
+**To emergency-stop automation, shake the mouse back and forth repeatedly while Computer Use controls the desktop.** The gesture stops automatic actions and result delivery across all sessions; the top overlay shows the stop state for six seconds. Detection requires at least four direction reversals within 1.2 seconds, with at least 40 physical pixels per reversal. Ordinary one-way movement, small jitter, and injected pointer movement do not contribute. The emergency-stop button remains available; double-Esc and `Ctrl+Alt+Shift+F12` are no longer stop gestures.
+
+After an emergency stop, wait for executors to drain, release the emergency latch in the client, then submit or explicitly resume a task. Previous tasks do not restart automatically; background processes retain their independent lifecycles. “结束任务” stops only the current session. Repeated ordinary keyboard/mouse interference can pause Computer Use; a new message in the same conversation continues a task paused by user input, starting with a fresh observation.
+
+Under **设置 → computer use**, configure task/action/wait timeouts, step and recovery limits, and the delay before results return to the model. Limits preserve an unfinished task rather than restarting it; resuming retains the original budget. Delaying result delivery does not repeat the action.
 
 ### Terminals, files, and tools
 

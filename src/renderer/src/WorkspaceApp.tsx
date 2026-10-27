@@ -60,6 +60,7 @@ export default function WorkspaceApp(): ReactElement {
   const [projects, setProjects] = useState<WorkspaceProject[]>([])
   const [projectEditor, setProjectEditor] = useState<{ project: WorkspaceProject | null } | null>(null)
   const [pendingProjectDelete, setPendingProjectDelete] = useState<WorkspaceProject | null>(null)
+  const removeProjectTrigger = useRef<HTMLButtonElement | null>(null)
   const [movingSession, setMovingSession] = useState<ManagedSessionSummary | null>(null)
   const [moveTarget, setMoveTarget] = useState('')
   const [projectBusy, setProjectBusy] = useState(false)
@@ -75,12 +76,14 @@ export default function WorkspaceApp(): ReactElement {
   const [web2termChatCreation, setWeb2termChatCreation] = useState<{ projectId: string | null } | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<ManagedSessionSummary | null>(null)
+  const deleteSessionTrigger = useRef<HTMLButtonElement | null>(null)
   const [appVersion, setAppVersion] = useState('')
   const [updateNotice, setUpdateNotice] = useState<{ version: string } | null>(null)
   const updateNoticeAnchor = useRef<HTMLSpanElement>(null)
   const [updateDownloading, setUpdateDownloading] = useState(false)
   const [updateLive, setUpdateLive] = useState<{ phase: UpdateStatus['phase']; percent: number }>({ phase: 'idle', percent: 0 })
   const [theme, setTheme] = useState<AppTheme>('light')
+  const navigationRef = useRef<HTMLElement>(null)
   const newSessionButton = useRef<HTMLButtonElement>(null)
   const web2termDeviceDialogTrigger = useRef<HTMLButtonElement | null>(null)
   const noticedVersion = useRef('')
@@ -311,14 +314,15 @@ export default function WorkspaceApp(): ReactElement {
     void window.api.installUpdate()
   }
 
-  const workspaceModalOpen = transfersOpen || pendingDelete !== null || newSessionOpen || web2termDeviceDialogOpen || updateNotice !== null
-    || projectEditor !== null || movingSession !== null || pendingProjectDelete !== null
+  // Sidebar confirmations stay within the navigation and leave the native chat view visible.
+  const workspaceModalOpen = transfersOpen || newSessionOpen || web2termDeviceDialogOpen || updateNotice !== null
+    || projectEditor !== null || movingSession !== null
   const newSessionProject = projects.find(project => project.id === newSessionProjectId)
 
   return (
     <ToolWindowsProvider sessionIds={sessions.map((item) => item.id)}>
     <div className={'workspace' + (navCollapsed ? ' workspace--nav-collapsed' : '')} data-theme={theme} style={{ '--nav-width': `${navWidth}px` } as CSSProperties}>
-      <nav className="workspace__nav">
+      <nav ref={navigationRef} className="workspace__nav">
         <div className="workspace__brand">
           <span className="workspace__brand-mark" aria-hidden="true"><img src={brandIcon} alt="" /></span>
           <span className="workspace__brand-text workspace__brand-wordmark"><Web2termWordmark /></span>
@@ -335,9 +339,9 @@ export default function WorkspaceApp(): ReactElement {
         <WorkspaceNavigation sessions={sessions} projects={projects} activeId={workspace.sessionId} theme={theme} creating={creating}
           newChatButton={newSessionButton} status={navigationError}
           onNewChat={requestNewChat} onNewProject={() => editProject(null)} onEditProject={editProject}
-          onRemoveProject={project => { setNavigationError(''); window.api.setEmbedVisible(false); setPendingProjectDelete(project) }}
+          onRemoveProject={(project, anchor) => { removeProjectTrigger.current = anchor; setNavigationError(''); setPendingProjectDelete(project) }}
           onMoveSession={item => { setNavigationError(''); window.api.setEmbedVisible(false); setMoveTarget(item.projectId ?? ''); setMovingSession(item) }}
-          onDeleteSession={item => { window.api.setEmbedVisible(false); setPendingDelete(item) }} />
+          onDeleteSession={(item, anchor) => { deleteSessionTrigger.current = anchor; setPendingDelete(item) }} />
         <div
           className="workspace__nav-resizer"
           role="separator"
@@ -481,6 +485,7 @@ export default function WorkspaceApp(): ReactElement {
         </form>
       </AppPopover> : null}
       <ConfirmDialog open={pendingProjectDelete !== null} title={`移除项目“${pendingProjectDelete?.name ?? ''}”？`}
+        anchor={removeProjectTrigger.current} containerRef={navigationRef}
         description={navigationError || '项目中的对话会保留，并移到“本电脑”列表。'} icon="!" busy={projectBusy} confirmLabel="移除项目"
         onCancel={() => setPendingProjectDelete(null)} onConfirm={() => void removeProject()} />
 
@@ -507,6 +512,8 @@ export default function WorkspaceApp(): ReactElement {
       />
       <ConfirmDialog
         open={pendingDelete !== null}
+        anchor={deleteSessionTrigger.current}
+        containerRef={navigationRef}
         title={`删除“${pendingDelete?.title || '对话'}”？`}
         description="将结束终端和 SSH 连接，网页对话保留。"
         danger

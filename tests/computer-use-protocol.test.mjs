@@ -174,7 +174,7 @@ test('registered constraints survive normalization and invalid registrations can
     { sessionId: 'session-A', platformId: 'deepseek', hostPlatform: 'win32', hostArch: 'x64', connection: 'local' }, definitions), token)
   assert.match(prompt, /≤1920/)
   assert.match(prompt, /定位二选一/)
-  assert.equal(JSON.parse(prompt.match(/```json\n([^]*?)\n```/)[1]).step_token, token)
+  assert.ok(prompt.includes(`当前 step_token：${token}`))
   for (const bad of [
     { ...definitions[1], locatorAlternatives: [['element_id'], ['element_id', 'x']] },
     { ...definitions[1], locatorAlternatives: [['missing'], ['x', 'y']] },

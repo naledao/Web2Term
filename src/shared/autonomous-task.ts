@@ -254,7 +254,7 @@ export function parseAutonomousTask(payload: string): AutonomousTask | null {
       task.progress.lastReply.messageId !== task.modelCompletion.messageId)) return null
     if (task.status === 'completed' && !task.modelCompletion && (task.completion?.report?.state !== 'delivered' || task.progress?.phase !== 'completed' ||
       task.progress.currentStep?.id !== task.completion.report.stepId || task.progress.currentStep.delivery !== 'sent' || task.progress.currentStep.status !== 'delivered' || task.progress.currentStep.action !== 'complete_task' ||
-      task.progress.currentStep.execution !== 'executed' || task.control?.halted || task.recovery?.requiresObservation)) return null
+      task.progress.currentStep.execution !== 'executed' || task.recovery?.requiresObservation)) return null
     if (task.status !== 'completed' && (task.completion?.report?.state === 'delivered' || task.progress?.phase === 'completed')) return null
     if (task.status === 'completed' && task.completion?.report?.state === 'delivered' && (task.completion.report.requirements.length !== new Set(task.inputs.map(i => i.id)).size ||
       task.completion!.report!.requirements.some(r => !task.inputs.some(i => i.id === r.input_id)))) return null

@@ -184,6 +184,7 @@ test('the production diagnostic context advertises live capabilities and exclude
   }).outputText).runInNewContext({ fileReadingPlatform: id => id === 'deepseek' ? { id } : null })
   let current = true, available = true
   const subject = Object.assign(new Subject(), { active: true, disposed: false, activePlatformId: 'deepseek',
+    toolPreferences: () => ({ fileReadingEnabled: true }),
     taskCoordinator: { owns: () => current }, embed: { getInterceptorStatus: () => ({ enabled: true }) },
     getComputerUseCapability: () => ({ available, scopeSupported: true, computerUseEnabled: true, actions: ['observe'] }) })
   assert.deepEqual(plain(subject.inspect({ platformId: 'deepseek' })), { actions: ['observe'], otherTools: ['command', 'read_files'] })

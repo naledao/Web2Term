@@ -1,6 +1,5 @@
 import type { AutonomousTaskState } from '@shared/autonomous-task'
 import { useState } from 'react'
-import { PROGRESS_STOP_MESSAGES } from '@shared/computer-progress'
 import { supportsComputerUsePlatform } from '@shared/computer-use'
 import { taskPausedByInput } from '@shared/autonomous-task'
 import { pendingTaskQuestion } from '@shared/task-clarification'
@@ -21,7 +20,7 @@ function TaskDetails({ state }: { state: AutonomousTaskState }) {
   const question = task ? pendingTaskQuestion(task) : null
   const uncertainAnswer = task?.status === 'recorded' && question?.state === 'uncertain'
   // A task paused by the user's input continues with their next message; it needs no resume button.
-  const canResume = supportsComputerUsePlatform(state.platformId) && !!state.conversationId && task && !task.control?.halted && !taskPausedByInput(task) &&
+  const canResume = supportsComputerUsePlatform(state.platformId) && !!state.conversationId && task && !taskPausedByInput(task) &&
     (task.status === 'interrupted' || task.status === 'stopped' || uncertainAnswer || task.status === 'recorded' && task.progress?.phase === 'blocked')
   const openQuestion = async () => {
     if (!task || !question || !state.conversationId || openingQuestion) return
@@ -57,14 +56,13 @@ function TaskDetails({ state }: { state: AutonomousTaskState }) {
         <div><dt>执行环境</dt><dd>{task.machine.platform === 'win32' ? 'Windows' : task.machine.platform} {task.machine.arch} · 本机</dd></div>
         <div><dt>工作目录</dt><dd>{task.machine.workingDirectory || '尚未取得'}</dd></div>
         <div><dt>条件与产物</dt><dd>随用户原始要求完整保存。</dd></div>
-        {task.control ? <div><dt>运行预算</dt><dd>{task.control.steps}／{task.control.limits.maxSteps} 步 · 恢复 {task.control.recoverySteps}／{task.control.limits.maxRecoverySteps} 步</dd></div> : null}
         {task.progress ? <div><dt>工具步骤</dt><dd>已接收 {task.progress.stepCount} 步{task.progress.currentStep
           ? ` · 最近动作：${task.progress.currentStep.action}（${task.progress.currentStep.execution === 'not_executed' ? '未执行'
             : task.progress.currentStep.execution === 'executed' ? '执行器已返回' : '执行结果未确认'}）` : ''}</dd></div> : null}
       </dl>
       {task.inputs.filter(input => input.kind === 'clarification').map(input =>
         <p className="autonomous-task-summary__goal" key={input.id}>补充要求：{input.text}</p>)}
-      <p className="autonomous-task-summary__meta">{task.control?.halted ? PROGRESS_STOP_MESSAGES[task.control.halted] : task.status === 'recorded'
+      <p className="autonomous-task-summary__meta">{task.status === 'recorded'
         ? task.progress?.detail ?? '保留同一任务上下文；收到可用工具的实际结果后由模型决定下一步。'
         : '已保存任务要求；重新打开会话不会自动执行。'}</p>
       {task.stop ? <p className="autonomous-task-summary__meta">{paused ? '因连续 3 次键鼠操作暂停；发送新消息即继续同一任务，继续时会先重新观察桌面' : task.stop.reason === 'global-emergency' ? '因全局急停结束' : '用户已结束任务'}；已发生的操作没有回滚，后台进程保持独立运行。</p> : null}

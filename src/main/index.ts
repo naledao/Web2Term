@@ -1928,6 +1928,18 @@ function registerIpcHandlers(): void {
       sessionId: null, platformId: '', hostPlatform: process.platform, hostArch: process.arch, connection: 'none'
     })
   })
+  ipcMain.handle(IpcChannels.conversationToolsGet, (event, owner) => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime || !owner) throw new Error('当前对话不可用，请重新打开工具设置。')
+    return runtime.getConversationTools(owner)
+  })
+  ipcMain.handle(IpcChannels.conversationToolsUpdate, (event, request) => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime) throw new Error('当前对话不可用，工具设置未保存。')
+    const state = runtime.updateConversationTools(request)
+    for (const other of runtimes.values()) if (other !== runtime) other.refreshComputerUseCapabilities(request)
+    return state
+  })
   const requireEmergencyStopClient = (event: IpcMainInvokeEvent): void => {
     if (!isManagerEvent(event) || event.senderFrame !== event.sender.mainFrame) throw new Error('只有客户端主界面可以操作全局急停。')
   }

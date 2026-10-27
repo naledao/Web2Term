@@ -1,6 +1,7 @@
 import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult } from '../shared/emergency-stop'
 import type { ToolboxInvocation } from '../shared/toolbox'
 import type { ComputerUseCapability } from '../shared/computer-use'
+import type { ConversationToolsOwner, ConversationToolsState, ConversationToolsUpdate } from '../shared/conversation-tools'
 import type { AutonomousTaskState, TaskResumeRequest } from '../shared/autonomous-task'
 import type { TaskLease } from '../shared/autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from '../shared/task-presentation'
@@ -313,6 +314,15 @@ removeConversation: (id: string): Promise<Conversation[]> =>
 
   getComputerUseCapability: (): Promise<ComputerUseCapability> =>
     ipcRenderer.invoke(IpcChannels.computerUseGetCapability),
+  getConversationTools: (owner: ConversationToolsOwner): Promise<ConversationToolsState> =>
+    ipcRenderer.invoke(IpcChannels.conversationToolsGet, owner),
+  updateConversationTools: (request: ConversationToolsUpdate): Promise<ConversationToolsState> =>
+    ipcRenderer.invoke(IpcChannels.conversationToolsUpdate, request),
+  onConversationToolsChanged: (listener: (state: ConversationToolsState) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: ConversationToolsState): void => listener(state)
+    ipcRenderer.on(IpcChannels.conversationToolsChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.conversationToolsChanged, handler)
+  },
   onComputerUseCapabilityChanged: (listener: (capability: ComputerUseCapability) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, capability: ComputerUseCapability): void => listener(capability)
     ipcRenderer.on(IpcChannels.computerUseCapabilityChanged, handler)
