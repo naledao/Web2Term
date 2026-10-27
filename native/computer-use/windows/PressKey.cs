@@ -12,15 +12,19 @@ internal static class PressKeyProtocol
         .. new[] { "PageUp", "PageDown", "End", "Home", "Left", "Up", "Right", "Down" }.Select((name, i) => new PressKeySpec(name, (ushort)(33 + i), true)),
         new("Insert", 45, true), new("Delete", 46, true), new("Menu", 93, true), new("NumpadEnter", 13, true),
         new("Multiply", 106), new("Add", 107), new("Subtract", 109), new("Decimal", 110), new("Divide", 111, true),
+        new("Semicolon", 0xba), new("Equal", 0xbb), new("Comma", 0xbc), new("Minus", 0xbd), new("Period", 0xbe), new("Slash", 0xbf),
+        new("Backquote", 0xc0), new("LeftBracket", 0xdb), new("Backslash", 0xdc), new("RightBracket", 0xdd), new("Quote", 0xde),
         .. Enumerable.Range(0, 10).Select(i => new PressKeySpec("Numpad" + i, (ushort)(96 + i))),
         .. Enumerable.Range(0, 26).Select(i => new PressKeySpec(((char)(65 + i)).ToString(), (ushort)(65 + i))),
         .. Enumerable.Range(0, 10).Select(i => new PressKeySpec(i.ToString(), (ushort)(48 + i))),
         .. Enumerable.Range(0, 24).Select(i => new PressKeySpec("F" + (i + 1), (ushort)(112 + i)))];
     private static readonly Dictionary<string, string> Aliases = new(StringComparer.Ordinal) { ["ctrl"] = "control", ["ctl"] = "control", ["option"] = "alt", ["windows"] = "win", ["meta"] = "win",
         ["esc"] = "escape", ["return"] = "enter", ["spacebar"] = "space", ["pgup"] = "pageup", ["pgdn"] = "pagedown", ["del"] = "delete", ["ins"] = "insert",
-        ["arrowleft"] = "left", ["arrowright"] = "right", ["arrowup"] = "up", ["arrowdown"] = "down", ["apps"] = "menu" };
+        ["arrowleft"] = "left", ["arrowright"] = "right", ["arrowup"] = "up", ["arrowdown"] = "down", ["apps"] = "menu",
+        ["-"] = "minus", ["="] = "equal", ["plus"] = "equal", ["["] = "leftbracket", ["]"] = "rightbracket", ["/"] = "slash", ["\\"] = "backslash",
+        [";"] = "semicolon", ["'"] = "quote", ["`"] = "backquote", [","] = "comma", ["."] = "period" };
     internal static PressKeyChord? Parse(string value) {
-        if (string.IsNullOrWhiteSpace(value) || value.Length > 80 || value.Any(c => !(c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '+' or ' '))) return null;
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 80 || value.Any(char.IsControl)) return null;
         string[] tokens = value.Split('+').Select(s => s.Trim().ToLowerInvariant()).Select(s => Aliases.GetValueOrDefault(s, s)).ToArray();
         if (tokens.Length > 5 || tokens.Any(string.IsNullOrEmpty) || tokens.Distinct(StringComparer.Ordinal).Count() != tokens.Length) return null;
         PressKeySpec? primary = Named.Concat(Modifiers).FirstOrDefault(s => s.Name.ToLowerInvariant() == tokens[^1]);

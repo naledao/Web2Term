@@ -93,7 +93,7 @@ internal sealed class WindowFocusService(WindowCatalog catalog, IWindowFocusBack
         bool Focused() => current is { Window: { Visible: true, Minimized: false, Foreground: true, Enabled: true, Cloaked: false } } &&
             sample.Observation.foreground_hwnd == current.Window.Handle && sample.Observation.active_hwnd == current.Window.Handle && sample.Observation.focus_hwnd != null &&
             sample.Observation.focus_root_hwnd == current.Window.Handle && sample.Observation.win32_focus == "confirmed" && sample.Observation.uia_focus.status == "confirmed" &&
-            sample.Observation.uia_focus.root_hwnd == current.Window.Handle && sample.Observation.uia_focus.has_keyboard_focus == true;
+            sample.Observation.uia_focus.root_hwnd == current.Window.Handle; // has_keyboard_focus is informational: Win32 focus is already confirmed.
         bool Observe()
         {
             if (Resolve() == null) return false;

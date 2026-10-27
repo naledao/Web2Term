@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { computerOverlaySnapshot, ComputerOverlayLifetime } from '../shared/computer-overlay'
+import type { ComputerOverlaySnapshot } from '../shared/computer-overlay'
 import { reportedArtifactEvidence, samePresentationLease, taskActivity, taskPresentationLease, validTaskPresentationRequest } from '../shared/task-presentation'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from '../shared/task-presentation'
 import { recheckCompletionFile } from './task-completion'
@@ -13,7 +15,7 @@ import { TaskContinuityService } from './task-continuity'
 import { TaskBackgroundWait, backgroundBelongsTo, reusableBackgroundTask } from './task-background-wait'
 import type { ComputerUseStepRequest, StepAcceptance } from './task-progression'
 import type { AutonomousTask, AutonomousTaskState, TaskLease, TaskToolContext, TaskMachine, TaskResumeRequest } from '../shared/autonomous-task'
-import { computerRecoveryMessage } from './computer-recovery'
+import { computerRecoveryMessage, recoverySendBlockedMessage } from './computer-recovery'
 import { taskToolResultContext, parseTaskToolContext } from '../shared/autonomous-task'
 import { pendingTaskQuestion, validTaskQuestionRequest } from '../shared/task-clarification'
 import type { TaskQuestion, TaskQuestionSource, TaskQuestionRequest } from '../shared/task-clarification'
@@ -428,6 +430,7 @@ export class SessionRuntime {
   private taskEnded = false
   private stoppingTask: Promise<InterceptorStatus> | null = null
   private readonly completedTaskNotifications = new Set<string>()
+  private readonly computerOverlayLifetime = new ComputerOverlayLifetime()
   private readonly taskCoordinator: TaskCoordinator
   private readonly taskProgression: TaskProgression
   private readonly taskBackgroundWait: TaskBackgroundWait
@@ -438,6 +441,8 @@ export class SessionRuntime {
   private legacyToolSend: { context: TaskToolContext; abort: AbortController } | null = null
   private focusSending = false
   private taskRecoverySend: { request: TaskResumeRequest; text: string; pageEpoch: string; acknowledged: boolean } | null = null
+  /** One 继续原任务 at a time: a forced resume waits for the app's own work, and a second click must not send twice. */
+  private resumingTask = false
   private focusUiRecovering = false
   private focusUiRecoveredTurn: { platformId: string; conversationId: string; turnId: string } | null = null
   private focusRevision: { token: string; platformId: string; conversationId: string; turnIds: string[]; messageIds: string[]; acknowledged: boolean } | null = null
@@ -464,6 +469,7 @@ export class SessionRuntime {
     this.computerUseTool = new ComputerUseTool(() => this.refreshComputerUseCapabilities(), options.desktopCoordinator)
     this.focusChat = new FocusChat(this.id, options.store)
     this.taskCoordinator = new TaskCoordinator(this.id, options.store, state => {
+      if (state.task) this.computerOverlayLifetime.update(state.task)
       this.taskProgression?.reconcile()
       this.taskBackgroundWait?.reconcile()
       this.backgroundTaskResults.reconcile()
@@ -474,7 +480,7 @@ export class SessionRuntime {
       this.refreshComputerUseStepContext(state.platformId)
       if (state.task?.status === 'completed') {
         void this.embeds.get(state.platformId)?.embed?.endTask()
-        if (state.platformId === this.activePlatformId) this.notifyTaskCompleted(state.task.completion?.report?.summary ?? '任务已完成')
+        if (state.platformId === this.activePlatformId) this.notifyTaskCompleted(state.task.modelCompletion ? '任务已完成' : state.task.completion?.report?.summary ?? '任务已完成')
       }
       if (state.platformId === this.activePlatformId) this.send(IpcChannels.autonomousTaskChanged, state)
     })
@@ -1010,8 +1016,12 @@ export class SessionRuntime {
         }
       },
       onTaskQuestion: (question, source) => this.recordTaskQuestion(platform.id, question, source),
-      onTaskCompleted: () => {
-        if (isActive()) this.notifyTaskCompleted('任务已完成')
+      onTaskCompleted: (messageId, source) => {
+        if (!isActive()) return
+        const capability = this.getComputerUseCapability(platform.id)
+        if (capability.scopeSupported && capability.computerUseEnabled) {
+          return this.completeComputerTaskFromModel(platform.id, messageId, source)
+        } else this.notifyTaskCompleted('任务已完成')
       },
       /*
        * ONLY the visible platform feeds the command loop.
@@ -1897,12 +1907,19 @@ export class SessionRuntime {
       const common = { ...lease, sourceMessageId: request.messageId, stepToken: checked.stepToken, receipt: request }
       let accepted: StepAcceptance
       if (issue || !capability.available) {
-        const unavailable = !capability.available && (!issue || issue.code === 'unknown_action')
+        // complete_task stays registered while the helper is down, so "available" alone cannot tell
+        // a missing helper from a misspelled action. Name the helper state instead of "not registered".
+        const helperDown = !!capability.helper && capability.helper.phase !== 'ready'
+        const unavailable = (!capability.available || helperDown) && (!issue || issue.code === 'unknown_action')
+        const reason = capability.available && helperDown
+          ? `Windows helper 当前不可用（${capability.helper!.message}），桌面动作暂时无法执行；helper 恢复后先用 observe 核对实际状态。`
+          : capability.message
         const result: ComputerUseToolResult = { type: 'computer_result', version: 1,
           action: checked.ok ? checked.call.action : checked.action, ok: false, execution: 'not_executed',
           code: unavailable ? 'unavailable' : issue!.code,
-          message: unavailable ? capability.message + ' 本次未执行，请使用当前实际可用的工具。' : issue!.message + ' 本次未执行桌面动作。',
-          data: { ...(issue && !unavailable ? { protocol_error: issue } : {}), tool_available: capability.available, available_actions: capability.actions } }
+          message: unavailable ? reason + ' 本次未执行，请使用当前实际可用的工具。' : issue!.message + ' 本次未执行桌面动作。',
+          data: { ...(issue && !unavailable ? { protocol_error: issue } : {}), tool_available: capability.available, available_actions: capability.actions,
+            ...(helperDown ? { helper_phase: capability.helper!.phase, helper_code: capability.helper!.code } : {}) } }
         accepted = this.advanceComputerUse({ ...common, result })
       } else if (checked.ok) accepted = this.advanceComputerUse({ ...common, call: checked.call })
       else return false
@@ -1929,6 +1946,45 @@ export class SessionRuntime {
   getAutonomousTask(): AutonomousTaskState | null {
     if (this.disposed) return null
     return this.syncAutonomousTask(this.activePlatformId, this.embed.getState().conversationId)
+  }
+
+  /** Display-only read: never restores tasks, issues tokens, observes the desktop or wakes execution. */
+  getComputerOverlaySnapshot(): ComputerOverlaySnapshot | null {
+    if (this.disposed || !this.active || !this.getComputerUseCapability().computerUseEnabled) return null
+    const conversationId = this.embed.getState().conversationId
+    if (!conversationId) return null
+    const task = this.options.store.latestAutonomousTask(this.id, this.activePlatformId, conversationId)
+    const lease = task && taskPresentationLease(task)
+    // A live completion stays visible briefly as a notice, then leaves the native window hidden.
+    // Reading history cannot create this lifetime or renew it on each 500 ms refresh.
+    // A plain chat turn records a task too; stay hidden until the model issues its first desktop step.
+    if (!task || !lease || !task.progress?.stepCount || !this.computerOverlayLifetime.visible(task)) return null
+    return computerOverlaySnapshot(task, this.getTaskActivity(lease), this.runner.getAutomation().paused)
+  }
+
+  private completeComputerTaskFromModel(platformId: string, messageId?: string, source?: import('../shared/types').TaskActionSource): boolean {
+    const entry = this.embeds.get(platformId), task = this.taskCoordinator.current(platformId)
+    if (this.disposed || !this.active || this.taskEnded || platformId !== this.activePlatformId || !task || !source || !messageId ||
+      task.sourceSubmissionId !== source.sourceSubmissionId || task.conversationId !== entry?.platform.conversationIdFromPath(source.pagePath) ||
+      task.conversationId !== entry?.embed?.getState().conversationId) return false
+    const lease = taskPresentationLease(task)
+    if (!lease) return false
+    try {
+      if (!this.taskCoordinator.completeFromModel(lease, messageId)) return false
+      this.taskEnded = true
+      this.pendingTaskCommand = null; this.pendingTaskComputer = null; this.pendingTaskReply = null; this.taskRecoverySend = null
+      this.deferredCommands.clear()
+      this.legacyToolSend?.abort.abort()
+      this.taskProgression.cancel()
+      this.backgroundTaskResults.cancel({ platformId, conversationId: lease.conversationId })
+      this.backgroundTasks.cancelNotifications({ platformId, conversationId: lease.conversationId })
+      this.options.computerUseObservations?.invalidateInput(this.computerUseTool, lease)
+      this.options.desktopCoordinator?.reconcile()
+      return true
+    } catch {
+      this.taskCoordinator.fail(platformId, task.conversationId)
+      return false
+    }
   }
 
   /** Read the saved visible task without restoring a coordinator, issuing tokens or waking tools. */
@@ -2039,22 +2095,51 @@ export class SessionRuntime {
     if (!request || typeof request !== 'object' || Array.isArray(request) || Object.keys(request).length !== 5 ||
       !['sessionId', 'platformId', 'conversationId', 'taskId', 'generation'].every(key => Object.hasOwn(request, key)) ||
       !this.active || !this.ownsFocus(request) || request.platformId !== 'deepseek' || !request.conversationId) return '原会话已切换，请重新打开需要恢复的任务。'
+    if (this.resumingTask) return '正在恢复原任务，请稍候。'
+    this.resumingTask = true
+    try { return await this.resumeAutonomousTaskNow(request) }
+    finally { this.resumingTask = false }
+  }
+
+  /*
+   * 继续原任务 is the user's explicit decision to go on. Clear what the app itself holds (pause, a
+   * switched-off terminal mode or prompt injection, an open question, an unconfirmed earlier recovery),
+   * wait briefly for work it is finishing, and let the page stop a streaming reply and end a stale wait.
+   * Only the user's own unsent draft, a changed or halted task and an unavailable desktop still stop it.
+   */
+  private async resumeAutonomousTaskNow(request: TaskResumeRequest): Promise<string> {
+    const until = async (ready: () => boolean, ms: number): Promise<boolean> => {
+      const end = Date.now() + ms
+      while (!ready()) {
+        if (Date.now() >= end || this.disposed) return false
+        await new Promise(resolve => setTimeout(resolve, 200))
+      }
+      return true
+    }
+    if (this.runner.getAutomation().paused) this.setPaused(false)
+    if (!this.embed.getInterceptorStatus().enabled) this.embed.setInterceptorEnabled(true)
+    if (!this.embed.getInterceptorStatus().promptInjectionEnabled) this.setPromptInjectionEnabled(true)
+    const question = this.embed.getInterceptorStatus().pendingQuestion
+    if (question) await this.embed.cancelQuestion(question.messageId)
+    this.taskRecoverySend = null
+    const settled = await until(() => !this.stoppingTask && this.options.desktopCoordinator?.canReleaseHumanControl() !== false &&
+      !this.focusSending && !this.runner.hasInFlightWork() && !this.backgroundTaskResults.isSending && !this.focusRevision, 15_000)
+    if (!this.active || !this.ownsFocus(request)) return '原会话已切换，请重新打开需要恢复的任务。'
+    if (!settled) return this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending
+      ? '终端命令或结果回传仍在进行，请等它结束后再点继续原任务。' : '原操作仍在退出，请稍后再点继续原任务。'
+    // A restarting helper is ready within seconds; wait for it rather than refuse.
+    await until(() => !computerUseSendBlock(this.getComputerUseCapability(request.platformId)), 20_000)
     const capability = this.getComputerUseCapability(request.platformId)
     if (!capability.available) return capability.message
-    if (this.stoppingTask) return '正在停止原操作，请等待实际执行器退出后继续原任务。'
-    if (this.options.desktopCoordinator?.canReleaseHumanControl() === false) return '人工接管后的原操作尚未退出，请等待后再继续原任务。'
     const state = this.getAutonomousTask(), task = state?.task
     if (task?.control?.halted) return '原任务已达到运行上限并保留未完成状态；如需继续，请调整运行上限后重新提交目标。'
     if (state?.error || !task || task.id !== request.taskId || task.generation !== request.generation ||
       task.machine.id !== this.options.localMachineId || task.machine.platform !== process.platform || task.machine.arch !== process.arch ||
       !(['interrupted', 'stopped'].includes(task.status) || task.status === 'recorded' && (task.progress?.phase === 'blocked' || pendingTaskQuestion(task)?.state === 'uncertain'))) return '任务状态已变化，无法恢复这份历史记录。'
-    const pending = this.taskRecoverySend
-    if (pending && pending.pageEpoch !== this.embed.getComputerUsePageEpoch()) this.taskRecoverySend = null
-    if (this.taskRecoverySend) return '上次恢复消息是否提交尚未确认，请先核对原对话；不会自动重复发送。'
     const status = this.embed.getInterceptorStatus()
-    if (this.focusSending || this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending || this.focusRevision || status.pendingQuestion || this.runner.getAutomation().paused) return '请等待当前操作结束，并解除暂停后恢复原任务。'
-    if (!status.enabled || !status.promptInjectionEnabled) return '请先启用当前对话的终端模式和提示词注入。'
-    const helperBlock = computerUseSendBlock(this.getComputerUseCapability(request.platformId))
+    if (this.focusSending || this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending || this.focusRevision || this.runner.getAutomation().paused) return '请等待当前操作结束后再点继续原任务。'
+    if (!status.enabled || !status.promptInjectionEnabled) return '未能开启当前对话的终端模式或提示词注入，请手动开启后再点继续原任务。'
+    const helperBlock = computerUseSendBlock(capability)
     if (helperBlock) return helperBlock
     // Retire a blocked live delivery before sending the recovery message. Its timer/late
     // acknowledgements may refine history but cannot race this new conversation turn.
@@ -2068,12 +2153,12 @@ export class SessionRuntime {
     this.taskRecoverySend = send
     this.focusSending = true
     try {
-      const outcome = await this.embed.sendUserTask(text)
+      const outcome = await this.embed.sendUserTask(text, true)
       if (send.acknowledged) return ''
       // Known pre-submit rejection can be retried by the user. Lost acknowledgements cannot.
       if (['busy', 'no-composer', 'insert-failed', 'unavailable', 'invalid'].includes(outcome)) {
         if (this.taskRecoverySend === send) this.taskRecoverySend = null
-        return outcome === 'busy' ? '页面正在生成或有未发送草稿，请处理后重试恢复。' : '恢复消息未发送，请等待页面就绪后重试。'
+        return outcome === 'busy' ? recoverySendBlockedMessage(await this.embed.userSendBlockReason()) : '恢复消息未发送，请等待页面就绪后再点继续原任务。'
       }
       return '恢复消息的发送确认尚未取得，请先核对原对话；不会自动重发或执行历史动作。'
     } catch { return '恢复消息的发送结果未知，请先核对原对话；不会自动重发。' }

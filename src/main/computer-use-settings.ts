@@ -6,7 +6,7 @@ interface SettingsStore {
   setSetting(key: string, value: string): void
 }
 
-const KEYS = ['computerUseEnabled', 'desktopControlEnabled'] as const
+const KEYS = ['computerUseEnabled', 'desktopControlEnabled', 'desktopPointClickEnabled'] as const
 
 export function readComputerUsePreferences(store: Pick<SettingsStore, 'getSetting'>): ComputerUsePreferences {
   // An explicit value under the new name takes precedence, including a saved "off".
@@ -15,9 +15,13 @@ export function readComputerUsePreferences(store: Pick<SettingsStore, 'getSettin
   let limits: unknown
   try { limits = savedLimits ? JSON.parse(savedLimits) : undefined } catch { /* Corrupt saved preferences use bounded defaults. */ }
   const savedDelay = store.getSetting('computerResultDelaySeconds')
+  const on = enabled === '1'
   return {
-    computerUseEnabled: enabled === '1',
-    desktopControlEnabled: store.getSetting('desktopControlEnabled') === '1',
+    computerUseEnabled: on,
+    // Desktop control and coordinate clicks follow computer use; the settings page no longer offers
+    // them separately, so values saved under their own keys by older versions are ignored.
+    desktopControlEnabled: on,
+    desktopPointClickEnabled: on,
     ...(savedLimits != null ? { computerUseLimits: normalizeComputerProgressLimits(limits) } : {}),
     ...(savedDelay != null ? { computerResultDelaySeconds: normalizeComputerResultDelay(savedDelay) } : {})
   }
@@ -51,9 +55,9 @@ export function parseComputerUsePreferencesPatch(value: unknown): Partial<Comput
 
 export function saveComputerUsePreferences(store: SettingsStore, value: unknown): Partial<ComputerUsePreferences> {
   const patch = parseComputerUsePreferencesPatch(value)
-  for (const key of KEYS) {
-    if (patch[key] !== undefined) store.setSetting(key, patch[key] ? '1' : '0')
-  }
+  // Only the computer use switch is a choice; the two desktop keys are written alongside it so the
+  // stored values never disagree with what readComputerUsePreferences reports.
+  if (patch.computerUseEnabled !== undefined) for (const key of KEYS) store.setSetting(key, patch.computerUseEnabled ? '1' : '0')
   if (patch.computerUseLimits) store.setSetting('computerUseLimits', JSON.stringify(patch.computerUseLimits))
   if (patch.computerResultDelaySeconds !== undefined) store.setSetting('computerResultDelaySeconds', String(patch.computerResultDelaySeconds))
   return patch

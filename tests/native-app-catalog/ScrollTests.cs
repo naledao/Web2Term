@@ -45,7 +45,7 @@ internal static class ScrollTests
             ("scroll routing requires mouse-position routing or the exact focused hit and never guesses horizontal routing", Routing),
             ("control scrolling checks live identity without requiring a focused editable target", Controls),
             ("stale image focus DPI control and blocked routing stop before input", Stale),
-            ("cursor movement and post-hover changes are not mistaken for a wheel event", Hover),
+            ("hover repaint is allowed while lost native route still blocks wheel submission", Hover),
             ("zero/unknown wheel receipts and cancellation never cause a second wheel", Uncertain),
             ("new observations cannot replay a consumed scroll request and private parameters are strict", Protocol)
         }) { item.Item2(); Console.WriteLine("PASS " + item.Item1); }
@@ -68,6 +68,8 @@ internal static class ScrollTests
         }
         var f = new Fixture(); f.States.Current = f.States.Current with { InputTargetReady = false, PointerTargetReady = true }; f.Input.Route = "mouse_position";
         Check(f.Scroll(f.Publish()).Ok, "verified pointer-routed wheel incorrectly required keyboard focus");
+        Check(ScrollRoutingPolicy.Select("horizontal", null, false, true) == "focused_descendant", "verified child focus cannot route to its hit parent");
+        Check(ScrollRoutingPolicy.Select("horizontal", null, false, false) == null, "unrelated sibling pane was admitted");
     }
     private static void Controls() {
         var f = new Fixture(); f.Controls.RootNode.Children[0].Raw = f.Controls.RootNode.Children[0].Raw with { Focused = false };
@@ -78,8 +80,8 @@ internal static class ScrollTests
     private static void Stale() {
         foreach (string scenario in new[] { "image", "focus", "dpi", "route", "blocked", "control", "ancestor", "hit" }) {
             var f = new Fixture(); var image = f.Publish(controls: scenario is "control" or "ancestor" or "hit");
-            if (scenario == "image") f.Images.Pixels.Bgra[0] = 255;
-            if (scenario == "focus") f.States.Current = f.States.Current with { Focus = "foreign" };
+            if (scenario == "image") Array.Fill(f.Images.Pixels.Bgra, (byte)255);
+            if (scenario == "focus") f.Input.Pointer.Allowed = false;
             if (scenario == "dpi") f.States.Current = f.States.Current with { Source = f.States.Current.Source with { WindowDpi = 192 } };
             if (scenario == "route") f.Input.Route = null;
             if (scenario == "blocked") f.Input.Pointer.Allowed = false;
@@ -100,7 +102,8 @@ internal static class ScrollTests
             if (scenario == "route") f.Input.Pointer.OnMove = () => f.Input.Route = null;
             if (scenario == "live_control") f.Input.Pointer.OnMove = () => f.Controls.RootNode.Children[0].Raw = f.Controls.RootNode.Children[0].Raw with { Name = "changed on hover" };
             var result = f.Scroll(image, element: image.controls != null); var r = Receipt(result);
-            Check(!result.Ok && f.Input.Pointer.Moves == 1 && f.Input.Wheels == 0 && !r.scroll_attempted && r.move_attempted && result.Execution == (scenario == "move_zero" ? "not_executed" : "executed"), "hover failure dispatched a wheel or lost movement fact: " + scenario); f.Closed();
+            bool repaint = scenario is "hover" or "focus";
+            Check(result.Ok == repaint && f.Input.Pointer.Moves == 1 && f.Input.Wheels == (repaint ? 1 : 0) && r.scroll_attempted == repaint && r.move_attempted && result.Execution == (scenario == "move_zero" ? "not_executed" : "executed"), "hover/native route handling lost input facts: " + scenario); f.Closed();
         }
     }
     private static void Uncertain() {

@@ -333,7 +333,7 @@ test('a ChatGPT chart is saved as its title, data points and caption, not as its
   const marker = /<!--focus-chart (\{[\s\S]*?\}) -->\n> 📊/.exec(saved.text)
   assert.ok(marker, 'marker sits directly before its quoted fallback')
   assert.deepEqual(JSON.parse(marker[1]), {
-    title: '每日数值', caption: '数据来自用户输入', series: [{ name: '数值', unit: '' }],
+    title: '每日数值', caption: '数据来自用户输入', kind: 'table', series: [{ name: '数值', unit: '' }],
     rows: [{ label: '周一', values: [12] }, { label: '周二', values: [18] }, { label: '周三', values: [9] }]
   })
 })
@@ -358,7 +358,7 @@ test('chart data parses multi-series points, and any unparsable point leaves onl
   assert.equal(data.title, 'CPU 与内存使用率', 'the card heading wins over the aria-label')
   assert.deepEqual(data.series, [{ name: 'CPU', unit: '%' }, { name: '内存', unit: '%' }])
   assert.deepEqual(data.rows[1], { label: '2', values: [25, 51.1] })
-  for (const items of [['周一: 很高', '周二: 18'], ['1: CPU 20%', '2: GPU 25%'], ['只有一个: 1']]) {
+  for (const items of [['周一: 很高', '周二: 18'], ['1: CPU 20%', '2: GPU 25%'], ['1: CPU 20%', '2: CPU 25ms']]) {
     const text = savedFor(items)
     assert.equal(text.includes('focus-chart'), false, items.join(' | '))
     assert.match(text, /> 📊/)
@@ -382,6 +382,39 @@ test('a chart whose only label is a type word ("图表 图表") gets no title of
   assert.match(text, /## 周一至周五数据折线图/)
   assert.match(text, /> 📊 图表（可在原始视图中交互查看）/)
   assert.equal(text.includes('图表 图表'), false)
+})
+
+test('ChatGPT categorical bars retain their kind, DIL title, caption and exact values', () => {
+  const values = [.9684, .965, .966, 1.7572]
+  const labels = ['零差分', '全局均值', '细胞均值', '同药同条件跨板均值']
+  const native = element('g', { class: 'recharts-bar' }, values.map((value, index) =>
+    element('path', { class: 'recharts-rectangle', x: String(index * 100), y: String(200 - value * 100), height: String(value * 100) })))
+  const chart = element('div', { 'data-testid': 'chatgpt-chart-content-reference' }, [
+    element('span', { 'data-d-component': 'Text', 'data-d-default-strong': '' }, '跨实验板已知药物条件评价'),
+    element('section', { 'aria-label': '图表 图表' }, [element('svg', {}, [native]),
+      element('ul', { class: 'sr-only' }, labels.map((label, index) => element('li', {}, `${label}: ${values[index]}`))),
+      element('p', { class: 'line-clamp-2' }, '原尺度 MSE，越低越好；并非 drug-blind 测试。')])
+  ])
+  const turn = element('div', { 'data-chatgpt-selection-message-id': 'bars' }, [
+    element('div', { 'data-markdown-text-style': 'assistant-message' }, [chart])])
+  const read = () => {
+    const app = fixture([turn], CHATGPT_PAGE)
+    app.controller.checkNow(); app.tick(250)
+    return JSON.parse(/<!--focus-chart (\{[^\n]*\}) -->/.exec(app.events.find(event => event.event === 'assistant-message').text)[1])
+  }
+  const data = read()
+  assert.equal(data.kind, 'bar')
+  assert.equal(data.title, '跨实验板已知药物条件评价')
+  assert.match(data.caption, /drug-blind/)
+  assert.deepEqual(data.rows, labels.map((label, index) => ({ label, values: [values[index]] })))
+  // Mixed charts and horizontal bars cannot be relabelled as vertical bars or lines.
+  native.childNodes.push(element('g', { class: 'recharts-line' }))
+  assert.equal(read().kind, 'table')
+  native.childNodes.pop()
+  for (const node of native.childNodes) node.attributes.x = '0'
+  assert.equal(read().kind, 'table')
+  native.attributes.class = 'recharts-line'
+  assert.equal(read().kind, 'line')
 })
 
 // DeepSeek's native tool-call markup, as its page renders it: the bars come out as `| |`
@@ -432,4 +465,53 @@ test('a DSML call to an unknown tool is not turned into a request', () => {
   ])])
   app.controller.checkNow()
   assert.equal(app.events.some((event) => ['command', 'read-files', 'question'].includes(event.event)), false)
+})
+
+// DeepSeek ended a reply by itself mid-thinking: the reasoning header reads 已停止, no answer, no 继续生成.
+const stoppedTurn = (key) => element('div', { 'data-virtual-list-item-key': key }, [
+  element('div', { class: 'ds-think-header' }, [element('span', {}, '已停止')]),
+  element('div', { class: 'ds-think-content' }, 'Actually, let me just try press_key with Ctrl+F to see if it works.')
+])
+const stubSends = (app) => {
+  const sent = []
+  app.controller.sendRaw = async (text) => { sent.push(text); return 'ok' }
+  return sent
+}
+// The first scan only marks the turn; the settle timer rescans it.
+const settleStopped = (app) => { app.advance(4000); app.tick(4000); app.tick(800) }
+
+test('a reply the site stopped mid-thinking gets one automatic 继续 after it stays stopped', async () => {
+  const app = fixture([userTurn('1'), stoppedTurn('2')])
+  const sent = stubSends(app)
+  app.controller.checkNow()
+  assert.deepEqual(sent, [], 'never on the first sight of a stopped turn')
+  settleStopped(app)
+  assert.deepEqual(sent, ['继续'])
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.ok(app.events.some((event) => event.event === 'continue-generation' && event.reason === 'stopped-continue-sent'))
+  settleStopped(app)
+  assert.deepEqual(sent, ['继续'], 'the same stopped turn is answered once')
+})
+
+test('automatic 继续 stops after three stopped replies in a row, and never fires outside a live wait or with an answer', () => {
+  const app = fixture([userTurn('1'), stoppedTurn('2')])
+  const sent = stubSends(app)
+  app.controller.checkNow()
+  for (const key of ['2', '4', '6', '8']) {
+    app.replaceNodes([userTurn('1'), stoppedTurn(key)])
+    app.scan(); settleStopped(app)
+  }
+  assert.equal(sent.length, 3)
+  assert.ok(app.events.some((event) => event.reason === 'stopped-continue-limit'))
+
+  const history = fixture([userTurn('1'), stoppedTurn('2')])
+  const none = stubSends(history)
+  history.controller.armBaseline()
+  history.scan(); settleStopped(history)
+  assert.deepEqual(none, [], 'a restored stopped turn is history')
+
+  const answered = fixture([proseTurn('2', '这是最终回答。', element('span', {}, '已停止'))])
+  const nothing = stubSends(answered)
+  answered.controller.checkNow(); settleStopped(answered)
+  assert.deepEqual(nothing, [], 'a turn with an answer is read normally')
 })

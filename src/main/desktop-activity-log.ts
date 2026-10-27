@@ -11,7 +11,7 @@ let logPath: string | null = null
  */
 export function writeDesktopActivityDiagnostic(event: DesktopActivityEvent, takeover: boolean): string | null {
   if (event.kind === 'focus-changed') return null
-  const details = { event: 'desktop-activity', kind: event.kind, input: event.input, takeover,
+  const details = { event: 'desktop-activity', kind: event.kind, input: event.input, strike: event.strike, takeover,
     taskId: event.owner.taskId, taskGeneration: event.owner.generation, helperGeneration: event.generation }
   try {
     if (!logPath) {

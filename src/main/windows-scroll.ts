@@ -21,7 +21,7 @@ export function validateWindowsScrollReceipt(value: unknown, p: Record<string, u
     value.request_id !== requestId || value.observation_id !== p.observation_id || value.source_step_id !== sourceStep || value.element_id !== (p.element_id ?? null) ||
     value.direction !== p.direction || value.amount !== (p.amount ?? 3) || value.axis !== scrollAxis(p.direction as string) || value.wheel_delta !== scrollDelta(p.direction as string, Number(p.amount ?? 3)) ||
     ['move_attempted', 'scroll_attempted', 'scroll_completed'].some(k => typeof value[k] !== 'boolean') || !accepted(value.move_accepted) || !accepted(value.wheel_events_accepted) ||
-    value.routing !== null && !['mouse_position', 'focused_hit'].includes(value.routing as string) || value.scroll_verified !== false || value.goal_verified !== false || value.input_ready !== false) return false
+    value.routing !== null && !['mouse_position', 'focused_hit', 'focused_descendant'].includes(value.routing as string) || value.scroll_verified !== false || value.goal_verified !== false || value.input_ready !== false) return false
   const v = value as unknown as WindowsScrollReceipt
   const before = typeof v.before_at === 'string' ? Date.parse(v.before_at) : NaN, end = typeof v.completed_at === 'string' ? Date.parse(v.completed_at) : NaN
   if (!Number.isFinite(before) || !Number.isFinite(end) || before > end || end > now + 10000 || now - before > 120000 ||
@@ -35,7 +35,7 @@ export function validateWindowsScrollReceipt(value: unknown, p: Record<string, u
     if (!object(v.point) || !fields(v.point, ['x', 'y']) || !integer(v.point.x, -1_000_000, 1_032_768) || !integer(v.point.y, -1_000_000, 1_032_768)) return false
     if (p.element_id !== undefined) {
       const row = observed.controls?.elements.find(row => row.element_id === p.element_id)
-      if (!row?.bounds || !row.properties_complete || !inside(row.bounds, v.point) || !inside(observed.controls!.window_bounds, v.point)) return false
+      if (!row?.bounds || row.control_type === null || !inside(row.bounds, v.point) || !inside(observed.controls!.window_bounds, v.point)) return false
       if ((v.move_attempted || v.scroll_attempted) && (row.enabled !== true || row.offscreen !== false || observed.target !== 'controls' && observed.monitors.filter(m => inside(m.bounds, v.point!)).length !== 1)) return false
     } else {
       const mapped = observed.target === 'controls' ? null : resolveImagePoint(observed, Number(p.x), Number(p.y))

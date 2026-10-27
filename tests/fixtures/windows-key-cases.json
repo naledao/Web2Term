@@ -1,5 +1,9 @@
 {
   "valid": [
+    { "input": "Ctrl+-", "key": "Control+Minus", "down": [["Control", 162, false], ["Minus", 189, false]] },
+    { "input": "Ctrl+[", "key": "Control+LeftBracket", "down": [["Control", 162, false], ["LeftBracket", 219, false]] },
+    { "input": "Ctrl+/", "key": "Control+Slash", "down": [["Control", 162, false], ["Slash", 191, false]] },
+    { "input": "Control+Shift+Equal", "key": "Control+Shift+Equal", "down": [["Control", 162, false], ["Shift", 160, false], ["Equal", 187, false]] },
     { "input": "Tab", "key": "Tab", "down": [["Tab", 9, false]] },
     { "input": " shift + ctrl + s ", "key": "Control+Shift+S", "down": [["Control", 162, false], ["Shift", 160, false], ["S", 83, false]] },
     { "input": "Alt+F4", "key": "Alt+F4", "down": [["Alt", 164, false], ["F4", 115, false]] },

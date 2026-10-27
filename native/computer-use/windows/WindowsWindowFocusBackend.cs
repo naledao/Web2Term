@@ -91,8 +91,11 @@ internal sealed class WindowsWindowFocusBackend(WindowCatalog catalog) : IWindow
             Marshal.ThrowExceptionForHR(automation.GetFocusedElement(out latest));
             if (latest == null) return new("unavailable");
             Marshal.ThrowExceptionForHR(automation.CompareElements(focused, latest, out bool same));
-            if (!same || BooleanProperty(latest, 30008) != true) return new("outside_target", Handle(root), false);
-            return new(root == target && hasFocus == true ? "confirmed" : "outside_target", Handle(root), hasFocus);
+            // Focus moved while sampling: not evidence that it left the target.
+            if (!same) return new("unavailable");
+            // Office-style providers report HasKeyboardFocus=false on the focused element itself. The focused
+            // element's root window decides inside/outside; the flag is reported as observed, not as a verdict.
+            return new(root == target ? "confirmed" : "outside_target", Handle(root), BooleanProperty(latest, 30008));
         }
         catch (OperationCanceledException) { throw; }
         catch { return new("unavailable"); }

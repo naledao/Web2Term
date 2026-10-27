@@ -42,7 +42,7 @@ const definitions = [
     { name: 'button', type: 'string', required: false, description: 'Button', enum: ['left', 'right'] }
   ], example: { window_id: 'window-A', observation_id: 'obs-A', element_id: 'element-A' } }
 ]
-const envelope = (patch = {}) => ({ type: 'computer', version: 1, action: 'observe', step_token: token, ...patch })
+const envelope = (patch = {}) => ({ type: 'computer', version: 1, action: 'observe', step_token: token, description: '观察当前界面，确认下一步操作目标', ...patch })
 const click = (patch = {}) => envelope({ action: 'click', window_id: 'window-A', observation_id: 'obs-A', element_id: 'element-A', ...patch })
 const plain = value => JSON.parse(JSON.stringify(value))
 const check = raw => protocol.computerUseProtocol.check(typeof raw === 'string' ? raw : JSON.stringify(raw), definitions)
@@ -52,10 +52,24 @@ test('strict parsing yields one typed request and action parameters without prot
   const parsed = check(click())
   assert.equal(parsed.ok, true)
   assert.equal(parsed.stepToken, token)
-  assert.deepEqual(plain(parsed.call), { action: 'click', parameters: {
+  assert.deepEqual(plain(parsed.call), { action: 'click', description: envelope().description, parameters: {
     window_id: 'window-A', observation_id: 'obs-A', element_id: 'element-A'
   } })
   assert.equal(check(envelope()).ok, true)
+})
+
+test('description is required Chinese display metadata, bounded and stripped from executor parameters', () => {
+  for (const description of [undefined, null, 1, '', '  ', 'click QQ', '中'.repeat(161), '点击\n联系人', '点击\u0000联系人']) {
+    const result = check(click({ description }))
+    assert.equal(result.ok, false)
+    assert.equal(result.error.code, 'invalid_description')
+    assert.equal(result.error.field, 'description')
+  }
+  const result = check(click({ description: '  点击 QQ 联系人入口  ' }))
+  assert.equal(result.ok, true)
+  assert.equal(result.call.description, '点击 QQ 联系人入口')
+  assert.equal(Object.hasOwn(result.call.parameters, 'description'), false)
+  assert.equal(check(click({ description: '中'.repeat(160) })).ok, true)
 })
 
 test('decoded duplicate keys at every depth, unsafe object keys and malformed JSON are rejected', () => {
@@ -147,8 +161,8 @@ test('registered constraints survive normalization and invalid registrations can
   const prompt = shared.computerUseCapabilityPrompt(shared.resolveComputerUseCapability(
     { computerUseEnabled: true, desktopControlEnabled: true },
     { sessionId: 'session-A', platformId: 'deepseek', hostPlatform: 'win32', hostArch: 'x64', connection: 'local' }, definitions), token)
-  assert.match(prompt, /最大值 1920/)
-  assert.match(prompt, /组间互斥/)
+  assert.match(prompt, /≤1920/)
+  assert.match(prompt, /定位二选一/)
   assert.equal(JSON.parse(prompt.match(/```json\n([^]*?)\n```/)[1]).step_token, token)
   for (const bad of [
     { ...definitions[1], locatorAlternatives: [['element_id'], ['element_id', 'x']] },
@@ -249,6 +263,9 @@ test('the pre-send token binds to the confirmed goal, is consumed once, and rota
   assert.equal(f.executions.length, 1)
   assert.equal(f.sends.length, 1)
   const result = f.sends[0].result
+  assert.equal(f.progress().currentStep.description, envelope().description)
+  assert.equal(f.snapshots.at(-1).progress.currentStep.description, envelope().description)
+  assert.equal(Object.hasOwn(f.executions[0].parameters, 'description'), false)
   assert.equal(result.execution, 'executed')
   assert.equal(result.task_id, f.first.id)
   assert.notEqual(result.next_step_token, f.firstToken)
@@ -284,6 +301,18 @@ test('main rejects forged page validity and sends a not-executed error that the 
   assert.equal(f.executions.length, 1)
   assert.equal(f.sends[1].result.ok, true)
   assert.equal(f.progress().stepCount, 2)
+})
+
+test('missing description returns corrective feedback without executing the action', async () => {
+  const f = fixture()
+  f.receive(f.pageRequest(JSON.stringify(envelope({ step_token: f.firstToken, description: undefined }))))
+  await f.flush()
+  assert.equal(f.executions.length, 0)
+  assert.equal(f.sends[0].result.code, 'invalid_description')
+  assert.equal(f.sends[0].result.execution, 'not_executed')
+  f.receive(f.pageRequest(JSON.stringify(envelope({ step_token: f.sends[0].result.next_step_token }))))
+  await f.flush()
+  assert.equal(f.executions.length, 1)
 })
 
 test('a consumed token in another response cannot replay its desktop action', async () => {

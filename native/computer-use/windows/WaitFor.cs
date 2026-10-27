@@ -12,12 +12,13 @@ internal static class WaitPredicate
     internal static WaitEvaluation Controls(WaitOptions p, DiscoveredWindow window, ControlTreeResult? tree)
     {
         if (tree == null || !window.Visible || window.Minimized || window.Cloaked != false) return new("unavailable", 0);
-        var visible = tree.elements.Where(r => r.properties_complete && r.password == false && r.offscreen == false && r.bounds != null && r.name != null);
+        var visible = tree.elements.Where(r => r.password == false && r.offscreen == false && r.bounds != null && r.name != null);
         if (p.Condition == "text_present") {
             int matches = visible.Count(r => r.name!.Contains(p.Text!, StringComparison.Ordinal));
             return new(matches > 0 ? "met" : tree.complete ? "not_met" : "unavailable", matches);
         }
         int count = visible.Count(r => !r.name_truncated && r.name == p.Selector!.Name && (p.Selector.Role == null || r.role == p.Selector.Role) && r.enabled == true && window.Enabled);
+        if (p.Condition == "control_present") return new(count > 0 ? "met" : tree.complete ? "not_met" : "unavailable", count);
         return new(count > 1 ? "ambiguous" : !tree.complete ? "unavailable" : count == 1 ? "met" : "not_met", count);
     }
     internal static bool Window(DiscoveredWindow w, WaitOptions p, int controlPid) => w.Verified && w.Visible && !w.Minimized && w.Cloaked == false && w.ClassName != "#32768" &&
@@ -32,7 +33,12 @@ internal sealed partial class WindowCatalog
             if (scopes.Count >= 16) scopes.Remove(scopes.MinBy(p => p.Value.At).Key);
             s = new("", null, false, Now, [], true, []); scopes[scope] = s;
         }
-        return Now - s.At >= TimeSpan.FromMinutes(2) ? null : (s.Id, s.At, s.At.AddMinutes(2));
+        if (Now - s.RetainedAt >= ReferenceLifetime) return null;
+        // Renew only through live, bounded wait samples; expired references never revive.
+        s.RetainedAt = Now;
+        foreach (var pair in s.Related.ToArray())
+            if (pair.Value.Menu == null && pair.Value.Expires > Now) s.Related[pair.Key] = pair.Value with { Expires = Now.Add(ReferenceLifetime) };
+        return (s.Id, Now, Now.Add(ReferenceLifetime));
     }
     internal WindowSelection? PublishWaitWindow(string scope, DiscoveredWindow expected, CancellationToken cancellation)
     {
@@ -112,7 +118,7 @@ internal sealed class WaitForAction(WaitProbeService waits) : IWindowsAction
             if (!ObservationBindingProtocol.Id(scope, "ws_") || !Guid.TryParseExact(waitId, "D", out _) || budget is < 100 or > 500 ||
                 (condition == "window_present" ? !Text(query, 200) || pid == 0 || windowId != null || text != null || selector != null
                 : !ObservationBindingProtocol.Id(windowId ?? "", "win_") || query != null || pid != null ||
-                    (condition == "text_present" ? !Text(text, 200) || selector != null : condition != "control_available" || selector == null || text != null))) return ObservationBindingProtocol.Invalid();
+                    (condition == "text_present" ? !Text(text, 200) || selector != null : condition is not ("control_available" or "control_present") || selector == null || text != null))) return ObservationBindingProtocol.Invalid();
             options = new(condition, windowId, query?.Trim(), pid, text, selector);
         } catch { return ObservationBindingProtocol.Invalid(); }
         return waits.Probe(scope, waitId, options, budget, cancellation);

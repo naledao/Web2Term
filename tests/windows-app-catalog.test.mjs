@@ -79,7 +79,7 @@ test('registered application actions are published only when also provided by th
 })
 
 test('strict page protocol validates the actual discovery schema and rejects mixed or out-of-bounds requests', () => {
-  const base = { type: 'computer', version: 1, action: 'list_apps', step_token: identity('cu_'), query: 'Excel', limit: 12 }
+  const base = { type: 'computer', version: 1, action: 'list_apps', description: '查找 Excel 应用', step_token: identity('cu_'), query: 'Excel', limit: 12 }
   assert.equal(protocol.computerUseProtocol.check(JSON.stringify(base), [metadata.LIST_APPS_DEFINITION]).ok, true)
   for (const patch of [{ limit: 0 }, { limit: 26 }, { limit: 1.5 }, { query: 'x'.repeat(201) }, { command: 'anything' }, { path: 'guess' }]) {
     assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ ...base, ...patch }), [metadata.LIST_APPS_DEFINITION]).ok, false)
@@ -237,13 +237,13 @@ test('launch_app becomes callable only when the helper advertises the registered
   assert.deepEqual(plain(f.context.capability().actions), ['list_apps'])
   f.state.actions.push('launch_app')
   assert.deepEqual(plain(f.context.capability().actions), ['list_apps', 'launch_app'])
-  assert.match(computer.computerUseCapabilityPrompt(f.context.capability(), identity('cu_')), /不能仅凭成功或 PID/)
+  assert.match(computer.computerUseCapabilityPrompt(f.context.capability(), identity('cu_')), /启动后继续核对窗口/)
   f.service.dispose()
 })
 
 test('strict protocol and mandatory executor validation reject arbitrary launch paths, commands, arguments and invalid ids', async () => {
   const f = fixture(); f.state.actions.push('launch_app')
-  const base = { type: 'computer', version: 1, action: 'launch_app', step_token: identity('cu_'), ...launchParameters() }
+  const base = { type: 'computer', version: 1, action: 'launch_app', description: '启动目标应用', step_token: identity('cu_'), ...launchParameters() }
   assert.equal(protocol.computerUseProtocol.check(JSON.stringify(base), f.tool.definitions()).ok, true)
   for (const patch of [{ path: 'C:\\app.exe' }, { command: 'anything' }, { arguments: ['text'] }, { catalog_id: identity('cat_') },
     { wait_ms: -1 }, { wait_ms: 5001 }, { wait_ms: 0.5 }, { app_id: 'x'.repeat(36) }, { launch_reference_id: 'x'.repeat(39) }]) {
@@ -365,7 +365,7 @@ test('open is advertised only with the live helper action and unregisters with i
 })
 
 test('open protocol rejects commands, unknown fields and invalid kind or target types', () => {
-  const request = { type: 'computer', version: 1, action: 'open', step_token: identity('cu_'), kind: 'url', target: 'https://example.com/' }
+  const request = { type: 'computer', version: 1, action: 'open', description: '打开目标网页', step_token: identity('cu_'), kind: 'url', target: 'https://example.com/' }
   assert.equal(protocol.computerUseProtocol.check(JSON.stringify(request), [metadata.OPEN_RESOURCE_DEFINITION]).ok, true)
   for (const patch of [{ command: 'start' }, { arguments: '--new-window' }, { catalog_id: identity('cat_') }, { kind: 'script' }, { target: 9 }, { wait_ms: 5001 }])
     assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ ...request, ...patch }), [metadata.OPEN_RESOURCE_DEFINITION]).ok, false)

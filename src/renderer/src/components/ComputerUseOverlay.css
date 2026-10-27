@@ -1,0 +1,91 @@
+.computer-use-overlay {
+  --cu-panel: rgba(16, 22, 28, .96);
+  --cu-panel-soft: rgba(28, 37, 46, .72);
+  --cu-line: rgba(235, 241, 248, .13);
+  --cu-line-strong: rgba(235, 241, 248, .21);
+  --cu-text: #edf2f7;
+  --cu-muted: #9ca8b4;
+  --cu-quiet: #6f7b87;
+  --cu-blue: #8caeff;
+  --cu-amber: #f1b84b;
+  --cu-green: #76d3a1;
+  --cu-red: #f17e72;
+}
+
+.computer-use-overlay, .computer-use-overlay * { box-sizing: border-box; }
+.computer-use-overlay {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--cu-line-strong);
+  border-radius: 14px;
+  background: var(--cu-panel);
+  box-shadow: 0 20px 70px rgba(0, 0, 0, .42);
+  color: var(--cu-text);
+  font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+  user-select: none;
+  pointer-events: none;
+  -webkit-font-smoothing: antialiased;
+}
+.computer-use-overlay__notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--cu-line);
+  color: var(--cu-text);
+  font-size: 11px;
+}
+.computer-use-overlay__notice-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--cu-amber);
+  box-shadow: 0 0 0 4px rgba(241, 184, 75, .12);
+  animation: computer-use-overlay-pulse 1.2s ease-in-out infinite;
+}
+.computer-use-overlay__notice-status {
+  margin-left: auto;
+  color: var(--cu-amber);
+  font-size: 10px;
+}
+.computer-use-overlay__escape-hint { color: var(--cu-muted); font-size: 10px; white-space: nowrap; }
+.computer-use-overlay[data-completed] .computer-use-overlay__notice-dot { background: var(--cu-green); box-shadow: none; animation: none; }
+.computer-use-overlay[data-completed] .computer-use-overlay__notice-status,
+.computer-use-overlay[data-completed] .computer-use-overlay__lane--action .computer-use-overlay__label { color: var(--cu-green); }
+.computer-use-overlay[data-completed] .computer-use-overlay__lane--action { background: rgba(118, 211, 161, .08); }
+.computer-use-overlay__content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); gap: 0; padding: 0; }
+.computer-use-overlay__lane { min-width: 0; min-height: 88px; padding: 14px 16px; font-size: 13px; line-height: 1.45; }
+.computer-use-overlay__lane--goal { border-right: 1px solid var(--cu-line); background: rgba(140, 174, 255, .08); }
+.computer-use-overlay__lane--action { background: rgba(241, 184, 75, .07); }
+.computer-use-overlay__lane .computer-use-overlay__label { display: flex; align-items: center; justify-content: space-between; }
+.computer-use-overlay__lane--action .computer-use-overlay__label { color: var(--cu-amber); }
+.computer-use-overlay__lane--action .computer-use-overlay__label span { color: var(--cu-muted); font-size: 10px; font-weight: 400; }
+.computer-use-overlay__label { margin-bottom: 5px; color: var(--cu-blue); font-size: 10px; font-weight: 600; }
+.computer-use-overlay__action-text { min-height: 38px; color: var(--cu-text); font-size: 13px; font-weight: 600; }
+.computer-use-overlay__current-detail { margin-top: 2px; overflow: hidden; color: var(--cu-muted); font: 10px "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.computer-use-overlay__target { display: flex; align-items: center; gap: 10px; padding: 10px 11px; border: 1px solid var(--cu-line); border-radius: 8px; background: var(--cu-panel-soft); }
+.computer-use-overlay__target-icon { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid var(--cu-line-strong); border-radius: 7px; color: var(--cu-blue); font-size: 14px; }
+.computer-use-overlay__target-name { font-size: 12px; }
+.computer-use-overlay__target-detail { margin-top: 2px; color: var(--cu-muted); font-size: 10px; }
+.computer-use-overlay__verified { margin-left: auto; color: var(--cu-green); font-size: 10px; white-space: nowrap; }
+.computer-use-overlay__result { padding: 11px 12px; border: 1px solid rgba(118, 211, 161, .28); border-radius: 8px; background: rgba(118, 211, 161, .08); }
+.computer-use-overlay__result--error { border-color: rgba(241, 126, 114, .3); background: rgba(241, 126, 114, .08); }
+.computer-use-overlay__result-title { display: flex; align-items: center; gap: 7px; color: var(--cu-green); font-size: 12px; font-weight: 650; }
+.computer-use-overlay__result--error .computer-use-overlay__result-title { color: var(--cu-red); }
+.computer-use-overlay__result-title span { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: rgba(118, 211, 161, .18); }
+.computer-use-overlay__result-text { margin-top: 5px; color: var(--cu-muted); font-size: 11px; line-height: 1.45; }
+.computer-use-overlay__result-time { margin-top: 7px; color: var(--cu-quiet); font: 9px "Cascadia Code", Consolas, monospace; }
+.computer-use-overlay__waiting { padding: 6px 16px; border-top: 1px solid rgba(241, 184, 75, .32); background: rgba(241, 184, 75, .1); color: var(--cu-amber); font-size: 10px; }
+@keyframes computer-use-overlay-pulse { 50% { opacity: .35; transform: scale(.8); } }
+@media (prefers-reduced-motion: reduce) { .computer-use-overlay__notice-dot { animation: none; } }
+.computer-use-overlay__empty { padding: 20px 16px; color: var(--cu-muted); font-size: 12px; }
+.computer-use-overlay__goal-text, .computer-use-overlay__action-text {
+  overflow-wrap: anywhere;
+}
+.computer-use-overlay__result--idle { background: var(--cu-panel-soft); border-color: var(--cu-line); }
+@media (max-width: 560px) {
+  .computer-use-overlay__content { grid-template-columns: 1fr; }
+  .computer-use-overlay__lane--goal { border-right: 0; border-bottom: 1px solid var(--cu-line); }
+}

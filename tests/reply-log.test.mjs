@@ -58,6 +58,20 @@ test('scan metadata preserves correlation and waiting/generation evidence', () =
   assert.equal(value.stopButtonOnPage, true)
 })
 
+test('reply diagnostics retain both sides of the task generation boundary without request content', () => {
+  const value = replyDiagnosticMetadata('deepseek', {
+    event: 'computer-request', taskPromptGeneration: 7, computerOutcome: 'candidate',
+    rawJson: '{"type":"computer","text":"private-generation-sentinel"}'
+  }, { ...context, mainTaskPromptGeneration: 6, computerAccepted: false })
+  assert.equal(value.taskPromptGeneration, 7)
+  assert.equal(value.mainTaskPromptGeneration, 6)
+  assert.equal(value.computerAccepted, false)
+  assert.ok(!JSON.stringify(value).includes('private-generation-sentinel'))
+  for (const invalid of [-1, Infinity, '6']) {
+    assert.equal(replyDiagnosticMetadata('deepseek', payload, { ...context, mainTaskPromptGeneration: invalid }).mainTaskPromptGeneration, undefined)
+  }
+})
+
 test('default traces omit commands, question content, page text and unrecognized values', () => {
   const secret = 'sensitive-sentinel'
   const value = replyDiagnosticMetadata('claude', {

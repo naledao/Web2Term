@@ -88,12 +88,16 @@ internal sealed class WindowsWindowDiscovery(WindowLifetimeMonitor lifetimes) : 
             bool? cloaked = DwmGetWindowAttribute(window, 14, out uint cloakFlags, 4) == 0 ? cloakFlags != 0 : null;
             IntPtr owner = GetWindow(window, 4); // GW_OWNER, not a GetWindow enumeration loop.
             bool visible = IsWindowVisible(window), minimized = IsIconic(window), enabled = IsWindowEnabled(window);
+            // Visible frame in physical pixels (DWM extended frame bounds), so two same-titled windows
+            // of one app can be told apart: a 60×71 helper window is not the chat window.
+            CaptureRect? bounds = ControlTreeInterop.DwmGetWindowAttribute(window, 9, out ControlTreeInterop.Rect frame, (uint)System.Runtime.InteropServices.Marshal.SizeOf<ControlTreeInterop.Rect>()) == 0
+                ? new(frame.Left, frame.Top, frame.Right - frame.Left, frame.Bottom - frame.Top) : null;
             uint afterThread = GetWindowThreadProcessId(window, out uint afterPid);
             StringBuilder afterClass = new(257); _ = GetClassName(window, afterClass, afterClass.Capacity);
             bool stable = thread == afterThread && pid == afterPid && className.ToString() == afterClass.ToString() && IsWindow(window) &&
                 lifetime == lifetimes.Lifetime(window) && (process.IsInvalid || WaitForSingleObject(process, 0) == 258);
             return new(Handle(window), pid, started, thread, ApplicationCatalog.Clip(className.ToString(), 256), ApplicationCatalog.Clip(caption.ToString(), 256),
-                new(name, path, aumid), visible, minimized, GetForegroundWindow() == window, enabled, cloaked, owner != IntPtr.Zero && owner != window ? Handle(owner) : null, lifetime, stable);
+                new(name, path, aumid), visible, minimized, GetForegroundWindow() == window, enabled, cloaked, owner != IntPtr.Zero && owner != window ? Handle(owner) : null, lifetime, stable, bounds);
         }
         catch (OperationCanceledException) { throw; }
         catch { return null; }

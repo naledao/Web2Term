@@ -72,18 +72,29 @@ test('both preferences must be real booleans and neither turns the other on', ()
   assert.equal(resolve(enabled).reason, 'runtime-not-ready')
 })
 
-test('old settings default off; preferences round-trip and partial updates preserve the other flag', () => {
+test('old settings default off; desktop control and coordinate clicks follow the computer use switch', () => {
   const values = new Map([['theme', 'dark']])
   const store = { getSetting: key => values.get(key) ?? null, setSetting: (key, value) => values.set(key, value) }
   assert.equal(persistence.readComputerUsePreferences(store).computerUseEnabled, false)
   assert.equal(persistence.readComputerUsePreferences(store).desktopControlEnabled, false)
-  persistence.saveComputerUsePreferences(store, enabled)
+  assert.equal(persistence.readComputerUsePreferences(store).desktopPointClickEnabled, false)
+  persistence.saveComputerUsePreferences(store, { computerUseEnabled: true })
   const reopened = { getSetting: key => new Map(values).get(key) ?? null }
   assert.equal(persistence.readComputerUsePreferences(reopened).desktopControlEnabled, true)
-  persistence.saveComputerUsePreferences(store, { desktopControlEnabled: false, unrelated: true })
+  assert.equal(persistence.readComputerUsePreferences(reopened).desktopPointClickEnabled, true)
+  assert.equal(values.get('desktopControlEnabled'), '1'); assert.equal(values.get('desktopPointClickEnabled'), '1')
+  // The sub-switches are not separate choices any more: a patch of their own changes nothing.
+  persistence.saveComputerUsePreferences(store, { desktopControlEnabled: false, desktopPointClickEnabled: false, unrelated: true })
   const saved = persistence.readComputerUsePreferences(store)
   assert.equal(saved.computerUseEnabled, true)
-  assert.equal(saved.desktopControlEnabled, false)
+  assert.equal(saved.desktopControlEnabled, true)
+  assert.equal(saved.desktopPointClickEnabled, true)
+  persistence.saveComputerUsePreferences(store, { computerUseEnabled: false })
+  assert.deepEqual([values.get('desktopControlEnabled'), values.get('desktopPointClickEnabled')], ['0', '0'])
+  assert.equal(persistence.readComputerUsePreferences(store).desktopControlEnabled, false)
+  // A value an older version saved under its own key no longer overrides the switch.
+  values.set('desktopControlEnabled', '1'); values.set('desktopPointClickEnabled', '1')
+  assert.equal(persistence.readComputerUsePreferences(store).desktopPointClickEnabled, false)
   assert.equal(values.get('theme'), 'dark')
   assert.equal(values.has('unrelated'), false)
 })
@@ -149,6 +160,8 @@ test('computer use contributes only its tool declaration and leaves the existing
   assert.equal(current.prefix, baseline.prefix.replace(originalTools, () => currentTools))
   assert.match(declaration, /【工具能力：computer use】/)
   assert.doesNotMatch(declaration, /AI 自主执行|自主规划|task_plan/)
+  assert.doesNotMatch(declaration, /task_continuity|progress_control|candidate_paths|task_clarification_context/)
+  assert.match(declaration, /最新观察|unknown|complete_task/)
 })
 
 const runtimeSource = ts.createSourceFile('session-runtime.ts', readFileSync(new URL('../src/main/session-runtime.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
@@ -197,6 +210,26 @@ test('runtime uses the live connection and refreshes cached platform prompts wit
   runtime.disposed = true
   runtime.refreshComputerUseCapabilities()
   assert.equal(prompts.size, 0)
+})
+
+test('desktop coordinate clicks come with computer use, and only then are described to the model', () => {
+  const values = new Map()
+  const store = { getSetting: key => values.get(key) ?? null, setSetting: (key, value) => values.set(key, value) }
+  assert.equal(persistence.readComputerUsePreferences(store).desktopPointClickEnabled, false, 'absent means off')
+  assert.throws(() => persistence.saveComputerUsePreferences(store, { desktopPointClickEnabled: 'yes' }), /布尔值/)
+  persistence.saveComputerUsePreferences(store, { computerUseEnabled: true })
+  assert.equal(values.get('desktopPointClickEnabled'), '1')
+  assert.equal(persistence.readComputerUsePreferences(store).desktopPointClickEnabled, true)
+  persistence.saveComputerUsePreferences(store, { computerUseEnabled: false })
+  assert.equal(persistence.readComputerUsePreferences(store).desktopPointClickEnabled, false)
+  assert.equal(capability.normalizeComputerUsePreferences({ desktopPointClickEnabled: 1 }).desktopPointClickEnabled, false)
+
+  const click = { action: 'click', description: 'Synthetic click', parameters: [], example: {} }
+  const prompt = preferences => capability.computerUseCapabilityPrompt(capability.resolveComputerUseCapability(preferences, local, [click]), 'cu_' + 'a'.repeat(32))
+  assert.doesNotMatch(prompt(enabled), /桌面坐标点击：用户已开启/)
+  assert.match(prompt({ ...enabled, desktopPointClickEnabled: true }), /桌面坐标点击：用户已开启/)
+  assert.doesNotMatch(capability.computerUseCapabilityPrompt(capability.resolveComputerUseCapability({ ...enabled, desktopPointClickEnabled: true }, local, [])), /桌面坐标点击/,
+    'never described while click itself is unavailable')
 })
 
 test('computer result delay is saved as whole seconds within 0–600', () => {

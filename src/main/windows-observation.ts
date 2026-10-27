@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdtemp, open, rm, lstat, realpath } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { inflateSync } from 'node:zlib'
 import type { TaskLease } from '../shared/autonomous-task'
 import { TaskObservationPreviewCache } from './task-observation-preview'
 import type { TaskObservationSummary } from '../shared/task-presentation'
 import type { ComputerUseImageReference } from '../shared/computer-use'
-import { OBSERVE_DEFINITION, validateObserveParameters } from '../shared/windows-observation'
+import { OBSERVE_CONTROLS_DIMENSION, OBSERVE_DEFINITION, OBSERVE_FALLBACK_DIMENSION, OBSERVE_MAX_DIMENSION, validateObserveParameters } from '../shared/windows-observation'
 import type { ObservationRect, WindowsObservation } from '../shared/windows-observation'
 import { ComputerUseActionError, throwIfDesktopInterrupted } from './computer-use-tool'
 import type { ComputerUseDispatchContext, ComputerUseTool } from './computer-use-tool'
@@ -89,7 +89,7 @@ export function validateWindowsObservation(value: unknown, p: Record<string, unk
   const crop: ObservationRect = p.target === 'region' ? { x: p.x as number, y: p.y as number, width: p.width as number, height: p.height as number }
     : { x: 0, y: 0, width: value.source_bounds.width, height: value.source_bounds.height }
   if (!sameRect(value.crop, crop) || !object(value.image) || !fields(value.image, ['width', 'height', 'mime_type', 'size_bytes', 'sha256'])) return false
-  const image = value.image, maximum = Number(p.max_dimension ?? 1600), scale = Math.min(1, maximum / Math.max(crop.width, crop.height))
+  const image = value.image, maximum = Number(p.max_dimension ?? OBSERVE_MAX_DIMENSION), scale = Math.min(1, maximum / Math.max(crop.width, crop.height))
   if (image.width !== Math.max(1, Math.floor(crop.width * scale)) || image.height !== Math.max(1, Math.floor(crop.height * scale)) ||
       image.mime_type !== 'image/png' || image.size_bytes !== bytes.length || bytes.length < 57 || bytes.length > MAX_BYTES ||
       image.sha256 !== createHash('sha256').update(bytes).digest('hex') || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
@@ -196,7 +196,7 @@ export class WindowsObservationService {
     } catch { /* Optional display must not block execution or delivery. */ }
   }
   private bind(owner: ObservationOwner, data: ObservationData, p: Record<string, unknown>, context: ComputerUseDispatchContext, windowScope: string | null): ObservationData {
-    const expires = this.now() + 120_000, step = context.step!.id, digest = createHash('sha256').update(context.step!.token!).digest('hex')
+    const expires = this.now() + 15 * 60_000, step = context.step!.id, digest = createHash('sha256').update(context.step!.token!).digest('hex')
     const binding = { source_step_id: step, expires_at: new Date(expires).toISOString() }
     data.binding = binding
     if (data.controls) data.controls.binding = { ...binding }
@@ -255,17 +255,18 @@ export class WindowsObservationService {
       }
     } else observationError = { code: 'target_unresolved', message: '未唯一定位窗口，最后发现状态见 last_check；未猜测来源或捕获整个桌面。' }
     if (!active()) { if (after?.attachments) this.release(after.attachments, context.lease); throw new ComputerUseActionError({ code: context.signal?.aborted ? 'cancelled' : 'inactive_context', execution: progress.execution, message: '等待后观察的原任务已失效，未向新任务发布结果。' }) }
-    let met = waitStatus === 'met' && !!after && !!last?.window
-    if (met && p.condition !== 'window_present') {
+    const met = waitStatus === 'met' && !!last?.window
+    let postMet: boolean | null = after && p.condition === 'window_present' ? true : null
+    if (met && after && p.condition !== 'window_present') {
       const tree = after!.data.controls, window = last!.window!
       const root = tree?.elements[0]
-      met = !!tree && evaluateWaitControls(p, { ...window, enabled: typeof root?.enabled === 'boolean' ? root.enabled : window.enabled }, tree).status === 'met'
+      postMet = tree ? evaluateWaitControls(p, { ...window, enabled: typeof root?.enabled === 'boolean' ? root.enabled : window.enabled }, tree).status === 'met' : null
     }
-    if (waitStatus === 'met' && !met) waitStatus = after ? 'changed' : 'observation_failed'
-    const data = { condition: p.condition, condition_met: met, status: waitStatus, timeout_ms: p.timeout_ms ?? 10000, wait_elapsed_ms: elapsed, checks,
+    const data = { condition: p.condition, condition_met: met, condition_observed_at: met ? last!.checked_at : null, post_condition_met: postMet,
+      status: waitStatus, timeout_ms: p.timeout_ms ?? 10000, wait_elapsed_ms: elapsed, checks,
       last_check: last ? { status: last.status, matches: last.matches, checked_at: last.checked_at, complete: last.complete, limitations: last.limitations, revision: last.revision, window_id: last.window?.window_id ?? null } : null,
       ...(failure ? { check_error: failure } : {}), ...(after ? { observation: after.data } : { post_observation_error: observationError }), snapshot_atomic: false, input_ready: false, goal_verified: false }
-    const message = met ? '条件在检查及结束后的新观察中得到支持；仅代表当前固定条件满足，业务目标仍需验证。'
+    const message = met ? '条件已在采样时满足；condition_observed_at保留命中时间，post_condition_met单独说明后观察是否仍支持。采样命中不保证当前仍满足，也不授权输入或证明业务完成。'
       : waitStatus === 'timeout' ? '等待已到检查期限，未确认条件满足；请根据最后检查和新观察诊断或调整路径，不无界等待。'
         : waitStatus === 'ambiguous' ? '匹配目标不唯一，未任意选择；请进一步发现／观察并细化条件。' : '条件未能在新观察中确认，未执行桌面输入，请根据真实结果继续判断。'
     if (!met) throw new ComputerUseActionError({ code: waitStatus === 'timeout' ? 'wait_timeout' : waitStatus === 'ambiguous' ? 'wait_ambiguous' : 'wait_failed', execution: progress.execution, message, data, attachments: after?.attachments })
@@ -277,23 +278,32 @@ export class WindowsObservationService {
     if (!this.current(context) || !this.registrations.has(tool)) throw new ComputerUseActionError({ code: 'inactive_context', execution: 'not_executed', message: '输入操作需要当前真实任务、已占用步骤与工具上下文。' })
     const owner = this.owner(tool, context), saved = owner.latest
     if (!saved || !saved.ids.includes(p.observation_id as string)) throw new ComputerUseActionError({ code: 'stale_observation', execution: 'not_executed', message: '输入操作引用不属于当前任务最新观察，请重新 observe。' })
-    if (!saved.source.window_id) throw new ComputerUseActionError({ code: blocked, execution: 'not_executed', message: '显示器概览不能直接作为输入目标，请发现、激活并观察业务窗口。' })
+    // Desktop clicks: a window-less desktop/region image, opted into in settings. Click only; the helper checks the
+    // pixels around the point and the window under it, never a business-window binding.
+    const desktopClick = action === 'click' && !saved.source.window_id
+    if (desktopClick && context.capability().desktopPointClickEnabled !== true)
+      throw new ComputerUseActionError({ code: blocked, execution: 'not_executed', message: '桌面坐标点击未开启（设置 → computer use →「允许点击桌面任意位置」）。请发现、激活并观察业务窗口后再点击。' })
+    if (desktopClick && (p.element_id !== undefined || !['desktop', 'region'].includes(saved.data.target)))
+      throw new ComputerUseActionError({ code: 'invalid_parameters', execution: 'not_executed', message: '桌面坐标点击只接受桌面或区域截图中的 x/y 像素点，不接受控件编号。' })
+    if (!saved.source.window_id && !desktopClick) throw new ComputerUseActionError({ code: blocked, execution: 'not_executed', message: '显示器概览不能直接作为输入目标，请发现、激活并观察业务窗口。' })
     if (dragging && (saved.data.target === 'controls' || !resolveDragPath(saved.data, p.path as DragPoint[])))
       throw new ComputerUseActionError({ code: blocked, execution: 'not_executed', message: '拖拽需要同组窗口图像中的完整有界可见轨迹，请观察业务窗口并重新规划。' })
     if (p.element_id !== undefined && !saved.elements.has(p.element_id as string) || p.x !== undefined && (saved.data.target === 'controls' || Number(p.x) >= saved.data.image.width || Number(p.y) >= saved.data.image.height))
       throw new ComputerUseActionError({ code: 'invalid_parameters', execution: 'not_executed', message: '输入操作控件或图像点不属于该观察，未派发输入。' })
-    if (typing || pressing && p.element_id !== undefined) {
+    if ((typing || pressing) && p.element_id !== undefined) {
       const row = saved.data.controls?.elements.find(row => row.element_id === p.element_id), focus = saved.data.controls?.focus
-      if (!row?.properties_complete || row.focused !== true || row.enabled !== true || row.offscreen !== false ||
+      if (!row?.bounds || row.control_type === null || row.focused !== true || row.enabled !== true || row.offscreen !== false ||
         focus?.status !== 'inside_target' || focus.element_id !== p.element_id || typing && (row.password === null || !['edit', 'document'].includes(row.role) && !row.patterns.includes('value')))
         throw new ComputerUseActionError({ code: blocked, execution: 'not_executed', message: '输入需要最近观察中已确认焦点和可用状态的目标控件，请由 AI 定位并重新观察。' })
     }
+    if (typing && p.element_id === undefined && (p.mode ?? 'insert') !== 'insert')
+      throw new ComputerUseActionError({ code: 'invalid_parameters', execution: 'not_executed', message: '窗口级文字输入仅支持 insert；全文替换需要明确的可编辑控件或先选择范围再插入。' })
     let code: ComputerUseToolResult['code'] = 'stale_observation', execution: ComputerUseToolResult['execution'] = 'not_executed'
     let message = '旧观察或窗口引用已失效，未派发输入操作。', receipt: unknown
     let helperCode: string | null = null
-    const interaction = this.windows.interactionContext?.(tool, saved.source.window_id as string, context)
+    const interaction = desktopClick ? undefined : this.windows.interactionContext?.(tool, saved.source.window_id as string, context)
     owner.latest = null // Consume the main-side reference before sending any mutating request, including uncertain replies.
-    if (saved.expires > this.now() && this.windows.lookup(tool, saved.source.window_id as string, context)?.scope_id === saved.windowScope) {
+    if (saved.expires > this.now() && (desktopClick || this.windows.lookup(tool, saved.source.window_id as string, context)?.scope_id === saved.windowScope)) {
       let response: WindowsHelperActionResult
       try { response = await this.helper.request(action, { binding_scope: owner.scope, source_step_id: saved.step, source_token_digest: saved.digest,
         request_id: context.step!.id, request_token_digest: createHash('sha256').update(context.step!.token!).digest('hex'),
@@ -395,13 +405,24 @@ export class WindowsObservationService {
     let kept = false
     try {
       if (!this.current(context)) throw new ComputerUseActionError({ code: 'cancelled', execution: 'not_executed', message: '观察已取消，本次未捕获。' })
-      const response = await this.helper.request('observe', { binding_scope: owner.scope, source_step_id: context.step!.id,
+      const capture = (maximum: number) => this.helper.request('observe', { binding_scope: owner.scope, source_step_id: context.step!.id,
         source_token_digest: createHash('sha256').update(context.step!.token!).digest('hex'), scope_id: selected?.scope_id ?? 'ws_' + randomUUID().replaceAll('-', ''), target: p.target,
         window_id: p.window_id ?? null, monitor_id: p.monitor_id ?? null, crop: p.target === 'region' ? { x: p.x, y: p.y, width: p.width, height: p.height } : null,
-        max_dimension: p.max_dimension ?? 1600, output_path: path,
+        max_dimension: maximum, output_path: path,
         controls_options: p.target === 'controls' || p.include_controls === true ? { max_depth: p.max_depth ?? 4, max_elements: p.max_elements ?? 100, timeout_ms: p.timeout_ms ?? 1200, include_selection: p.include_selection === true } : null
       }, { signal: context.signal, expectedGeneration: generation, timeoutMs: 20_000 })
+      let response = await capture(p.target === 'controls' ? OBSERVE_CONTROLS_DIMENSION : (p.max_dimension as number | undefined) ?? OBSERVE_MAX_DIMENSION)
       throwIfDesktopInterrupted(response)
+      // An unscaled 4K PNG can exceed the 8 MB attachment budget (native capture_failed). Only the
+      // default may shrink, once, and the result says so; an explicit max_dimension is never overridden.
+      let fallback = false
+      if (!response.ok && response.code === 'capture_failed' && p.target !== 'controls' && p.max_dimension === undefined && this.current(context)) {
+        await rm(path!, { force: true }).catch(() => {})
+        response = await capture(OBSERVE_FALLBACK_DIMENSION)
+        throwIfDesktopInterrupted(response)
+        fallback = true
+      }
+      if (fallback) p = { ...p, max_dimension: OBSERVE_FALLBACK_DIMENSION }
       if (!this.current(context) || leaseKey(context.lease) !== key || !this.registrations.has(tool) || this.owners.get(tool) !== owner)
         throw new ComputerUseActionError({ code: context.signal?.aborted ? 'cancelled' : 'inactive_context', execution: response.execution, message: '原观察任务已结束，截图未发布给新任务。', data: { helper_code: response.code } })
       if (!response.ok) {
@@ -427,11 +448,14 @@ export class WindowsObservationService {
           !validateWindowsObservation(response.data, p, selected?.window ?? null, bytes, this.now()))
         throw new ComputerUseActionError({ code: 'invalid_result', execution: response.execution, message: '截图、身份或几何信息未通过主进程核对，未发布观察。' })
       const data = structuredClone(response.data), id = 'img_' + randomUUID().replaceAll('-', '')
-      const attachment: PreparedAttachment = { path: path!, fileName: data.observation_id + '.png', mimeType: 'image/png', sizeBytes: bytes.length, sha256: data.image.sha256 }
+      // The page checks the uploaded File's name, which the browser takes from the path; any other
+      // name makes the upload look like a user's changed draft, and the result is never delivered.
+      const attachment: PreparedAttachment = { path: path!, fileName: basename(path!), mimeType: 'image/png', sizeBytes: bytes.length, sha256: data.image.sha256 }
       this.artifacts.set(id, { tool, owner: key, directory: directory!, attachment, expires: this.now() + 15 * 60_000 }); kept = true
       const bound = this.bind(owner, data, p, context, selected?.scope_id ?? null)
       this.recordDisplay(tool, context, bound, selected?.window ?? null, bytes)
-      return { message: response.message, data: bound, attachments: [{ id, mime_type: 'image/png', sha256: attachment.sha256 }] }
+      const message = fallback ? response.message + ` 原始分辨率 PNG 超过 8MB，本次已自动缩至最长边 ${OBSERVE_FALLBACK_DIMENSION}；需要细节时可用 region 截取局部。` : response.message
+      return { message, data: bound, attachments: [{ id, mime_type: 'image/png', sha256: attachment.sha256 }] }
     } finally { if (!kept && directory) await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(() => {}) }
   }
   async prepare(references: ComputerUseImageReference[], lease: TaskLease): Promise<PreparedAttachment[]> {

@@ -40,7 +40,7 @@ export function recoverInterruptedComputerActions(db: DatabaseSync, at = Date.no
     for (const row of tasks) {
       const task = parseAutonomousTask(row.payload)
       if (!task || task.id !== row.id) continue
-      if (task.status === 'completed') continue // An acknowledged final report is immutable history, never work to resume.
+      if (task.status === 'completed') continue // Completed by model marker or delivered report: history, never work to resume.
       if (task.status !== 'recorded') {
         // Graceful shutdown after a checkpoint error may already have interrupted this
         // task using an older snapshot. A durable hard-limit receipt still takes priority.
@@ -144,4 +144,17 @@ export function computerRecoveryMessage(task: AutonomousTask, records: ComputerA
   // Preserve requirements verbatim. Refuse an oversized recovery instead of silently losing them.
   if (text.length > 20_000) throw new Error('恢复上下文超过消息长度限制，请在原对话中重新提交完整目标和需要核对的产物。')
   return text
+}
+
+/** Why a forced resume still could not send, named from the page's refusal reason. */
+export function recoverySendBlockedMessage(reason: string | null): string {
+  switch (reason) {
+    case 'text-draft': case 'attachment-draft': case 'image-draft':
+      return '网页输入框里有你未发送的文字或附件；为免丢失没有清除。请清空或发出后再点继续原任务。'
+    case 'conversation-changed': return '网页已不在原对话，请回到原对话后再点继续原任务。'
+    case 'model-generating': return '网页上的回复没能停下来，请在原网页手动停止后再点继续原任务。'
+    case 'awaiting-reply': return '网页仍在等待上一条回复且未能结束等待，请刷新页面后再点继续原任务。'
+    case 'programmatic-send': case 'file-send': return '软件正在向网页发送其他内容，请几秒后再点继续原任务。'
+    default: return '恢复消息未发送，请等待页面就绪后再点继续原任务。'
+  }
 }

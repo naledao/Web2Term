@@ -38,7 +38,7 @@ internal static class CoordinateMapper
         {
             CaptureRect c = o.crop, content = o.transform.content_bounds;
             CaptureTransform t = o.transform;
-            if (x < 0 || y < 0 || x >= o.image.width || y >= o.image.height || o.image.width is < 1 or > 2560 || o.image.height is < 1 or > 2560 ||
+            if (x < 0 || y < 0 || x >= o.image.width || y >= o.image.height || o.image.width is < 1 or > ObservationPng.MaximumDimension || o.image.height is < 1 or > ObservationPng.MaximumDimension ||
                 !o.source_bounds.Valid || !c.Valid || c.x < 0 || c.y < 0 || (long)c.x + c.width > o.source_bounds.width || (long)c.y + c.height > o.source_bounds.height ||
                 o.source_size.width != o.source_bounds.width || o.source_size.height != o.source_bounds.height ||
                 !content.Valid || content.x < 0 || content.y < 0 || (long)content.x + content.width > o.image.width || (long)content.y + content.height > o.image.height || !Inside(content, x, y) ||

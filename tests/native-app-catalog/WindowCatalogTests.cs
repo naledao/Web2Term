@@ -84,7 +84,7 @@ static class WindowCatalogTests
     static void Expiration()
     {
         DateTime now = At; var catalog = new WindowCatalog(new FakeWindowDiscovery([Window("0x10"), Window("0x20")]), () => now);
-        var page = Data(List(catalog, limit: 1)); now = now.AddMinutes(2);
+        var page = Data(List(catalog, limit: 1)); now = now.AddMinutes(15);
         Check(catalog.Resolve(Scope, page.windows[0].window_id!, CancellationToken.None) == null && List(catalog, page.next_cursor).Code == "stale_window", "expired reference/cursor survived");
     }
     static void Unavailable()

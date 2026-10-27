@@ -14,7 +14,7 @@ export function validateWindowsTypeTextReceipt(value: unknown, p: Record<string,
   requestId: string, sourceStep: string, response: WindowsHelperActionResult, now: number): value is WindowsTypeTextReceipt {
   if (!object(value) || !fields(value, ['request_id', 'observation_id', 'source_step_id', 'window_id', 'element_id', 'mode', 'method', 'text_utf16_length', 'text_sha256',
     'input_attempted', 'input_completed', 'batches', 'verification', 'content_verified', 'before_at', 'completed_at', 'goal_verified', 'input_ready']) ||
-    value.request_id !== requestId || value.observation_id !== p.observation_id || value.source_step_id !== sourceStep || value.element_id !== p.element_id ||
+    value.request_id !== requestId || value.observation_id !== p.observation_id || value.source_step_id !== sourceStep || value.element_id !== (p.element_id ?? null) ||
     value.mode !== (p.mode ?? 'insert') || !['none', 'unicode', 'uia_value'].includes(value.method as string) || typeof p.text !== 'string' ||
     value.text_utf16_length !== p.text.length || value.text_sha256 !== createHash('sha256').update(p.text).digest('hex') ||
     ['input_attempted', 'input_completed', 'content_verified'].some(k => typeof value[k] !== 'boolean') ||
@@ -28,9 +28,10 @@ export function validateWindowsTypeTextReceipt(value: unknown, p: Record<string,
     v.input_completed && !v.input_attempted || v.input_attempted && v.method === 'none' ||
     v.content_verified !== (v.verification === 'matched') || v.verification !== 'unavailable' &&
     (!v.input_completed || row?.password !== false || !row.patterns.includes('text'))) return false
-  if (v.input_attempted && (!row?.properties_complete || row.enabled !== true || row.offscreen !== false || row.focused !== true || row.password === null ||
+  if (v.input_attempted && p.element_id !== undefined && (!row?.bounds || row.control_type === null || row.enabled !== true || row.offscreen !== false || row.focused !== true || row.password === null ||
     observed.controls?.focus.status !== 'inside_target' || observed.controls.focus.element_id !== p.element_id ||
     !['edit', 'document'].includes(row.role) && !row.patterns.includes('value'))) return false
+  if (p.element_id === undefined && (observed.window_id === null || v.mode !== 'insert' || v.method === 'uia_value' || v.verification !== 'unavailable' || v.content_verified)) return false
   let execution: WindowsHelperActionResult['execution'] = 'not_executed'
   if (v.method === 'uia_value') {
     if (v.mode !== 'replace' || !v.input_attempted || v.batches.length || row?.password !== false || !row.patterns.includes('value')) return false

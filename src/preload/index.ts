@@ -1,4 +1,4 @@
-import type { EmergencyStopState, EmergencyStopResetResult } from '../shared/emergency-stop'
+import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult } from '../shared/emergency-stop'
 import type { ToolboxInvocation } from '../shared/toolbox'
 import type { ComputerUseCapability } from '../shared/computer-use'
 import type { AutonomousTaskState, TaskResumeRequest } from '../shared/autonomous-task'
@@ -289,6 +289,11 @@ removeConversation: (id: string): Promise<Conversation[]> =>
     const handler = (_event: IpcRendererEvent, state: EmergencyStopState): void => listener(state)
     ipcRenderer.on(IpcChannels.emergencyStopChanged, handler)
     return () => ipcRenderer.removeListener(IpcChannels.emergencyStopChanged, handler)
+  },
+  onDesktopInputWarning: (listener: (warning: DesktopInputWarning) => void) => {
+    const handler = (_event: IpcRendererEvent, warning: DesktopInputWarning): void => listener(warning)
+    ipcRenderer.on(IpcChannels.desktopInputWarning, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.desktopInputWarning, handler)
   },
   endTask: (): Promise<InterceptorStatus> => ipcRenderer.invoke(IpcChannels.interceptorEndTask),
   retryCommandRecovery: (owner: FocusOwner, token: number): Promise<string> => ipcRenderer.invoke(IpcChannels.commandRecoveryRetry, owner, token),

@@ -1,5 +1,18 @@
 # Windows helper（第 07—23 项）
 
+## 2026-10-27 判定策略更新（当前契约）
+
+当前私有协议为 **v7**；主进程拒绝旧helper，模型computer JSON保持v1。请使用`npm run build`生成的配套helper，用户运行项目仍只用`npm run dev`。以下原有分项保留实现历史，其中旧v4/v5/v6、两分钟引用、整图稳定、焦点完整性及三十秒桌面等待等描述，以本段及[排查与修复清单](../../../docs/computer-use-overstrict-rules-review.md)为准。
+
+- 窗口读取允许普通内容/内部焦点事件变化；坐标滚动/拖拽先核对局部，悬停后采用实时原生目标检查。窗口级按键不再比较旧整图或旧控件树。
+- 控件祖先主要核对真实身份链；指针动作只要求自身必要属性，键盘输入继续核对实际焦点。窗口级`type_text`可省略`element_id`，仅支持insert，不读取或声称验证内容；无Value的替换给出明确分步路径。
+- 窗口/观察引用有界保留15分钟，每次使用仍实时核对身份及几何；对话框不再沿用菜单的30秒期限。瞬时菜单仍核对短期上下文。非模态owned面板不自动等于主窗口不可输入。
+- OEM标点键以受控名称提供；滚轮可使用已证明的命中容器与焦点子窗口路由，不凭共同顶层窗口猜测分栏。
+- 桌面等待最多3600000毫秒，受任务预算约束，长等待持续核对并续期活跃引用。`control_present`提供存在证据，`control_available`继续要求唯一；采样命中与后观察的当前状态分别返回。
+- 退出手势为500毫秒内连续两次真实Esc按下，中间须有抬起；长按重复、helper自身注入和其他软件注入都不计入。检测器绑定当前桌面watch，换任务不继承半次手势，其他有意输入会重置序列。第一次`escape-pressed`只失效旧定位并保留原生按键投递，第二次`human-stop`锁停输入、取消当前任务并保留真实回执。控制面板窗口同样支持双击退出；普通单次Esc仍可由模型正常发送到业务应用。
+
+构建通过只代表打包成功，真实桌面操作等待用户测试。
+
 此项目提供独立进程、stdio 协议、父进程监督和 MTA 工作线程。第 08—23 项已注册 `list_apps` 应用发现、`launch_app` 应用启动、`open` 资源打开、`list_windows` 窗口发现、`focus_window` 窗口激活／恢复、`observe` 截图／控件／焦点观察、`validate_observation` 只读复核、`click` 点击／双击、`type_text` 文字输入、`press_key` 按键／组合键、`scroll` 区域滚动、`drag` 拖拽／基础画布输入、`inspect_interactions` 菜单／弹窗关联发现及 `wait_for` 条件等待；其他动作由后续功能注册。Shell 启动使用独立 STA 线程，窗口元数据、UIA 控件／焦点和 WGC 截图在 MTA；窗口创建／销毁事件使用独立消息循环。主进程只声明与真实 helper 同时已接入的动作，不接受脚本或命令字符串执行。
 
 ## 构建与启动
@@ -340,6 +353,19 @@ API 依据：[PMv2 与物理像素](https://learn.microsoft.com/en-us/windows/wi
 已新增 `tests/native-app-catalog/ClickTests.cs` 并扩展主进程与推进测试。合成用例覆盖 UIA 角色与模式、只读回退、语义失败不补点、所有按钮与单／双击、移动未到达、悬停变化、遮挡／控件失效、前台无键盘焦点、部分事件／释放、取消、重复 request、原生 ABI／严格协议、主进程回执独立校验、controls-only 后观察以及交付重试不重放。可由用户运行 `node --test tests/windows-observation.test.mjs tests/task-progression.test.mjs tests/windows-coordinates.test.mjs tests/windows-helper.test.mjs`；原生仍使用前述测试项目命令，全部为模拟后端。智能体只做语法检查、编译测试源码及 `npm run build`，未运行测试、启动 Electron／helper、移动鼠标或实际点击。交付状态为“构建通过，等待测试”。
 
 API 依据：[SendInput 接收数、串行批次与权限限制](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)、[INPUT 布局](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-input)、[现有按键状态](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate)、[UIA 控件模式](https://learn.microsoft.com/en-us/dotnet/framework/ui-automation/ui-automation-control-patterns-overview)。COM UUID 与方法次序另按本机 Microsoft Windows SDK 的 UIAutomationClient.h 核对。
+
+### 窗口内坐标点击的局部核验
+
+窗口观察上的 `click` x/y（仅点击，滚动、拖拽、按键与按控件点击不变）按落点局部核验：窗口身份、位置、DPI、焦点、弹窗和 helper 自身输入后的失效仍须一致；不再比较窗口对象事件计数（Revision），也不再要求整窗截图逐字节相同，而是比对落点周围 49×49 图像像素（与桌面坐标点击同一规则）。移动鼠标后只复核窗口、焦点和弹窗，不比对像素，以免悬停高亮阻断。用于持续重绘的窗口（如基于 Electron 的新版 QQ 登录动画）。
+
+### 桌面坐标点击（可选，默认关闭）
+
+设置 → computer use →「允许点击桌面任意位置」开启后，主进程才放行以 `target=desktop` 或无窗口 `region` 观察为来源的 `click`；关闭时请求在主进程被拦截，不发往 helper。只接受图像 `x/y`（左／右／中键、单／双击，均为鼠标路径），不接受 `element_id`。
+
+- `ObservationService` 对无窗口来源在结果里私有保留本次 PNG（`desktop_png`，不序列化给模型）。
+- `ObservationRegistry.WithCurrentDesktopPoint`：同一观察、同一步骤、未过期、无其他输入；截图来源、显示器与原观察一致；重新捕获后，按 `nearest_floor` 采样比对点击点周围 49×49 图像像素，偏差超过 8 的像素不超过 10%（远处的时钟、其他窗口变化不影响，覆盖到落点的弹窗或移动会判 `image_changed`）。
+- `WindowsClickBackend.DesktopTarget`：落点下根窗口不属于 Web2Term 主进程或 helper，输入桌面一致，无按住的修饰键或鼠标键，非窗口拖动，菜单模式下只能点菜单本身，外部鼠标捕获须属于同一根窗口。移动前后的根窗口身份必须相同才派发按钮事件；移动后不再比对像素，以免悬停高亮阻断。
+- 回执 `window_id` 为 `null`，`point` 为桌面物理坐标；点击后主进程按原来源重新观察一次。
 
 ## 第 18 项：文字输入
 

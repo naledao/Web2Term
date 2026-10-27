@@ -1,6 +1,9 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent, JSX, ReactNode, RefObject, SyntheticEvent } from 'react'
+import type { ComponentProps, FormEvent, JSX, ReactNode, RefObject, SyntheticEvent } from 'react'
 import MDEditor from '@uiw/react-md-editor'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import 'katex/dist/katex.min.css'
 import ConversationTranscript from './ConversationTranscript'
 import FocusChart, { parseFocusChart } from './FocusChart'
 import type { FocusChartData } from './FocusChart'
@@ -169,8 +172,20 @@ function executionNeedsAction(record: ExecutionRecord, delivery?: FocusDelivery)
  */
 const RICH_BLOCK = /<!--focus-(chart|ui|layout) (\{[^\n]*\}) -->\n((?:>[^\n]*(?:\n|$))*)/g
 const CHART_MARKER = /<!--focus-(?:chart|ui|layout) [\s\S]*? -->\n?/g
+const mathRemarkPlugins = [remarkMath]
+const mathRehypePlugins: NonNullable<ComponentProps<typeof MDEditor.Markdown>['rehypePlugins']> = [
+  [rehypeKatex, { trust: false, strict: 'ignore', maxExpand: 1000, maxSize: 20 }]
+]
+/** DeepSeek commonly emits LaTeX delimiters instead of Markdown math delimiters. */
+function normalizeMathDelimiters(markdown: string): string {
+  return markdown.replace(/(```[\s\S]*?```|~~~[\s\S]*?~~~|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/g, token => {
+    if (token.startsWith('```') || token.startsWith('~~~')) return token
+    if (token.startsWith('\\[')) return `\n$$\n${token.slice(2, -2).trim()}\n$$\n`
+    return `$${token.slice(2, -2).replace(/\s*\n\s*/g, ' ')}$`
+  })
+}
 const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: AppTheme }): JSX.Element {
-  const source = cleanFocusAnswer(text)
+  const source = normalizeMathDelimiters(cleanFocusAnswer(text))
   const blocks: Array<string | { kind: 'chart'; data: FocusChartData } | { kind: 'ui'; data: FocusUiWidget } | { kind: 'layout'; data: FocusLayoutData }> = []
   let last = 0
   for (const match of source.matchAll(RICH_BLOCK)) {
@@ -181,10 +196,10 @@ const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: 
     blocks.push(source.slice(last, match.index), block)
     last = match.index + match[0].length
   }
-  if (!blocks.length) return <MDEditor.Markdown source={source} skipHtml wrapperElement={{ 'data-color-mode': theme }} />
+  if (!blocks.length) return <MDEditor.Markdown source={source} skipHtml remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} />
   blocks.push(source.slice(last))
   return <>{blocks.map((block, index) => typeof block === 'string'
-    ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml wrapperElement={{ 'data-color-mode': theme }} /> : null
+    ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /> : null
     : block.kind === 'chart' ? <FocusChart key={index} data={block.data} /> : block.kind === 'layout'
       ? <FocusLayout key={index} data={block.data} /> : <FocusSmartUi key={index} data={block.data} />)}</>
 })

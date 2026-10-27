@@ -1,4 +1,6 @@
 import { EmergencyStopController } from './emergency-stop'
+import { COMPUTER_OVERLAY_GET, COMPUTER_OVERLAY_CHANGED, COMPUTER_OVERLAY_FIT } from '../shared/computer-overlay'
+import type { ComputerOverlaySnapshot } from '../shared/computer-overlay'
 import { EMERGENCY_STOP_SHORTCUT } from '../shared/emergency-stop'
 import { ToolboxRouter } from './toolbox-router'
 import { TOOLBOX_METHODS } from '../shared/toolbox'
@@ -33,7 +35,7 @@ import { DEFAULT_BACKEND_URL, normalizeBackendUrl, readBackendUrl } from '../sha
 import { BackendAuthService } from './backend-auth'
 import { DEFAULT_COMPUTER_USE_PREFERENCES, resolveComputerUseCapability } from '../shared/computer-use'
 import { parseComputerUsePreferencesPatch, readComputerUsePreferences, saveComputerUsePreferences } from './computer-use-settings'
-import { WindowsHelperManager } from './windows-helper'
+import { desktopActivityRequestsTakeover, HUMAN_TAKEOVER_STRIKES, WindowsHelperManager } from './windows-helper'
 import { writeDesktopActivityDiagnostic } from './desktop-activity-log'
 import { WindowsAppCatalog } from './windows-app-catalog'
 import { WindowsObservationService } from './windows-observation'
@@ -168,6 +170,7 @@ function readDefaultChatView(value: string | null): 'original' | 'local' | 'focu
 }
 
 let managerWindow: BrowserWindow | null = null
+let computerUseOverlayWindow: BrowserWindow | null = null
 const linuxAgentDownloader = new LinuxAgentDownloader((state) => {
   if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.linuxAgentDownloadChanged, state)
 })
@@ -192,8 +195,11 @@ desktopCoordinator.subscribe(() => {
 })
 windowsHelper.subscribeDesktopActivity(event => {
   desktopObservations.invalidateAllInputs()
-  const takeover = event.kind === 'human-input' && desktopCoordinator.takeHumanControl(event.owner)
+  const takeover = desktopActivityRequestsTakeover(event) && desktopCoordinator.takeHumanControl(event.owner)
   writeDesktopActivityDiagnostic(event, takeover)
+  // Fewer strikes only interrupt the step; tell the user before the next one pauses the task.
+  if (event.kind === 'human-input' && event.strike !== null && event.strike < HUMAN_TAKEOVER_STRIKES && managerWindow && !managerWindow.isDestroyed())
+    managerWindow.webContents.send(IpcChannels.desktopInputWarning, { strike: event.strike, limit: HUMAN_TAKEOVER_STRIKES, input: event.input, at: Date.now() })
   if (takeover) void runtimes.get(event.owner.sessionId)?.humanTakeover(event.owner).catch(() => {
     // The task gate is already closed. Do not log native input, titles or task contents.
     console.warn('[desktop] human takeover cancellation acknowledgement incomplete')
@@ -292,6 +298,123 @@ const SPLASH_MIN_VISIBLE_MS = 3_000
  * it outlives the thing it is covering.
  */
 const SPLASH_MAX_MS = 20_000
+
+const COMPUTER_USE_OVERLAY_WIDTH = 720
+const COMPUTER_USE_OVERLAY_HEIGHT = 160
+const COMPUTER_USE_OVERLAY_MARGIN = 24
+let computerUseOverlayWidth = COMPUTER_USE_OVERLAY_WIDTH
+let computerUseOverlayHeight = COMPUTER_USE_OVERLAY_HEIGHT
+
+function positionComputerUseOverlay(window: BrowserWindow): void {
+  if (!managerWindow || managerWindow.isDestroyed()) return
+  const display = screen.getDisplayMatching(managerWindow.getBounds())
+  const { workArea } = display
+  const current = window.getBounds()
+  const width = Math.min(computerUseOverlayWidth, Math.max(1, workArea.width - COMPUTER_USE_OVERLAY_MARGIN * 2))
+  const height = Math.min(computerUseOverlayHeight, workArea.height)
+  const bounds = {
+    x: workArea.x + Math.round((workArea.width - width) / 2),
+    y: workArea.y + Math.min(COMPUTER_USE_OVERLAY_MARGIN, workArea.height - height),
+    width,
+    height
+  }
+  if (bounds.x !== current.x || bounds.y !== current.y || bounds.width !== current.width || bounds.height !== current.height) window.setBounds(bounds)
+}
+
+function showComputerUseOverlay(): void {
+  if (!computerUseOverlayWindow || computerUseOverlayWindow.isDestroyed()) return
+  positionComputerUseOverlay(computerUseOverlayWindow)
+  computerUseOverlayWindow.showInactive()
+  computerUseOverlayWindow.setAlwaysOnTop(true, 'screen-saver')
+  // A topmost fullscreen window created later (a PowerPoint slide show) stacks above us; showInactive
+  // on an already visible window does not change z-order. moveTop re-asserts it without activation.
+  computerUseOverlayWindow.moveTop()
+}
+
+function hideComputerUseOverlay(): void {
+  if (computerUseOverlayWindow && !computerUseOverlayWindow.isDestroyed()) computerUseOverlayWindow.hide()
+}
+
+function readComputerOverlaySnapshot(): ComputerOverlaySnapshot | null {
+  return currentSessionId ? runtimes.get(currentSessionId)?.getComputerOverlaySnapshot() ?? null : null
+}
+
+function createComputerUseOverlay(parent: BrowserWindow): void {
+  if (computerUseOverlayWindow && !computerUseOverlayWindow.isDestroyed()) return
+
+  const window = new BrowserWindow({
+    width: COMPUTER_USE_OVERLAY_WIDTH,
+    height: COMPUTER_USE_OVERLAY_HEIGHT,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    hasShadow: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    focusable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    show: false,
+    webPreferences: {
+      preload: join(__dirname, '../preload/overlay.js'),
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false
+    }
+  })
+  computerUseOverlayWindow = window
+  window.setIgnoreMouseEvents(true)
+  window.setContentProtection(true)
+  window.setAlwaysOnTop(true, 'screen-saver')
+  positionComputerUseOverlay(window)
+  window.on('closed', () => {
+    clearInterval(refreshTimer)
+    screen.removeListener('display-metrics-changed', reposition)
+    screen.removeListener('display-removed', reposition)
+    if (computerUseOverlayWindow === window) computerUseOverlayWindow = null
+  })
+  // Pull once via the narrow preload bridge; then push only changed display snapshots.
+  let previousSnapshot = ''
+  const refresh = (): void => {
+    if (window.isDestroyed() || window.webContents.isLoading()) return
+    try {
+      const snapshot = readComputerOverlaySnapshot()
+      const encoded = JSON.stringify(snapshot)
+      if (snapshot) showComputerUseOverlay()
+      else hideComputerUseOverlay()
+      if (encoded !== previousSnapshot) {
+        previousSnapshot = encoded
+        window.webContents.send(COMPUTER_OVERLAY_CHANGED, snapshot)
+      }
+    } catch {
+      previousSnapshot = ''
+      window.webContents.send(COMPUTER_OVERLAY_CHANGED, null)
+    }
+  }
+  const refreshTimer = setInterval(refresh, 500)
+  refreshTimer.unref()
+  const reposition = (): void => { if (!window.isDestroyed()) positionComputerUseOverlay(window) }
+  screen.on('display-metrics-changed', reposition)
+  screen.on('display-removed', reposition)
+  window.webContents.on('did-finish-load', () => { previousSnapshot = ''; refresh() })
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('will-navigate', event => event.preventDefault())
+  window.once('ready-to-show', refresh)
+  window.webContents.once('did-finish-load', refresh)
+
+  const overlayUrl = rendererDevServerUrl ? `${rendererDevServerUrl.replace(/\/$/, '')}/overlay.html` : null
+  const loaded = overlayUrl ? window.loadURL(overlayUrl) : window.loadFile(join(__dirname, '../renderer/overlay.html'))
+  void loaded.catch(() => console.warn('[computer-overlay] renderer failed to load'))
+
+  parent.on('move', () => { if (!window.isDestroyed()) positionComputerUseOverlay(window) })
+  parent.on('resize', () => { if (!window.isDestroyed()) positionComputerUseOverlay(window) })
+  parent.on('show', refresh)
+  // Keep the native window hidden until a live computer-use task is available.
+  hideComputerUseOverlay()
+}
 
 function showManagerWhenReady(): void {
   if (!managerReadyToShow || !managerWindow || managerWindow.isDestroyed()) return
@@ -1029,6 +1152,7 @@ function createManagerWindow(): void {
     }
   })
   managerWindow = window
+  createComputerUseOverlay(window)
   managerReadyToShow = false
   window.once('ready-to-show', () => {
     managerReadyToShow = true
@@ -1045,6 +1169,7 @@ function createManagerWindow(): void {
   })
   window.on('focus', () => markSessionViewed(currentSessionId))
   window.on('closed', () => {
+    if (computerUseOverlayWindow && !computerUseOverlayWindow.isDestroyed()) computerUseOverlayWindow.close()
     for (const runtime of runtimes.values()) runtime.dispose()
     runtimes.clear()
     unseenCompletedTasks.clear()
@@ -1073,6 +1198,22 @@ function createManagerWindow(): void {
 }
 
 function registerIpcHandlers(): void {
+  ipcMain.handle(COMPUTER_OVERLAY_GET, event => {
+    if (!computerUseOverlayWindow || computerUseOverlayWindow.isDestroyed() ||
+      event.sender !== computerUseOverlayWindow.webContents || event.senderFrame !== event.sender.mainFrame) return null
+    return readComputerOverlaySnapshot()
+  })
+  ipcMain.on(COMPUTER_OVERLAY_FIT, (event, size: unknown) => {
+    const window = computerUseOverlayWindow
+    if (!window || window.isDestroyed() || event.sender !== window.webContents ||
+      event.senderFrame !== event.sender.mainFrame || !size || typeof size !== 'object') return
+    const { width, height } = size as Record<string, unknown>
+    if (typeof width !== 'number' || !Number.isFinite(width) || width <= 0 ||
+      typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return
+    computerUseOverlayWidth = Math.max(COMPUTER_USE_OVERLAY_WIDTH, Math.ceil(width))
+    computerUseOverlayHeight = Math.max(COMPUTER_USE_OVERLAY_HEIGHT, Math.ceil(height))
+    positionComputerUseOverlay(window)
+  })
   const fromManager = (event: IpcMainEvent | IpcMainInvokeEvent): boolean =>
     managerWindow !== null && !managerWindow.isDestroyed() && event.sender === managerWindow.webContents
 

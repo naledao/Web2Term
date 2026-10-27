@@ -663,7 +663,7 @@ export class CommandRunner {
         const record = this.deps.store.getExecution(key)
         if (record) {
           const text = this.taskResult(record, JSON.stringify({ type: 'task_completion_required', goal_verified: false,
-            message: '模型报告完成，但整项目标尚未逐项核对。请使用 computer.complete_task，引用本任务实际文件回读／界面后状态／后台结果证据，列出产物路径与未确认事项；无证据先继续核对。空命令没有执行，也没有标记任务完成。' }))
+            message: '空命令没有执行。要结束任务，请以“【任务完成】”开头回复，客户端收到该标记即标记完成并提示用户；如需详细核对和产物报告，可选用 computer.complete_task。' }))
           this.taskEvent({ taskContext }, { stage: 'result-ready', execution: 'not_executed', resultText: text, message: '完成声明需要证据，等待回传核对要求。' })
           void this.deliverTaskText(record, text).catch(() => this.taskEvent({ taskContext }, { stage: 'uncertain', message: '完成核对反馈交付未确认，不自动重发。' }))
         }

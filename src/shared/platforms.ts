@@ -171,6 +171,29 @@ export interface PageAdapter {
    * accepting the partial text as the final answer.
    */
   continueButtonLabels?: string[]
+  /**
+   * Exact text of the reasoning header when the SITE ended a reply mid-thinking with no answer and
+   * no resume control. During the app's own wait such a turn is answered with 继续.
+   */
+  stoppedReplyLabels?: string[]
+  /**
+   * The site's own edit-and-resend on a sent user message, in the original page (not the focus
+   * view). Lets an edit of the LAST user message continue the current computer task, and lets the
+   * page resend that message unchanged when the reply is a leaked safety verdict. Absent: edits
+   * stay invisible to the app, as before.
+   */
+  nativeEdit?: {
+    /** One row per message, either role; the edit box and its buttons render inside the row. */
+    rowSelector: string
+    /** The edit control on a user row. */
+    buttonSelector: string
+    /** The inline editor that replaces the user bubble. Never the composer. */
+    editorSelector: string
+    /** The editor's send control, inside the same row. */
+    submitSelector: string
+    /** A whole reply consisting only of this is a leaked moderation verdict, not an answer. */
+    safetyLeakPattern?: string
+  }
   /** Attachment acknowledgements only; never used as command message identities. */
   fileTurnPositionAttr?: string
   /** The list position can live on a surrounding row rather than the user wrapper. */
@@ -751,6 +774,25 @@ export const DEEPSEEK_PAGE: PageAdapter = {
    */
   continueButtonLabels: ['继续生成'],
   /*
+   * From the user's 2026-10-26 screenshot and reply log: the reasoning header read 已停止, the
+   * stop control disappeared and the turn kept its 3159 characters, with no answer and no 继续生成.
+   */
+  stoppedReplyLabels: ['已停止'],
+  /*
+   * Measured in deepseek-edit-2026-10-27T02-38-31-777Z-40428.log: the edit icon (path M9.94076…,
+   * next to copy M6.14929…) has a box without hover; the editor is an in-row textarea WITHOUT a
+   * placeholder; 发送 is the filled primary button in that row; Enter in the editor sends too;
+   * the submit is POST /api/v0/chat/edit_message. The safety leak is from the user's 2026-10-27
+   * screenshot: the whole answer read <ds_safety>…</ds_safety>Safe.
+   */
+  nativeEdit: {
+    rowSelector: '[data-virtual-list-item-key]',
+    buttonSelector: '.ds-button--icon:has(svg path[d^="M9.94076 1.34942"])',
+    editorSelector: 'textarea.ds-textarea__textarea',
+    submitSelector: '.ds-button--primary.ds-button--filled',
+    safetyLeakPattern: '^<ds_safety>[\\s\\S]*</ds_safety>\\s*Safe$'
+  },
+  /*
    * The focus view's reads, measured in the user's 2026-10-22 chat-view log: send and stop
    * share their classes and differ only in the icon (stop M2 4.88C2 3.68009, send
    * M8.3125 0.980206). Reasoning is `.ds-think-content`; the row key is the virtual list's.
@@ -810,11 +852,12 @@ export const DEEPSEEK_PAGE: PageAdapter = {
   assistantReplySelectors: ['.ds-assistant-message-main-content'],
   messageSelectors: ['[data-virtual-list-item-key]'],
   /*
-   * EMPTY on purpose. `data-virtual-list-item-key` exists but holds "1", "2", … — a
-   * position in a virtualised list, so it changes meaning as rows are recycled and is not
-   * an identity. Declaring it here would let two different replies share a key and silently
-   * suppress the second; leaving it empty routes both sides through the content hash, which
-   * is exactly what `turnKeyOf` and `executionKeyOf` were built for.
+   * EMPTY on purpose. `data-virtual-list-item-key` holds the server's message id ("2", "3", …),
+   * with a temporary negative key ("-2") until the server assigns one, and an edit creates a
+   * new id while the version pager can bring the old one back (deepseek-edit-2026-10-27 log).
+   * A key that changes while the same reply renders is not an identity: declaring it here would
+   * let the temporary and the final key name one reply twice. Leaving it empty routes both sides
+   * through the content hash, which is exactly what `turnKeyOf` and `executionKeyOf` were built for.
    */
   messageIdAttr: '',
   /*

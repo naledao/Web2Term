@@ -6,7 +6,7 @@ namespace Web2Term.WindowsHelper;
 internal sealed record WindowApplication(string? name, string? executable_path, string? app_user_model_id);
 internal sealed record DiscoveredWindow(string Handle, uint Pid, string? ProcessStartedAt, uint ThreadId, string ClassName, string Title,
     WindowApplication Application, bool Visible, bool Minimized, bool Foreground, bool Enabled, bool? Cloaked, string? OwnerHandle,
-    string? Lifetime, bool Stable = true)
+    string? Lifetime, bool Stable = true, CaptureRect? Bounds = null)
 {
     internal bool Verified => ProcessStartedAt != null && ThreadId > 0 && ClassName.Length > 0 && Lifetime != null && Stable;
     internal string IdentityStatus => !Stable ? "changed" : ProcessStartedAt == null ? "process_unavailable" : Lifetime == null || ClassName.Length == 0 ? "lifetime_unavailable" : "verified";
@@ -21,7 +21,7 @@ internal interface IWindowDiscovery
 }
 internal sealed record CatalogWindow(string? window_id, string hwnd, uint pid, string? process_started_at, uint thread_id, string class_name, string title,
     WindowApplication application, bool visible, bool minimized, bool foreground, bool enabled, bool? cloaked, string? owner_hwnd,
-    string? owner_window_id, bool identity_verified, string identity_status);
+    string? owner_window_id, bool identity_verified, string identity_status, CaptureRect? bounds);
 internal sealed record WindowPage(string snapshot_id, string collected_at, string expires_at, string query, uint? pid, bool include_hidden,
     CatalogWindow[] windows, int total_matches, bool has_more, string? next_cursor, bool complete, string[] limitations);
 internal sealed record WindowSelection(string ScopeId, string SnapshotId, string WindowId, DiscoveredWindow Window, MenuWindowBinding? Menu = null);
@@ -29,6 +29,9 @@ internal sealed record WindowSelection(string ScopeId, string SnapshotId, string
 /** MTA-owned task scopes. Enumeration is a snapshot, never a lock on a foreign window. */
 internal sealed partial class WindowCatalog(IWindowDiscovery discovery, Func<DateTime>? clock = null, IWindowInteractionBackend? interactions = null)
 {
+    // Bounded reference retention covers the maximum 10-minute delivery delay plus model time.
+    // Resolve still reads the real identity immediately before every use.
+    internal static readonly TimeSpan ReferenceLifetime = TimeSpan.FromMinutes(15);
     private sealed record Entry(string? Id, DiscoveredWindow Window);
     private sealed class Snapshot(string query, uint? pid, bool hidden, DateTime at, Entry[] entries, bool complete, string[] limitations)
     {
@@ -37,6 +40,7 @@ internal sealed partial class WindowCatalog(IWindowDiscovery discovery, Func<Dat
         internal readonly uint? Pid = pid;
         internal readonly bool Hidden = hidden;
         internal readonly DateTime At = at;
+        internal DateTime RetainedAt = at;
         internal readonly Entry[] Entries = entries;
         internal readonly bool Complete = complete;
         internal readonly string[] Limitations = limitations;
@@ -70,14 +74,14 @@ internal sealed partial class WindowCatalog(IWindowDiscovery discovery, Func<Dat
         }
         string scope = p.GetProperty("scope_id").GetString()!, query = p.GetProperty("query").GetString()!.Trim();
         bool hidden = p.GetProperty("include_hidden").GetBoolean();
-        foreach (string expired in scopes.Where(pair => Now - pair.Value.At >= TimeSpan.FromMinutes(2)).Select(pair => pair.Key).ToArray()) scopes.Remove(expired);
+        foreach (string expired in scopes.Where(pair => Now - pair.Value.RetainedAt >= ReferenceLifetime).Select(pair => pair.Key).ToArray()) scopes.Remove(expired);
         if (cancellation.IsCancellationRequested) { scopes.Remove(scope); return Cancelled(); }
         Snapshot snapshot;
         int offset = 0;
         if (p.TryGetProperty("cursor", out JsonElement cursor))
         {
             if (cursor.ValueKind != JsonValueKind.String || !CursorId().IsMatch(cursor.GetString()!)) return Invalid();
-            if (!scopes.TryGetValue(scope, out snapshot!) || snapshot.Query != query || snapshot.Pid != pid || snapshot.Hidden != hidden ||
+            if (!scopes.TryGetValue(scope, out snapshot!) || Now - snapshot.At >= ReferenceLifetime || snapshot.Query != query || snapshot.Pid != pid || snapshot.Hidden != hidden ||
                 !snapshot.Cursors.TryGetValue(cursor.GetString()!, out offset)) return Stale();
         }
         else
@@ -112,11 +116,11 @@ internal sealed partial class WindowCatalog(IWindowDiscovery discovery, Func<Dat
                 string? owner = w.OwnerHandle != w.Handle ? w.OwnerHandle : null;
                 return new CatalogWindow(windowId, w.Handle, w.Pid, w.ProcessStartedAt, w.ThreadId, w.ClassName, w.Title, w.Application,
                     w.Visible, w.Minimized, w.Foreground, w.Enabled, w.Cloaked, owner, owner != null && ownerIds.TryGetValue(owner, out string? ownerId) ? ownerId : null,
-                    windowId != null, windowId != null ? "verified" : entry.Id != null ? "changed" : w.IdentityStatus);
+                    windowId != null, windowId != null ? "verified" : entry.Id != null ? "changed" : w.IdentityStatus, w.Bounds is { Valid: true } ? w.Bounds : null);
             }).ToArray();
             bool more = offset + selected.Length < snapshot.Entries.Length;
             string[] reasons = snapshot.Limitations.Concat(rows.Any(row => row.identity_status == "changed") ? ["window_changed"] : Array.Empty<string>()).Distinct().ToArray();
-            page = new(snapshot.Id, snapshot.At.ToString("O"), snapshot.At.AddMinutes(2).ToString("O"), query, pid, hidden, rows, snapshot.Entries.Length,
+            page = new(snapshot.Id, snapshot.At.ToString("O"), snapshot.At.Add(ReferenceLifetime).ToString("O"), query, pid, hidden, rows, snapshot.Entries.Length,
                 more, more ? next : null, snapshot.Complete && reasons.Length == 0, reasons);
             if (JsonSerializer.SerializeToUtf8Bytes(page).Length <= 180 * 1024 || selected.Length <= 1) break;
             selected = selected[..^1];
@@ -135,7 +139,7 @@ internal sealed partial class WindowCatalog(IWindowDiscovery discovery, Func<Dat
     internal WindowSelection? Resolve(string scope, string windowId, CancellationToken cancellation)
     {
         cancellation.ThrowIfCancellationRequested();
-        if (!scopes.TryGetValue(scope, out Snapshot? snapshot) || Now - snapshot.At >= TimeSpan.FromMinutes(2) || !snapshot.Published.Contains(windowId) || snapshot.Revoked.Contains(windowId)) return null;
+        if (!scopes.TryGetValue(scope, out Snapshot? snapshot) || Now - snapshot.RetainedAt >= ReferenceLifetime || !snapshot.Published.Contains(windowId) || snapshot.Revoked.Contains(windowId)) return null;
         RelatedEntry? related = snapshot.Related.GetValueOrDefault(windowId);
         if (related != null && related.Expires <= Now) { snapshot.Related.Remove(windowId); snapshot.Published.Remove(windowId); return null; }
         Entry? entry = snapshot.Entries.FirstOrDefault(value => value.Id == windowId) ?? related?.Entry ?? snapshot.WaitReferences.GetValueOrDefault(windowId);

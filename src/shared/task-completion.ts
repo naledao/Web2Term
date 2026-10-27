@@ -97,7 +97,7 @@ export function parseTaskCompletionState(v: unknown): TaskCompletionState | null
   return structuredClone(v) as unknown as TaskCompletionState
 }
 export const COMPLETE_TASK_ACTION: ComputerUseActionDefinition = {
-  action: 'complete_task', description: '核对整项目标并交付产物。逐项对应 task_completion_context.inputs 中的所有原始／补充要求，引用主进程证据编号。文件须先 read_files 回读内容；界面须观察真实后状态；纯终端任务可引用实际输出及校验结果，不能只依据退出码。模型负责语义核对，主进程检查事实、文件快照、归属和未决依赖。结果确认交付前不标记任务完成。',
+  action: 'complete_task', description: '可选的详细结果核对和产物交付。逐项对应 task_completion_context.inputs 中的所有原始／补充要求，引用主进程证据编号。文件须先 read_files 回读内容；界面须观察真实后状态；纯终端任务可引用实际输出及校验结果，不能只依据退出码。模型负责语义核对，主进程检查本报告的事实、文件快照、归属和未决依赖。也可直接以“【任务完成】”开头回复来结束任务，无需先调用本动作。',
   parameters: [
     { name: 'summary', type: 'string', required: true, minLength: 1, maxLength: 2000, description: '具体完成结果，不能只写已完成。' },
     { name: 'requirements', type: 'array', required: true, maxItems: 64, description: '每项 {input_id,checks:[{criterion,evidence_ids,status,assessment}]}；status 为 passed／failed／unconfirmed，每条检查引用 1～8 个实际证据编号并说明如何满足要求。覆盖全部输入，不能遗漏约束。' },

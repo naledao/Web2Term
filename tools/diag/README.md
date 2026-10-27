@@ -26,6 +26,48 @@ It reuses the application's existing profile and `persist:chatgpt`, defaults to 
 local proxy, and synchronously appends under `%TEMP%`. It never clicks, types,
 captures network/storage/cookies, or starts the application injection pipeline.
 
+## deepseek-edit-probe.cjs
+
+User-run, passive capture of DeepSeek's native edit-and-resend: the unlabelled edit icon, the
+in-row editor and its send/cancel controls, Enter behaviour, the `1 / 2` version pager, the edit
+and regenerate endpoints, and where a `<ds_safety>…</ds_safety>Safe` reply shows up (page and
+stream). See [steps and log contract](deepseek-edit-probe.md). It never clicks, types or replays
+requests; text is length-only. Log: `%TEMP%\gpt-login-diag\deepseek-edit-<timestamp>-<pid>.log`.
+
+## mouse-extrainfo-probe.ps1
+
+**The question this run answers:** does the `dwExtraInfo` that `SendInput` attaches reach a
+`WH_MOUSE_LL` / `WH_KEYBOARD_LL` hook with all 64 bits intact? The Windows helper marks its own
+input as `(pid << 32) | 0x57325443` (`ClickInterop.Marker`) and classifies any other injected
+click as `external_input` (`DesktopActivityPolicy.Classify`). Every `external-input` in the
+`desktop-activity-*.log` files so far is a `click`, timed with the helper's own click steps.
+
+Not Electron: a standalone PowerShell script with inline C#, same struct layouts as the helper.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\diag\mouse-extrainfo-probe.ps1
+```
+
+1. A small topmost window **“dwExtraInfo 探针”** opens. Do not touch mouse or keyboard for ~5 s:
+   it moves the cursor onto its own window and sends move ±1px, left click, wheel and the
+   unassigned virtual key `0x88`, once per marker variant. Button/wheel are sent only while the
+   cursor is over the probe's own window; otherwise the case logs `SKIP`.
+2. Optional, 20 s: click 空白文稿 / title / subtitle placeholders in PowerPoint, so any third-party
+   injector shows up as `FOREIGN`. Closing the window ends the run early.
+
+| Line | Meaning |
+| --- | --- |
+| `START … is64= inputSize=` | must be `True` / `40`; a 32-bit run proves nothing |
+| `SEEN case= kind= extra= -> …` | per hooked injected event: `PRESERVED`, `TRUNCATED_LOW32`, `SIGN_EXTENDED_LOW32`, `OTHER` |
+| `SUMMARY case=helper-style button=…` | the case that matches the helper's real marker |
+| `VERDICT` | `SURVIVES` → truncation is not the cause; `LOSES its high 32 bits` → the helper misjudges its own clicks |
+| `FOREIGN` / `PASSIVE end foreignInjected=` | injected input from someone else during the passive phase |
+
+Rules: no coordinates, window titles or real key values are written; extra/flags/message only.
+It sets `$env:LIB` to empty for its own process (an unexpanded `%LIB%` breaks `Add-Type`).
+
+Log: `%TEMP%\gpt-login-diag\mouse-extrainfo-<timestamp>-<pid>.log` (`PROBE_LOG_DIR` overrides).
+
 ## web2term desktop/workspace checks
 
 Only the user runs these offline checks:

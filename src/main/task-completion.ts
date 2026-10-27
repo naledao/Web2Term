@@ -8,13 +8,37 @@ import type { TaskCompletionClaim, TaskCompletionReport, TaskCompletionState, Ta
 
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 const hash = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v)
-const readonly = new Set(['list_apps', 'list_windows', 'observe', 'validate_observation', 'inspect_interactions', 'wait_for', 'complete_task'])
+const readonly = new Set(['list_apps', 'list_windows', 'observe', 'validate_observation', 'inspect_interactions', 'wait_for', 'focus_window', 'complete_task'])
+function evidenceWindowScope(e: TaskEvidence): { key: string; pid: number; alias: string | null } | null {
+  if (e.kind !== 'observation') return null
+  try {
+    const facts = JSON.parse(e.facts), w = facts.window_identity
+    if (!object(w) || !['hwnd', 'pid', 'process_started_at', 'thread_id', 'class_name'].every(k => w[k] !== undefined && w[k] !== null)) return null
+    if (!Number.isSafeInteger(w.pid) || Number(w.pid) < 1) return null
+    return { key: createHash('sha256').update(JSON.stringify([w.hwnd, w.pid, w.process_started_at, w.thread_id, w.class_name])).digest('hex'),
+      pid: Number(w.pid), alias: typeof facts.controls_observation_id === 'string' ? facts.controls_observation_id : null }
+  } catch { return null }
+}
 export function completionState(task: AutonomousTask): TaskCompletionState {
   return structuredClone(task.completion ?? { version: 1, revision: 0, evidence: [], report: null })
 }
-export function advanceCompletion(task: AutonomousTask, action: string): TaskCompletionState {
+export function advanceCompletion(task: AutonomousTask, action: string, observationId?: string): TaskCompletionState {
   const state = completionState(task)
-  if (action !== 'read_files' && !readonly.has(action)) state.revision++
+  if (action !== 'read_files' && !readonly.has(action)) {
+    const previous = state.revision++
+    // Derive scope from this actual request's delivered observation, never a last-window hint:
+    // a later desktop click can hit another app, and controls aliases may have no scoped fact.
+    const source = observationId ? state.evidence.find(e => e.kind === 'observation' && e.delivered && (e.target === observationId || evidenceWindowScope(e)?.alias === observationId)) : undefined
+    const target = source ? evidenceWindowScope(source) : null
+    if (target && ['click', 'type_text', 'press_key', 'scroll', 'drag'].includes(action)) {
+      for (const e of state.evidence) {
+        const scope = evidenceWindowScope(e)
+        // Same-process windows can be two views of one document. Preserve only another
+        // process's current window facts; unknown commands/open/desktop scopes invalidate all.
+        if (e.revision === previous && scope && scope.key !== target.key && scope.pid !== target.pid) e.revision = state.revision
+      }
+    }
+  }
   state.report = null
   return state
 }
@@ -33,8 +57,8 @@ export function captureCompletionResult(task: AutonomousTask, result: ComputerUs
     (object(observed.image) && hash(observed.image.sha256) || object(observed.controls))) {
     const controls = object(observed.controls) ? observed.controls : null
     add(task, state, stepId, { kind: 'observation', target: observed.observation_id, sha256: object(observed.image) && hash(observed.image.sha256) ? observed.image.sha256 : null, sizeBytes: null,
-      facts: JSON.stringify({ observation_id: observed.observation_id, target: observed.target, window_id: observed.window_id, window_identity: observed.window_identity,
-        image_sha256: object(observed.image) ? observed.image.sha256 : null, controls_status: controls?.status ?? null,
+        facts: JSON.stringify({ observation_id: observed.observation_id, target: observed.target, window_id: observed.window_id, window_identity: observed.window_identity ?? controls?.window_identity,
+        image_sha256: object(observed.image) ? observed.image.sha256 : null, controls_observation_id: controls?.observation_id ?? null, controls_status: controls?.status ?? null,
         controls_complete: controls?.complete ?? null, limitations: controls?.limitations ?? [],
         basis: '已采集的真实后状态；具体业务含义由模型结合本次图像／控件判断' }).slice(0, 6000) }, at)
   }
@@ -67,7 +91,7 @@ export function completionContext(task: AutonomousTask): unknown {
     evidence: task.completion?.evidence.slice(-32) ?? [], evidence_truncated: (task.completion?.evidence.length ?? 0) > 32,
     last_report: report ? { state: report.state, summary: report.summary, blockers: report.blockers.slice(0, 8), artifact_count: report.artifacts.length } : null,
     current_revision: task.completion?.revision ?? 0, goal_verified: task.status === 'completed',
-    guidance: '完成时用 complete_task 逐项核对所有输入，细分每个内容、位置和约束条件，引用实际证据。原始要求与补充要求以原对话完整内容为准，摘录有裁剪标记。刚回传的证据在发送确认后生效；文件须核对附件内容，界面须核对最后一次操作后的观察。不得以退出码 0、输入派发或上传成功代替业务验证。无证据先继续观察／回读／等待，不要求用户代做常规核对。' }
+    guidance: '以“【任务完成】”开头回复即可结束任务并提示用户，complete_task 是可选的详细核对入口。若选择提交核对报告，须逐项对应所有输入，细分内容、位置和约束条件，引用实际证据。原始要求与补充要求以原对话完整内容为准，摘录有裁剪标记。刚回传的证据在发送确认后生效；文件核对附件内容，界面核对最后一次操作后的观察。报告不能以退出码 0、输入派发或上传成功代替业务验证。' }
   while (JSON.stringify(context).length > 48_000 && context.evidence.length > 1) { context.evidence.shift(); context.evidence_truncated = true }
   if (JSON.stringify(context).length > 48_000) for (const input of context.inputs) { input.text_excerpt = ''; input.text_truncated = true }
   return context
@@ -137,7 +161,7 @@ export async function assessTaskCompletion(task: AutonomousTask, claim: TaskComp
   for (const id of referenced) {
     const e = state.evidence.find(e => e.id === id)
     if (!e || !e.delivered) { block(`证据 ${id} 不存在于当前任务或尚未确认交付。`); continue }
-    if (['observation', 'command'].includes(e.kind) && (e.revision !== state.revision || now < e.recordedAt || now - e.recordedAt > 2 * 60_000)) block(`后状态证据 ${id} 已过时，请在最近操作后重新观察。`)
+    if (['observation', 'command'].includes(e.kind) && (e.revision !== state.revision || now < e.recordedAt || now - e.recordedAt > 15 * 60_000)) block(`后状态证据 ${id} 已过时；相关对象发生后续操作或超过证据保留期限，请补充核对。`)
     if (e.kind === 'file') {
       let valid = false
       try { valid = await recheck(e) } catch { /* Missing, locked, replaced or unreadable means unconfirmed. */ }

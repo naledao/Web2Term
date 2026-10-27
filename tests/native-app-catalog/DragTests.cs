@@ -38,7 +38,7 @@ internal static class DragTests
     }
     private static DragReceipt Receipt(ActionResult r) => (DragReceipt)r.Data!;
     internal static void RunAll() {
-        Geometry(); Complete(); Stale(); Interrupted(); Receipts(); Cancellation(); Protocol();
+        Geometry(); Complete(); Stale(); HoverRepaint(); Interrupted(); Receipts(); Cancellation(); Protocol();
         Console.WriteLine("PASS drag bounded paths, guards, accepted prefixes, cancellation and cleanup (synthetic)");
     }
     private static void Geometry() {
@@ -70,10 +70,10 @@ internal static class DragTests
         }
     }
     private static void Stale() {
-        foreach (string scenario in new[] { "image", "focus", "dpi", "route", "hover", "hover_route" }) {
+        foreach (string scenario in new[] { "image", "focus", "dpi", "route", "hover_route" }) {
             var f = new Fixture(); var image = f.Publish();
-            if (scenario == "image") f.Images.Pixels.Bgra[0] = 255;
-            if (scenario == "focus") f.States.Current = f.States.Current with { Focus = "foreign" };
+            if (scenario == "image") Array.Fill(f.Images.Pixels.Bgra, (byte)255);
+            if (scenario == "focus") f.Input.Allowed = false;
             if (scenario == "dpi") f.States.Current = f.States.Current with { Source = f.States.Current.Source with { WindowDpi = 192 } };
             if (scenario == "route") f.Input.Allowed = false;
             if (scenario == "hover") f.Input.AfterMove = n => { if (n == 1) f.Images.Pixels.Bgra[0] = 255; };
@@ -81,6 +81,11 @@ internal static class DragTests
             var result = f.Drag(image);
             Check(!result.Ok && f.Input.DownCalls == 0 && f.Input.UpCalls == 0 && f.Input.Moves == (scenario.StartsWith("hover") ? 1 : 0), "stale image/route started drag: " + scenario);
         }
+    }
+    private static void HoverRepaint() {
+        var f = new Fixture(); var image = f.Publish();
+        f.Input.AfterMove = n => { if (n == 1) { Array.Fill(f.Images.Pixels.Bgra, (byte)255); f.States.Current = f.States.Current with { Revision = "hover-handles", Focus = "internal-focus" }; } };
+        Check(f.Drag(image).Ok && f.Input.DownCalls == 1 && f.Input.UpCalls == 1, "ordinary hover paint blocked drag or unbalanced the button");
     }
     private static void Interrupted() {
         foreach (string scenario in new[] { "window", "dpi", "monitor", "cursor", "capture", "foreground", "user_button", "not_arrived" }) {

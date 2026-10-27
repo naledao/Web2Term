@@ -2,7 +2,7 @@ import type { ComputerUseActionDefinition } from './computer-use'
 
 export const INSPECT_INTERACTIONS_DEFINITION: ComputerUseActionDefinition = {
   action: 'inspect_interactions',
-  description: '只读发现一个已知业务窗口关联的新弹窗、文件对话框及活动原生菜单，不点击、不激活、不统一确认。传入普通业务 window_id，软件核对 owner 链、真实身份和活动菜单路由，返回可供 observe/focus_window 使用的短期窗口引用，并保留原窗口引用。先 observe 新引用的截图及控件，理解文件名、路径、覆盖／未保存提示和影响，再按用户目标自主使用 click/type_text/press_key；UIA 模态未知不等于无弹窗。活动菜单不要 focus_window，以免关闭菜单；mode=popup 观察菜单引用，mode=owner 观察 keyboard_window_id 对应的原窗口；两种模式都直接 observe，截图不可用时改 target=controls，再用 click 或不带 element_id 的窗口级 press_key。活动菜单不使用 type_text/scroll/drag；关闭菜单后重新观察再输入。菜单输入仍由原生侧实时核对前台 owner、线程、捕获及菜单存活；普通窗口不能借此绕过菜单拦截。菜单关闭、子菜单或新弹窗出现后，以本次 parent_window_id 再检查，重新观察后继续，不重放旧动作。每次重新检查仅替换本来源上次派生的交互引用，30 秒或父窗口快照到期即失效；未知关联、自绘嵌入弹层可继续观察原窗口，不能仅凭标题／同 PID 猜测归属。',
+  description: '只读发现一个已知业务窗口关联的新弹窗、文件对话框及活动原生菜单，不点击、不激活、不统一确认。传入普通业务 window_id，软件核对 owner 链、真实身份和活动菜单路由，返回可供 observe/focus_window 使用的短期窗口引用，并保留原窗口引用。先 observe 新引用的截图及控件，理解文件名、路径、覆盖／未保存提示和影响，再按用户目标自主使用 click/type_text/press_key；UIA 模态未知不等于无弹窗。活动菜单不要 focus_window，以免关闭菜单；mode=popup 观察菜单引用，mode=owner 观察 keyboard_window_id 对应的原窗口；两种模式都直接 observe，截图不可用时改 target=controls，再用 click 或不带 element_id 的窗口级 press_key。活动菜单不使用 type_text/scroll/drag；关闭菜单后重新观察再输入。菜单输入仍由原生侧实时核对前台 owner、线程、捕获及菜单存活；普通窗口不能借此绕过菜单拦截。菜单关闭、子菜单或新弹窗出现后，以本次 parent_window_id 再检查，重新观察后继续，不重放旧动作。每次重新检查替换本来源上次派生的交互引用；瞬时菜单30秒失效，普通对话框/owned窗口保留至父引用期限，使用时仍核对真实身份与关系；未知关联、自绘嵌入弹层可继续观察原窗口，不能仅凭标题／同 PID 猜测归属。',
   parameters: [
     { name: 'window_id', type: 'string', required: true, minLength: 36, maxLength: 36, description: '当前任务已发现的普通业务窗口编号，可检查禁用的父窗口；不接受菜单自身、原生句柄或会话字段。' },
     { name: 'limit', type: 'integer', required: false, minimum: 1, maximum: 16, description: '默认 8，最多 16 个关联窗口／菜单；超限或读取不足明确返回 complete=false，不能当作不存在其他弹窗。' }
@@ -19,7 +19,7 @@ export interface WindowsInteractions {
 
 export const LIST_WINDOWS_DEFINITION: ComputerUseActionDefinition = {
   action: 'list_windows',
-  description: '发现当前本机桌面的业务顶层窗口，包括同一应用的多个窗口、标题、真实进程／应用信息、前台／可见／最小化状态和 owner 关系。客户端、helper、同一客户端程序的其他窗口／实例及其拥有的弹窗不作为业务候选；无法核实程序或 owner 归属的窗口不可操作。桌面概览中看见控制界面不能授权操作该界面、切换权限或向控制对话输入。由你根据任务自行选择；同名窗口不能只凭标题认定目标，应结合应用身份并继续观察。仅原样使用 windows 行中 identity_verified=true 的 window_id，hwnd、owner_hwnd 和启动候选不是操作引用。没有 window_id 的窗口仅供参考，不能猜测引用。每次不带 cursor 的查询都会重新采集并作废本任务上一批窗口引用；分页须保持 query、pid 和 include_hidden。引用还受任务、helper 代次和有效期约束，后续动作必须重新核实实际身份。此动作不激活窗口、不输入、不代表任务完成。',
+  description: '发现当前本机桌面的业务顶层窗口，包括同一应用的多个窗口、标题、真实进程／应用信息、前台／可见／最小化状态和 owner 关系。客户端、helper、同一客户端程序的其他窗口／实例及其拥有的弹窗不作为业务候选；无法核实程序或 owner 归属的窗口不可操作。桌面概览中看见控制界面不能授权操作该界面、切换权限或向控制对话输入。由你根据任务自行选择；同名窗口不能只凭标题认定目标，应结合应用身份、bounds（物理像素的可见边框，无法读取时为 null）并继续观察；tiny=true 表示宽或高不足 100 像素，通常是托盘、通知或辅助窗口而非主界面。仅原样使用 windows 行中 identity_verified=true 的 window_id，hwnd、owner_hwnd 和启动候选不是操作引用。没有 window_id 的窗口仅供参考，不能猜测引用。每次不带 cursor 的查询都会重新采集并作废本任务上一批窗口引用；分页须保持 query、pid 和 include_hidden。引用还受任务、helper 代次和有效期约束，后续动作必须重新核实实际身份。此动作不激活窗口、不输入、不代表任务完成。',
   parameters: [
     { name: 'query', type: 'string', required: false, description: '按窗口标题、进程名称、真实路径或 AppUserModelID 子串过滤，忽略大小写。', maxLength: 200 },
     { name: 'pid', type: 'integer', required: false, description: '可选的进程筛选，PID 仅用于过滤，不能代替窗口身份。', minimum: 1, maximum: 4294967295 },
@@ -61,7 +61,14 @@ export interface DesktopWindow {
   owner_window_id: string | null
   identity_verified: boolean
   identity_status: WindowIdentityStatus
+  /** Visible frame (DWM extended frame bounds) in physical desktop pixels; null when unreadable. */
+  bounds: { x: number; y: number; width: number; height: number } | null
+  /** Added by main on list_windows output only: a frame under TINY_WINDOW_EDGE on either side. */
+  tiny?: boolean
 }
+/** Frames this small are tray, notification or helper windows, not an application's main surface. */
+export const TINY_WINDOW_EDGE = 100
+export const tinyWindow = (row: DesktopWindow): boolean => !!row.bounds && (row.bounds.width < TINY_WINDOW_EDGE || row.bounds.height < TINY_WINDOW_EDGE)
 export type WindowListLimitation = 'enumeration_limited' | 'metadata_unavailable' | 'lifetime_unavailable' | 'window_changed'
 export interface WindowsWindowPage {
   snapshot_id: string

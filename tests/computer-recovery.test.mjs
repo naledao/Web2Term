@@ -135,6 +135,20 @@ test('a helper/executor unknown result installs a durable barrier; only a new su
   returned = result('click'); await f.run(); assert.equal(f.executions.at(-1).call.action, 'click')
   assert.equal(f.errors.length, 0)
 })
+test('recovery permits bounded diagnostics and window preparation without lifting the input barrier', async t => {
+  let returned = result('click', { ok: false, execution: 'unknown', code: 'executor_error' })
+  const f = fixture(t, { action: 'click', execute: () => returned })
+  await f.run()
+  for (const action of ['inspect_interactions', 'validate_observation', 'wait_for', 'focus_window']) {
+    returned = result(action)
+    await f.run(f.request({ call: { action, parameters: {} } }))
+    assert.equal(f.executions.at(-1).call.action, action)
+    assert.equal(f.coordinator.current('deepseek').recovery.requiresObservation, true)
+  }
+  const executed = f.executions.length
+  returned = result('click'); await f.run()
+  assert.equal(f.executions.length, executed); assert.equal(f.sends.at(-1).code, 'recovery_required')
+})
 
 test('a late receipt from an old generation can refine history without clearing the resumed task barrier', t => {
   const f = fixture(t, { action: 'observe' }), old = stage(f)
@@ -176,16 +190,20 @@ test('recovery metadata is validated and malformed checkpoints cannot silently r
 // Extract actual runtime methods so recovery send/ack ordering is checked without Electron.
 const source = ts.createSourceFile('runtime.ts', readFileSync(new URL('../src/main/session-runtime.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
 const declaration = source.statements.find(n => ts.isClassDeclaration(n) && n.name?.text === 'SessionRuntime')
-const methods = ['resumeAutonomousTask', 'embedHandlers'].map(name => declaration.members.find(n => n.name?.getText(source) === name).getText(source)).join('\n')
+const methods = ['resumeAutonomousTask', 'resumeAutonomousTaskNow', 'embedHandlers'].map(name => declaration.members.find(n => n.name?.getText(source) === name).getText(source)).join('\n')
 const Runtime = new Script(ts.transpileModule(`class Runtime { ${methods} }; Runtime`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
-}).outputText).runInNewContext({ structuredClone, process: { platform: 'win32', arch: 'x64' },
-  console: { warn() {} }, computerRecoveryMessage: recovery.computerRecoveryMessage, supportsFocusView: () => false })
-function runtime(f, send) {
+}).outputText).runInNewContext({ structuredClone, process: { platform: 'win32', arch: 'x64' }, setTimeout,
+  console: { warn() {} }, computerRecoveryMessage: recovery.computerRecoveryMessage, recoverySendBlockedMessage: recovery.recoverySendBlockedMessage,
+  computerUseSendBlock: () => null, supportsFocusView: () => false })
+function runtime(f, send, status = { enabled: true, promptInjectionEnabled: true, pendingQuestion: null }) {
   const owner = f.lease(); f.coordinator.stop('deepseek', 'interrupted')
   const capability = { available: true, scopeSupported: true, computerUseEnabled: true, context: { sessionId: 'session-a', platformId: 'deepseek' } }
-  const embed = { getComputerUsePageEpoch: () => 'document-a', getInterceptorStatus: () => ({ enabled: true, promptInjectionEnabled: true }),
-    sendUserTask: text => send(text, subject) }
+  const forced = []
+  const embed = { getComputerUsePageEpoch: () => 'document-a', getInterceptorStatus: () => ({ ...status }),
+    setInterceptorEnabled: enabled => { status.enabled = enabled }, cancelQuestion: async () => { status.pendingQuestion = null },
+    userSendBlockReason: async () => 'text-draft',
+    sendUserTask: (text, force) => { forced.push(force); return send(text, subject) } }
   const subject = Object.assign(new Runtime(), { id: 'session-a', active: true, activePlatformId: 'deepseek', embed,
     options: { store: f.store, localMachineId: 'machine-a' }, taskCoordinator: f.coordinator, taskProgression: { wake: async () => {} },
     embeds: new Map([['deepseek', { conversationId: 'chat-a', embed }]]),
@@ -193,16 +211,18 @@ function runtime(f, send) {
     getComputerUseCapability: () => capability, getAutonomousTask: () => f.coordinator.context('deepseek', 'chat-a'),
     stopAutonomousTask: (platform, status) => f.coordinator.stop(platform, status),
     runner: { hasInFlightWork: () => false, getAutomation: () => ({ paused: false }), getTerminalState: () => ({ cwd: 'C:\\work' }) },
-    backgroundTaskResults: { isSending: false }, focusChat: { begin: () => 'turn-resume' }, environment: {}, taskRecoverySend: null })
-  return { subject, owner }
+    backgroundTaskResults: { isSending: false }, focusChat: { begin: () => 'turn-resume' }, environment: {}, taskRecoverySend: null,
+    setPromptInjectionEnabled: enabled => { status.promptInjectionEnabled = enabled }, setPaused: paused => { subject.runner.getAutomation = () => ({ paused }) } })
+  return { subject, owner, status, forced }
 }
 
-test('native confirmed sends alone create the resumed generation; unknown sends are never resubmitted', async t => {
+test('native confirmed sends alone create the resumed generation; another explicit click sends again', async t => {
   let sends = 0
-  const f = fixture(t), { subject, owner } = runtime(f, async () => { sends++; return 'stuck' })
+  const f = fixture(t), { subject, owner, forced } = runtime(f, async () => { sends++; return 'stuck' })
   assert.match(await subject.resumeAutonomousTask(owner), /确认/)
   assert.equal(f.store.autonomousTaskGeneration('session-a'), 1)
-  assert.match(await subject.resumeAutonomousTask(owner), /不会自动重复发送/); assert.equal(sends, 1)
+  assert.match(await subject.resumeAutonomousTask(owner), /确认/); assert.equal(sends, 2, 'the user chose to continue again')
+  assert.deepEqual(forced, [true, true], 'every resume asks the page to clear its own blockers')
   const pending = subject.taskRecoverySend
   subject.embedHandlers({ id: 'deepseek' }).onUserStarted(pending.text, [], undefined, { id: 'user:resume:late', kind: 'goal' })
   const next = f.coordinator.current('deepseek')
@@ -213,7 +233,7 @@ test('native confirmed sends alone create the resumed generation; unknown sends 
 test('known pre-submit rejection permits a new user attempt without restoring or replaying anything', async t => {
   let sends = 0
   const f = fixture(t), { subject, owner } = runtime(f, async () => { sends++; return 'busy' })
-  assert.match(await subject.resumeAutonomousTask(owner), /草稿/); assert.equal(subject.taskRecoverySend, null)
+  assert.match(await subject.resumeAutonomousTask(owner), /未发送的文字或附件/); assert.equal(subject.taskRecoverySend, null)
   await subject.resumeAutonomousTask(owner); assert.equal(sends, 2)
   assert.equal(f.store.autonomousTaskGeneration('session-a'), 1); assert.equal(f.executions.length, 0)
 })
@@ -230,14 +250,24 @@ test('a blocked live task is retired before recovery submission so old delivery 
   assert.equal(f.executions.length, 0)
 })
 
-test('stale task identities, other conversations and paused tasks cannot submit a recovery', async t => {
+test('stale task identities and other conversations cannot submit a recovery', async t => {
   let calls = 0
   const f = fixture(t), { subject, owner } = runtime(f, async () => { calls++; return 'busy' })
   for (const patch of [{ taskId: 'other-task' }, { generation: 99 }, { conversationId: 'another-chat' }, { platformId: 'chatgpt' }, { sessionId: 'other-session' }]) {
     assert.ok(await subject.resumeAutonomousTask({ ...owner, ...patch }))
   }
+  assert.equal(calls, 0)
+})
+
+test('an explicit resume clears the app's own blockers: pause, terminal mode, prompt injection and an open question', async t => {
+  let calls = 0
+  const status = { enabled: false, promptInjectionEnabled: false, pendingQuestion: { messageId: 'question-a', questions: [] } }
+  const f = fixture(t), { subject, owner, forced } = runtime(f, async () => { calls++; return 'stuck' }, status)
   subject.runner.getAutomation = () => ({ paused: true })
-  assert.match(await subject.resumeAutonomousTask(owner), /暂停/); assert.equal(calls, 0)
+  assert.match(await subject.resumeAutonomousTask(owner), /确认/)
+  assert.equal(calls, 1); assert.deepEqual(forced, [true])
+  assert.equal(subject.runner.getAutomation().paused, false)
+  assert.deepEqual(status, { enabled: true, promptInjectionEnabled: true, pendingQuestion: null })
 })
 
 test('late recovery acknowledgement after a replacement cannot create or fail the new goal', async t => {

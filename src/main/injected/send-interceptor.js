@@ -182,6 +182,10 @@
   }
 
   let computerSourceSubmissionId = null
+  // A native edit-and-resend of the last user message that is waiting for generation to start.
+  let nativeEditRetry = null
+  // Leaked moderation verdicts answered by an automatic unchanged resend; reset by a genuine send.
+  let safetyLeak = { count: 0, busy: false, failedKey: null }
   let computerReplyWait = null
   let computerReplySerial = 0
   let pendingComputerRecognition = null
@@ -189,11 +193,11 @@
   let computerPageEpoch = null
 
   let taskPromptConfigured = false
-  const resetTaskPrompt = () => {
+  const resetTaskPrompt = (generation = state.taskPromptGeneration + 1) => {
     computerReplyWait = null
     computerSourceSubmissionId = null
     pendingComputerRecognition = null
-    state.taskPromptGeneration += 1
+    state.taskPromptGeneration = generation
     state.taskPromptInjected = false
     state.failedCommand = null
     state.commandRecoveryUsed = false
@@ -210,7 +214,7 @@
   const replyDiagnosticEvents = new Set([
     'installed', 'configured', 'sent', 'sent-raw', 'scan', 'reply-state', 'question',
     'question-cleared', 'command', 'read-files', 'computer-request', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
-    'continue-generation', 'command-recovery'
+    'continue-generation', 'command-recovery', 'native-edit'
   ])
   const replyScanEvents = new Set(['scan', 'question', 'command', 'read-files', 'computer-request', 'parse-failed', 'task-finished'])
   let replyScanSnapshot = {}
@@ -310,12 +314,14 @@
       if (!node || typeof node.closest !== 'function') continue
       for (const selector of PAGE.composerSelectors) {
         const found = node.closest(selector)
-        if (isVisibleElement(found) && !found.closest(PAGE.focus?.edit?.turnSelector || ':not(*)')) return found
+        if (isVisibleElement(found) && !found.closest(PAGE.focus?.edit?.turnSelector || ':not(*)') &&
+          !found.closest(PAGE.nativeEdit?.rowSelector || ':not(*)')) return found
       }
     }
+    // A message's inline edit box is never the composer: composing into it would send the prompt as the edit.
     for (const selector of PAGE.composerSelectors) {
       const found = [...document.querySelectorAll(selector)].find(node => isVisibleElement(node) &&
-        !node.closest(PAGE.focus?.edit?.turnSelector || ':not(*)'))
+        !node.closest(PAGE.focus?.edit?.turnSelector || ':not(*)') && !node.closest(PAGE.nativeEdit?.rowSelector || ':not(*)'))
       if (found) return found
     }
     return null
@@ -382,6 +388,8 @@
     pendingComputerRecognition = null
     // Manual checkNow is allowed for legacy commands, but cannot re-arm desktop history.
     const confirmedSend = ['user-sent', 'result-sent', 'file-send-submitted', 'smart-ui-sent', 'user-edited'].includes(reason)
+    // Only a new message starts a fresh retry budget; a resend of the same one keeps counting.
+    if (confirmedSend && reason !== 'user-edited') safetyLeak = { count: 0, busy: false, failedKey: null }
     computerReplyWait = since && confirmedSend && PAGE.computerUseRequests === true ? {
       serial: ++computerReplySerial, path: location.pathname, generation: state.taskPromptGeneration,
       sourceSubmissionId: computerSourceSubmissionId, baseline: computerBaseline || computerBaselineOf(), reported: false,
@@ -405,18 +413,21 @@
    *   </｜DSML｜function_calls>
    *
    * The page renders the bars as `| |` with spaces and may drop the `function_` prefix, so
-   * tags are matched by their DSML marker only. Each invoke of a known tool becomes the same
+   * tags are matched by their DSML marker and paired invoke/invocation spelling. Each known tool becomes the same
    * JSON the prompt describes, and every later parser sees exactly that JSON. An invoke of an
    * unknown tool is left alone, so it reads as prose rather than as an invented request.
    */
   const DSML_OPEN = String.raw`<\s*[\s|｜]*DSML[\s|｜]*`
   const DSML_CLOSE = String.raw`<\s*\/[\s|｜]*DSML[\s|｜]*`
-  const DSML_INVOKE = new RegExp(`${DSML_OPEN}invoke\\s+name\\s*=\\s*"([^"]+)"\\s*>([\\s\\S]*?)${DSML_CLOSE}invoke\\s*>`, 'g')
+  const DSML_INVOKE = new RegExp(`${DSML_OPEN}(invoke|invocation)\\s+name\\s*=\\s*"([^"]+)"\\s*>([\\s\\S]*?)${DSML_CLOSE}\\1\\s*>`, 'g')
   const DSML_PARAMETER = new RegExp(`${DSML_OPEN}parameter\\s+name\\s*=\\s*"([^"]+)"([^>]*)>([\\s\\S]*?)${DSML_CLOSE}parameter\\s*>`, 'g')
   const DSML_WRAPPER = new RegExp(`(?:${DSML_OPEN}|${DSML_CLOSE})\\w*calls\\s*>`, 'g')
-  const DSML_INVOKE_START = new RegExp(`${DSML_OPEN}invoke\\s+name\\s*=`)
-  const DSML_TOOLS = ['read_files', 'questions', 'question', 'computer']
+  const DSML_INVOKE_START = new RegExp(`${DSML_OPEN}(?:invoke|invocation)\\s+name\\s*=`)
+  const DSML_COMPUTER_START = new RegExp(`${DSML_OPEN}(?:invoke|invocation)\\s+name\\s*=\\s*"\\s*computer\\s*"`)
+  const DSML_TOOLS = ['read_files', 'questions', 'question']
+  const looksLikeJsonEnvelope = (text) => /^(?:```(?:json)?\s*)?(?:\{|\[)/i.test(String(text || '').trimStart())
   const looksLikeDsmlToolCall = (text) => DSML_INVOKE_START.test(String(text || ''))
+  const looksLikeDsmlComputerCall = (text) => !looksLikeJsonEnvelope(text) && DSML_COMPUTER_START.test(String(text || ''))
   // string="false" is JSON. Models leave Windows paths unescaped (`"C:\Users\a"`), which is
   // either invalid JSON or, worse, valid with `\t`/`\n` inside it; escape lone backslashes first then.
   const dsmlJson = (raw) => {
@@ -441,14 +452,43 @@
     if (typeof params.command === 'string') return { command: params.command, ...params }
     return null
   }
+  // The native tool name supplies type=computer, and this adapter speaks protocol v1.
+  // Preserve duplicate fields and typed JSON bytes for the shared strict validator;
+  // never apply the legacy Windows-path repair or fill a token/description/action.
+  const dsmlComputerRequest = (body) => {
+    const fields = []
+    let offset = 0, hasType = false, hasVersion = false
+    for (const match of body.matchAll(DSML_PARAMETER)) {
+      if (body.slice(offset, match.index).trim()) return null
+      const [, key, attributes, rawValue] = match
+      const string = /^\s+string\s*=\s*"(true|false)"\s*$/.exec(attributes)?.[1]
+      if (!string) return null
+      const value = string === 'true' ? JSON.stringify(rawValue) : rawValue.trim()
+      if (key === 'type') {
+        try { if (JSON.parse(value) !== 'computer') return null } catch (_) { return null }
+        hasType = true
+      }
+      if (key === 'version') hasVersion = true
+      fields.push(JSON.stringify(key) + ':' + value)
+      offset = match.index + match[0].length
+    }
+    if (body.slice(offset).trim()) return null
+    if (!hasVersion) fields.unshift('"version":1')
+    if (!hasType) fields.unshift('"type":"computer"')
+    return '{' + fields.join(',') + '}'
+  }
   const normalizeDsmlToolCalls = (text) => {
+    // DSML inside a JSON string is literal user content, not another tool envelope.
+    if (looksLikeJsonEnvelope(text)) return text
     if (!looksLikeDsmlToolCall(text)) return text
+    if (looksLikeDsmlComputerCall(text) && text.length > 64_000) return text
     let converted = false
-    const replaced = text.replace(DSML_INVOKE, (match, name, body) => {
-      const request = dsmlRequest(name, body)
+    const replaced = text.replace(DSML_INVOKE, (match, _tag, name, body) => {
+      const computer = name.trim() === 'computer'
+      const request = computer ? dsmlComputerRequest(body) : dsmlRequest(name, body)
       if (!request) return match
       converted = true
-      return JSON.stringify(request)
+      return computer ? request : JSON.stringify(request)
     })
     return converted ? replaced.replace(DSML_WRAPPER, '').replace(/\n{3,}/g, '\n\n').trim() : text
   }
@@ -513,12 +553,16 @@
   const chartMarkdown = (root, chart) => {
     // The card's own heading when it has one (the 2026-10-22 screenshot shows it inside the
     // card); the section's aria-label otherwise.
-    const heading = collapse(root.querySelector('h1, h2, h3, h4, h5, h6')?.textContent || '')
+    const titleCandidates = [...root.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], strong, b, p, span')]
+    const heading = collapse(titleCandidates.find(element =>
+      !element.closest('svg, ul, button') && !(chart.captionSelector && element.matches(chart.captionSelector)) &&
+      (!['P', 'SPAN'].includes(element.tagName) || element.getAttribute('data-d-default-strong') !== null ||
+        Number.parseFloat(getComputedStyle(element).fontWeight) >= 600))?.textContent || '')
     const named = heading || collapse(root.querySelector(chart.titleSelector)?.getAttribute('aria-label') || '')
     // The section's label can be just a type word ("图表 图表", 2026-10-22) while the real title
     // is a heading above the card that is already written out; such a label is no title.
     const title = /^(?:图表|chart)(?:\s+(?:图表|chart))*$/i.test(named) ? '' : named
-    const points = [...root.querySelectorAll(chart.dataItemSelector)].map((item) => collapse(item.textContent)).filter(Boolean).slice(0, 200)
+    const points = [...root.querySelectorAll(chart.dataItemSelector)].map((item) => collapse(item.textContent)).filter(Boolean)
     const caption = chart.captionSelector ? collapse(root.querySelector(chart.captionSelector)?.textContent || '') : ''
     const lines = [title ? '> 📊 **' + title + '**（图表，可在原始视图中交互查看）' : '> 📊 图表（可在原始视图中交互查看）',
       ...(points.length ? ['>', ...points.map((point) => '> - ' + point)] : []),
@@ -526,7 +570,24 @@
     // A machine-readable copy for the focus view, which draws the chart from it. An HTML
     // comment: invisible wherever Markdown is rendered, so the quote above stays the fallback.
     const data = chartData(points)
-    const marker = data ? '<!--focus-chart ' + JSON.stringify({ title, caption, ...data }).replace(/--/g, '\\u002d\\u002d') + ' -->\n' : ''
+    // Recharts exposes the rendered series kind. Unknown, mixed and stacked charts
+    // stay data tables rather than acquiring an invented line-chart trend.
+    const bars = [...root.querySelectorAll('.recharts-bar')]
+    const linesPresent = !!root.querySelector('.recharts-line')
+    const other = !!root.querySelector('.recharts-area, .recharts-pie, .recharts-scatter, .recharts-radar, .recharts-radial-bar')
+    const coordinates = [...root.querySelectorAll('.recharts-rectangle')].map(element => ({
+      x: Number.parseFloat(element.getAttribute('x')), y: Number.parseFloat(element.getAttribute('y')),
+      height: Number.parseFloat(element.getAttribute('height')) }))
+    // Horizontal bars share x rather than y. Redraw only confirmed vertical bars
+    // with a common zero baseline, including charts containing negative values.
+    const vertical = data && coordinates.length === data.rows.length && coordinates.every(point =>
+      Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.height)) &&
+      new Set(coordinates.map(point => point.x)).size === coordinates.length && coordinates.every((point, index) =>
+        Math.abs(point.y + (data.rows[index].values[0] >= 0 ? point.height : 0) -
+          (coordinates[0].y + (data.rows[0].values[0] >= 0 ? coordinates[0].height : 0))) < 1)
+    const kind = !other && !linesPresent && bars.length === 1 && data?.series.length === 1 && vertical ? 'bar' :
+      !other && !bars.length && linesPresent ? 'line' : 'table'
+    const marker = data ? '<!--focus-chart ' + JSON.stringify({ title, caption, kind, ...data }).replace(/</g, '\\u003c').replace(/--/g, '\\u002d\\u002d') + ' -->\n' : ''
     return '\n\n' + marker + lines.join('\n') + '\n\n'
   }
 
@@ -536,7 +597,7 @@
    * series, there is no chart and the quoted list is all that is shown.
    */
   const chartData = (points) => {
-    if (points.length < 2) return null
+    if (points.length < 1 || points.length > 200) return null
     const series = []
     const rows = []
     for (const point of points) {
@@ -549,11 +610,13 @@
       for (const part of parts) {
         const match = /^(.*?)\s*(-?\d+(?:\.\d+)?)\s*(%|[A-Za-z]{1,6})?$/.exec(part)
         if (!match) return null
-        values.push({ name: match[1].trim(), value: Number(match[2]), unit: match[3] || '' })
+        const value = Number(match[2])
+        if (!Number.isFinite(value)) return null
+        values.push({ name: match[1].trim(), value, unit: match[3] || '' })
       }
       if (!rows.length) values.forEach((value) => series.push({ name: value.name || '数值', unit: value.unit }))
-      else if (values.length !== series.length || values.some((value, index) => (value.name || '数值') !== series[index].name)) return null
-      rows.push({ label: label.slice(0, 40), values: values.map((value) => value.value) })
+      else if (values.length !== series.length || values.some((value, index) => (value.name || '数值') !== series[index].name || value.unit !== series[index].unit)) return null
+      rows.push({ label, values: values.map((value) => value.value) })
     }
     return series.length <= 6 ? { series, rows } : null
   }
@@ -801,6 +864,19 @@
       const layout = layouts.find(item => item.element === element)
       if (layout) return layoutMarkdown(layout)
       const tag = element.tagName.toLowerCase()
+      // KaTeX contains three representations of the SAME formula: MathML, its TeX
+      // annotation and visual HTML. Consume the outer formula once, before walking
+      // children, otherwise every expression is concatenated two or three times.
+      if (element.matches('.katex-display, .katex, math')) {
+        const annotation = element.querySelector('annotation[encoding="application/x-tex"]')
+        const tex = String(annotation?.textContent || '').trim()
+        const display = element.matches('.katex-display') || element.getAttribute('display') === 'block'
+        if (tex) return display ? '\n\n$$\n' + tex + '\n$$\n\n' : '$' + tex.replace(/\s*\n\s*/g, ' ') + '$'
+        // A partial/native formula without TeX still has one readable version.
+        // Never fall back to all descendants, which includes accessibility copies.
+        const visual = element.querySelector('.katex-html') || element.querySelector('mrow')
+        return String(visual?.textContent || element.getAttribute('aria-label') || '')
+      }
       const heading = /^h[1-6]$/.test(tag)
       // DIL Text uses p/span with an explicit strong marker or a computed weight;
       // treating these as plain wrappers loses emphasis outside the layout cards.
@@ -851,8 +927,11 @@
           .filter((child) => child.tagName.toLowerCase() === 'li')
           .map((child, index) => {
             const prefix = tag === 'ol' ? `${index + 1}. ` : '- '
-            const body = render(child, depth + 1, strongContext).trim().replace(/\n+/g, '\n')
-            return `${'  '.repeat(depth)}${prefix}${body}`
+            // Continuation paragraphs (including display math) belong to this item.
+            // Render nested lists relative to it, then indent every continuation.
+            const body = render(child, 0, strongContext).trim()
+            const indent = ' '.repeat(prefix.length)
+            return prefix + body.replace(/\n/g, '\n' + indent)
           })
           .join('\n')
         return `\n${items}\n`
@@ -2812,12 +2891,144 @@
     return true
   }
 
+  /* ------------------------------------------------------------------ *
+   * The site's own edit-and-resend (PAGE.nativeEdit, DeepSeek)
+   * ------------------------------------------------------------------ */
+
+  const nativeEditRows = () => PAGE.nativeEdit ? queryAll([PAGE.nativeEdit.rowSelector]).filter(isVisibleElement) : []
+  // An open edit box replaces the bubble, so a row is the user's when it holds no reply.
+  const latestUserRow = () => nativeEditRows().filter(row => !isAssistantTurn(row)).pop() || null
+  const nativeEditor = (row) => row ? [...row.querySelectorAll(PAGE.nativeEdit.editorSelector)].find(isVisibleElement) || null : null
+
+  /** Only the current task's latest message may be retried; anything older is the user's own history edit. */
+  const nativeEditRejection = (row, auto) => {
+    if (row !== latestUserRow()) return 'native-edit-not-latest'
+    if (PAGE.computerUseRequests !== true || !state.enabled || !state.computerUseEnabled || !computerSourceSubmissionId ||
+      !state.taskActive || state.pendingQuestion || state.programmatic || focusEditing || (!auto && safetyLeak.busy)) return 'native-edit-no-task'
+    return null
+  }
+
+  /**
+   * The site sends the edited message itself; the app never composes into an edit box. The wait
+   * is armed only once generation actually starts, so a send that did not happen cannot leave
+   * the task waiting for a reply that will never come. The baseline is taken before the send:
+   * row keys are message ids, so the replaced reply stays in it and the new reply's id does not.
+   */
+  const startNativeEditRetry = (row, auto) => {
+    const rejected = nativeEditRejection(row, auto)
+    if (rejected) { report({ event: 'native-edit', reason: rejected }); return false }
+    const attempt = { auto, baseline: computerBaselineOf(), previous: lastAssistantId(), startedAt: Date.now() }
+    nativeEditRetry = attempt
+    const poll = () => {
+      if (nativeEditRetry !== attempt) return
+      if (findStopButton()) {
+        nativeEditRetry = null
+        safetyLeak.busy = false
+        state.taskActive = true
+        state.lastCommandMessageId = attempt.previous
+        setReplyWaiting(Date.now(), 'user-edited', null, attempt.baseline)
+        report({ event: 'native-edit', reason: 'native-edit-retry', attempt: safetyLeak.count })
+        scheduleCheck()
+        return
+      }
+      if (Date.now() - attempt.startedAt < 10000) { setTimeout(poll, 200); return }
+      nativeEditRetry = null
+      report({ event: 'native-edit', reason: 'native-edit-unconfirmed' })
+      if (auto) giveUpSafetyLeak(attempt.previous, 'generation')
+    }
+    setTimeout(poll, 200)
+    return true
+  }
+
+  /** @returns true when the event belongs to an open edit box and must not reach the composer interceptor. */
+  const handleNativeEditSend = (event) => {
+    if (!PAGE.nativeEdit || !(event.target instanceof Element)) return false
+    const row = event.target.closest(PAGE.nativeEdit.rowSelector)
+    const editor = nativeEditor(row)
+    if (!editor) return false
+    if (event.type === 'click' && !event.target.closest(PAGE.nativeEdit.submitSelector)) return false
+    if (event.type === 'keydown' && (event.target !== editor || event.shiftKey || event.isComposing || event.repeat || event.defaultPrevented)) return true
+    // The automatic resend armed its own attempt before pressing send.
+    if (!event.isTrusted || nativeEditRetry?.auto) return true
+    if (collapse(editor.value) !== '') startNativeEditRetry(row, false)
+    return true
+  }
+
+  /** A center point the page itself would deliver to `element` (or, for a hover-only toolbar, to its row). */
+  const nativeEditPoint = (element, row) => {
+    if (!element || !isVisibleElement(element)) return null
+    try { element.scrollIntoView({ block: 'nearest' }) } catch (_) { /* measured as-is */ }
+    const rect = element.getBoundingClientRect()
+    const x = Math.round(rect.left + rect.width / 2)
+    const y = Math.round(rect.top + rect.height / 2)
+    const hit = document.elementFromPoint(x, y)
+    return hit && (element.contains(hit) || hit.contains(element) || row.contains(hit)) ? { x, y } : null
+  }
+  const nativeEditWait = async (probe, ms) => {
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      const found = probe()
+      if (found) return found
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    return null
+  }
+  const giveUpSafetyLeak = (messageId, step) => {
+    safetyLeak.busy = false
+    safetyLeak.failedKey = messageId
+    report({ event: 'native-edit', reason: 'safety-leak-failed', messageId, step })
+    scheduleCheck()
+  }
+
+  /**
+   * Resend the latest user message unchanged, by real clicks the main process makes at points
+   * measured here (the site ignores script clicks, as with 继续生成). Every miss gives up and lets
+   * the reply settle as before; nothing else on the page is ever clicked.
+   */
+  const resendAfterSafetyLeak = async (messageId) => {
+    safetyLeak.busy = true
+    const row = latestUserRow()
+    if (!row || nativeEditRejection(row, true)) return giveUpSafetyLeak(messageId, 'row')
+    const editPoint = nativeEditPoint(row.querySelector(PAGE.nativeEdit.buttonSelector), row)
+    if (!editPoint) return giveUpSafetyLeak(messageId, 'edit-button')
+    report({ event: 'native-edit', reason: 'safety-leak-edit-click', messageId, ...editPoint })
+    const editor = await nativeEditWait(() => nativeEditor(latestUserRow()), 3000)
+    if (!editor || collapse(editor.value) === '') return giveUpSafetyLeak(messageId, 'editor')
+    const editRow = editor.closest(PAGE.nativeEdit.rowSelector)
+    const sendPoint = nativeEditPoint(editRow.querySelector(PAGE.nativeEdit.submitSelector), editRow)
+    if (!sendPoint) return giveUpSafetyLeak(messageId, 'submit')
+    if (!startNativeEditRetry(editRow, true)) return giveUpSafetyLeak(messageId, 'task')
+    report({ event: 'native-edit', reason: 'safety-leak-send-click', messageId, ...sendPoint })
+  }
+
+  /** @returns true while a leaked moderation verdict is being answered by a resend instead of ending the task. */
+  const handleSafetyLeak = (messageId, text) => {
+    const source = PAGE.nativeEdit?.safetyLeakPattern
+    if (!source || PAGE.computerUseRequests !== true) return false
+    let pattern
+    try { pattern = new RegExp(source, 'i') } catch (_) { return false }
+    if (!pattern.test(String(text || '').trim())) return false
+    if (safetyLeak.busy || nativeEditRetry) return true
+    if (safetyLeak.failedKey === messageId) return false
+    report({ event: 'native-edit', reason: 'safety-leak-detected', messageId, attempt: safetyLeak.count })
+    if (safetyLeak.count >= 2) {
+      safetyLeak.failedKey = messageId
+      report({ event: 'native-edit', reason: 'safety-leak-limit', messageId, attempt: safetyLeak.count })
+      return false
+    }
+    safetyLeak.count += 1
+    void resendAfterSafetyLeak(messageId).catch(() => giveUpSafetyLeak(messageId, 'error'))
+    return true
+  }
+
   // Capture phase, on `document`: survives ChatGPT's client-side route changes,
   // and runs before React's own handlers on the composer.
   document.addEventListener(
     'keydown',
     (event) => {
       if (event.key !== 'Enter') return
+      // Enter in a message's edit box sends that edit natively (measured); it is never a composer send.
+      if (handleNativeEditSend(event)) return
       const element = getComposer(event.target)
       if (!element || !element.contains(event.target)) {
         const target = event.target
@@ -2843,6 +3054,10 @@
       const target = event.target
       if (!target || typeof target.closest !== 'function') return
       if (!PAGE.sendButtonSelectors.some((selector) => target.closest(selector))) return
+      // The edit box's 发送 shares the send button's classes; it resends that message, not the composer.
+      if (handleNativeEditSend(event)) return
+      // While a reply streams the primary button is stop. A user's own stop is never answered with 继续.
+      if (event.isTrusted && state.awaitingReplySince !== 0 && collapse(readComposer(getComposer())) === '') userStoppedAt = Date.now()
       intercept(event)
     },
     true
@@ -2919,9 +3134,17 @@
     }
     return false
   }
-  const looksLikeComputerReply = (text) => balancedObjects(String(text || ''), true).some(hasComputerDiscriminator)
+  const looksLikeComputerReply = (text) => looksLikeDsmlComputerCall(text) || balancedObjects(String(text || ''), true).some(hasComputerDiscriminator)
   const extractComputerRequest = (text) => {
-    const cleaned = String(text || '').trim().replace(/^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```$/i, '$1').trim()
+    // DeepSeek sometimes leaks one pseudo tag block of prose before the request (seen on 2026-10-27:
+    // <system>…</system>, once <bsystem>…</bsystem>). Only that single LEADING block is dropped; any
+    // other text around the JSON still makes the request ambiguous.
+    const cleaned = String(text || '').trim().replace(/^<(b?system)>[\s\S]*?<\/\1>/i, '').trim()
+      .replace(/^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```$/i, '$1').trim()
+    // A malformed or incomplete native computer call must receive protocol feedback,
+    // never settle as prose or fall through to a command nested inside its parameters.
+    if (looksLikeDsmlComputerCall(cleaned)) return { outcome: 'invalid',
+      issue: cleaned.length > 64_000 ? 'oversized-request' : 'invalid-json', rawJson: cleaned.slice(0, 64_000) }
     const objects = balancedObjects(cleaned, true)
     if (!objects.some(hasComputerDiscriminator)) return null
     if (cleaned.length > 64_000) return { outcome: 'invalid', issue: 'oversized-request', rawJson: cleaned.slice(0, 64_000) }
@@ -2983,6 +3206,7 @@
         turnKeyOf(latest) !== recognition.key || readComputerText(latest) !== input) { scheduleCheck(); return }
       wait.reported = true
       state.lastCommandMessageId = turnKeyOf(latest)
+      lastLiveComputer = { messageId: `computer:${userSubmissionScope}:${wait.serial}`, since: state.awaitingReplySince }
       state.replyActionDetected = true
       const checked = window.__computerUseProtocol?.check(request.rawJson, computerProtocolContext.definitions)
       const protocolCode = !checked ? 'invalid_envelope' : !checked.ok ? checked.error.code
@@ -3586,6 +3810,57 @@
   }
 
   /**
+   * A reply the SITE ended by itself mid-thinking: the reasoning header reads 已停止, no answer was
+   * written and no 继续生成 control is offered. Without an answer marker the turn never passes the
+   * role check below, so the wait for our own reply would hang until something else ends the task.
+   *
+   * Send 继续, as the user would — only during our own live wait, only after the turn has stayed
+   * stopped for STOPPED_SETTLE_MS, never after the user pressed stop themselves, and at most
+   * STOPPED_LIMIT times in a row (a real answer resets the count).
+   */
+  const STOPPED_SETTLE_MS = 4000
+  const STOPPED_LIMIT = 3
+  let stoppedReply = { key: '', at: 0 }
+  let stoppedContinues = 0
+  let userStoppedAt = 0
+  const stoppedReasoning = (node) => {
+    const labels = PAGE.stoppedReplyLabels || []
+    const reasoning = (PAGE.focus?.reasoningSelectors || []).map((selector) => node.querySelector(selector)).find(Boolean)
+    if (!labels.length || !reasoning || PAGE.assistantReplySelectors.some((selector) => node.matches(selector) || node.querySelector(selector))) return false
+    return [...node.querySelectorAll('div, span')].some((element) => !reasoning.contains(element) && labels.includes(collapse(element.textContent)))
+  }
+  const continueStoppedReply = (node) => {
+    if (state.awaitingReplySince === 0 || !state.enabled || !state.taskActive || state.pendingQuestion || state.programmatic ||
+        userStoppedAt >= state.awaitingReplySince || findStopButton() || replyIsGenerating(node) || !stoppedReasoning(node)) {
+      stoppedReply = { key: '', at: 0 }
+      return false
+    }
+    const key = turnKeyOf(node), now = Date.now()
+    if (key === state.lastCommandMessageId) return false // Already answered with 继续 (or handled otherwise).
+    if (stoppedReply.key !== key) {
+      stoppedReply = { key, at: now }
+      setTimeout(scheduleCheck, STOPPED_SETTLE_MS) // A stopped turn renders no further mutation to wake the scan.
+      return true
+    }
+    if (now - stoppedReply.at < STOPPED_SETTLE_MS) return true
+    if (stoppedContinues >= STOPPED_LIMIT) {
+      noteScan(key, 'stopped-continue-limit')
+      return false
+    }
+    stoppedContinues += 1
+    stoppedReply = { key: '', at: 0 }
+    state.lastCommandMessageId = key
+    const attempt = stoppedContinues
+    void window[STATE_KEY].sendRaw('继续', null, { path: location.pathname, generation: state.taskPromptGeneration })
+      .then((outcome) => {
+        // A refused send (busy page, draft) may be retried by a later scan, within the same limit.
+        if (outcome !== 'ok' && state.lastCommandMessageId === key) state.lastCommandMessageId = null
+        report({ event: 'continue-generation', reason: outcome === 'ok' ? 'stopped-continue-sent' : 'stopped-continue-failed', attempt, outcome })
+      })
+    return true
+  }
+
+  /**
    * Runs after the reply has been quiet for REPLY_SETTLE_MS. Only the LAST
    * assistant message is considered, and each message id is reported at most
    * once — the main process does the durable deduplication against SQLite.
@@ -3613,6 +3888,7 @@
     }
     // Before the role check: a turn cut off while thinking may have no answer marker yet.
     if (continueCutOffReply(node)) return
+    if (continueStoppedReply(node)) return
 
     /*
      * Only assistant turns count, and this is checked FIRST.
@@ -3647,6 +3923,7 @@
      * forever: no command is ever detected, and nothing anywhere reports a problem. That
      * is the exact failure this guard exists to prevent now.
      */
+    stoppedContinues = 0 // A reply with an answer ends a run of automatic 继续.
     const messageId = turnKeyOf(node)
     if (!messageId) {
       // `turnKeyOf` only returns '' for a turn that renders no text at all, so this is a
@@ -3790,8 +4067,12 @@
             scheduleCheck()
             return
           }
+          // A leaked moderation verdict is not the model's answer: resend instead of ending the task.
+          if (handleSafetyLeak(messageId, text)) return
           const markdown = readReplyMarkdown(latest) || text
-          const completed = text.trimStart().startsWith('【任务完成】')
+          const completed = /^(?:#{1,6}\s*)?(?:\*\*)?(?:【任务完成】|任务完成(?=$|[\s。！!：:]))/.test(text.trimStart())
+          // Capture the live reply's owner before clearing its wait and advancing the page generation.
+          const completionSource = completed ? legacyTaskSource(latest) : {}
           replyScanSnapshot = snapshotReplyScan(latest, nodes)
           state.lastCommandMessageId = messageId
           setReplyWaiting(0, 'non-command-reply', messageId)
@@ -3800,7 +4081,8 @@
             resetTaskPrompt()
           }
           report({ event: 'assistant-message', messageId, text: markdown })
-          report({ event: 'task-finished', messageId, completed })
+          report({ event: 'task-finished', messageId, completed, live: true,
+            ...completionSource, computerPageEpoch })
         }, 250)
       }
 
@@ -4016,6 +4298,41 @@
    *     the VOICE button: ending a task would start dictation.
    *   - empty composer — otherwise the click could submit a half-written draft.
    */
+  /**
+   * Explicit 继续原任务: the user chose to go on whatever the page was doing. Stop a streaming reply,
+   * drop an open question and end a wait nothing will answer, so the recovery message can be sent.
+   * Never touches what the user typed or attached: a draft still refuses the send.
+   */
+  const clearForResume = async () => {
+    const until = async (ready, ms) => {
+      const end = Date.now() + ms
+      while (!ready() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 150))
+      return ready()
+    }
+    if (state.programmatic || fileSend) await until(() => !state.programmatic && !fileSend, 3000)
+    const generating = () => {
+      if (findStopButton()) return true
+      const latest = latestReplyNode(queryAllAssistant())
+      return !!latest && replyIsGenerating(latest)
+    }
+    if (generating()) {
+      const stop = findStopButton()
+      if (stop) pressButton(stop)
+      else clickPrimaryWhileWaiting()
+      await until(() => !generating(), 5000)
+    }
+    if (state.pendingQuestion) {
+      report({ event: 'question-cleared', messageId: state.pendingQuestion.messageId })
+      state.pendingQuestion = null
+      state.answerDraft = null
+    }
+    if (state.awaitingReplySince !== 0) setReplyWaiting(0, 'resume-forced')
+  }
+  // The last live desktop request reported to main, so main's refusal can end exactly that wait.
+  let lastLiveComputer = null
+  // Why the last human-task send was refused, for main to name the actual reason.
+  let lastUserSendBlock = null
+
   const clickPrimaryWhileWaiting = () => {
     if (state.awaitingReplySince === 0) return null
     const element = getComposer()
@@ -4788,7 +5105,7 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, computerUseRequests: false, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], focus: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, computerUseRequests: false, ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
         observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing
@@ -4814,7 +5131,10 @@
     },
 
     /** Manually terminate the current task, including an in-progress model reply. */
-    endTask() {
+    endTask(generation = null) {
+      // Main has already advanced this boundary. Its configure() may arrive before
+      // or after the stop call; applying the same value must never advance it twice.
+      if (generation !== null && (!Number.isSafeInteger(generation) || generation < state.taskPromptGeneration)) return false
       if (fileSend) {
         state.programmatic = false
         fileSend = null
@@ -4873,7 +5193,7 @@
       state.programmatic = false
       setReplyWaiting(0, 'task-ended')
       state.taskActive = false
-      resetTaskPrompt()
+      resetTaskPrompt(generation === null ? state.taskPromptGeneration + 1 : generation)
       draftRejected = false
       state.pendingQuestion = null
       state.answerDraft = null
@@ -4936,17 +5256,20 @@
         return !current() ? 'cancelled' : focusSendFailureOf() ? 'stuck' : 'unknown'
       } finally { releaseFocusSendRetry(pending) }
     },
-    sendUser(text, expectedPath) {
+    async sendUser(text, expectedPath, options = null) {
+      lastUserSendBlock = null
       const element = getComposer()
       if (!element) return Promise.resolve('no-composer')
       if (typeof text !== 'string' || !text.trim() || text.length > 20000) return Promise.resolve('invalid')
       // Same guards as before, each now named in the raw-send log: a bare 'busy' left
       // "the focus view cannot send after startup" with nothing to read.
       const busy = (reason, details = {}) => {
+        lastUserSendBlock = reason
         report({ event: 'raw-busy', reason, composerTextLength: readComposer(element).length, ...details })
         return Promise.resolve('busy')
       }
       if (location.pathname !== expectedPath) return busy('conversation-changed')
+      if (options?.force === true) await clearForResume()
       if (state.programmatic) return busy('programmatic-send')
       if (fileSend) return busy('file-send')
       if (state.awaitingReplySince !== 0 || state.pendingQuestion) return busy('awaiting-reply')
@@ -5473,6 +5796,15 @@
     },
 
     takeUserImageAttachments,
+    /** Main refused this live desktop request (stale token, paused task …); nothing will answer it, so stop waiting. */
+    releaseRejectedComputer(messageId) {
+      if (!lastLiveComputer || lastLiveComputer.messageId !== messageId || state.awaitingReplySince === 0 ||
+        lastLiveComputer.since !== state.awaitingReplySince) return false
+      lastLiveComputer = null
+      setReplyWaiting(0, 'computer-rejected')
+      return true
+    },
+    userSendBlock: () => lastUserSendBlock,
     checkNow,
     armBaseline,
     status: () => ({ ...state })

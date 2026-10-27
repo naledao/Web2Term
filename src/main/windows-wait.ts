@@ -55,7 +55,7 @@ export async function pollWindowsWait(p: Record<string, unknown>, check: (budget
 }> {
   const start = clock.now(), timeout = Number(p.timeout_ms ?? 10000); let checks = 0, last: WaitProbe | undefined, previous: string | null = null, backoff = 250
   const valid = (): void => { if (signal?.aborted || !current()) throw new Error('wait_context_inactive') }
-  while (checks < 128) {
+  while (clock.now() - start < timeout || !last) {
     valid(); const remaining = timeout - (clock.now() - start)
     if (last && remaining < 100) { if (remaining > 0) await clock.sleep(remaining, signal); break }
     last = await check(Math.max(100, Math.min(4000, Math.floor(remaining)))); checks++; valid()

@@ -10,6 +10,14 @@ const canonical = (v: unknown): unknown => Array.isArray(v) ? v.map(canonical) :
   ? Object.fromEntries(Object.keys(v).sort().map(k => [k, canonical(v[k])])) : v
 const hash = (v: unknown): string => createHash('sha256').update(JSON.stringify(canonical(v))).digest('hex')
 const readOnly = new Set(['list_apps', 'list_windows', 'observe', 'validate_observation', 'inspect_interactions', 'wait_for', 'complete_task'])
+function repeatableNavigation(call: ComputerUseToolCall): boolean {
+  if (['scroll', 'focus_window'].includes(call.action)) return true
+  if (call.action !== 'press_key' || typeof call.parameters.key !== 'string') return false
+  const keys = call.parameters.key.toLowerCase().split('+').map(k => k.trim())
+  const primary = keys.pop()
+  return keys.every(k => ['control', 'ctrl', 'ctl', 'shift'].includes(k)) &&
+    ['tab', 'left', 'right', 'up', 'down', 'arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'home', 'end', 'pageup', 'pagedown', 'pgup', 'pgdn'].includes(primary ?? '')
+}
 
 export function createProgressState(limits?: ComputerProgressLimits): ComputerProgressState {
   return { version: 1, limits: normalizeComputerProgressLimits(limits), elapsedMs: 0, steps: 0, epoch: 0, unchangedObservations: 0,
@@ -32,8 +40,8 @@ export function inspectProgressAdmission(task: AutonomousTask, state: ComputerPr
   const repeat = key ? (old?.count ?? 0) + 1 : 0
   const hard: ProgressStopReason | null = state.halted ?? (state.elapsedMs >= state.limits.taskTimeoutMs ? 'task_timeout'
     : state.steps >= state.limits.maxSteps ? 'step_limit' : state.recovering && state.recoverySteps >= state.limits.maxRecoverySteps ? 'recovery_limit'
-      : repeat >= state.limits.maxRepeatedAction ? 'repeated_action' : null)
-  return { fingerprint: key, repeat, hard, blocked: !!hard || !!call && !readOnly.has(call.action) && repeat >= 2 }
+      : call && !readOnly.has(call.action) && repeat >= state.limits.maxRepeatedAction ? 'repeated_action' : null)
+  return { fingerprint: key, repeat, hard, blocked: !!hard || !!call && !readOnly.has(call.action) && !repeatableNavigation(call) && repeat >= 2 }
 }
 export function admitProgressStep(task: AutonomousTask, state: ComputerProgressState, stepId: string, call?: ComputerUseToolCall): ComputerProgressState {
   const next = structuredClone(state), admission = inspectProgressAdmission(task, next, call)
@@ -74,27 +82,29 @@ function evidence(result: ComputerUseToolResult): { source: string; digest: stri
 }
 export function recordProgressResult(state: ComputerProgressState, stepId: string, result: ComputerUseToolResult, actionTimedOut = false): { state: ComputerProgressState; report: ComputerProgressReport } {
   const next = structuredClone(state), p = next.pending?.stepId === stepId ? next.pending : null
-  const timeout = actionTimedOut || result.code === 'wait_timeout' || object(result.data) && result.data.helper_code === 'action_timeout'
+  const timeout = actionTimedOut || object(result.data) && result.data.helper_code === 'action_timeout'
   if (timeout) next.consecutiveTimeouts++
-  else if (result.ok && result.execution === 'executed') next.consecutiveTimeouts = 0
+  else if ((result.ok || result.code === 'wait_timeout') && result.execution === 'executed') next.consecutiveTimeouts = 0
   const seen = evidence(result)
   let changed = false
   if (seen) {
     const previous = next.sources.find(r => r.source === seen.source)
     changed = !previous || previous.digest !== seen.digest
-    next.unchangedObservations = changed ? 0 : next.unchangedObservations + 1
+    next.unchangedObservations = changed || next.sources.at(-1)?.source !== seen.source ? 0 : next.unchangedObservations + 1
     if (changed) { next.epoch++; next.recovering = false; next.recoverySteps = 0 }
     next.sources = next.sources.filter(r => r.source !== seen.source)
     next.sources.push({ source: seen.source, digest: seen.digest }); if (next.sources.length > 32) next.sources.shift()
     if (seen.target) { next.latestTarget = seen.target; next.elements = seen.elements }
+    if (result.ok && result.execution === 'executed') { next.recovering = false; next.recoverySteps = 0 }
   }
   const signals: string[] = []
   if (p && p.repeat >= 2 && !changed) signals.push('repeated_action')
-  if (next.unchangedObservations >= Math.max(1, next.limits.maxUnchangedObservations - 1)) signals.push('unchanged_observations')
+  if (next.unchangedObservations >= next.limits.maxUnchangedObservations) signals.push('unchanged_observations')
   if (timeout) signals.push('action_timeout')
-  if (!result.ok || result.diagnosis || signals.length) next.recovering = true
+  else if (result.code === 'wait_timeout') signals.push('condition_timeout')
+  if (!result.ok && result.code !== 'wait_timeout' || timeout || p?.blocked) next.recovering = true
   next.halted = next.halted ?? p?.hard ?? (next.elapsedMs >= next.limits.taskTimeoutMs ? 'task_timeout'
-    : next.steps >= next.limits.maxSteps ? 'step_limit' : next.unchangedObservations >= next.limits.maxUnchangedObservations ? 'unchanged_observations'
+    : next.steps >= next.limits.maxSteps ? 'step_limit'
     : next.consecutiveTimeouts >= next.limits.maxConsecutiveTimeouts ? 'consecutive_timeouts'
       : next.recovering && next.recoverySteps >= next.limits.maxRecoverySteps ? 'recovery_limit' : null)
   const reason = next.halted
@@ -102,7 +112,7 @@ export function recordProgressResult(state: ComputerProgressState, stepId: strin
     unchanged_observations: next.unchangedObservations, consecutive_timeouts: next.consecutiveTimeouts, recovery_steps: next.recoverySteps,
     action_timed_out: timeout, signals, halted: !!reason, stop_reason: reason,
     guidance: reason ? PROGRESS_STOP_MESSAGES[reason] : p?.blocked ? '没有新的状态变化证据，本次重复输入未派发；请先核对后状态或选择不同方法，不盲目点击、发送、保存或启动。'
-      : signals.length ? '发现重复、相同状态或超时信号，请基于真实结果重新诊断，必要时换路径；新令牌或新观察编号不证明取得进展。'
+      : signals.length ? '已记录重复、相同状态或等待信号；相同只读状态也可能是正常核对。结合目标判断是否需要换路径，仍受总步骤、时限和执行故障预算约束。'
         : '仅记录可观察变化与执行预算，不据此判定业务目标完成。', goal_verified: false }
   next.pending = null
   return { state: next, report }

@@ -7,16 +7,20 @@ const modifiers = [spec('Control', 0xa2), spec('Alt', 0xa4), spec('Shift', 0xa0)
 const named = [spec('Backspace', 8), spec('Tab', 9), spec('Enter', 13), spec('Escape', 27), spec('Space', 32), spec('CapsLock', 20),
   ...['PageUp', 'PageDown', 'End', 'Home', 'Left', 'Up', 'Right', 'Down'].map((name, i) => spec(name, 33 + i, true)),
   spec('Insert', 45, true), spec('Delete', 46, true), spec('Menu', 93, true), spec('NumpadEnter', 13, true),
-  spec('Multiply', 106), spec('Add', 107), spec('Subtract', 109), spec('Decimal', 110), spec('Divide', 111, true),
+   spec('Multiply', 106), spec('Add', 107), spec('Subtract', 109), spec('Decimal', 110), spec('Divide', 111, true),
+   spec('Semicolon', 0xba), spec('Equal', 0xbb), spec('Comma', 0xbc), spec('Minus', 0xbd), spec('Period', 0xbe), spec('Slash', 0xbf),
+   spec('Backquote', 0xc0), spec('LeftBracket', 0xdb), spec('Backslash', 0xdc), spec('RightBracket', 0xdd), spec('Quote', 0xde),
   ...Array.from({ length: 10 }, (_, i) => spec('Numpad' + i, 96 + i)),
   ...Array.from({ length: 26 }, (_, i) => spec(String.fromCharCode(65 + i), 65 + i)),
   ...Array.from({ length: 10 }, (_, i) => spec(String(i), 48 + i)),
   ...Array.from({ length: 24 }, (_, i) => spec('F' + (i + 1), 112 + i))]
 const aliases: Record<string, string> = { ctrl: 'control', ctl: 'control', option: 'alt', windows: 'win', meta: 'win',
   esc: 'escape', return: 'enter', spacebar: 'space', pgup: 'pageup', pgdn: 'pagedown', del: 'delete', ins: 'insert',
-  arrowleft: 'left', arrowright: 'right', arrowup: 'up', arrowdown: 'down', apps: 'menu' }
+   arrowleft: 'left', arrowright: 'right', arrowup: 'up', arrowdown: 'down', apps: 'menu',
+   '-': 'minus', '=': 'equal', plus: 'equal', '[': 'leftbracket', ']': 'rightbracket', '/': 'slash', '\\': 'backslash',
+   ';': 'semicolon', "'": 'quote', '`': 'backquote', ',': 'comma', '.': 'period' }
 export function parsePressKey(value: unknown): PressKeyChord | null {
-  if (typeof value !== 'string' || !value.trim() || value.length > 80 || /[^a-zA-Z0-9+ ]/.test(value)) return null
+  if (typeof value !== 'string' || !value.trim() || value.length > 80 || /[\x00-\x1f\x7f]/.test(value)) return null
   const tokens = value.split('+').map(s => s.trim().toLowerCase()).map(s => Object.hasOwn(aliases, s) ? aliases[s] : s)
   if (tokens.length > 5 || tokens.some(s => !s) || new Set(tokens).size !== tokens.length) return null
   const primaryName = tokens.at(-1)!, primary = [...named, ...modifiers].find(s => s.name.toLowerCase() === primaryName)
@@ -36,7 +40,7 @@ export function pressKeyReleaseNames(chord: PressKeyChord, accepted: number | nu
 }
 export const PRESS_KEY_DEFINITION: ComputerUseActionDefinition = {
   action: 'press_key',
-  description: '在最近观察的前台业务窗口中按一次键或组合键，例如 Tab、Escape、Control+S、Control+Shift+S、Alt+F4。key 是按键名称，不是文字：字母大小写不隐含 Shift，正文用 type_text。支持导航／编辑键、A-Z、0-9、F1-F24、命名数字小键盘及 Control/Alt/Shift/Win；修饰键也可单独按一次。每次只派发一个完整组合，不提供跨轮按住、任意 VK/扫描码、脚本、重复次数或延时。必须绑定最新窗口观察；element_id 可选，指定时须为本组实际焦点控件，未指定时核对窗口的 Win32 焦点路由，可用于 UIA 不可读时的键盘导航。需要窗口已前台且无菜单／捕获／移动占用，不操作本软件控制窗口，不绕过 UAC 或安全桌面；Control+Alt+Delete 不受支持。仅在目标键和修饰键当前未按下时派发；记录实际接收数，异常／取消只尝试释放本次可能按下的键，不补按、不重放。操作后返回新观察或明确观察失败，完整事件接收不等于保存、确认或业务成功。',
+  description: '在最近观察的前台业务窗口中按一次键或组合键，例如 Tab、Escape、Control+S、Control+Shift+S、Alt+F4。key 是按键名称，不是文字：字母大小写不隐含 Shift，正文用 type_text。支持导航／编辑键、A-Z、0-9、F1-F24、命名数字小键盘、Minus/Equal/LeftBracket/RightBracket/Slash/Backslash/Backquote/Quote/Semicolon/Comma/Period及Control/Alt/Shift/Win；OEM标点为物理键，字符含义依键盘布局，Shift须显式指定；修饰键也可单独按一次。每次只派发一个完整组合，不提供跨轮按住、任意 VK/扫描码、脚本、重复次数或延时。必须绑定最新窗口观察；element_id 可选，指定时须为本组实际焦点控件，未指定时核对窗口的 Win32 焦点路由，可用于 UIA 不可读时的键盘导航。需要窗口已前台且无菜单／捕获／移动占用，不操作本软件控制窗口，不绕过 UAC 或安全桌面；Control+Alt+Delete 不受支持。仅在目标键和修饰键当前未按下时派发；记录实际接收数，异常／取消只尝试释放本次可能按下的键，不补按、不重放。操作后返回新观察或明确观察失败，完整事件接收不等于保存、确认或业务成功。',
   parameters: [
     { name: 'observation_id', type: 'string', required: true, minLength: 36, maxLength: 36, description: '本任务最近一组业务窗口观察；显示器概览不能直接授权按键。' },
     { name: 'element_id', type: 'string', required: false, minLength: 35, maxLength: 35, description: '可选，本组实际获得焦点的控件；省略时针对已核对焦点路由的窗口。' },

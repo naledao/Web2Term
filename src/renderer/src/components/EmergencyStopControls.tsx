@@ -1,12 +1,25 @@
 import { useEffect, useState } from 'react'
-import type { EmergencyStopState } from '@shared/emergency-stop'
+import type { DesktopInputWarning, EmergencyStopState } from '@shared/emergency-stop'
 import './EmergencyStopControls.css'
+
+const INPUT_LABEL = { keyboard: '键盘操作', click: '鼠标点击', wheel: '滚轮操作' } as const
 
 export default function EmergencyStopControls() {
   const [state, setState] = useState<EmergencyStopState | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [warning, setWarning] = useState<DesktopInputWarning | null>(null)
   const receive = (value: EmergencyStopState) => setState(previous => previous && previous.revision > value.revision ? previous : value)
+  // This strip is DOM below the embedded page, so the reminder stays visible while the AI works in other windows.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const off = window.api.onDesktopInputWarning(value => {
+      setWarning(value)
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => setWarning(null), 15000)
+    })
+    return () => { off(); if (timer) clearTimeout(timer) }
+  }, [])
   useEffect(() => {
     let current = true, pushed = false
     const off = window.api.onEmergencyStopChanged(value => { pushed = true; if (current) receive(value) })
@@ -34,6 +47,9 @@ export default function EmergencyStopControls() {
       <span className="emergency-stop__status" role="status">{state.message}{state.failedSessions ? ` ${state.failedSessions} 项停止请求未确认，请查看实际状态。` : ''}</span>
       <button type="button" disabled={!state.canReset || busy} onClick={() => void reset()}>{busy ? '正在解除…' : state.canReset ? '解除急停' : '等待退场…'}</button>
     </> : <span className="emergency-stop__hint">{state?.shortcutRegistered ? 'Ctrl+Alt+Shift+F12' : state ? '快捷键注册失败，请使用此按钮' : '读取快捷键状态…'}</span>}
+    {warning && !state?.active ? <span className="emergency-stop__warning" role="status">
+      检测到{warning.input ? INPUT_LABEL[warning.input] : '键鼠操作'}（{warning.strike}/{warning.limit}）：AI 正在操作电脑，请先别动鼠标和键盘。这一步已中断，AI 会重新观察后继续；连续 {warning.limit} 次将暂停任务等你确认。
+    </span> : null}
     {error ? <span className="emergency-stop__status" role="alert">{error}</span> : null}
   </div>
 }

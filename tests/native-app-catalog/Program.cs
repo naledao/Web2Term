@@ -43,6 +43,7 @@ static class CatalogTests
         ObservationBindingTests.RunAll();
         CoordinateTests.RunAll();
         ClickTests.RunAll();
+        DesktopClickTests.RunAll();
         TypeTextTests.RunAll();
         PressKeyTests.RunAll();
         ScrollTests.RunAll();

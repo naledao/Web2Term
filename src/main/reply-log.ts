@@ -11,6 +11,7 @@ export interface ReplyDiagnosticContext {
   viewId: number | null
   conversationId: string | null
   mainPendingQuestion: boolean
+  mainTaskPromptGeneration?: number
   questionAccepted?: boolean
   computerAccepted?: boolean
 }
@@ -18,7 +19,7 @@ export interface ReplyDiagnosticContext {
 const events = new Set([
   'installed', 'configured', 'sent', 'sent-raw', 'scan', 'reply-state', 'question',
   'question-cleared', 'command', 'read-files', 'computer-request', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
-  'continue-generation', 'command-recovery'
+  'continue-generation', 'command-recovery', 'native-edit'
 ])
 const reasons = new Set([
   'no-turns', 'no-visible-turns', 'not-assistant-turn', 'no-key', 'already-handled', 'question-still-generating',
@@ -26,7 +27,10 @@ const reasons = new Set([
   'terminal-mode-off', 'result-sent', 'user-sent', 'question-detected', 'non-command-reply',
   'history-baseline', 'manual-resume', 'file-send-submitted', 'configured-baseline', 'task-ended',
   'continue-clicked', 'continue-unreachable', 'continue-limit', 'duplicate-command', 'command-format-error',
-  'computer-quoted-content', 'computer-not-live', 'computer-reply-cut-off'
+  'computer-quoted-content', 'computer-not-live', 'computer-reply-cut-off',
+  'stopped-continue-sent', 'stopped-continue-failed', 'stopped-continue-limit', 'resume-forced', 'computer-rejected',
+  'user-edited', 'native-edit-retry', 'native-edit-unconfirmed', 'native-edit-not-latest', 'native-edit-no-task',
+  'safety-leak-detected', 'safety-leak-edit-click', 'safety-leak-send-click', 'safety-leak-limit', 'safety-leak-failed'
 ])
 
 function identifier(value: unknown): string | null {
@@ -46,6 +50,9 @@ export function replyDiagnosticMetadata(
     viewId: Number.isSafeInteger(context.viewId) && Number(context.viewId) >= 0 ? context.viewId : null,
     conversationId: identifier(context.conversationId),
     mainPendingQuestion: context.mainPendingQuestion === true
+  }
+  if (Number.isSafeInteger(context.mainTaskPromptGeneration) && context.mainTaskPromptGeneration! >= 0) {
+    details.mainTaskPromptGeneration = context.mainTaskPromptGeneration!
   }
   if (payload.reason !== undefined) details.reason = reasons.has(payload.reason) ? payload.reason : 'unknown'
   for (const key of ['messageId', 'lastHandledMessageId', 'lastMatchedMessageId', 'lastVisibleMessageId', 'visibleAnswerOwnerMessageId'] as const) {
@@ -68,6 +75,7 @@ export function replyDiagnosticMetadata(
   ] as const) {
     if (typeof payload[key] === 'boolean') details[key] = payload[key]!
   }
+  if (['row', 'edit-button', 'editor', 'submit', 'task', 'generation', 'error'].includes(payload.step ?? '')) details.step = payload.step!
   for (const key of ['replyKind', 'lastVisibleReplyKind', 'visibleAnswerKind'] as const) {
     if (['empty', 'questions', 'read-files', 'command', 'computer', 'prose'].includes(payload[key] ?? '')) details[key] = payload[key]!
   }
@@ -84,7 +92,7 @@ export function replyDiagnosticMetadata(
   if (typeof context.computerAccepted === 'boolean') details.computerAccepted = context.computerAccepted
   if (payload.event === 'computer-request') {
     if (['invalid_json', 'duplicate_field', 'unsafe_field', 'limit_exceeded', 'invalid_envelope', 'unsupported_version',
-      'unknown_action', 'invalid_parameters', 'invalid_step_token', 'stale_step_token', 'ambiguous_request'].includes(payload.computerProtocolCode ?? '')) {
+      'unknown_action', 'invalid_parameters', 'invalid_step_token', 'stale_step_token', 'ambiguous_request', 'invalid_description'].includes(payload.computerProtocolCode ?? '')) {
       details.computerProtocolCode = payload.computerProtocolCode!
     }
     if (['candidate', 'invalid'].includes(payload.computerOutcome ?? '')) details.computerOutcome = payload.computerOutcome!

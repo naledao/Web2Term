@@ -18,13 +18,16 @@ internal sealed class WindowsScrollBackend(WindowCatalog windows, int parentPid)
         IntPtr hit = WindowFromPoint(location);
         if (hit == IntPtr.Zero || !ScreenToClient(hit, ref location) || !GetClientRect(hit, out Rect bounds) ||
             location.X < bounds.Left || location.Y < bounds.Top || location.X >= bounds.Right || location.Y >= bounds.Bottom) return null;
-        // Vertical mouse-position routing is explicit. Legacy/hybrid and horizontal messages may use focus;
-        // require the exact hit HWND to equal focus rather than guessing another child pane or changing settings.
+        // Focus within the hit container can route wheel messages up its actual parent chain.
+        // A common top-level ancestor alone cannot distinguish two unrelated panes.
         uint? mode = WheelRouting(0x201c, 0, out uint value, 0) ? value : null;
         if (axis == "vertical" && mode == 2) return ScrollRoutingPolicy.Select(axis, mode, false);
         GuiThreadInfo gui = new() { Size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
-        return GetGUIThreadInfo(0, ref gui) ? ScrollRoutingPolicy.Select(axis, mode, gui.Focus == hit) : null;
+        IntPtr target = (IntPtr)long.Parse(window.Window.Handle.AsSpan(2), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture);
+        return GetGUIThreadInfo(0, ref gui) ? ScrollRoutingPolicy.Select(axis, mode, gui.Focus == hit,
+            hit != target && gui.Focus != IntPtr.Zero && IsChild(hit, gui.Focus)) : null;
     }
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsChild(IntPtr parent, IntPtr child);
     public int Wheel(WindowSelection window, DesktopPointResolution point, ScrollOptions options, string routing, CancellationToken cancellation)
     {
         try {

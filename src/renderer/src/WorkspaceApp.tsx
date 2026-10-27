@@ -1,4 +1,3 @@
-import EmergencyStopControls from './components/EmergencyStopControls'
 import AppPopover from './components/AppPopover'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
@@ -396,7 +395,6 @@ export default function WorkspaceApp(): ReactElement {
                 : '暂无任务'}
           </span>
         </button>
-        <EmergencyStopControls />
         {appVersion ? <span className="workspace__version" title="应用版本号">v{appVersion}</span> : null}
       </footer>
 

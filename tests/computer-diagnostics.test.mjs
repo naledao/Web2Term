@@ -38,7 +38,8 @@ test('only currently advertised actions/tools are offered; verification gates fi
   assert.deepEqual(plain(d.candidate_paths.map(p => [p.tool, p.action])), [['computer', 'observe']])
   const blocked = diagnose(receipt({ code: 'focus_denied', execution: 'executed' }), context)
   assert.equal(blocked.requires_fresh_observation, true); assert.equal(blocked.same_action_retry, 'verify_effect_first')
-  assert.equal(blocked.candidate_paths.some(p => p.action === 'focus_window' || p.action === 'wait_for'), false)
+  assert.equal(blocked.candidate_paths.some(p => p.action === 'focus_window'), true)
+  assert.equal(blocked.candidate_paths.some(p => p.action === 'click'), false)
   assert.deepEqual(plain(diagnose(receipt({ code: 'unavailable' }), { actions: [], otherTools: [] }).candidate_paths), [])
 })
 
@@ -86,6 +87,13 @@ test('empty discovery and wait timeout do not prove an application is absent or 
   assert.equal(d.category, 'loading_timeout'); assert.equal(d.may_have_side_effects, false)
   assert.match(d.guidance, /不能据此断言加载故障/)
   assert.ok(d.candidate_paths.some(p => p.action === 'wait_for'))
+})
+test('usable partial observations remain informational instead of entering a failure recovery loop', async t => {
+  const f = fixture(t, { action: 'observe', execute: () => receipt({ action: 'observe', code: 'ok', ok: true, execution: 'executed',
+    data: observation({ image: { sha256: 'b'.repeat(64) }, controls: { complete: false, elements: [] } }) }), diagnosticContext: () => context })
+  await f.run(); await f.run()
+  const c = f.coordinator.current('deepseek').control
+  assert.equal(f.sends[0].diagnosis.category, 'partial_observation'); assert.equal(c.recovering, false); assert.equal(c.recoverySteps, 0)
 })
 
 test('cancelled and obsolete contexts offer no autonomous repair paths', () => {

@@ -5,7 +5,7 @@ import type { ComputerDiagnosticContext } from './computer-diagnostics'
 export type ComputerExecutionState = 'queued' | 'dispatching' | 'completed' | 'failed' | 'cancelled' | 'unknown'
 export type ComputerDeliveryState = 'pending' | 'uploading' | 'sending' | 'sent' | 'failed' | 'unknown' | 'cancelled'
 export type ComputerActionEvent =
-  | { event: 'dispatch' }
+  | { event: 'dispatch'; observationId?: string }
   | { event: 'result'; result: ComputerUseToolResult; diagnosticContext?: ComputerDiagnosticContext; actionTimedOut?: boolean }
   | { event: 'ready'; text: string }
   | { event: 'delivery-start'; attemptId: string }

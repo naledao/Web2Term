@@ -5121,6 +5121,7 @@ body {
 }
 
 .prompt-modal {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: min(880px, calc(100vw - 52px));
@@ -5143,6 +5144,7 @@ body {
 }
 
 .prompt-modal__title {
+  margin: 0;
   color: #16233a;
   font-size: 20px;
   font-weight: 780;

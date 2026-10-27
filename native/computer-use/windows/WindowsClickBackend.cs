@@ -9,7 +9,7 @@ using static Web2Term.WindowsHelper.WindowFocusInterop;
 namespace Web2Term.WindowsHelper;
 
 /** Narrow compiled input path; no activation, focus manipulation, scripts, privilege changes or user-key release. */
-internal sealed class WindowsClickBackend(WindowCatalog windows, int parentPid) : IClickBackend
+internal sealed class WindowsClickBackend(WindowCatalog windows, int parentPid) : IClickBackend, IDesktopClickBackend
 {
     private static readonly int[] BusyKeys = [1, 2, 4, 5, 6, 0x10, 0x11, 0x12, 0x5B, 0x5C];
     private static string? DesktopName(IntPtr handle)
@@ -34,8 +34,9 @@ internal sealed class WindowsClickBackend(WindowCatalog windows, int parentPid) 
         if (!GuardCore(expected, point, false, false, cancellation, holding ? ButtonKey(button) : null) || cursor != null && !Cursor(cursor)) return false;
         GuiThreadInfo gui = new() { Size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
         if (!GetGUIThreadInfo(0, ref gui) || (gui.Flags & 0x1e) != 0) return false;
-        IntPtr popup = GetLastActivePopup(gui.Active);
-        return popup == IntPtr.Zero || popup == gui.Active || !ApplicationInterop.IsWindowVisible(popup);
+        // A visible owned modeless palette does not block the enabled foreground target.
+        // GuardCore checks actual hit/capture/foreground and disabled modal owners.
+        return true;
     }
     internal static int ButtonKey(string button) => button switch { "left" => 1, "right" => 2, "middle" => 4, _ => throw new InvalidDataException() };
     private bool GuardCore(WindowSelection expected, CoordinatePoint? point, bool cursorAtPoint, bool keyboard, CancellationToken cancellation, int? heldButton = null)
@@ -85,6 +86,36 @@ internal sealed class WindowsClickBackend(WindowCatalog windows, int parentPid) 
             if (cancellation.IsCancellationRequested) return 0;
             WindowsDpiContext.CheckVirtualBounds(point.VirtualBounds);
             if (!Guard(window, point.Desktop, true, cancellation)) return 0;
+        } catch { return 0; }
+        var flags = ButtonFlags(button);
+        Input[] inputs = Enumerable.Range(0, count).SelectMany(_ => new[] { Mouse(0, 0, flags.Down), Mouse(0, 0, flags.Up) }).ToArray();
+        if (cancellation.IsCancellationRequested) return 0;
+        return HelperInputState.Send(inputs, cancellation);
+    }
+    public string? DesktopTarget(CoordinatePoint point, bool cursorAtPoint, CancellationToken cancellation)
+    {
+        HelperInputState.Check(cancellation); WindowsDpiContext.RequirePhysicalCoordinates();
+        if (!InputDesktop() || BusyKeys.Any(key => (GetAsyncKeyState(key) & 0x8000) != 0) || cursorAtPoint && !Cursor(point)) return null;
+        IntPtr hit = WindowFromPoint(new ClickInterop.Point { X = point.x, Y = point.y });
+        IntPtr root = hit == IntPtr.Zero ? IntPtr.Zero : GetAncestor(hit, 2); // GA_ROOT
+        if (root == IntPtr.Zero) return null;
+        _ = ApplicationInterop.GetWindowThreadProcessId(root, out uint pid);
+        if (pid == 0 || pid == (uint)parentPid || pid == (uint)Environment.ProcessId) return null;
+        StringBuilder name = new(257); _ = GetClassName(root, name, name.Capacity);
+        bool menu = name.ToString() == "#32768";
+        GuiThreadInfo gui = new() { Size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
+        if (!GetGUIThreadInfo(0, ref gui) || gui.MoveSize != IntPtr.Zero ||
+            (gui.MenuOwner != IntPtr.Zero || (gui.Flags & 0x4) != 0) && !menu || // GUI_INMENUMODE: only the open menu itself.
+            gui.Capture != IntPtr.Zero && !menu && GetAncestor(gui.Capture, 2) != root) return null;
+        return string.Join(':', root.ToInt64(), pid, name.ToString());
+    }
+    public int DesktopButtons(DesktopPointResolution point, string target, string button, int count, CancellationToken cancellation)
+    {
+        // As in Buttons: every failure here is before SendInput, so cleanup never releases a button we did not submit.
+        try {
+            if (cancellation.IsCancellationRequested) return 0;
+            WindowsDpiContext.CheckVirtualBounds(point.VirtualBounds);
+            if (DesktopTarget(point.Desktop, true, cancellation) != target) return 0;
         } catch { return 0; }
         var flags = ButtonFlags(button);
         Input[] inputs = Enumerable.Range(0, count).SelectMany(_ => new[] { Mouse(0, 0, flags.Down), Mouse(0, 0, flags.Up) }).ToArray();

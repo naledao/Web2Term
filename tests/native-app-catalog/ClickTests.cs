@@ -51,7 +51,9 @@ internal static class ClickTests
             ("left single chooses role-compatible UIA operations and unsupported patterns fall back only before mutation", Semantics),
             ("semantic failures never fall back to mouse and disposed resources are released", SemanticFailure),
             ("stale control ancestry hit target focus image and window stop input", Stale),
-            ("move must arrive and hover changes block button dispatch", Movement),
+            ("move must arrive and focus or hit changes after it block button dispatch", Movement),
+            ("repaints tolerate live coordinate and element targets; a blocked native hit never clicks", Repaints),
+            ("coordinate click does not re-enter UIA/state validation after cursor arrival", CoordinateProviderFailure),
             ("partial button receipts preserve unknown execution and release only a pending attempted button", Partial),
             ("cancellation before input and after movement never dispatches another click", Cancellation),
             ("a foreground pointer target may establish keyboard focus without authorizing keyboard input", PointerFocus),
@@ -112,9 +114,10 @@ internal static class ClickTests
             if (scenario == "ancestry") f.Controls.AncestorsValid = false;
             if (scenario == "hit") f.Controls.HitMatches = false;
             if (scenario == "control") f.Controls.RootNode.Children[0].Raw = f.Controls.RootNode.Children[0].Raw with { Key = "replacement" };
-            if (scenario == "focus") f.States.Current = f.States.Current with { Focus = "changed" };
-            if (scenario == "image") f.Images.Pixels.Bgra[0] = 255;
-            if (scenario == "window") f.States.Current = f.States.Current with { Source = f.States.Current.Source with { WindowDpi = 192 } };
+            if (scenario == "focus") f.Input.Allowed = false;
+            // The pixels around the coordinate point changed (a covering popup), not just one stray pixel.
+            if (scenario == "image") f.Images.Current = f.Images.Current with { Window = f.Images.Current.Window! with { Window = f.Images.Current.Window!.Window with { Lifetime = "new-window" } } };
+            if (scenario == "window") f.Images.Current = f.Images.Current with { WindowDpi = 192 };
             if (scenario == "blocked") f.Input.Allowed = false;
             var result = f.Click(image, element: image.controls != null);
             Check(!result.Ok && result.Execution == "not_executed" && f.Input.Moves == 0 && f.Input.Clicks == 0 && f.Controls.Invoked == 0, "stale target accepted: " + scenario); f.Closed();
@@ -122,17 +125,46 @@ internal static class ClickTests
     }
     private static void Movement()
     {
-        foreach (string scenario in new[] { "blocked", "not_arrived", "hover", "focus", "hit" }) {
+        foreach (string scenario in new[] { "blocked", "not_arrived", "focus", "hit" }) {
             var f = new Fixture(); var image = f.Publish();
             if (scenario == "blocked") f.Input.MoveAccepted = 0;
             if (scenario == "not_arrived") f.Input.Arrived = false;
-            if (scenario == "hover") f.Input.OnMove = () => f.Images.Pixels.Bgra[0] = 255;
-            if (scenario == "focus") f.Input.OnMove = () => f.States.Current = f.States.Current with { Focus = "changed-on-hover" };
+            if (scenario == "focus") f.Input.OnMove = () => f.Input.Allowed = false;
             if (scenario == "hit") f.Input.OnMove = () => f.Input.Allowed = false;
             var result = f.Click(image);
             Check(!result.Ok && f.Input.Moves == 1 && f.Input.Clicks == 0 && f.Input.Releases == 0 && !Receipt(result).click_attempted, "movement failure clicked: " + scenario);
             Check(result.Execution == (scenario == "blocked" ? "not_executed" : "executed"), "movement fact lost"); f.Closed();
         }
+    }
+    private static void Repaints()
+    {
+        // An animated window: its object-event revision moves and a few pixels change between observe and click.
+        var f = new Fixture(); var image = f.Publish();
+        f.States.Current = f.States.Current with { Revision = "revision-repainted" };
+        f.Images.Pixels.Bgra[0] = 255;
+        f.Input.OnMove = () => Array.Fill(f.Images.Pixels.Bgra, (byte)200); // Hover highlight after the move.
+        var result = f.Click(image);
+        Check(result.Ok && f.Input.Moves == 1 && f.Input.Clicks == 1, "repaints or hover blocked a coordinate click: " + result.Code);
+        // Element identity/ancestry and native hit remain valid despite unrelated revisions.
+        var g = new Fixture(); var tree = g.Publish(controls: true);
+        g.States.Current = g.States.Current with { Revision = "revision-repainted" };
+        var element = g.Click(tree, element: true);
+        Check(element.Ok && g.Controls.Invoked == 1, "unrelated revision blocked a live element"); g.Closed();
+        var h = new Fixture(); var other = h.Publish();
+        Array.Fill(h.Images.Pixels.Bgra, (byte)255);
+        h.Input.Allowed = false;
+        var covered = h.Click(other);
+        Check(!covered.Ok && h.Input.Moves == 0 && !Receipt(covered).click_attempted, "blocked native target was clicked");
+    }
+    private static void CoordinateProviderFailure()
+    {
+        var f = new Fixture(); var image = f.Publish();
+        // Simulate a provider/UIA failure and a hover repaint after the cursor arrives.
+        f.States.Current = f.States.Current with { InputTargetReady = false, Focus = "provider-error" };
+        f.Input.OnMove = () => Array.Fill(f.Images.Pixels.Bgra, (byte)200);
+        var result = f.Click(image);
+        Check(result.Ok && Receipt(result).click_attempted && f.Input.Clicks == 1, "coordinate click still depended on provider/input readiness");
+        f.Closed();
     }
     private static void Partial()
     {

@@ -48,15 +48,26 @@ interface HelperProcess {
   emergencyId: string | null
   cancelEmergency: () => void
   activityStopped: boolean
-  activityCause: 'human_takeover' | 'external_input' | 'input_monitor_unavailable' | null
+  activityCause: 'human_takeover' | 'human_input' | 'external_input' | 'input_monitor_unavailable' | null
+  /** Which consecutive physical input stopped this run (1..HUMAN_TAKEOVER_STRIKES); null for other causes. */
+  activityStrike: number | null
 }
 
+export const HUMAN_TAKEOVER_STRIKES = 3
+export const HUMAN_STRIKE_WINDOW_MS = 120_000
+
 export interface DesktopActivityEvent {
-  kind: 'human-input' | 'external-input' | 'focus-changed' | 'monitor-unavailable'
-  /** Which kind of input stopped the run; null for focus and monitor events. Never a key or a position. */
+  kind: 'human-input' | 'external-input' | 'focus-changed' | 'monitor-unavailable' | 'escape-pressed' | 'human-stop'
+  /** Input category; escape-pressed only notifies. Null for focus/monitor events; never a key or position. */
   input: 'keyboard' | 'click' | 'wheel' | null
+  /** Ordinary physical input strikes; the explicit double-Escape gesture has no strike count. */
+  strike: number | null
   owner: DesktopOwner
   generation: number
+}
+
+export function desktopActivityRequestsTakeover(event: DesktopActivityEvent): boolean {
+  return event.kind === 'human-stop' || event.kind === 'human-input' && (event.strike ?? 0) >= HUMAN_TAKEOVER_STRIKES
 }
 
 const messages: Record<WindowsHelperCode, string> = {
@@ -123,6 +134,18 @@ export class WindowsHelperManager {
     this.send(run, { type: 'watch_desktop', id: randomUUID(), epoch: run.generation, watch_id: this.desktopWatch?.id ?? null })
   }
 
+  /*
+   * A stray touch or accidental click should not end a task. Physical input under the live watch interrupts
+   * the current step every time, but only the HUMAN_TAKEOVER_STRIKES-th in a row is a takeover. "In a row":
+   * the same watch (same goal) with no more than HUMAN_STRIKE_WINDOW_MS between inputs.
+   */
+  private humanStrikes: { watchId: string; count: number; at: number } | null = null
+  private humanStrike(watchId: string): number {
+    const now = this.now(), previous = this.humanStrikes
+    const count = previous && previous.watchId === watchId && now - previous.at <= HUMAN_STRIKE_WINDOW_MS ? previous.count + 1 : 1
+    this.humanStrikes = count >= HUMAN_TAKEOVER_STRIKES ? null : { watchId, count, at: now }
+    return count
+  }
   inputReleaseStatus(): InputReleaseStatus { return this.inputRelease }
   emergencyStop(): void {
     if (this.emergency) return
@@ -259,7 +282,7 @@ export class WindowsHelperManager {
 
   private async launch(): Promise<boolean> {
     const now = this.now()
-    while (this.attempts.length && now - this.attempts[0] >= 60_000) this.attempts.shift()
+    this.pruneAttempts(now)
     if (this.attempts.length >= 3) { this.update('restart_limit', 'error'); return false }
     this.attempts.push(now)
     this.update('starting', 'starting', { actions: [], pid: null, protocolVersion: null })
@@ -278,7 +301,7 @@ export class WindowsHelperManager {
     const run: HelperProcess = { child, generation: this.state.generation + 1, helloId: randomUUID(), nonce: randomUUID(), buffer: Buffer.alloc(0),
       ready: new Promise(resolve => { settle = resolve }), settle: value => settle(value),
       closing: false, restartWhenClosed: false, handshaken: false,
-      cancelStartup: () => {}, cancelHeartbeat: () => {}, cancelKill: () => {}, ping: null, action: null, cancelledIds: new Set(), emergencyId: null, cancelEmergency: () => {}, activityStopped: false, activityCause: null }
+      cancelStartup: () => {}, cancelHeartbeat: () => {}, cancelKill: () => {}, ping: null, action: null, cancelledIds: new Set(), emergencyId: null, cancelEmergency: () => {}, activityStopped: false, activityCause: null, activityStrike: null }
     this.run = run
     this.update('starting', 'starting', { generation: run.generation, pid: child.pid ?? null })
     child.once('error', () => this.retire(run, run.handshaken ? 'pipe_closed' : 'spawn_failed', true))
@@ -336,6 +359,9 @@ export class WindowsHelperManager {
         value.actions.length > 32 || value.actions.some(action => !actionName(action)) || new Set(value.actions).size !== value.actions.length) return invalid()
       if (this.emergency) { this.inputRelease = 'unconfirmed'; this.retire(run, 'emergency_stopped', false); return false }
       run.handshaken = true
+      // The limit is for consecutive failed starts. A helper retired after a desktop interruption
+      // restarted fine; counting it would strand the task with only complete_task after three stops.
+      this.attempts.length = 0
       run.cancelStartup()
       // Pipe ordering arms the hook before any later request can be dispatched.
       this.sendDesktopWatch(run)
@@ -346,22 +372,28 @@ export class WindowsHelperManager {
     }
     if (value.type === 'desktop_activity') {
       const inputKind = ['human-input', 'external-input'].includes(value.kind as string)
-      if (Object.keys(value).length !== 6 || !['human-input', 'external-input', 'focus-changed', 'monitor-unavailable'].includes(value.kind as string) ||
-        (inputKind ? !['keyboard', 'click', 'wheel'].includes(value.input as string) : value.input !== null) ||
+      const escapeKind = ['escape-pressed', 'human-stop'].includes(value.kind as string)
+      const notification = ['focus-changed', 'escape-pressed'].includes(value.kind as string)
+      if (Object.keys(value).length !== 6 || !['human-input', 'external-input', 'focus-changed', 'monitor-unavailable', 'escape-pressed', 'human-stop'].includes(value.kind as string) ||
+        (escapeKind ? value.input !== 'keyboard' : inputKind ? !['keyboard', 'click', 'wheel'].includes(value.input as string) : value.input !== null) ||
         typeof value.watch_id !== 'string' || !/^[a-f0-9-]{36}$/i.test(value.watch_id) || value.epoch !== run.generation) return invalid()
       const watch = this.desktopWatch
       const matches = watch?.id === value.watch_id
-      if (value.kind !== 'focus-changed') {
+      const strike = matches && value.kind === 'human-input' ? this.humanStrike(watch!.id) : null
+      if (!notification) {
         run.activityStopped = true
-        run.activityCause = value.kind === 'monitor-unavailable' ? 'input_monitor_unavailable' : matches && value.kind === 'human-input' ? 'human_takeover' : 'external_input'
+        run.activityCause = value.kind === 'monitor-unavailable' ? 'input_monitor_unavailable'
+          : matches && value.kind === 'human-stop' ? 'human_takeover'
+            : strike === null ? 'external_input' : strike >= HUMAN_TAKEOVER_STRIKES ? 'human_takeover' : 'human_input'
+        run.activityStrike = strike
       }
-      if (watch && (matches || value.kind !== 'focus-changed')) for (const listener of this.activityListeners) {
+      if (watch && (matches || !notification)) for (const listener of this.activityListeners) {
         // An old watch can retire a latched native process, but cannot label a new goal as human takeover.
         try { listener({ kind: matches || value.kind === 'monitor-unavailable' ? value.kind as DesktopActivityEvent['kind'] : 'external-input',
-          input: value.input as DesktopActivityEvent['input'], owner: structuredClone(watch.owner), generation: run.generation }) }
+          input: value.input as DesktopActivityEvent['input'], strike, owner: structuredClone(watch.owner), generation: run.generation }) }
         catch { /* Native input is already latched off; one observer cannot suppress retirement. */ }
       }
-      if (value.kind !== 'focus-changed') this.interruptDesktopRun(run)
+      if (!notification) this.interruptDesktopRun(run)
       return !run.closing
     }
     if (value.type === 'emergency_stopped' && this.emergency && value.id === run.emergencyId && value.epoch === run.generation) {
@@ -389,7 +421,9 @@ export class WindowsHelperManager {
     const pending = run.action
     if (!pending) return
     if (run.activityCause) result = { ...result, ok: false, code: run.activityCause,
-      message: run.activityCause === 'human_takeover' ? '检测到人工接管，已暂停原任务并保留实际执行回执。' : run.activityCause === 'input_monitor_unavailable' ? '桌面接管监测已不可用，本轮控制已停止；请核对实际状态。' : '其他来源输入已中断本轮控制，请重新观察真实界面后继续判断；不重放原动作。' }
+      message: run.activityCause === 'human_takeover' ? '检测到人工接管，已暂停原任务并保留实际执行回执。'
+        : run.activityCause === 'human_input' ? `检测到用户键鼠操作（第 ${run.activityStrike}/${HUMAN_TAKEOVER_STRIKES} 次），本步已中断；动作是否生效须重新观察核对，不重放原动作。请继续原任务，连续 ${HUMAN_TAKEOVER_STRIKES} 次将暂停并等待用户。`
+        : run.activityCause === 'input_monitor_unavailable' ? '桌面接管监测已不可用，本轮控制已停止；请核对实际状态。' : '其他来源输入已中断本轮控制，请重新观察真实界面后继续判断；不重放原动作。' }
     run.action = null; pending.cancelTimer(); pending.detachAbort(); pending.resolve(result)
     if (pending.cancelled && !run.closing && !this.emergency) this.retire(run, 'cancelled', true)
   }
@@ -443,8 +477,14 @@ export class WindowsHelperManager {
     if (run.restartWhenClosed) this.restartLater()
   }
 
+  private pruneAttempts(now: number): void {
+    while (this.attempts.length && now - this.attempts[0] >= 60_000) this.attempts.shift()
+  }
+
   private restartLater(): void {
     if (this.disposed || this.emergency || !this.owners.size || this.cancelRestart) return
+    // Stale entries must not block forever: only launch() used to expire them, and it is never reached from here.
+    this.pruneAttempts(this.now())
     if (this.attempts.length >= 3) return // Keep the concrete failure visible after the third failure.
     this.cancelRestart = this.schedule(() => { this.cancelRestart = null; void this.ensureStarted() }, 1000 * this.attempts.length)
   }

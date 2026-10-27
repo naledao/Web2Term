@@ -41,8 +41,11 @@
     "@uiw/react-md-editor": "^4.1.2",
     "electron-updater": "^6.8.9",
     "ioredis": "^5.11.1",
+    "katex": "^0.19.1",
     "mysql2": "^3.24.5",
     "react-avatar-editor": "^15.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-math": "^6.0.0",
     "ssh2": "^1.17.0",
     "ws": "^8.22.0"
   },

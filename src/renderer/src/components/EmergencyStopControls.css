@@ -5,5 +5,7 @@
 .emergency-stop button:disabled { opacity: .6; cursor: default; }
 .emergency-stop__hint { color: var(--text-muted); }
 .emergency-stop__status { max-width: min(48vw, 680px); color: var(--text); line-height: 1.5; }
+.emergency-stop__warning { max-width: min(48vw, 680px); padding: 3px 9px; border: 1px solid #f5c26b; border-radius: 5px; color: #8a4b00; background: #fff7e6; line-height: 1.5; }
+.workspace[data-theme=dark] .emergency-stop__warning { border-color: #8a5a12; color: #f6c86f; background: #2b2110; }
 .workspace__transferbar:has(.emergency-stop) { height: auto; min-height: 34px; flex-wrap: wrap; gap: 8px; padding-top: 5px; padding-bottom: 5px; }
-@media (max-width: 780px) { .emergency-stop__hint { display: none; } .emergency-stop__status { max-width: 100%; } }
+@media (max-width: 780px) { .emergency-stop__hint { display: none; } .emergency-stop__status, .emergency-stop__warning { max-width: 100%; } }

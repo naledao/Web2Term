@@ -1,7 +1,9 @@
 /** Private parent/helper transport. This is never a model-facing tool or renderer command. */
 // v4 adds a main-issued desktop watch and scoped native activity events. Model protocol remains v1.
 // v5 adds each activity's input category (keyboard/click/wheel) for the takeover log.
-export const WINDOWS_HELPER_PROTOCOL_VERSION = 5 as const
+// v6 adds action-specific observation checks and optional window text insertion.
+// v7 attributes physical double-Escape to the native watch; helper-injected keys never stop a task.
+export const WINDOWS_HELPER_PROTOCOL_VERSION = 7 as const
 export const WINDOWS_HELPER_MAX_FRAME_BYTES = 262_144
 export const WINDOWS_HELPER_MAX_REQUEST_BYTES = 65_536
 

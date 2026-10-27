@@ -70,6 +70,9 @@
 .focus-history--assistant{font-size:14px;margin:0 0 32px;overflow-wrap:anywhere}
 .focus-answer{font-size:14px;line-height:1.9;overflow-wrap:anywhere}
 .focus-answer+.focus-answer{margin-top:18px}
+.focus-chat .wmde-markdown .katex{color:inherit;overflow-wrap:normal;text-indent:0}
+.focus-chat .wmde-markdown .katex-display{max-width:100%;overflow-x:auto;overflow-y:hidden;padding:4px 0}
+.focus-chat .wmde-markdown .katex-display>.katex{white-space:nowrap}
 .focus-smart-ui{margin:16px 0;padding:14px;border:1px solid var(--fc-border);border-radius:14px;background:var(--fc-bg);color:var(--fc-text);font-size:15px;line-height:1.65;overflow-wrap:anywhere}
 .focus-smart-ui h3{margin:0 0 8px;font-size:16px;line-height:1.5;font-weight:650}
 .focus-smart-ui__description{margin:0 0 10px}
@@ -207,6 +210,15 @@
 .focus-chart__line{fill:none;stroke:currentColor;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
 .focus-chart__point{fill:currentColor;cursor:default}
 .focus-chart__point:hover{r:5}
+.focus-chart__bar{fill:currentColor;cursor:default}
+.focus-chart__bar:hover{filter:brightness(1.2)}
+.focus-chart__plot{overflow-x:auto;margin-top:10px}
+.focus-chart__data{margin-top:8px;font-size:12px;color:var(--fc-muted)}
+.focus-chart__data summary{cursor:pointer;width:fit-content}
+.focus-chart__table{overflow-x:auto;max-height:360px;margin-top:8px}
+.focus-chart__table table{width:100%;border-collapse:collapse;font-size:12px;color:var(--fc-text)}
+.focus-chart__table th,.focus-chart__table td{padding:6px 10px;border-bottom:1px solid var(--fc-border);text-align:right;white-space:nowrap}
+.focus-chart__table th:first-child{text-align:left;white-space:normal;min-width:100px}
 .focus-chart__legend{display:flex;flex-wrap:wrap;justify-content:center;gap:14px;margin-top:4px;font-size:12px;color:var(--fc-text)}
 .focus-chart__legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:1px}
 .focus-chart__caption{margin:6px 0 0;font-size:12px;color:var(--fc-muted)}

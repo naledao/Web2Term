@@ -59,6 +59,8 @@ static class ApplicationLaunchTests
     static void Expiration()
     {
         DateTime now = Timestamp; var f = Catalog(() => now); now = now.AddMinutes(3);
+        Check(f.Catalog.ResolveLaunch(f.Selection.CatalogId, f.Selection.AppId, f.Selection.ReferenceId) != null, "normal delivery delay expired a known app reference");
+        now = Timestamp.AddMinutes(16);
         var dispatcher = new FakeDispatcher(); var action = new LaunchAppAction(f.Catalog, new(dispatcher, new FakeWindowProbe()));
         Check(Invoke(action, f.Selection).Code == "stale_catalog" && dispatcher.Calls == 0, "expired catalog dispatched");
     }

@@ -2,10 +2,10 @@ import type { ComputerUseActionDefinition } from './computer-use'
 
 export const TYPE_TEXT_DEFINITION: ComputerUseActionDefinition = {
   action: 'type_text',
-  description: '向最新观察中已获得键盘焦点的真实控件输入文字。先由 AI 点击目标，再 observe(include_controls=true 或 target=controls) 取得当前焦点 element_id；不要求用户选窗。mode=insert（默认）以分段 Unicode 文本事件替换当前选区／在光标插入，不清空全文；mode=replace 明确替换整个控件内容，仅使用可写 UIA Value，不模拟全选或自动回退。支持中文、非 BMP 字符、制表与逻辑换行，CRLF/CR/LF 在插入时统一为一个 Unicode CR 字符，不生成 Enter、Tab 或组合键；应用仍决定如何处理字符。文本按字面输入，不解释脚本或快捷键。每段复核窗口和实际焦点；取消、部分输入或未知结果不重输。操作后自动返回新观察；只有有界回读与预期全文一致才报告 content_verified=true，输入流接收不等于内容正确或业务完成。',
+  description: '向最新窗口观察中的键盘目标输入字面文字。优先指定真实焦点编辑控件；自绘/UIA不可读时可省略 element_id，仅支持 insert，实时核对窗口键盘路由且不回读内容。mode=insert（默认）以分段 Unicode 文本事件替换当前选区／在光标插入，不清空全文；mode=replace 明确替换整个控件内容，仅使用可写 UIA Value，不模拟全选或自动回退。支持中文、非 BMP 字符、制表与逻辑换行，CRLF/CR/LF 在插入时统一为一个 Unicode CR 字符，不生成 Enter、Tab 或组合键；应用仍决定如何处理字符。文本按字面输入，不解释脚本或快捷键。每段复核窗口和实际焦点；取消、部分输入或未知结果不重输。操作后自动返回新观察；只有有界回读与预期全文一致才报告 content_verified=true，输入流接收不等于内容正确或业务完成。',
   parameters: [
-    { name: 'observation_id', type: 'string', required: true, minLength: 36, maxLength: 36, description: '本任务最近一组包含控件的观察编号。' },
-    { name: 'element_id', type: 'string', required: true, minLength: 35, maxLength: 35, description: '本组已返回且实际获得键盘焦点的控件，不能传坐标或原生句柄。' },
+    { name: 'observation_id', type: 'string', required: true, minLength: 36, maxLength: 36, description: '本任务最近一组业务窗口观察编号；指定 element_id 时需包含相应控件。' },
+    { name: 'element_id', type: 'string', required: false, minLength: 35, maxLength: 35, description: '优先使用本组真实焦点编辑控件；自绘/UIA不可读时可省略，仅以 insert 向最近窗口的已核对键盘路由输入，不回读或声称内容已验证。' },
     { name: 'text', type: 'string', required: true, minLength: 0, maxLength: 8192, description: '最多 8192 个 UTF-16 单元；保留空格，支持中文、emoji、换行和制表；拒绝无效代理项及其他控制字符。仅 replace 允许空串清空。' },
     { name: 'mode', type: 'string', required: false, enum: ['insert', 'replace'], description: '默认 insert，输入到当前光标／选区；replace 替换整个控件值，不得用于只想插入一段文字的情况。' }
   ],
@@ -35,9 +35,9 @@ export function validateTypeTextParameters(p: Record<string, unknown>): string |
       else if (c >= 0xdc00 && c <= 0xdfff) { valid = false; break }
     }
   }
-  return !valid || !validId(p.observation_id, 'obs_') || !validId(p.element_id, 'el_') || !['insert', 'replace'].includes((p.mode ?? 'insert') as string) ||
+  return !valid || !validId(p.observation_id, 'obs_') || p.element_id !== undefined && !validId(p.element_id, 'el_') || p.element_id === undefined && p.mode === 'replace' || !['insert', 'replace'].includes((p.mode ?? 'insert') as string) ||
     Object.keys(p).some(k => !['observation_id', 'element_id', 'text', 'mode'].includes(k))
-    ? 'type_text 只接受最新观察中的焦点控件、有效 Unicode 文字（最多 8192 UTF-16 单元）及 insert／replace；空串只用于 replace，不接受坐标、按键或脚本字段。' : null
+    ? 'type_text 需要最新业务窗口观察、有效 Unicode 文字（最多8192 UTF-16单元）及insert／replace；焦点控件可选，省略时只支持insert。空串只用于明确控件的replace，不接受坐标、按键或脚本字段。' : null
 }
 
 export interface TextInputBatch {
@@ -45,7 +45,7 @@ export interface TextInputBatch {
   release_attempted: boolean; release_accepted: number | null
 }
 export interface WindowsTypeTextReceipt {
-  request_id: string; observation_id: string; source_step_id: string; window_id: string | null; element_id: string
+  request_id: string; observation_id: string; source_step_id: string; window_id: string | null; element_id: string | null
   mode: 'insert' | 'replace'; method: 'none' | 'unicode' | 'uia_value'
   text_utf16_length: number; text_sha256: string
   input_attempted: boolean; input_completed: boolean; batches: TextInputBatch[]

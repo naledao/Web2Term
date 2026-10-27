@@ -60,7 +60,7 @@ test('new timestamps, references and step tokens do not establish observable pro
     c = result.state
     assert.equal(result.report.goal_verified, false)
   }
-  assert.equal(c.epoch, 1); assert.equal(c.unchangedObservations, 3); assert.equal(c.halted, 'unchanged_observations')
+  assert.equal(c.epoch, 1); assert.equal(c.unchangedObservations, 3); assert.equal(c.halted, null)
   assert.ok(policy.parseComputerProgressState(c))
 })
 
@@ -78,6 +78,19 @@ test('same input is blocked before dispatch without new evidence, including fres
   const decision = guard.inspectProgressAdmission(task, c, { action: 'click', parameters: { observation_id: next.observation_id, element_id: next.controls.elements[0].element_id } })
   assert.equal(decision.blocked, true); assert.equal(decision.repeat, 2)
   assert.equal(JSON.stringify(c).includes('Save'), false, 'stored control state contains hashes, not control text')
+})
+test('bounded navigation can repeat while an unverified submit remains blocked', () => {
+  const task = {}
+  for (const call of [{ action: 'scroll', parameters: { direction: 'down', amount: 3 } }, { action: 'press_key', parameters: { key: 'Control+Right' } }]) {
+    let c = guard.createProgressState()
+    c = guard.admitProgressStep(task, c, 'first', call)
+    c = guard.recordProgressResult(c, 'first', receipt({ action: call.action })).state
+    assert.equal(guard.inspectProgressAdmission(task, c, call).blocked, false)
+  }
+  const submit = { action: 'press_key', parameters: { key: 'Enter' } }
+  let c = guard.admitProgressStep(task, guard.createProgressState(), 'submit', submit)
+  c = guard.recordProgressResult(c, 'submit', receipt({ action: 'press_key' })).state
+  assert.equal(guard.inspectProgressAdmission(task, c, submit).blocked, true)
 })
 
 test('actual changed image evidence allows a new attempt, while exit success alone does not reset recovery', () => {
@@ -159,14 +172,22 @@ test('action expiry requests cancellation and keeps the desktop permit until the
   assert.equal(f.sends[0].code, 'ok', 'a late real success receipt is not changed into a fictitious failure')
 })
 
-test('consecutive wait timeouts halt with their actual result facts and a final report', async t => {
+test('consecutive executor timeouts halt with their actual result facts and a final report', async t => {
   const f = fixture(t, { action: 'wait_for', parameters: { condition: 'delay', timeout_ms: 1000 }, limits: limits({ maxConsecutiveTimeouts: 2 }),
-    execute: () => receipt({ action: 'wait_for', ok: false, code: 'wait_timeout' }) })
+    execute: () => receipt({ action: 'wait_for', ok: false, code: 'wait_failed', data: { helper_code: 'action_timeout' } }) })
   await f.run(); await f.run()
   assert.equal(f.executions.length, 2); assert.equal(f.state().execution_fact, 'executed')
   assert.equal(f.coordinator.current('deepseek').control.halted, 'consecutive_timeouts')
   assert.equal(f.sends.at(-1).diagnosis.same_action_retry, 'stop')
   assert.equal(f.sends.at(-1).progress_control.stop_reason, 'consecutive_timeouts')
+})
+test('normal condition timeouts do not consume the executor fault budget', async t => {
+  const f = fixture(t, { action: 'wait_for', parameters: { condition: 'window_present', query: 'Large document', timeout_ms: 180000 },
+    limits: limits({ maxConsecutiveTimeouts: 1 }), execute: () => receipt({ action: 'wait_for', ok: false, code: 'wait_timeout' }) })
+  await f.run(); await f.run(); await f.run()
+  const c = f.coordinator.current('deepseek').control
+  assert.equal(f.executions.length, 3); assert.equal(c.consecutiveTimeouts, 0); assert.equal(c.halted, null)
+  assert.equal(f.sends.at(-1).progress_control.action_timed_out, false)
 })
 
 test('native helper timeout codes survive adapter context errors and count as timeouts', async t => {
@@ -247,7 +268,7 @@ test('actual settings persistence validates before writes and falls back safely 
 
 test('a separately saved hard-limit receipt restores its stop reason after checkpoint failure', async t => {
   const f = fixture(t, { action: 'wait_for', parameters: { condition: 'delay' }, limits: limits({ maxConsecutiveTimeouts: 1 }),
-    execute: () => receipt({ action: 'wait_for', ok: false, code: 'wait_timeout' }) })
+    execute: () => receipt({ action: 'wait_for', ok: false, code: 'wait_failed', data: { helper_code: 'action_timeout' } }) })
   f.db.exec(`CREATE TRIGGER reject_limit_checkpoint BEFORE UPDATE ON autonomous_tasks
     WHEN json_extract(NEW.payload, '$.control.halted') = 'consecutive_timeouts'
     BEGIN SELECT RAISE(FAIL, 'synthetic checkpoint failure'); END`)
@@ -260,6 +281,23 @@ test('a separately saved hard-limit receipt restores its stop reason after check
   const restored = f.store.latestAutonomousTask('session-a', 'deepseek', 'chat-a')
   assert.equal(restored.control.halted, 'consecutive_timeouts'); assert.equal(restored.control.consecutiveTimeouts, 1)
   assert.equal(restored.status, 'interrupted')
+})
+
+test('completion notifications are delivered once for the completed task even while the app is focused', () => {
+  const ast = ts.createSourceFile('runtime.ts', readFileSync(new URL('../src/main/session-runtime.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
+  const cls = ast.statements.find(n => ts.isClassDeclaration(n) && n.name?.text === 'SessionRuntime')
+  const method = cls.members.find(n => n.name?.getText(ast) === 'notifyTaskCompleted').getText(ast)
+  const Subject = new Script(ts.transpileModule(`class Subject { ${method} }; Subject`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText).runInNewContext({})
+  let completed = 0
+  const subject = Object.assign(new Subject(), {
+    id: 'session-a', active: true, completedTaskNotifications: new Set(), activePlatformId: 'deepseek',
+    taskCoordinator: { isLimited: () => false, completionNotificationAllowed: () => true, completedTaskId: () => 'finished-task' },
+    window: { isDestroyed: () => false, isFocused: () => true },
+    embed: { getState: () => ({ conversationId: 'chat-a' }) }, options: { onTaskCompleted: () => completed++ }
+  })
+  subject.notifyTaskCompleted('任务已完成')
+  subject.notifyTaskCompleted('任务已完成')
+  assert.equal(completed, 1)
 })
 
 test('completion notifications are suppressed for a task stopped by its limits', () => {

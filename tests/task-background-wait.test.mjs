@@ -80,7 +80,7 @@ test('background parameters exclude desktop targets, scripts, PID and unbounded 
     for (const timeout_ms of [100, 600000, 3600000]) {
       const p = { condition, background_id: backgroundId, timeout_ms }
       assert.equal(metadata.validateWaitParameters(p), null)
-      assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'wait_for', step_token: 'cu_' + 'a'.repeat(32), ...p }), [metadata.WAIT_FOR_DEFINITION]).ok, true)
+      assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'wait_for', description: '等待后台任务结束', step_token: 'cu_' + 'a'.repeat(32), ...p }), [metadata.WAIT_FOR_DEFINITION]).ok, true)
     }
     for (const patch of [{ background_id: 'PID:12345' }, { observation: 'window' }, { query: 'report' }, { pid: 12345 },
       { window_id: 'win_' + 'a'.repeat(32) }, { script: 'ready()' }, { timeout_ms: 99 }, { timeout_ms: 3600001 }])

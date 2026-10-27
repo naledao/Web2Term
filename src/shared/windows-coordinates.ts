@@ -45,7 +45,8 @@ function absolutePixel(offset: number, size: number): number | null {
 export function resolveImagePoint(observation: WindowsObservation, x: number, y: number): ImagePointResolution | null {
   try {
     const o = observation, t = o.transform, c = o.crop, content = t.content_bounds
-    if (!integer(x, 0, 2559) || !integer(y, 0, 2559) || !integer(o.image.width, 1, 2560) || !integer(o.image.height, 1, 2560) ||
+    // 8192 matches OBSERVE_MAX_DIMENSION: screenshots keep their source resolution.
+    if (!integer(x, 0, 8191) || !integer(y, 0, 8191) || !integer(o.image.width, 1, 8192) || !integer(o.image.height, 1, 8192) ||
         x >= o.image.width || y >= o.image.height || !rect(o.source_bounds) || !rect(c) || c.x < 0 || c.y < 0 ||
         c.x + c.width > o.source_bounds.width || c.y + c.height > o.source_bounds.height ||
         o.source_size.width !== o.source_bounds.width || o.source_size.height !== o.source_bounds.height ||

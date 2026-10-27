@@ -119,7 +119,7 @@ internal sealed class ApplicationCatalog(IApplicationDiscovery discovery, Func<s
 
     internal LaunchSelection? ResolveLaunch(string snapshot, string appId, string referenceId)
     {
-        if (snapshot != catalogId || catalogId.Length == 0 || UtcNow - collected > TimeSpan.FromMinutes(2)) return null;
+        if (snapshot != catalogId || catalogId.Length == 0 || UtcNow - collected >= WindowCatalog.ReferenceLifetime) return null;
         Entry? entry = entries.Values.FirstOrDefault(candidate => candidate.Id == appId);
         return entry != null && entry.Launches.TryGetValue(referenceId, out NativeLaunch? launch)
             ? new(catalogId, entry.Id, referenceId, entry.Identity, launch) : null;
@@ -156,7 +156,7 @@ internal sealed class ApplicationCatalog(IApplicationDiscovery discovery, Func<s
         int offset = 0;
         if (cursor != null)
         {
-            if (!cursors.TryGetValue(cursor, out var saved) || saved.Catalog != catalogId || saved.Query != query || UtcNow - collected > TimeSpan.FromMinutes(2))
+            if (!cursors.TryGetValue(cursor, out var saved) || saved.Catalog != catalogId || saved.Query != query || UtcNow - collected >= WindowCatalog.ReferenceLifetime)
                 return new(false, "not_executed", "stale_catalog", "应用目录分页已过期或 query 已变化，请不带 cursor 重新查询。");
             offset = saved.Offset;
         }

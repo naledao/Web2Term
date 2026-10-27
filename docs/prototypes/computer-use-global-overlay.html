@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; script-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+  <title>Computer Use 展示窗</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --panel: rgba(16, 22, 28, .96);
+      --panel-soft: rgba(28, 37, 46, .72);
+      --line: rgba(235, 241, 248, .13);
+      --line-strong: rgba(235, 241, 248, .21);
+      --text: #edf2f7;
+      --muted: #9ca8b4;
+      --quiet: #6f7b87;
+      --blue: #8caeff;
+      --amber: #f1b84b;
+      --green: #76d3a1;
+      --red: #f17e72;
+      --shadow: 0 20px 70px rgba(0, 0, 0, .42);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body {
+      overflow: hidden;
+      background: transparent;
+      color: var(--text);
+      font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      pointer-events: none;
+      user-select: none;
+    }
+    .mono { font-family: "Cascadia Code", Consolas, monospace; }
+
+    .overlay {
+      position: fixed;
+      top: 24px;
+      right: 24px;
+      width: 360px;
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: 14px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+      animation: enter .28s ease-out both;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-height: 62px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .brand {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      flex: none;
+      border-radius: 8px;
+      background: var(--blue);
+      color: #152139;
+      font-size: 16px;
+      font-weight: 800;
+    }
+    .heading { min-width: 0; }
+    .heading__label {
+      color: var(--quiet);
+      font-size: 9px;
+      letter-spacing: .12em;
+      line-height: 1;
+    }
+    .heading__title {
+      margin: 5px 0 0;
+      overflow: hidden;
+      font-size: 14px;
+      font-weight: 650;
+      line-height: 1.2;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      color: var(--amber);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .status__dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 0 4px rgba(241, 184, 75, .12);
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    .content { padding: 16px; }
+    .goal {
+      padding: 12px 13px;
+      border-left: 2px solid var(--blue);
+      border-radius: 0 7px 7px 0;
+      background: rgba(140, 174, 255, .1);
+    }
+    .label {
+      margin-bottom: 5px;
+      color: var(--blue);
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .goal__text { font-size: 13px; line-height: 1.45; }
+
+    .section { margin-top: 18px; }
+    .section__title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 7px;
+      color: var(--quiet);
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .section__title::after {
+      content: "";
+      height: 1px;
+      flex: 1;
+      background: var(--line);
+    }
+
+    .current {
+      display: grid;
+      grid-template-columns: 27px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      padding: 10px 0;
+      border-top: 1px solid var(--line);
+    }
+    .current:first-of-type { border-top: 0; }
+    .current__icon {
+      display: grid;
+      place-items: center;
+      width: 27px;
+      height: 27px;
+      border: 1px solid rgba(241, 184, 75, .44);
+      border-radius: 50%;
+      color: var(--amber);
+      font-size: 13px;
+    }
+    .current__name { font-size: 12px; }
+    .current__detail {
+      margin-top: 2px;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .current__state {
+      float: right;
+      color: var(--amber);
+      font-size: 10px;
+    }
+
+    .target {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+    }
+    .target__icon {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      color: var(--blue);
+      font-size: 14px;
+    }
+    .target__name { font-size: 12px; }
+    .target__detail { margin-top: 2px; color: var(--muted); font-size: 10px; }
+    .target__verified { margin-left: auto; color: var(--green); font-size: 10px; white-space: nowrap; }
+
+    .result {
+      padding: 11px 12px;
+      border: 1px solid rgba(118, 211, 161, .28);
+      border-radius: 8px;
+      background: rgba(118, 211, 161, .08);
+    }
+    .result__title { display: flex; align-items: center; gap: 7px; color: var(--green); font-size: 12px; font-weight: 650; }
+    .result__check { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: rgba(118, 211, 161, .18); }
+    .result__text { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .result__time { margin-top: 7px; color: var(--quiet); font-size: 9px; }
+
+    .footer {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 35px;
+      padding: 0 16px;
+      border-top: 1px solid var(--line);
+      color: var(--quiet);
+      font-size: 10px;
+    }
+    .footer__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+
+    @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
+    @keyframes enter { from { opacity: 0; transform: translateY(-7px); } to { opacity: 1; transform: none; } }
+    @media (max-width: 460px) {
+      .overlay { top: 12px; right: 12px; width: calc(100vw - 24px); }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; } }
+  </style>
+</head>
+<body>
+  <section class="overlay" aria-label="Computer Use 任务展示">
+    <header class="header">
+      <div class="brand">⌁</div>
+      <div class="heading">
+        <div class="heading__label mono">正在执行任务</div>
+        <h1 class="heading__title">正在帮你打开 QQ 发消息</h1>
+      </div>
+      <div class="status"><span class="status__dot"></span>执行中</div>
+    </header>
+
+    <div class="content">
+      <section class="goal">
+        <div class="label">任务目标</div>
+        <div class="goal__text">打开 QQ，找到联系人并发送准备好的消息。</div>
+      </section>
+
+      <section class="section">
+        <div class="section__title">当前动作</div>
+        <div class="current">
+          <div class="current__icon">✓</div>
+          <div>
+            <div class="current__name">定位 QQ 主窗口 <span class="current__state" style="color: var(--green)">完成</span></div>
+            <div class="current__detail mono">目标已确认</div>
+          </div>
+        </div>
+        <div class="current">
+          <div class="current__icon">↗</div>
+          <div>
+            <div class="current__name">点击“联系人” <span class="current__state">执行中</span></div>
+            <div class="current__detail mono">第 19 步 · 正在操作目标窗口</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section__title">目标窗口</div>
+        <div class="target">
+          <div class="target__icon">▣</div>
+          <div>
+            <div class="target__name">QQ</div>
+            <div class="target__detail">QQ.exe · 主窗口</div>
+          </div>
+          <div class="target__verified">● 已复核</div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section__title">最近结果</div>
+        <div class="result">
+          <div class="result__title"><span class="result__check">✓</span>已找到 QQ 主窗口</div>
+          <div class="result__text">窗口已确认，接下来会在 QQ 内继续操作。</div>
+          <div class="result__time mono">刚刚</div>
+        </div>
+      </section>
+    </div>
+
+    <footer class="footer"><span class="footer__dot"></span>任务正在后台运行</footer>
+  </section>
+</body>
+</html>

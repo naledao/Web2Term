@@ -112,7 +112,26 @@ test('new commands or input invalidate old UI evidence; read-only observations d
   t.completion.evidence[0].revision = t.completion.revision
   t.completion = completion.advanceCompletion(t, 'observe')
   assert.equal((await assess(t, c)).state, 'ready')
-  assert.equal((await assess(t, c, [], undefined, 122000)).state, 'rejected')
+  assert.equal((await assess(t, c, [], undefined, 122000)).state, 'ready')
+  assert.equal((await assess(t, c, [], undefined, 16 * 60000)).state, 'rejected')
+})
+test('cross-window completion carries only independent current facts and never guesses a desktop click scope', async () => {
+  const identity = n => ({ hwnd: '0x' + n, pid: n, process_started_at: '2026-10-27T00:00:00Z', thread_id: n + 1, class_name: 'Editor' })
+  const a = snapshot({ kind: 'observation', target: 'obs_' + 'a'.repeat(32), sizeBytes: null, facts: JSON.stringify({ window_identity: identity(100) }) })
+  const alias = 'obs_' + 'd'.repeat(32)
+  const b = snapshot({ id: eid(2), kind: 'observation', target: 'obs_' + 'b'.repeat(32), sizeBytes: null, facts: JSON.stringify({ window_identity: identity(200), controls_observation_id: alias }) })
+  const t = task({ completion: { version: 1, revision: 0, evidence: [a, b], report: null } })
+  const checks = ids => claim({ requirements: [{ input_id: 'input-a', checks: [{ criterion: '各应用结果满足要求', evidence_ids: ids, status: 'passed', assessment: '根据相应窗口的真实观察核对' }] }], artifacts: [], no_artifact_reason: '只需界面结果' })
+  t.completion = completion.advanceCompletion(t, 'focus_window')
+  assert.equal((await assess(t, checks([eid(1), eid(2)]))).state, 'ready')
+  t.completion = completion.advanceCompletion(t, 'type_text', alias)
+  assert.equal((await assess(t, checks([eid(1)]))).state, 'ready', 'another window invalidated independent A evidence')
+  assert.equal((await assess(t, checks([eid(2)]))).state, 'rejected', 'B input retained old B evidence')
+  t.completion = completion.advanceCompletion(t, 'click', 'obs_' + 'c'.repeat(32))
+  assert.equal((await assess(t, checks([eid(1)]))).state, 'rejected', 'unresolved desktop scope borrowed the last business window')
+  const shared = task({ completion: { version: 1, revision: 0, evidence: [a, { ...b, facts: JSON.stringify({ window_identity: { ...identity(200), pid: 100 } }) }], report: null } })
+  shared.completion = completion.advanceCompletion(shared, 'type_text', b.target)
+  assert.equal((await assess(shared, checks([eid(1)]))).state, 'rejected', 'two views in the same app were assumed to be independent documents')
 })
 
 test('background jobs and required deliveries must settle; ready services can remain running', async () => {

@@ -33,7 +33,7 @@ const readOnly = new Set(['list_apps', 'list_windows', 'observe', 'validate_obse
 const referenceCodes = new Set(['stale_catalog', 'stale_window', 'stale_observation', 'recovery_required'])
 const focusCodes = new Set(['focus_denied', 'focus_unconfirmed', 'restore_required', 'window_blocked'])
 const protocolCodes = new Set(['invalid_json', 'duplicate_field', 'unsafe_field', 'limit_exceeded', 'invalid_envelope', 'invalid_parameters',
-  'unsupported_version', 'unknown_action', 'invalid_step_token', 'stale_step_token', 'ambiguous_request'])
+  'unsupported_version', 'unknown_action', 'invalid_step_token', 'stale_step_token', 'ambiguous_request', 'invalid_description'])
 
 /** Reads only bounded metadata from executor-validated observations; never an input permit. */
 function latestObservation(result: ComputerUseToolResult): ComputerDiagnosis['facts']['latest_observation'] {
@@ -59,10 +59,11 @@ export function diagnoseComputerResult(result: ComputerUseToolResult, context: C
   const partial = observation?.controls_complete === false
   const empty = result.ok && data !== null && (result.action === 'list_apps' && Array.isArray(data.apps) && data.apps.length === 0 ||
     result.action === 'list_windows' && Array.isArray(data.windows) && data.windows.length === 0)
-  const noProgress = !!result.progress_control?.signals.length
+  const noProgress = result.progress_control?.signals.some(s => ['repeated_action', 'unchanged_observations'].includes(s)) === true
   const timedOut = result.progress_control?.action_timed_out === true
   const halted = result.progress_control?.halted === true
-  const external = result.code === 'external_input' || data?.helper_code === 'external_input'
+  // A single stray physical input interrupts like interference: re-observe and continue the same goal.
+  const external = ['external_input', 'human_input'].includes(result.code) || ['external_input', 'human_input'].includes(data?.helper_code as string)
   const monitorUnavailable = result.code === 'input_monitor_unavailable' || data?.helper_code === 'input_monitor_unavailable'
   if (result.ok && result.execution === 'executed' && !postFailed && !partial && !empty && !noProgress && !halted) return null
   const ended = result.code === 'human_takeover' || !external && !timedOut && (result.code === 'cancelled' || result.code === 'inactive_context')
@@ -89,7 +90,7 @@ export function diagnoseComputerResult(result: ComputerUseToolResult, context: C
   const barrier = verify || context.recoveryRequiresObservation === true && !(result.action === 'observe' && result.ok && result.execution === 'executed')
   const paths: ComputerDiagnosis['candidate_paths'] = []
   const add = (action: string, purpose: string): void => {
-    if (context.actions.includes(action) && (!barrier || ['list_apps', 'list_windows', 'observe'].includes(action)) &&
+      if (context.actions.includes(action) && (!barrier || ['list_apps', 'list_windows', 'observe', 'inspect_interactions', 'validate_observation', 'wait_for', 'focus_window'].includes(action)) &&
       !paths.some(p => p.tool === 'computer' && p.action === action)) paths.push({ tool: 'computer', action, purpose })
   }
   if (!ended && !halted) {

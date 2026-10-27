@@ -26,7 +26,7 @@ const id = (prefix, digit = 'a') => prefix + digit.repeat(32)
 const at = Date.parse('2026-10-25T00:00:00.000Z')
 const row = (patch = {}) => ({ window_id: id('win_'), hwnd: '0x1234', pid: 42, process_started_at: new Date(at - 10000).toISOString(), thread_id: 100,
   class_name: 'ExampleWindow', title: 'Report', application: { name: 'Editor', executable_path: 'C:\\Apps\\Editor.exe', app_user_model_id: null },
-  visible: true, minimized: false, foreground: false, enabled: true, cloaked: false, owner_hwnd: null, owner_window_id: null, identity_verified: true, identity_status: 'verified', ...patch })
+  visible: true, minimized: false, foreground: false, enabled: true, cloaked: false, owner_hwnd: null, owner_window_id: null, identity_verified: true, identity_status: 'verified', bounds: { x: 0, y: 0, width: 800, height: 600 }, ...patch })
 const page = (patch = {}) => ({ snapshot_id: id('wset_'), collected_at: new Date(at).toISOString(), expires_at: new Date(at + 120000).toISOString(),
   query: '', pid: null, include_hidden: false, windows: [row()], total_matches: 1, has_more: false, next_cursor: null, complete: true, limitations: [], ...patch })
 const success = data => ({ ok: true, execution: 'executed', code: 'ok', message: 'Actual window snapshot', data })
@@ -69,7 +69,8 @@ test('wait discovery admits scoped references without replacing existing list re
   second.title = 'mutated'; assert.equal(f.lookup(second.window_id).window.title, 'Report')
   assert.equal(lease.publish({ ...probe, window: { ...second, pid: 43 } }), false)
   assert.equal(lease.publish({ ...probe, snapshot_id: id('wset_', 'b') }), false)
-  assert.equal(lease.publish({ ...probe, scope_expires_at: new Date(at + 120001).toISOString() }), false)
+  assert.equal(lease.publish({ ...probe, scope_expires_at: new Date(at + 120001).toISOString() }), true)
+  assert.equal(lease.publish({ ...probe, scope_expires_at: new Date(at + 119999).toISOString() }), false)
   const newer = f.service.beginWait(f.tool, f.context)
   assert.equal(lease.isCurrent(), false); assert.equal(lease.publish(probe), false); assert.equal(newer.isCurrent(), true)
   f.service.dispose()
@@ -95,7 +96,7 @@ test('window capability is advertised only when the real helper supports it and 
 })
 
 test('page protocol and mandatory main validation reject overrides and invalid window filters', async () => {
-  const f = fixture(), base = { type: 'computer', version: 1, action: 'list_windows', step_token: id('cu_') }
+  const f = fixture(), base = { type: 'computer', version: 1, action: 'list_windows', description: '查找业务窗口', step_token: id('cu_') }
   assert.equal(protocol.computerUseProtocol.check(JSON.stringify(base), [metadata.LIST_WINDOWS_DEFINITION]).ok, true)
   for (const parameters of [{ hwnd: '0x1234' }, { window_id: id('win_') }, { scope_id: id('ws_') }, { task_id: 'forged' }, { command: 'text' },
     { limit: 0 }, { limit: 51 }, { pid: 0 }, { pid: 0x100000000 }, { pid: 1.5 }, { include_hidden: 1 }, { cursor: 'guessed' }, { query: 'x'.repeat(201) }]) {
@@ -135,6 +136,23 @@ test('same-title windows and verified owner relationships remain distinct', asyn
   assert.equal((await f.invoke()).ok, true)
   assert.equal(f.lookup(id('win_', 'b')).window.owner_window_id, owner.window_id)
   assert.notEqual(f.lookup().window.hwnd, f.lookup(id('win_', 'b')).window.hwnd)
+})
+
+test('window bounds tell same-titled windows apart and tiny helper windows are marked', async () => {
+  // QQ on 2026-10-27: two visible "QQ" Chrome_WidgetWin_1 rows of one process; the 60×71 one was not the chat window.
+  const f = fixture(), main = row({ bounds: { x: 100, y: 80, width: 1642, height: 1162 } })
+  const helper = row({ window_id: id('win_', 'b'), hwnd: '0x2234', bounds: { x: 3700, y: 2000, width: 60, height: 71 } })
+  const unknown = row({ window_id: id('win_', 'c'), hwnd: '0x3234', bounds: null })
+  f.setAnswer(success(page({ windows: [main, helper, unknown], total_matches: 3 })))
+  const result = await f.invoke()
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.data.windows.map(w => w.tiny), [false, true, false])
+  assert.match(result.message, /1 个窗口/)
+  assert.deepEqual(f.lookup(id('win_', 'b')).window.bounds, helper.bounds)
+  for (const bounds of [{ x: 0, y: 0, width: 0, height: 10 }, { x: 0, y: 0, width: 10 }, '0,0,10,10']) {
+    const g = fixture(); g.setAnswer(success(page({ windows: [row({ bounds })] })))
+    assert.equal((await g.invoke()).code, 'invalid_result', JSON.stringify(bounds))
+  }
 })
 
 test('pagination keeps the original snapshot and merges learned rows while a fresh list revokes them', async () => {
@@ -228,7 +246,7 @@ test('focus_window is advertised only after the helper declares its registered a
 
 test('focus page protocol and main adapter reject guessed handles, scope overrides and invalid parameters', async () => {
   const f = fixture(); f.state.actions.push('focus_window')
-  const base = { type: 'computer', version: 1, action: 'focus_window', step_token: id('cu_'), window_id: id('win_') }
+  const base = { type: 'computer', version: 1, action: 'focus_window', description: '激活目标窗口', step_token: id('cu_'), window_id: id('win_') }
   assert.equal(protocol.computerUseProtocol.check(JSON.stringify(base), [metadata.FOCUS_WINDOW_DEFINITION]).ok, true)
   for (const parameters of [{ hwnd: '0x1234' }, { window_id: '0x1234' }, { window_id: id('win_'), scope_id: id('ws_') },
     { window_id: id('win_'), pid: 42 }, { window_id: id('win_'), restore: 1 }, { window_id: id('win_'), wait_ms: -1 },
@@ -263,6 +281,15 @@ test('already-focused success may have no activation calls and still requires fu
   const result = await f.focus({ window_id: id('win_'), restore: false, wait_ms: 0 })
   assert.equal(result.ok, true); assert.equal(result.data.activation_attempts.length, 0); assert.equal(result.data.input_ready, false)
   assert.equal(f.requests[1].parameters.restore, false); assert.equal(f.requests[1].parameters.wait_ms, 0)
+})
+
+test('UIA focus rooted in the target counts even when the provider reports HasKeyboardFocus=false', async () => {
+  // PowerPoint's focused element reports HasKeyboardFocus=false while Win32 focus and the UIA root are the target.
+  for (const flag of [false, null]) {
+    const f = fixture(); f.state.actions.push('focus_window'); await f.invoke()
+    f.setAnswer(success(focusResult({ observation: { ...focusResult().observation, uia_focus: { status: 'confirmed', root_hwnd: '0x1234', has_keyboard_focus: flag } } })))
+    const result = await f.focus(); assert.equal(result.ok, true, String(flag)); assert.equal(result.data.focus_confirmed, true)
+  }
 })
 
 test('foreground-only focus with unavailable UIA returns unconfirmed evidence without becoming successful', async () => {
@@ -347,7 +374,7 @@ test('interaction protocol rejects handles confirmation directives and unbounded
   for (const p of [{}, { window_id: '0x1234' }, { window_id: id('win_'), limit: 0 }, { window_id: id('win_'), limit: 17 },
     { window_id: id('win_'), hwnd: '0x1234' }, { window_id: id('win_'), confirm: true }, { window_id: id('win_'), path: 'C:\secret' }, { window_id: id('win_'), scope_id: 'forged' }]) {
     assert.equal((await f.inspect(p)).code, 'invalid_parameters')
-    assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'inspect_interactions', step_token: id('cu_'), ...p }), [metadata.INSPECT_INTERACTIONS_DEFINITION]).ok, false)
+    assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'inspect_interactions', description: '查找关联弹窗', step_token: id('cu_'), ...p }), [metadata.INSPECT_INTERACTIONS_DEFINITION]).ok, false)
   }
   assert.equal(f.requests.length, 0); assert.equal((await f.inspect()).code, 'stale_window'); assert.equal(f.requests.length, 0)
 })

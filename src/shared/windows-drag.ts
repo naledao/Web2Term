@@ -14,7 +14,7 @@ export const DRAG_DEFINITION: ComputerUseActionDefinition = {
 }
 export function validateDragParameters(p: Record<string, unknown>): string | null {
   const point = (v: unknown): v is DragPoint => !!v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 2 &&
-    ['x', 'y'].every(k => Object.hasOwn(v, k) && Number.isSafeInteger((v as Record<string, unknown>)[k]) && Number((v as Record<string, unknown>)[k]) >= 0 && Number((v as Record<string, unknown>)[k]) <= 2559)
+    ['x', 'y'].every(k => Object.hasOwn(v, k) && Number.isSafeInteger((v as Record<string, unknown>)[k]) && Number((v as Record<string, unknown>)[k]) >= 0 && Number((v as Record<string, unknown>)[k]) <= 8191)
   const path = p.path, duration = p.duration_ms === undefined ? 600 : p.duration_ms, button = p.button === undefined ? 'left' : p.button
   return Object.keys(p).some(k => !['observation_id', 'path', 'button', 'duration_ms'].includes(k)) ||
     typeof p.observation_id !== 'string' || !/^obs_[a-f0-9]{32}$/.test(p.observation_id) || !Array.isArray(path) || path.length < 2 || path.length > 33 ||

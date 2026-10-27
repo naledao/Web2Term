@@ -2,7 +2,7 @@ import type { ComputerUseActionDefinition, ComputerUseToolCall, ComputerUseWireR
 
 export type ComputerUseProtocolErrorCode = 'invalid_json' | 'duplicate_field' | 'unsafe_field' | 'limit_exceeded'
   | 'invalid_envelope' | 'unsupported_version' | 'unknown_action' | 'invalid_parameters' | 'invalid_step_token'
-  | 'stale_step_token' | 'ambiguous_request'
+  | 'stale_step_token' | 'ambiguous_request' | 'invalid_description'
 export interface ComputerUseProtocolError { code: ComputerUseProtocolErrorCode; message: string; field: string; offset: number }
 export type ComputerUseProtocolCheck =
   | { ok: true; request: ComputerUseWireRequest; call: ComputerUseToolCall; stepToken: string }
@@ -124,9 +124,13 @@ export function createComputerUseProtocol() {
       }
       const definition = definitions.find(item => item.action === action)
       if (!definition) fail('unknown_action', '当前没有注册这个 computer 动作。', 'action')
-      const parameters = Object.fromEntries(Object.entries(request).filter(([key]) => !['type', 'version', 'action', 'step_token'].includes(key)))
+      const description = request.description
+      if (typeof description !== 'string' || !description.trim() || description.length > 160 ||
+        /[\x00-\x1f\x7f\u2028\u2029]/.test(description) || !/[\u3400-\u9fff]/.test(description))
+        fail('invalid_description', 'description 必须是 1–160 字的单行中文动作描述，说明本步准备做什么；仅用于展示，不代表执行成功。', 'description')
+      const parameters = Object.fromEntries(Object.entries(request).filter(([key]) => !['type', 'version', 'action', 'step_token', 'description'].includes(key)))
       if (!parametersMatch(definition!, parameters)) fail('invalid_parameters', '参数包含未知字段、缺少必填项、类型或范围不符，或同时使用了冲突的定位方式。')
-      return { ok: true, request: request as ComputerUseWireRequest, call: { action, parameters }, stepToken: stepToken! }
+      return { ok: true, request: request as ComputerUseWireRequest, call: { action, parameters, description: (description as string).trim() }, stepToken: stepToken! }
     } catch (error) {
       const issue = error as ComputerUseProtocolError
       return { ok: false, action, stepToken, error: issue && typeof issue.code === 'string' ? issue

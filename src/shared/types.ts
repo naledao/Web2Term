@@ -1,4 +1,4 @@
-import type { EmergencyStopState, EmergencyStopResetResult } from './emergency-stop'
+import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult } from './emergency-stop'
 import type { ToolboxInvocation } from './toolbox'
 import type { ComputerUsePreferences, ComputerUseCapability } from './computer-use'
 import type { AutonomousTaskState, TaskResumeRequest } from './autonomous-task'
@@ -94,6 +94,7 @@ export const IpcChannels = {
   emergencyStopTrigger: 'emergency-stop:trigger',
   emergencyStopReset: 'emergency-stop:reset',
   emergencyStopChanged: 'emergency-stop:changed',
+  desktopInputWarning: 'desktop:input-warning',
   autonomousTaskGet: 'autonomous-task:get',
   taskActivityGet: 'autonomous-task:activity',
   taskObservationImageGet: 'autonomous-task:observation-image',
@@ -1292,6 +1293,8 @@ export interface InterceptorPageEvent {
     | 'reply-watchdog'
     /** The page's own "continue" control was pressed on a reply the server cut off. */
     | 'continue-generation'
+    /** The site's own edit-and-resend: a retry of the current task, or the page asking main to press edit/send. */
+    | 'native-edit'
     /** One pending focus card control asks main to deliver native mouse input. */
     | 'focus-ui-click'
     | 'focus-model-click'
@@ -1365,7 +1368,7 @@ export interface InterceptorPageEvent {
   timeoutSeconds?: number
   /** Present on `command` events: true when it answers a message we just sent. */
   live?: boolean
-  /** Present on `task-finished`: true only for an explicitly marked completed task. */
+  /** Present on `task-finished`: true for a live model declaration of task completion. */
   completed?: boolean
 
   /*
@@ -1384,9 +1387,11 @@ export interface InterceptorPageEvent {
    * On `continue-generation`: presses made for the current reply wait.
    */
   attempt?: number
-  /** On `continue-generation` / `continue-clicked`: viewport CSS-pixel point the main process clicks. */
+  /** On `continue-generation` / `continue-clicked` and the `native-edit` click reasons: viewport CSS-pixel point the main process clicks. */
   x?: number
   y?: number
+  /** On `native-edit` / `safety-leak-failed`: which step of the automatic resend gave up. */
+  step?: string
   /** Which recovery action the failing pass used, or null when none had run yet. */
   recoveryTried?: string | null
   composerKind?: string | null
@@ -2373,6 +2378,8 @@ export interface AppApi {
   triggerEmergencyStop(): Promise<EmergencyStopState>
   resetEmergencyStop(): Promise<EmergencyStopResetResult>
   onEmergencyStopChanged(listener: (state: EmergencyStopState) => void): () => void
+  /** A physical input interrupted a desktop step without yet pausing the task (strike of limit). */
+  onDesktopInputWarning(listener: (warning: DesktopInputWarning) => void): () => void
   getAutonomousTask(): Promise<AutonomousTaskState | null>
   getTaskActivity(request: TaskLease): Promise<TaskActivity | null>
   getTaskObservationImage(request: TaskObservationRequest): Promise<string | null>

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { LIST_WINDOWS_DEFINITION, FOCUS_WINDOW_DEFINITION, INSPECT_INTERACTIONS_DEFINITION } from '../shared/windows-desktop'
+import { LIST_WINDOWS_DEFINITION, FOCUS_WINDOW_DEFINITION, INSPECT_INTERACTIONS_DEFINITION, TINY_WINDOW_EDGE, tinyWindow } from '../shared/windows-desktop'
 import type { DesktopWindow, WindowsWindowPage, WindowsWindowFocusResult, WindowsInteractions } from '../shared/windows-desktop'
 import { ComputerUseActionError, throwIfDesktopInterrupted } from './computer-use-tool'
 import type { ComputerUseTool, ComputerUseDispatchContext } from './computer-use-tool'
@@ -56,7 +56,8 @@ export function validateWindowsWindowFocusResult(value: unknown, snapshotId: str
     (observation.uia_focus.has_keyboard_focus !== null && typeof observation.uia_focus.has_keyboard_focus !== 'boolean')) return false
   if (observation.win32_focus === 'confirmed' && (observation.foreground_hwnd !== expected.hwnd || observation.active_hwnd !== expected.hwnd ||
     observation.focus_root_hwnd !== expected.hwnd || observation.focus_hwnd === null)) return false
-  if (observation.uia_focus.status === 'confirmed' && (observation.uia_focus.root_hwnd !== expected.hwnd || observation.uia_focus.has_keyboard_focus !== true)) return false
+  // has_keyboard_focus may be false or null on a confirmed root: Office reports false on its own focused element.
+  if (observation.uia_focus.status === 'confirmed' && observation.uia_focus.root_hwnd !== expected.hwnd) return false
   if (['unavailable', 'not_checked'].includes(observation.uia_focus.status as string) && (observation.uia_focus.root_hwnd !== null || observation.uia_focus.has_keyboard_focus !== null)) return false
   return value.focus_confirmed === (value.status === 'focused') &&
     (value.status !== 'focused' || (object(target) && target.visible === true && target.minimized === false && target.foreground === true && target.enabled === true && target.cloaked === false &&
@@ -68,7 +69,7 @@ export function validateWindowsWindowFocusResult(value: unknown, snapshotId: str
 export function validateWindowsWindowPage(value: unknown, request: { query: string; pid: number | null; include_hidden: boolean; limit: number }, now = Date.now()): value is WindowsWindowPage {
   if (!object(value) || !fields(value, ['snapshot_id', 'collected_at', 'expires_at', 'query', 'pid', 'include_hidden', 'windows', 'total_matches', 'has_more', 'next_cursor', 'complete', 'limitations']) ||
     !id(value.snapshot_id, 'wset_') || !time(value.collected_at) || !time(value.expires_at) || Date.parse(value.expires_at) <= now ||
-    Date.parse(value.expires_at) <= Date.parse(value.collected_at) || Date.parse(value.expires_at) - Date.parse(value.collected_at) > 120_001 || Date.parse(value.collected_at) > now + 5000 ||
+    Date.parse(value.expires_at) <= Date.parse(value.collected_at) || Date.parse(value.expires_at) - Date.parse(value.collected_at) > 15 * 60_000 + 1 || Date.parse(value.collected_at) > now + 5000 ||
     value.query !== request.query || value.pid !== request.pid || value.include_hidden !== request.include_hidden ||
     !Array.isArray(value.windows) || value.windows.length > request.limit || !number(value.total_matches, value.windows.length, 512) ||
     typeof value.has_more !== 'boolean' || (value.has_more ? !id(value.next_cursor, 'wcur_') || value.windows.length === 0 || value.total_matches <= value.windows.length : value.next_cursor !== null) ||
@@ -77,7 +78,9 @@ export function validateWindowsWindowPage(value: unknown, request: { query: stri
     (value.complete && value.limitations.length > 0)) return false
   const rows = value.windows
   if (!unique(rows.map(row => object(row) ? row.hwnd : null)) || !unique(rows.filter(row => object(row) && row.window_id !== null).map(row => row.window_id))) return false
-  if (!rows.every(row => object(row) && fields(row, ['window_id', 'hwnd', 'pid', 'process_started_at', 'thread_id', 'class_name', 'title', 'application', 'visible', 'minimized', 'foreground', 'enabled', 'cloaked', 'owner_hwnd', 'owner_window_id', 'identity_verified', 'identity_status']) &&
+  if (!rows.every(row => object(row) && fields(row, ['window_id', 'hwnd', 'pid', 'process_started_at', 'thread_id', 'class_name', 'title', 'application', 'visible', 'minimized', 'foreground', 'enabled', 'cloaked', 'owner_hwnd', 'owner_window_id', 'identity_verified', 'identity_status', 'bounds']) &&
+    (row.bounds === null || (object(row.bounds) && fields(row.bounds, ['x', 'y', 'width', 'height']) && number(row.bounds.x, -1_000_000, 1_000_000) &&
+      number(row.bounds.y, -1_000_000, 1_000_000) && number(row.bounds.width, 1, 32768) && number(row.bounds.height, 1, 32768))) &&
     hwnd(row.hwnd) && number(row.pid, 1, 0xffffffff) && (request.pid === null || row.pid === request.pid) && number(row.thread_id, 1, 0xffffffff) &&
     (row.process_started_at === null || time(row.process_started_at)) && string(row.class_name, 256, true) && string(row.title, 256, true) &&
     object(row.application) && fields(row.application, ['name', 'executable_path', 'app_user_model_id']) &&
@@ -101,7 +104,7 @@ export function validateWindowsInteractions(value: unknown, expected: DesktopWin
   if (!object(value) || !fields(value, ['snapshot_id', 'parent_window_id', 'before_at', 'observed_at', 'expires_at', 'parent', 'windows', 'menu', 'complete', 'limitations', 'snapshot_atomic', 'input_ready', 'goal_verified']) ||
     value.snapshot_id !== snapshotId || value.parent_window_id !== expected.window_id || !time(value.before_at) || !time(value.observed_at) || !time(value.expires_at) ||
     Date.parse(value.before_at) > Date.parse(value.observed_at) || Date.parse(value.observed_at) > now + 5000 || now - Date.parse(value.before_at) > 120000 ||
-    Date.parse(value.expires_at) <= now || Date.parse(value.expires_at) - Date.parse(value.before_at) > 30001 || Date.parse(value.expires_at) <= Date.parse(value.observed_at) ||
+    Date.parse(value.expires_at) <= now || Date.parse(value.expires_at) - Date.parse(value.before_at) > 15 * 60_000 + 1 || Date.parse(value.expires_at) <= Date.parse(value.observed_at) ||
     !object(value.parent) || ['window_id', 'hwnd', 'pid', 'process_started_at', 'thread_id', 'class_name'].some(k => (value.parent as Record<string, unknown>)[k] !== expected[k as keyof DesktopWindow]) ||
     !Array.isArray(value.windows) || value.windows.length > limit || value.snapshot_atomic !== false || value.input_ready !== false || value.goal_verified !== false ||
     typeof value.complete !== 'boolean' || !Array.isArray(value.limitations) || !unique(value.limitations) || value.limitations.length > 4 ||
@@ -214,7 +217,7 @@ export class WindowsWindowCatalog {
       this.helper.getState().generation === generation && this.helper.getState().phase === 'ready' && saved.expires > this.now()
     return { scope_id: saved.scopeId, generation, isCurrent: current, publish: (probe: WaitProbe): boolean => {
       if (!current() || saved.pageId !== null && saved.pageId !== probe.snapshot_id || !id(probe.snapshot_id, 'wset_') ||
-        !time(probe.scope_expires_at) || Date.parse(probe.scope_expires_at) <= this.now() || saved.expires !== Infinity && saved.expires !== Date.parse(probe.scope_expires_at)) return false
+        !time(probe.scope_expires_at) || Date.parse(probe.scope_expires_at) <= this.now() || Date.parse(probe.scope_expires_at) > this.now() + 15 * 60_000 + 5000 || saved.expires !== Infinity && Date.parse(probe.scope_expires_at) < saved.expires) return false
       const w = probe.window, previous = w?.window_id ? saved.windows.get(w.window_id) : null
       if (w && (!w.window_id || saved.windows.size >= 608 && !previous || previous && ['hwnd', 'pid', 'process_started_at', 'thread_id', 'class_name'].some(k => previous[k as keyof DesktopWindow] !== w[k as keyof DesktopWindow]))) return false
       saved.pageId = probe.snapshot_id; saved.expires = Date.parse(probe.scope_expires_at)
@@ -244,9 +247,9 @@ export class WindowsWindowCatalog {
     owner.windows.set(data.parent_window_id, structuredClone(data.parent))
     for (const r of data.windows) {
       owner.windows.set(r.window.window_id!, structuredClone(r.window))
-      owner.related.set(r.window.window_id!, { parentId: data.parent_window_id, expires: Date.parse(data.expires_at), kind: r.kind })
+      owner.related.set(r.window.window_id!, { parentId: data.parent_window_id, expires: r.kind === 'menu' ? Math.min(Date.parse(data.before_at) + 30_000, Date.parse(data.expires_at)) : Date.parse(data.expires_at), kind: r.kind })
     }
-    if (data.menu.mode === 'owner') owner.menuOwners.set(data.menu.owner_window_id!, { parentId: data.parent_window_id, expires: Date.parse(data.expires_at) })
+    if (data.menu.mode === 'owner') owner.menuOwners.set(data.menu.owner_window_id!, { parentId: data.parent_window_id, expires: Math.min(Date.parse(data.before_at) + 30_000, Date.parse(data.expires_at)) })
     return { message: response.message, data: structuredClone(data) }
   }
   private async focus(tool: ComputerUseTool, parameters: Record<string, unknown>, context: ComputerUseDispatchContext): Promise<{ message: string; data: WindowsWindowFocusResult }> {
@@ -326,6 +329,10 @@ export class WindowsWindowCatalog {
     owner.pageId = page.snapshot_id; owner.expires = Date.parse(page.expires_at)
     for (const row of page.windows) if (row.identity_verified && row.window_id) owner.windows.set(row.window_id, structuredClone(row))
     if (owner.windows.size > 608) { this.bindings.delete(tool); throw new ComputerUseActionError({ code: 'invalid_result', execution: 'unknown', message: '窗口引用数量异常，已清理本次引用。' }) }
-    return { message: response.message, data: structuredClone(page) }
+    // Same-titled windows of one app (QQ: a 60×71 helper next to the chat window) are otherwise indistinguishable.
+    const data = structuredClone(page)
+    for (const row of data.windows) row.tiny = tinyWindow(row)
+    const tiny = data.windows.filter(row => row.tiny).length
+    return { message: tiny ? response.message + ` 其中 ${tiny} 个窗口宽或高不足 ${TINY_WINDOW_EDGE} 像素（tiny=true），通常是托盘、通知或辅助窗口；同名窗口请优先选择尺寸正常的。` : response.message, data }
   }
 }

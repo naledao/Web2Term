@@ -55,14 +55,22 @@ internal sealed class WindowsObservationStateBackend(IObservationBackend images,
         string popupHash = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new { popups, last = popup.ToInt64() })));
         bool ready = target != IntPtr.Zero && foreground == target && gui.Active == target && gui.Focus != IntPtr.Zero &&
             GetAncestor(gui.Focus, 2) == target && gui.MenuOwner == IntPtr.Zero && gui.MoveSize == IntPtr.Zero && gui.Capture == IntPtr.Zero &&
-            selected!.Visible && !selected.Minimized && selected.Enabled && selected.Cloaked == false && popups.Count == 0 && (popup == IntPtr.Zero || popup == target);
+            selected!.Visible && !selected.Minimized && selected.Enabled && selected.Cloaked == false;
         bool pointerReady = target != IntPtr.Zero && foreground == target && gui.Active == target &&
             (gui.Focus == IntPtr.Zero || GetAncestor(gui.Focus, 2) == target) && gui.MenuOwner == IntPtr.Zero && gui.MoveSize == IntPtr.Zero && gui.Capture == IntPtr.Zero &&
-            selected!.Visible && !selected.Minimized && selected.Enabled && selected.Cloaked == false && popups.Count == 0 && (popup == IntPtr.Zero || popup == target);
+            selected!.Visible && !selected.Minimized && selected.Enabled && selected.Cloaked == false;
         // Detached native menus route through their verified foreground owner. The private relation is rechecked now;
         // ordinary windows still cannot consume menu/capture state as permission to input.
         if (source.Window?.Menu != null) ready = pointerReady = windows.MenuCurrent(source.Window, cancellation);
-        if (revision != events.ObservationRevision(target, cancellation)) throw new ObservationException("stale_observation");
+        // A desktop/region image has no business-window focus or UIA target to stabilize.
+        // WinEvent focus/object revisions may legitimately move while Windows Graphics
+        // Capture is taking the frame (tray refresh, compositor activity, caret repaint).
+        // The image path independently rechecks monitor topology, bounds and frame size;
+        // reserve the revision race for a concrete window observation, where it protects
+        // the later input binding.
+        // Events may change while reading even a valid screenshot. Keep the latest revision;
+        // source geometry and each later input target are independently checked by their callers.
+        revision = events.ObservationRevision(target, cancellation) ?? throw new ObservationException("unavailable");
         return new(source, focus, popupHash, revision, ready, pointerReady);
     }
     private string UiaFocus(WindowSelection target, CancellationToken cancellation)

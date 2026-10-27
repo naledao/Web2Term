@@ -27,7 +27,7 @@ export function validateWindowsPressKeyReceipt(value: unknown, p: Record<string,
     v.input_completed !== (v.input_attempted && v.events_accepted === v.events_requested)) return false
   if (v.input_attempted && p.element_id !== undefined) {
     const row = observed.controls?.elements.find(row => row.element_id === p.element_id)
-    if (!row?.properties_complete || row.enabled !== true || row.offscreen !== false || row.focused !== true ||
+    if (!row?.bounds || row.control_type === null || row.enabled !== true || row.offscreen !== false || row.focused !== true ||
       observed.controls?.focus.status !== 'inside_target' || observed.controls.focus.element_id !== p.element_id) return false
   }
   const release = v.input_attempted ? pressKeyReleaseNames(chord, v.events_accepted) : []

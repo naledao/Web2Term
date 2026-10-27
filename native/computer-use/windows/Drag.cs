@@ -5,7 +5,7 @@ namespace Web2Term.WindowsHelper;
 
 internal sealed record DragOptions(CoordinatePoint[] Path, string Button = "left", int Duration = 600)
 {
-    internal bool Valid => Path.Length is >= 2 and <= 33 && Path.All(p => p.x is >= 0 and <= 2559 && p.y is >= 0 and <= 2559) &&
+    internal bool Valid => Path.Length is >= 2 and <= 33 && Path.All(p => p.x >= 0 && p.x < ObservationPng.MaximumDimension && p.y >= 0 && p.y < ObservationPng.MaximumDimension) &&
         Path.Skip(1).Where((p, i) => p == Path[i]).Count() == 0 && Button is "left" or "right" or "middle" && Duration is >= 100 and <= 3000;
 }
 internal static class DragPath
@@ -84,13 +84,13 @@ internal sealed class DragService(ObservationRegistry observations, IDragBackend
             if (!consumed.Add(claim)) return Fail("drag_blocked", "本步骤已派发，拒绝重新拖拽。");
             order.Enqueue(claim); if (order.Count > 512) consumed.Remove(order.Dequeue());
             // Preflight is read-only but may take time. Revalidate the original image at its end, before the first move.
-            validation = observations.Validate(owner, Locator(), cancellation);
+            validation = observations.Validate(owner, Locator(), cancellation, localPoint: true);
             if (!validation.valid) return Fail("stale_observation", "轨迹检查期间原观察失效，未开始移动。");
             if (!backend.Guard(source, plan[0].Desktop, null, options.Button, false, cancellation)) return Fail("drag_blocked", "起点状态变化，未开始输入。");
             cancellation.ThrowIfCancellationRequested(); moved = true;
             MouseMoveResult move = backend.Move(plan[0], cancellation); moveAccepted = move.Accepted; arrived = move.Arrived;
             if (moveAccepted != 1 || !arrived) return Fail("drag_failed", "鼠标未确认到达起点，未按下按钮，不自动重试。");
-            validation = observations.Validate(owner, Locator(), cancellation);
+            validation = observations.ValidateState(owner, Locator(), cancellation);
             if (!validation.valid) return Fail("stale_observation", "移动后图像、焦点或几何变化，未开始拖拽。");
             // Recheck all planned hits after hover; do not silently choose a different route.
             foreach (DesktopPointResolution point in plan)
@@ -116,7 +116,7 @@ internal sealed class DragService(ObservationRegistry observations, IDragBackend
                 : Fail("drag_failed", "终点释放未确认，仅尝试必要 up 清理，不重复按下或拖动。");
         }
         ActionResult output;
-        try { output = options.Valid ? observations.WithCurrentObservation(owner, Locator(), Dispatch, cancellation) : Fail("invalid_parameters", "拖拽参数不符合有界轨迹协议。");
+        try { output = options.Valid ? observations.WithCurrentObservation(owner, Locator(), Dispatch, cancellation, localPoint: true) : Fail("invalid_parameters", "拖拽参数不符合有界轨迹协议。");
             if (output.Data is ObservationValidation check) validation = check;
         }
         catch (OperationCanceledException) { output = Fail("cancelled", "拖拽已取消，停止后续移动并尝试释放；已发生部分不可回滚。"); }

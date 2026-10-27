@@ -75,6 +75,7 @@ internal static class WaitForTests
         f.Backend.FailReadKey = "other";
         Check(Probe(f, Text(id)).status == "met", "partial tree discarded observed text existence");
         Check(Probe(f, Control(id)).status == "unavailable", "partial tree established unique control");
+        Check(Probe(f, Control(id) with { Condition = "control_present" }).status == "met", "partial tree discarded a real available match");
         Check(f.Backend.LiveNodes == 0 && f.Backend.Opened == f.Backend.Closed && f.Backend.Invoked == 0 && f.Backend.TextSets == 0, "wait retained nodes or performed input");
     }
     private static void Changed()
@@ -91,7 +92,9 @@ internal static class WaitForTests
     }
     private static void Expired()
     {
-        DateTime time = At; var f = Create(() => time); Probe(f, Find()); time = At.AddMinutes(2);
+        DateTime time = At; var f = Create(() => time); Probe(f, Find());
+        for (int n = 1; n <= 20; n++) { time = At.AddMinutes(n); Check(Probe(f, Find()).status == "met", "active wait lease expired during a bounded long wait"); }
+        time = time.AddMinutes(16);
         Check(f.Service.Probe(Scope, WaitId, Find(), 500, CancellationToken.None).Code == "stale_window", "wait revived expired scope");
         var capped = Create();
         for (int n = 0; n < 32; n++) { capped.Discovery.Windows = [Window("0x" + (1000 + n).ToString("x"))]; Check(Probe(capped, Find()).status == "met", "wait reference budget exhausted early"); }

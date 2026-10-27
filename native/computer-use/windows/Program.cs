@@ -68,7 +68,8 @@ internal sealed class HelperHost : IDisposable
         WindowsControlTreeBackend controlBackend = new();
         ControlTreeService controls = new(windows, controlBackend);
         ObservationRegistry observations = new(new WindowsObservationStateBackend(imageBackend, windowLifetimes, controlBackend, windows), imageBackend, controls);
-        ClickService clicks = new(observations, controls, new WindowsClickBackend(windows, parentPid));
+        WindowsClickBackend clickBackend = new(windows, parentPid);
+        ClickService clicks = new(observations, controls, clickBackend, desktop: clickBackend);
         TypeTextService texts = new(observations, controls, new WindowsTextInputBackend(windows, parentPid));
         PressKeyService keys = new(observations, controls, new WindowsPressKeyBackend(windows, parentPid));
         ScrollService scrolls = new(observations, controls, new WindowsScrollBackend(windows, parentPid));
@@ -193,8 +194,8 @@ internal sealed class HelperHost : IDisposable
     private void Complete(MtaWorker.Job job, ActionResult result)
     {
         string? interruption = desktopActivity.InterruptionFor(job.DesktopWatch, job.Epoch);
-        if (interruption != null) result = result with { Ok = false, Code = interruption == "human-input" ? "human_takeover" : interruption == "monitor-unavailable" ? "input_monitor_unavailable" : "external_input",
-            Message = interruption == "human-input" ? "检测到真实人工输入，已暂停自动控制；保留实际执行事实，等待用户明确继续。" : interruption == "monitor-unavailable" ? "桌面接管监测已不可用，已停止本轮控制；需重新核对状态。" : "检测到其他来源的注入输入，已停止本轮控制；请重新观察实际界面后自主决定下一步。" };
+        if (interruption != null) result = result with { Ok = false, Code = interruption is "human-input" or "human-stop" ? "human_takeover" : interruption == "monitor-unavailable" ? "input_monitor_unavailable" : "external_input",
+            Message = interruption is "human-input" or "human-stop" ? "检测到真实人工输入，已暂停自动控制；保留实际执行事实，等待用户明确继续。" : interruption == "monitor-unavailable" ? "桌面接管监测已不可用，已停止本轮控制；需重新核对状态。" : "检测到其他来源的注入输入，已停止本轮控制；请重新观察实际界面后自主决定下一步。" };
         lock (actionGate)
         {
             if (active != job) return;
@@ -215,7 +216,7 @@ internal sealed class HelperHost : IDisposable
 
     private void DesktopActivity(string kind, string? input, string watchId, long epoch)
     {
-        if (kind != "focus-changed")
+        if (kind is not ("focus-changed" or "escape-pressed"))
         {
             HelperInputState.StopAndRelease();
             lock (actionGate) { if (active != null) _ = active.Cancellation.CancelAsync(); }

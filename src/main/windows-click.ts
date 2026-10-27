@@ -39,7 +39,7 @@ export function validateWindowsClickReceipt(value: unknown, p: Record<string, un
     if (!object(v.point) || !fields(v.point, ['x', 'y']) || !integer(v.point.x, -1_000_000, 1_032_768) || !integer(v.point.y, -1_000_000, 1_032_768)) return false
     if (p.element_id !== undefined) {
       const row = observed.controls?.elements.find(item => item.element_id === p.element_id)
-      if (!row?.bounds || !row.properties_complete || !inside(row.bounds, v.point) || !inside(observed.controls!.window_bounds, v.point)) return false
+      if (!row?.bounds || row.control_type === null || !inside(row.bounds, v.point) || !inside(observed.controls!.window_bounds, v.point)) return false
       if ((v.move_attempted || v.click_attempted) && (row.enabled !== true || row.offscreen !== false)) return false
     } else {
       const mapped = observed.target === 'controls' ? null : resolveImagePoint(observed, Number(p.x), Number(p.y))

@@ -10,7 +10,9 @@ internal static class ClickInterop
     [StructLayout(LayoutKind.Explicit)] internal struct InputUnion { [FieldOffset(0)] internal MouseInput Mouse; [FieldOffset(0)] internal KeyboardInput Keyboard; }
     [StructLayout(LayoutKind.Sequential)] internal struct Input { internal uint Type; internal InputUnion Value; }
     [StructLayout(LayoutKind.Sequential)] internal struct Point { internal int X, Y; }
-    internal static readonly UIntPtr Marker = new(((ulong)(uint)Environment.ProcessId << 32) | 0x57325443u);
+    // Low-level mouse hooks receive only the low 32 bits of dwExtraInfo (keyboard keeps all 64), so the
+    // marker must fit in 31 bits: "W2" plus the low 16 bits of the pid, never sign-extended.
+    internal static readonly UIntPtr Marker = new(0x57320000u | ((uint)Environment.ProcessId & 0xFFFFu));
     internal static Input Mouse(int x, int y, uint flags) => new() { Type = 0, Value = new() { Mouse = new() { X = x, Y = y, Flags = flags, Extra = Marker } } };
     internal static Input Unicode(char unit, bool up) => new() { Type = 1, Value = new() { Keyboard = new() { Scan = unit, Flags = up ? 6u : 4u, Extra = Marker } } };
     internal static Input VirtualKey(ushort vk, bool extended, bool up) => new() { Type = 1, Value = new() { Keyboard = new() { VirtualKey = vk, Flags = (extended ? 1u : 0u) | (up ? 2u : 0u), Extra = Marker } } };

@@ -19,6 +19,17 @@ internal interface IClickBackend
     int Buttons(WindowSelection window, DesktopPointResolution point, string button, int count, CancellationToken cancellation);
     int Release(string button);
 }
+/** Desktop clicks have no observed business window; the window under the point is the only target identity. */
+internal interface IDesktopClickBackend
+{
+    /**
+     * Opaque identity of the root window under a physical point, or null where a desktop click must not land:
+     * Web2Term or the helper, another desktop, held keys or buttons, a window drag, foreign mouse capture, or
+     * menu mode outside the menu itself.
+     */
+    string? DesktopTarget(CoordinatePoint point, bool cursorAtPoint, CancellationToken cancellation);
+    int DesktopButtons(DesktopPointResolution point, string target, string button, int count, CancellationToken cancellation);
+}
 internal sealed record ClickReceipt(string request_id, string observation_id, string source_step_id, string? window_id,
     string button, int click_count, string requested_method, string method, bool move_attempted, int? move_accepted,
     bool click_attempted, bool click_completed, int button_events_requested, int? button_events_accepted,
@@ -27,7 +38,7 @@ internal sealed record ClickReceipt(string request_id, string observation_id, st
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ObservationValidation? validation = null);
 
 /** All decisions are based on the current observation; no input retry or fallback after a mutating call starts. */
-internal sealed class ClickService(ObservationRegistry observations, ControlTreeService controls, IClickBackend backend, Func<DateTime>? clock = null)
+internal sealed class ClickService(ObservationRegistry observations, ControlTreeService controls, IClickBackend backend, Func<DateTime>? clock = null, IDesktopClickBackend? desktop = null)
 {
     private readonly HashSet<string> consumed = new(StringComparer.Ordinal);
     private readonly Queue<string> order = new();
@@ -85,10 +96,13 @@ internal sealed class ClickService(ObservationRegistry observations, ControlTree
             if (moved.Accepted != 1 || !moved.Arrived) return Fail("click_failed", "鼠标移动未确认到达；没有派发按钮事件，不自动重试。");
             cancellation.ThrowIfCancellationRequested();
             ActionResult? changed;
-            if (locator.ElementId == null) { validation = observations.Validate(owner, locator, cancellation); changed = validation.valid ? null : Fail("stale_observation", "鼠标移动后观察变化，原点击未派发。"); }
-            else changed = StateGate();
+            // For image-coordinate clicks the native backend is the live authority after
+            // the cursor arrives. Do not re-enter UIA/state/image validation here: hover
+            // highlights and incomplete providers are expected and must not suppress the
+            // subsequent button event. Element clicks retain their strict control checks.
+            changed = locator.ElementId == null ? null : StateGate();
             if (changed != null) return changed;
-            if (!controlCurrent() || !backend.Guard(window, mapped.Desktop, true, cancellation)) return Fail("click_blocked", "移动后焦点、控件或实际落点不匹配，未派发按钮事件。");
+            if (!backend.Guard(window, mapped.Desktop, true, cancellation) || locator.ElementId != null && !controlCurrent()) return Fail("click_blocked", "移动后焦点、控件或实际落点不匹配，未派发按钮事件。");
             cancellation.ThrowIfCancellationRequested();
             requested = options.Count * 2; clickAttempted = true; execution = "unknown";
             try { accepted = backend.Buttons(window, mapped, options.Button, options.Count, cancellation); }
@@ -100,6 +114,33 @@ internal sealed class ClickService(ObservationRegistry observations, ControlTree
             completed = accepted == requested && !releaseRequired;
             execution = completed || accepted == 0 ? "executed" : "unknown"; // Movement already occurred even when no button event was accepted.
             return completed ? new(true, execution, "ok", "按钮事件已完整插入输入流；应用是否响应及业务目标须核对新观察。")
+                : Fail("click_failed", "按钮事件未完整确认；已记录接收数量及必要释放，不补点、不切换输入路径。");
+        }
+        // Mouse only: a desktop observation has no control tree. The pixels near the point were checked by the
+        // registry; hover highlights may change them after the move, so the window under the point is what must hold.
+        ActionResult DesktopMouse(ImagePointResolution resolved, CaptureSource source)
+        {
+            method = "mouse"; point = resolved.desktop;
+            DesktopPointResolution? mapped = CoordinateMapper.ResolvePhysical(source, point);
+            string? hit = mapped == null ? null : desktop!.DesktopTarget(mapped.Desktop, false, cancellation);
+            if (mapped == null || hit == null) return Fail("click_blocked", "落点属于本软件窗口或安全桌面，或正处于按键、拖动、菜单占用状态，未点击。");
+            if (!Claim(owner, requestId)) return Fail("click_blocked", "本步骤已经派发过输入，拒绝重复点击。");
+            cancellation.ThrowIfCancellationRequested();
+            moveAttempted = true; execution = "unknown";
+            MouseMoveResult moved = backend.Move(mapped, cancellation); moveAccepted = moved.Accepted;
+            execution = moved.Accepted == 0 ? "not_executed" : moved.Accepted == 1 ? "executed" : "unknown";
+            if (moved.Accepted != 1 || !moved.Arrived) return Fail("click_failed", "鼠标移动未确认到达；没有派发按钮事件，不自动重试。");
+            cancellation.ThrowIfCancellationRequested();
+            if (desktop!.DesktopTarget(mapped.Desktop, true, cancellation) != hit) return Fail("click_blocked", "移动后落点下的窗口或输入状态已变化，未派发按钮事件。");
+            requested = options.Count * 2; clickAttempted = true; execution = "unknown";
+            try { accepted = desktop!.DesktopButtons(mapped, hit, options.Button, options.Count, cancellation); }
+            finally {
+                releaseRequired = accepted == null || accepted > 0 && accepted < requested && accepted % 2 == 1;
+                Cleanup();
+            }
+            completed = accepted == requested && !releaseRequired;
+            execution = completed || accepted == 0 ? "executed" : "unknown";
+            return completed ? new(true, execution, "ok", "按钮事件已在桌面坐标处完整插入输入流；应用是否响应及业务目标须核对新观察。")
                 : Fail("click_failed", "按钮事件未完整确认；已记录接收数量及必要释放，不补点、不切换输入路径。");
         }
         ActionResult Dispatch(ImagePointResolution? imagePoint)
@@ -129,6 +170,9 @@ internal sealed class ClickService(ObservationRegistry observations, ControlTree
         ActionResult output;
         try {
             if (options.Button is not ("left" or "right" or "middle") || options.Count is < 1 or > 2 || options.Method is not ("auto" or "mouse")) output = Fail("invalid_parameters", "点击参数不符合约定。");
+            else if (desktop != null && target != null && target.Source.Window == null)
+                output = observations.WithCurrentDesktopPoint(owner, locator with { Purpose = "pointer" }, DesktopMouse, cancellation);
+            else if (locator.ElementId == null) output = observations.WithCurrentWindowPoint(owner, locator with { Purpose = "pointer" }, (resolved, _) => Dispatch(resolved), cancellation);
             else output = observations.WithCurrentObservation(owner, locator with { Purpose = "pointer" }, Dispatch, cancellation);
             if (output.Data is ObservationValidation check) validation = check;
         }
@@ -158,7 +202,7 @@ internal sealed class ClickAction(ClickService clicks) : IWindowsAction
             int? x = p.GetProperty("x").ValueKind == JsonValueKind.Null ? null : p.GetProperty("x").GetInt32(), y = p.GetProperty("y").ValueKind == JsonValueKind.Null ? null : p.GetProperty("y").GetInt32();
             int count = p.GetProperty("click_count").GetInt32();
             if (!ObservationBindingProtocol.Id(observation, "obs_") || element != null && !ObservationBindingProtocol.Id(element, "el_") ||
-                element == null && (x == null || y == null) || element != null && (x != null || y != null) || x is < 0 or > 2559 || y is < 0 or > 2559 ||
+                element == null && (x == null || y == null) || element != null && (x != null || y != null) || x is < 0 or > ObservationPng.MaximumDimension - 1 || y is < 0 or > ObservationPng.MaximumDimension - 1 ||
                 button is not ("left" or "right" or "middle") || count is < 1 or > 2 || method is not ("auto" or "mouse")) return ObservationBindingProtocol.Invalid();
             return clicks.Click(owner, new(observation, element, x, y, "pointer"), new(button, count, method), request, cancellation);
         }

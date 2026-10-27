@@ -42,6 +42,7 @@ internal static class TypeTextTests
     internal static void RunAll() {
         foreach (var item in new (string, Action)[] {
             ("literal Unicode insertion preserves selection surroundings and verifies exact text", Insertion),
+            ("window text insertion uses native routing without fabricating UIA verification", WindowInsertion),
             ("explicit replace uses one Value call and never falls back or clears on unsupported patterns", Replacement),
             ("stale targets stop input while own content revisions permit subsequent batches", State),
             ("partial Unicode acknowledgement releases only a pending packet without replay", Partial),
@@ -75,6 +76,16 @@ internal static class TypeTextTests
             Check(!result.Ok && f.Input.Sent.Count == 0 && f.Controls.TextSets == (scenario is "failure" or "throw" ? 1 : 0), "replace fell back or retried");
             Check(result.Execution == (scenario is "failure" or "throw" ? "unknown" : "not_executed"), "replace input fact lost"); f.Closed();
         }
+    }
+    private static void WindowInsertion() {
+        var f = new Fixture(); var image = f.Publish();
+        f.Controls.FailReadKey = "root";
+        var result = f.Texts.Type(Owner, new(image.observation_id, Purpose: "keyboard"), "自绘编辑区😀", "insert", Guid.NewGuid().ToString("D"), CancellationToken.None);
+        var r = Receipt(result);
+        Check(result.Ok && r.element_id == null && r.method == "unicode" && !r.content_verified && r.verification == "unavailable" && f.Controls.TextReads == 0,
+            "window insertion required UIA or fabricated readback");
+        var replace = new Fixture(); var unsupported = replace.Texts.Type(Owner, new(replace.Publish().observation_id, Purpose: "keyboard"), "new", "replace", Guid.NewGuid().ToString("D"), CancellationToken.None);
+        Check(!unsupported.Ok && replace.Input.Sent.Count == 0, "window insertion silently replaced an unknown document scope");
     }
     private static void State() {
         var own = new Fixture(); own.Input.AfterSend = () => own.States.Current = own.States.Current with { Revision = Guid.NewGuid().ToString() };

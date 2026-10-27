@@ -14,7 +14,6 @@ import type { PdfPreviewTarget } from './components/PdfPreviewDialog'
 import BackendLoginForm from './components/BackendLoginForm'
 import Web2termDevicesSettings from './components/Web2termDevicesSettings'
 import ComputerUseSettings from './components/ComputerUseSettings'
-import AutonomousTaskSummary from './components/AutonomousTaskSummary'
 import type { AutonomousTaskState } from '@shared/autonomous-task'
 import { DEFAULT_COMPUTER_USE_PREFERENCES, normalizeComputerUsePreferences } from '@shared/computer-use'
 import type { ComputerUseCapability, ComputerUsePreferences } from '@shared/computer-use'
@@ -697,6 +696,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const terminalSwitchRef = useRef<HTMLButtonElement>(null)
   const terminalOutputRef = useRef<HTMLDivElement>(null)
   const promptBodyRef = useRef<HTMLDivElement>(null)
+  const promptTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const promptCloseButtonRef = useRef<HTMLButtonElement>(null)
   const promptMatchIndexRef = useRef(-1)
   const promptCopyTimerRef = useRef<number | null>(null)
   const promptCopyGenerationRef = useRef(0)
@@ -2100,7 +2101,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
     matches[index].node.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }, [clearPromptHighlights])
-  // Ctrl/Cmd+F opens the prompt's local find field; the popover handles dismissal.
+  // Ctrl/Cmd+F opens the prompt's local find field; the dialog handles dismissal.
   useEffect(() => {
     if (!promptOpen) return
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -2667,7 +2668,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           </div>
 
           {taskStopError ? <p className="autonomous-task-summary__error" role="alert">{taskStopError}</p> : null}
-          <AutonomousTaskSummary state={visibleAutonomousTask} />
           {!visibleAutonomousTask?.task && currentGoal ? (
             <p className="terminal__last" title={currentGoal}>
               当前的目标：{currentGoal}
@@ -2679,7 +2679,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               type="button"
               className="terminal__prompt-link"
               aria-haspopup="dialog"
-              onClick={() => setPromptView('base')}
+              onClick={event => { promptTriggerRef.current = event.currentTarget; setPromptView('base') }}
             >
               查看系统提示词
             </button>
@@ -2687,7 +2687,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               type="button"
               className="terminal__prompt-link"
               aria-haspopup="dialog"
-              onClick={() => setPromptView('tools')}
+              onClick={event => { promptTriggerRef.current = event.currentTarget; setPromptView('tools') }}
             >
               查看工具提示词
             </button>
@@ -3360,27 +3360,32 @@ ${record.command}`
         ) : null}
 
         {/* Separate injected-prompt sections, using the same Markdown viewer. */}
-        {promptOpen ? (
-          <AppPopover
+        {promptOpen && appContainer ? (
+          <Dialog.Root open modal onOpenChange={(open, details) => {
+            if (open) return
+            if (details.reason === 'escape-key' && promptSearchOpen) {
+              details.cancel()
+              setPromptSearchOpen(false)
+              setPromptSearch('')
+              promptMatchIndexRef.current = -1
+              clearPromptHighlights()
+              promptCloseButtonRef.current?.focus()
+              return
+            }
+            setPromptView(null)
+          }}>
+          <Dialog.Portal container={appContainer}>
+          <Dialog.Popup
             className="modal modal--prompt"
-            aria-label={promptTitle}
-            onKeyDownCapture={event => {
-              if (event.key === 'Escape' && promptSearchOpen) {
-                event.preventDefault()
-                event.stopPropagation()
-                setPromptSearchOpen(false)
-                setPromptSearch('')
-                promptMatchIndexRef.current = -1
-                clearPromptHighlights()
-              }
-            }}
-            onClose={() => setPromptView(null)}>
+            initialFocus={promptCloseButtonRef}
+            finalFocus={promptTriggerRef}
+            onMouseDown={event => { if (event.target === event.currentTarget && event.button === 0) setPromptView(null) }}>
             <div className="prompt-modal" data-color-mode={theme}>
               <div className="prompt-modal__head">
                 <span className="prompt-modal__icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" width="20" height="20"><path d="M7 3.75h7.7L19 8.05v12.2H7z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"/><path d="M14.5 3.9v4.4h4.35M10 12h6M10 15.5h6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/></svg>
                 </span>
-                <span className="prompt-modal__title">{promptTitle}</span>
+                <Dialog.Title className="prompt-modal__title">{promptTitle}</Dialog.Title>
                 <span className="prompt-modal__readonly">只读</span>
                 <span className="panel__spacer" />
                 <button
@@ -3414,7 +3419,7 @@ ${record.command}`
                   <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.8"/><path d="m15 15 4 4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/></svg>
                   查找
                 </button>
-                <button type="button" className="prompt-modal__close" aria-label="关闭" onClick={() => setPromptView(null)}>×</button>
+                <Dialog.Close ref={promptCloseButtonRef} type="button" className="prompt-modal__close" aria-label="关闭" title="关闭（Esc）">×</Dialog.Close>
               </div>
 
               {promptSearchOpen ? (
@@ -3449,8 +3454,11 @@ ${record.command}`
               </div>
               {promptSource ? <div className="prompt-modal__scroll-hint" aria-hidden="true"><span>↓</span> 滚动查看更多</div> : null}
             </div>
-          </AppPopover>
-        ) : null}      {settingsOpen ? (
+          </Dialog.Popup>
+          </Dialog.Portal>
+          </Dialog.Root>
+        ) : null}
+      {settingsOpen ? (
         <div
           className="modal modal--settings"
           role="dialog"

@@ -24,7 +24,7 @@ function load(file, dependencies = {}) {
 const forbidden = () => { throw new Error('Real IO is forbidden') }
 const shared = load('../src/shared/windows-helper.ts')
 const version = shared.WINDOWS_HELPER_PROTOCOL_VERSION
-const { WindowsHelperManager } = load('../src/main/windows-helper.ts', {
+const { WindowsHelperManager, HUMAN_TAKEOVER_STRIKES, desktopActivityRequestsTakeover } = load('../src/main/windows-helper.ts', {
   'node:child_process': { spawn: forbidden }, 'node:fs/promises': { stat: forbidden },
   'node:path': path, 'node:crypto': { randomUUID }, '../shared/windows-helper': shared
 })
@@ -87,11 +87,13 @@ function fixture(patch = {}) {
 const desktopOwner = { sessionId: 'session-A', platformId: 'deepseek', conversationId: 'chat-A', taskId: 'goal-A', generation: 1, machineId: 'local' }
 const activity = (child, kind, patch = {}) => child.reply({ type: 'desktop_activity', version,
   epoch: child.last('watch_desktop').epoch, watch_id: child.last('watch_desktop').watch_id, kind,
-  input: ['human-input', 'external-input'].includes(kind) ? 'click' : null, ...patch })
+  input: ['human-stop', 'escape-pressed'].includes(kind) ? 'keyboard' : ['human-input', 'external-input'].includes(kind) ? 'click' : null, ...patch })
 
 test('activity carries only its input category; a missing or invented category is rejected', async () => {
   for (const [kind, input, accepted] of [['human-input', 'wheel', true], ['human-input', 'keyboard', true], ['human-input', null, false],
-    ['human-input', 'KeyA', false], ['focus-changed', 'click', false], ['monitor-unavailable', null, true]]) {
+    ['human-input', 'KeyA', false], ['focus-changed', 'click', false], ['monitor-unavailable', null, true],
+    ['escape-pressed', 'keyboard', true], ['human-stop', 'keyboard', true], ['human-stop', 'click', false],
+    ['human-stop', null, false], ['escape-pressed', 'wheel', false]]) {
     const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
     f.manager.subscribeDesktopActivity(event => events.push(event))
     const child = await f.start()
@@ -131,6 +133,96 @@ test('human activity cancels without replay and retains a final actual receipt b
   f.manager.dispose()
 })
 
+test('the first physical Escape leaves the active run and request alive without a takeover strike', async () => {
+  const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
+  f.manager.subscribeDesktopActivity(event => events.push(event))
+  const child = await f.start(['press_key']), pending = f.manager.request('press_key', {}); await flush()
+  activity(child, 'escape-pressed')
+  assert.equal(events[0].kind, 'escape-pressed')
+  assert.equal(events[0].strike, null)
+  assert.equal(desktopActivityRequestsTakeover(events[0]), false)
+  assert.equal(f.manager.getState().phase, 'ready')
+  assert.equal(child.last('cancel'), undefined)
+  assert.equal(child.ended, false)
+  f.response(child)
+  assert.equal((await pending).execution, 'executed')
+  activity(child, 'human-input')
+  assert.equal(events[1].strike, 1, 'a single Escape does not consume an ordinary input strike')
+  f.manager.dispose()
+})
+
+test('a native double-Escape stops the exact watch immediately and retains any accepted input receipt', async () => {
+  const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
+  f.manager.subscribeDesktopActivity(event => events.push(event))
+  const child = await f.start(['press_key']), pending = f.manager.request('press_key', {}); await flush()
+  activity(child, 'escape-pressed'); activity(child, 'human-stop')
+  assert.deepEqual(events.map(event => desktopActivityRequestsTakeover(event)), [false, true])
+  assert.equal(events[1].strike, null)
+  assert.deepEqual(JSON.parse(JSON.stringify(events[1].owner)), desktopOwner)
+  assert.equal(f.manager.getState().phase, 'stopping')
+  assert.equal(child.last('cancel').id, child.last('request').id)
+  f.response(child, { ok: false, code: 'cancelled', execution: 'executed' })
+  const result = await pending
+  assert.equal(result.code, 'human_takeover')
+  assert.equal(result.execution, 'executed')
+  assert.equal(child.frames.filter(frame => frame.type === 'request').length, 1, 'the stopped step is never replayed')
+  f.manager.dispose()
+})
+
+test('a double-Escape can still stop the task while an interrupted native step is draining', async () => {
+  const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
+  f.manager.subscribeDesktopActivity(event => events.push(event))
+  const child = await f.start(['press_key']), pending = f.manager.request('press_key', {}); await flush()
+  activity(child, 'external-input')
+  assert.equal(f.manager.getState().phase, 'stopping')
+  activity(child, 'human-stop')
+  assert.equal(desktopActivityRequestsTakeover(events.at(-1)), true)
+  f.response(child, { ok: false, code: 'cancelled', execution: 'executed' })
+  const result = await pending
+  assert.equal(result.code, 'human_takeover')
+  assert.equal(result.execution, 'executed')
+  f.manager.dispose()
+})
+
+// Each strike retires the latched process; the manager restarts it after the bounded delay.
+const restarted = async f => { f.clock.advance(500); await flush(); f.clock.advance(2000); await flush(); const child = f.children.at(-1); f.ready(child, ['click']); await flush(); return child }
+
+test('only the third physical input in a row is a takeover; earlier ones interrupt the step with human_input', async () => {
+  const f = fixture(), events = [], codes = []; f.manager.setDesktopOwner(desktopOwner)
+  f.manager.subscribeDesktopActivity(event => events.push(event))
+  let child = await f.start(['click'])
+  for (let strike = 1; strike <= HUMAN_TAKEOVER_STRIKES; strike++) {
+    if (strike > 1) child = await restarted(f)
+    const pending = f.manager.request('click', {}); await flush()
+    activity(child, 'human-input')
+    f.response(child, { ok: false, code: 'cancelled', execution: 'executed' })
+    const result = await pending
+    codes.push(result.code)
+    if (strike < HUMAN_TAKEOVER_STRIKES) assert.match(result.message, new RegExp(`第 ${strike}/3 次`))
+  }
+  assert.deepEqual(events.map(event => [event.kind, event.strike]), [['human-input', 1], ['human-input', 2], ['human-input', 3]])
+  assert.deepEqual(events.map(event => desktopActivityRequestsTakeover(event)), [false, false, true])
+  assert.deepEqual(codes, ['human_input', 'human_input', 'human_takeover'])
+  assert.equal(f.children.length, 3, 'two warnings fit inside the restart budget')
+  f.manager.dispose()
+})
+
+test('a new goal starts its own strike count, and other sources never count as strikes', async () => {
+  const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
+  f.manager.subscribeDesktopActivity(event => events.push(event))
+  let child = await f.start()
+  activity(child, 'human-input')
+  child = await restarted(f)
+  f.manager.setDesktopOwner({ ...desktopOwner, taskId: 'goal-B', generation: 2 })
+  activity(child, 'human-input')
+  assert.deepEqual(events.map(event => event.strike), [1, 1])
+  const g = fixture(), others = []; g.manager.setDesktopOwner(desktopOwner)
+  g.manager.subscribeDesktopActivity(event => others.push(event))
+  activity(await g.start(), 'external-input')
+  assert.equal(others[0].strike, null)
+  f.manager.dispose(); g.manager.dispose()
+})
+
 test('external injection is distinct from human activity; a missing final receipt remains unknown', async () => {
   const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
   f.manager.subscribeDesktopActivity(event => events.push(event))
@@ -149,6 +241,22 @@ test('late activity from a previous watch cannot be attributed to a replacement 
   activity(child, 'human-input', { watch_id: old.watch_id })
   assert.equal(events.length, 1); assert.equal(events[0].kind, 'external-input'); assert.equal(events[0].owner.taskId, 'replacement')
   assert.equal(child.ended, true, 'the native latch still retires, without pausing the new goal')
+  f.manager.dispose()
+})
+
+test('a double-Escape from a replaced watch cannot stop the replacement task', async () => {
+  const f = fixture(), events = []; f.manager.setDesktopOwner(desktopOwner)
+  f.manager.subscribeDesktopActivity(event => events.push(event))
+  const child = await f.start(), old = child.last('watch_desktop')
+  f.manager.setDesktopOwner({ ...desktopOwner, taskId: 'replacement', generation: 2 })
+  activity(child, 'escape-pressed', { watch_id: old.watch_id })
+  assert.equal(events.length, 0)
+  activity(child, 'human-stop', { watch_id: old.watch_id })
+  assert.equal(events.length, 1)
+  assert.equal(events[0].kind, 'external-input')
+  assert.equal(desktopActivityRequestsTakeover(events[0]), false)
+  assert.equal(events[0].owner.taskId, 'replacement')
+  assert.equal(child.ended, true, 'an interrupted old helper still retires')
   f.manager.dispose()
 })
 
@@ -215,7 +323,7 @@ test('an elevated helper (UAC off, or Web2Term run as administrator) is still ac
 })
 
 test('handshake rejects version, process identity, nonce, architecture, and apartment', async () => {
-  for (const patch of [{ version: 1 }, { version: 2 }, { version: version + 1 }, { pid: 1 }, { nonce: randomUUID() }, { arch: 'arm64' }, { apartment: 'STA' },
+  for (const patch of [{ version: 1 }, { version: 2 }, { version: version - 1 }, { version: version + 1 }, { pid: 1 }, { nonce: randomUUID() }, { arch: 'arm64' }, { apartment: 'STA' },
     { elevated: 'yes' }, { actions: ['command'] }, { actions: ['observe', 'observe'] }]) {
     const f = fixture(); f.manager.setDemand('session-A', true); await flush()
     f.ready(f.children[0], [], patch); await flush()

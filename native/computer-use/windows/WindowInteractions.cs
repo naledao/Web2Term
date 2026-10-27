@@ -33,7 +33,7 @@ internal sealed partial class WindowCatalog
     private sealed record MenuOwnerEntry(string Parent, DateTime Expires, MenuWindowBinding Menu);
     private static CatalogWindow Row(DiscoveredWindow w, string id, Dictionary<string, string> ids) => new(id, w.Handle, w.Pid, w.ProcessStartedAt, w.ThreadId, w.ClassName, w.Title,
         w.Application, w.Visible, w.Minimized, w.Foreground, w.Enabled, w.Cloaked, w.OwnerHandle,
-        w.OwnerHandle != null && ids.TryGetValue(w.OwnerHandle, out string? owner) ? owner : null, true, "verified");
+        w.OwnerHandle != null && ids.TryGetValue(w.OwnerHandle, out string? owner) ? owner : null, true, "verified", w.Bounds is { Valid: true } ? w.Bounds : null);
     // Only verified owner chains, never title/PID similarity. Every intermediate owner must also be published.
     internal static string[]? OwnerChain(DiscoveredWindow candidate, DiscoveredWindow parent, IReadOnlyDictionary<string, DiscoveredWindow> all)
     {
@@ -92,14 +92,15 @@ internal sealed partial class WindowCatalog
         if (after.Gui != gui || !Graph(all).SequenceEqual(Graph(fresh)) || !Same(original) || selected.Any(c => !Same(c.Window)) || Resolve(scope, parentId, cancellation) is not { } current || !current.Window.SameIdentity(original))
             return new(false, "not_executed", "stale_window", "交互发现期间窗口、owner 或菜单状态变化，未发布引用，请重新检查。");
         if (!after.Snapshot.Complete) reasons.Add("enumeration_incomplete");
-        Snapshot s = scopes[scope]; DateTime expiry = new[] { before.AddSeconds(30), s.At.AddMinutes(2) }.Min();
+        Snapshot s = scopes[scope]; DateTime expiry = s.RetainedAt.Add(ReferenceLifetime);
+        DateTime menuExpiry = new[] { before.AddSeconds(30), expiry }.Min();
         if (expiry <= Now) return Stale();
         if (s.Related.Count + selected.Count > 64) return new(false, "not_executed", "unavailable", "交互引用预算已满，请重新发现业务窗口。");
         Dictionary<string, string> ids = new(StringComparer.Ordinal) { [original.Handle] = parentId };
         foreach (InteractionCandidate c in selected) ids[c.Window.Handle] = "win_" + Guid.NewGuid().ToString("N");
         foreach (InteractionCandidate c in selected) {
             string id = ids[c.Window.Handle]; MenuWindowBinding? proof = c.MenuAnchor == null ? null : new(new(scope, s.Id, ids[c.MenuAnchor], fresh[c.MenuAnchor]), gui.menu_owner_hwnd!, c.Window);
-            s.Related[id] = new(parentId, new(id, c.Window), expiry, proof); s.Published.Add(id);
+            s.Related[id] = new(parentId, new(id, c.Window), c.Kind == "menu" ? menuExpiry : expiry, proof); s.Published.Add(id);
         }
         RelatedWindow[] rows = selected.Select(c => new RelatedWindow(c.Kind, c.Modal, c.Chain, Row(c.Window, ids[c.Window.Handle], ids))).ToArray();
         string? menuOwnerId = anchor is { Foreground: true } && gui.foreground_hwnd == anchor.Handle && ids.TryGetValue(anchor.Handle, out string? a) ? a : null;
@@ -107,7 +108,7 @@ internal sealed partial class WindowCatalog
         string mode = !activeMenu ? "none" : keyboard != null ? "popup" : "unavailable";
         if (activeMenu && keyboard == null && anchor != null && menuOwnerId != null) {
             MenuWindowBinding proof = new(new(scope, s.Id, menuOwnerId, anchor), gui.menu_owner_hwnd!, anchor);
-            if (interactions.MenuCurrent(proof, cancellation)) { s.MenuOwners[menuOwnerId] = new(parentId, expiry, proof); keyboard = menuOwnerId; mode = "owner"; }
+            if (interactions.MenuCurrent(proof, cancellation)) { s.MenuOwners[menuOwnerId] = new(parentId, menuExpiry, proof); keyboard = menuOwnerId; mode = "owner"; }
         }
         if (activeMenu && keyboard == null) reasons.Add("menu_unavailable");
         WindowInteractionsResult result = new(s.Id, parentId, before.ToString("O"), Now.ToString("O"), expiry.ToString("O"), Row(original, parentId, ids), rows,

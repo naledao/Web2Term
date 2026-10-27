@@ -15,7 +15,7 @@ export const COMPUTER_PROGRESS_LIMIT_FIELDS = {
   waitTimeoutMs: { label: '条件等待时限', min: 1000, max: 3_600_000, default: 3_600_000, unit: 1000, suffix: '秒' },
   maxSteps: { label: '任务步骤上限', min: 5, max: 2000, default: 200, unit: 1, suffix: '步' },
   maxRepeatedAction: { label: '同一动作无进展上限', min: 2, max: 20, default: 4, unit: 1, suffix: '次' },
-  maxUnchangedObservations: { label: '连续相同观察上限', min: 2, max: 50, default: 6, unit: 1, suffix: '次' },
+  maxUnchangedObservations: { label: '同来源相同观察提示阈值', min: 2, max: 50, default: 6, unit: 1, suffix: '次' },
   maxConsecutiveTimeouts: { label: '连续超时上限', min: 1, max: 20, default: 3, unit: 1, suffix: '次' },
   maxRecoverySteps: { label: '一次诊断恢复上限', min: 2, max: 100, default: 12, unit: 1, suffix: '步' }
 } as const

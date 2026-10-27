@@ -115,6 +115,44 @@ function fixture(options = {}) {
   }
 }
 
+test('a live model completion finishes without a completion report and revokes all step authority', async () => {
+  const f = fixture({ send: () => 'busy' })
+  const lease = f.request()
+  f.loop.enqueue(lease); await f.loop.wake()
+  const previous = structuredClone(f.progress().currentStep)
+  assert.equal(f.coordinator.completeFromModel(lease, 'final-answer'), true)
+  const done = f.records.get(f.first.id)
+  assert.equal(done.status, 'completed')
+  assert.equal(done.progress.phase, 'completed')
+  assert.equal(done.modelCompletion.messageId, 'final-answer')
+  assert.notEqual(done.completion?.report?.state, 'delivered', 'no evidence report is fabricated')
+  assert.equal(done.progress.currentStep.execution, previous.execution, 'step receipts are preserved')
+  assert.equal(f.coordinator.current('deepseek'), null)
+  assert.equal(f.coordinator.owns(lease), false)
+  assert.equal(f.coordinator.completionNotificationAllowed('deepseek', 'conversation-A'), true)
+  assert.equal(f.coordinator.completeFromModel(lease, 'final-answer'), false)
+  f.submit()
+  assert.equal(f.coordinator.completeFromModel(lease, 'late-old-answer'), false)
+  assert.equal(f.coordinator.current('deepseek').status, 'recorded')
+  f.loop.dispose()
+})
+
+test('a model completion also ends a halted task without requiring a new observation', () => {
+  const f = fixture(), lease = f.request(), task = f.coordinator.current('deepseek')
+  f.coordinator.updateProgress(lease, task.progress, undefined, { ...task.control, halted: 'recovery_limit' })
+  assert.equal(f.coordinator.isLimited('deepseek', 'conversation-A'), true)
+  assert.equal(f.coordinator.completeFromModel(lease, 'model-final'), true)
+  assert.equal(f.coordinator.isLimited('deepseek', 'conversation-A'), false)
+  assert.equal(f.coordinator.completionNotificationAllowed('deepseek', 'conversation-A'), true)
+  const saved = f.records.get(f.first.id)
+  assert.equal(saved.status, 'completed')
+  assert.equal(shared.parseAutonomousTask(JSON.stringify(saved)).modelCompletion.messageId, 'model-final')
+  const invalid = structuredClone(saved)
+  invalid.modelCompletion.messageId = 'different-reply'
+  assert.equal(shared.parseAutonomousTask(JSON.stringify(invalid)), null)
+  f.loop.dispose()
+})
+
 test('global admission keeps a step unexecuted; busy delivery retries without reacquiring or rerunning', async () => {
   const gate = deferred(), outcomes = ['busy', 'ok']
   let admissions = 0, released = 0

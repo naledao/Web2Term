@@ -44,15 +44,15 @@ internal sealed record PrivateControlSnapshot(ControlTreeResult Result, IReadOnl
 /** Bounded read-only traversal. All UIA objects are disposed on the same MTA; public IDs refer only to this observation. */
 internal sealed class ControlTreeService(WindowCatalog windows, IControlTreeBackend backend, Func<DateTime>? clock = null, Func<long>? elapsed = null)
 {
-    internal static bool MatchesRaw(ControlRow row, RawControl raw) => row.properties_complete && raw.Complete && raw.InWindow && raw.Key != null &&
-        raw.Type == row.control_type && Clip(raw.Password == false ? raw.Name : null, 256) == row.name && (raw.Password == false && raw.Name?.Length > 256) == row.name_truncated &&
-        raw.Password == row.password && raw.Enabled == row.enabled && raw.Focused == row.focused && raw.Offscreen == row.offscreen && raw.Selected == row.selected &&
-        raw.Bounds == row.bounds && raw.Patterns.Where(Patterns.Contains).Distinct().Order(StringComparer.Ordinal).SequenceEqual(row.patterns.Order(StringComparer.Ordinal));
+    internal static bool InputAvailable(ControlRow row) => row.control_type != null && row.enabled == true && row.offscreen == false && row.bounds?.Valid == true;
+    internal static bool MatchesRaw(ControlRow row, RawControl raw, bool input = true) => raw.InWindow && raw.Key != null &&
+        raw.Type == row.control_type && (row.name == null || raw.Name == null || Clip(raw.Password == false ? raw.Name : null, 256) == row.name) &&
+        raw.Password == row.password && raw.Bounds == row.bounds && (input ? InputAvailable(row) && raw.Enabled == true && raw.Offscreen == false : raw.Enabled == row.enabled && raw.Offscreen == row.offscreen);
     internal ActionResult WithCurrentControl(string scope, string windowId, PrivateControlSnapshot snapshot, string elementId,
         Func<IControlTreeSession, IControlNode, ControlRow, string[], ActionResult> dispatch, CancellationToken cancellation, int? dispatchTimeout = null)
     {
         ControlRow? row = snapshot.Result.elements.SingleOrDefault(item => item.element_id == elementId);
-        if (row == null || !row.properties_complete || !snapshot.Keys.TryGetValue(elementId, out string? key)) return Stale();
+        if (row == null || !InputAvailable(row) || !snapshot.Keys.TryGetValue(elementId, out string? key)) return Stale();
         List<string> expected = [];
         for (ControlRow? parent = row; parent != null; parent = parent.parent_id == null ? null : snapshot.Result.elements.SingleOrDefault(item => item.element_id == parent.parent_id)) {
             if (expected.Count > 8 || !snapshot.Keys.TryGetValue(parent.element_id, out string? parentKey)) return Stale();

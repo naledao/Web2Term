@@ -84,6 +84,8 @@ export interface TaskToolStep {
   message: string | null
   /** Text delivery only. Screenshots use the later attachment pipeline. */
   resultText: string | null
+  /** Model-authored display intent, not an execution receipt. Absent in legacy records. */
+  description?: string
   createdAt: number
   updatedAt: number
   stepToken?: string | null
@@ -176,6 +178,8 @@ export interface AutonomousTask extends TaskOwner {
   control?: ComputerProgressState
   /** Task-scoped evidence and the final delivery report; no replay authority. */
   completion?: TaskCompletionState
+  /** A live model completion marker ends the task without requiring an evidence report. */
+  modelCompletion?: { messageId: string; receivedAt: number }
   clarifications?: TaskClarificationState
   stop?: { reason: 'user-ended' | 'global-emergency' | 'human-takeover'; requestedAt: number }
   createdAt: number
@@ -234,11 +238,16 @@ export function parseAutonomousTask(payload: string): AutonomousTask | null {
       if (!completion) return null
       task.completion = completion
     }
-    if (task.status === 'completed' && (task.completion?.report?.state !== 'delivered' || task.progress?.phase !== 'completed' ||
+    if (task.modelCompletion !== undefined && (!task.modelCompletion || Object.keys(task.modelCompletion).length !== 2 ||
+      !text(task.modelCompletion.messageId) || !task.modelCompletion.messageId.trim() || task.modelCompletion.messageId.length > 512 ||
+      !Number.isSafeInteger(task.modelCompletion.receivedAt) || task.modelCompletion.receivedAt < 0 ||
+      task.status !== 'completed' || task.progress?.phase !== 'completed' || task.progress.lastReply?.kind !== 'response' ||
+      task.progress.lastReply.messageId !== task.modelCompletion.messageId)) return null
+    if (task.status === 'completed' && !task.modelCompletion && (task.completion?.report?.state !== 'delivered' || task.progress?.phase !== 'completed' ||
       task.progress.currentStep?.id !== task.completion.report.stepId || task.progress.currentStep.delivery !== 'sent' || task.progress.currentStep.status !== 'delivered' || task.progress.currentStep.action !== 'complete_task' ||
       task.progress.currentStep.execution !== 'executed' || task.control?.halted || task.recovery?.requiresObservation)) return null
     if (task.status !== 'completed' && (task.completion?.report?.state === 'delivered' || task.progress?.phase === 'completed')) return null
-    if (task.status === 'completed' && (task.completion!.report!.requirements.length !== new Set(task.inputs.map(i => i.id)).size ||
+    if (task.status === 'completed' && task.completion?.report?.state === 'delivered' && (task.completion.report.requirements.length !== new Set(task.inputs.map(i => i.id)).size ||
       task.completion!.report!.requirements.some(r => !task.inputs.some(i => i.id === r.input_id)))) return null
     if (task.control !== undefined) {
       const control = parseComputerProgressState(task.control)
@@ -286,6 +295,8 @@ export function parseAutonomousTask(payload: string): AutonomousTask | null {
           !Number.isFinite(request.receivedAt)) return null
       }
       const step = p.currentStep
+      if (step?.description !== undefined && (typeof step.description !== 'string' || !step.description.trim() || step.description.length > 160 ||
+        /[\x00-\x1f\x7f\u2028\u2029]/.test(step.description))) return null
       if (step !== null && (!step || ![step.id, step.sourceMessageId, step.action].every(value => text(value) && !!value) ||
         !p.handledMessageIds.includes(step.sourceMessageId) ||
         !['queued', 'executing', 'result-ready', 'delivered', 'interrupted'].includes(step.status) ||

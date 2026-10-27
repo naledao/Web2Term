@@ -32,7 +32,7 @@ export class ComputerUseActionError extends Error {
 
 /** Preserve an actual interruption receipt before success-payload or post-observation validation. */
 export function throwIfDesktopInterrupted(response: WindowsHelperActionResult): void {
-  if (['external_input', 'human_takeover', 'input_monitor_unavailable'].includes(response.code))
+  if (['external_input', 'human_input', 'human_takeover', 'input_monitor_unavailable'].includes(response.code))
     throw new ComputerUseActionError({ code: response.code as ComputerUseToolResult['code'], execution: response.execution,
       message: response.message, data: { helper_code: response.code } })
 }

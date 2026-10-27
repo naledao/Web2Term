@@ -23,21 +23,22 @@ export default function ComputerUseSettings({ preferences, onChange, capability,
     : context?.hostPlatform === 'linux' ? 'Linux' : context?.hostPlatform
   return <div className="computer-use-settings">
     <p className="computer-use-settings__intro">在支持的会话中启用 computer use 并记录任务上下文。桌面能力以当前实际接入的动作为准。</p>
-    {([
-      { key: 'computerUseEnabled', label: '启用 computer use', hint: '启用此工具及任务上下文记录。终端、文件和后台任务工具沿用原有设置。' },
-      { key: 'desktopControlEnabled', label: '允许桌面控制', hint: '用于发现和启动应用、截图及键鼠操作，需同时启用 computer use。' }
-    ] as const).map(({ key, label, hint }) => <div className="settings-appearance-row" key={key}>
+    <div className="settings-appearance-row">
       <div>
-        <div className="settings-proxy-row__label" id={`computer-use-${key}-label`}>{label}</div>
-        <p className="computer-use-settings__hint" id={`computer-use-${key}-hint`}>{hint}</p>
+        <div className="settings-proxy-row__label" id="computer-use-computerUseEnabled-label">启用 computer use</div>
+        <p className="computer-use-settings__hint" id="computer-use-computerUseEnabled-hint">启用此工具及任务上下文记录，同时允许桌面控制（发现和启动应用、截图及键鼠操作）和按桌面截图坐标点击任务栏、系统托盘等业务窗口以外的位置。终端、文件和后台任务工具沿用原有设置。</p>
       </div>
-      <button type="button" role="switch" aria-checked={preferences[key]}
-        aria-labelledby={`computer-use-${key}-label`} aria-describedby={`computer-use-${key}-hint`}
-        className={preferences[key] ? 'switch switch--on' : 'switch'} disabled={disabled}
-        onClick={() => onChange({ ...preferences, [key]: !preferences[key] })}>
+      {/* Desktop control and coordinate clicks follow this switch; they have no separate toggles. */}
+      <button type="button" role="switch" aria-checked={preferences.computerUseEnabled}
+        aria-labelledby="computer-use-computerUseEnabled-label" aria-describedby="computer-use-computerUseEnabled-hint"
+        className={preferences.computerUseEnabled ? 'switch switch--on' : 'switch'} disabled={disabled}
+        onClick={() => {
+          const on = !preferences.computerUseEnabled
+          onChange({ ...preferences, computerUseEnabled: on, desktopControlEnabled: on, desktopPointClickEnabled: on })
+        }}>
         <span className="switch__knob" />
       </button>
-    </div>)}
+    </div>
     <fieldset className="computer-use-settings__limits" disabled={disabled}>
       <legend>运行上限</legend>
       <p className="computer-use-settings__hint">用于新目标；恢复原任务沿用原预算。暂停和等待用户回答不计入任务时长。达到上限后保留未完成状态，不自动重新开始。</p>

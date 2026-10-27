@@ -444,7 +444,7 @@ export interface EmbedHandlers {
   /** A question reply's JSON, live or from history, to keep for 重新执行指令. */
   onQuestionRecorded(messageId: string, rawJson: string): void
   onTaskQuestion?(question: TaskQuestion, source: TaskQuestionSource): void
-  onTaskCompleted(): void
+  onTaskCompleted(messageId?: string, source?: import('../shared/types').TaskActionSource): boolean | void
   /**
    * This view finished loading its page for the first time since it was created.
    *
@@ -1218,13 +1218,14 @@ export class ChatGptEmbed {
     const contents = this.liveContents()
     // Revoke generation-bound sends and late page events before waiting for the renderer.
     const status = this.completeTask()
+    const generation = this.taskPromptGeneration
     let stopRequestAcknowledged = !contents
     this.computerUseProtocolContext = { ...this.computerUseProtocolContext, stepToken: null }
     if (contents) {
       let timeout: ReturnType<typeof setTimeout> | undefined
       try {
         const acknowledged = await Promise.race([
-          contents.executeJavaScript(`window.__cmdTerminalInterceptor ? window.__cmdTerminalInterceptor.endTask() : false`),
+          contents.executeJavaScript(`window.__cmdTerminalInterceptor ? window.__cmdTerminalInterceptor.endTask(${generation}) : false`),
           new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error('page-stop-timeout')), 2000) })
         ])
         stopRequestAcknowledged = acknowledged === true
@@ -1594,7 +1595,18 @@ export class ChatGptEmbed {
   }
 
   /** Sidebar user tasks share the confirmed send path on every supported platform. */
-  async sendUserTask(text: string): Promise<FocusSendOutcome> {
+  /** Why the page refused the last human-task send (raw-busy reason), or null. */
+  async userSendBlockReason(): Promise<string | null> {
+    const contents = this.liveContents()
+    if (!contents) return null
+    try {
+      const reason: unknown = await contents.executeJavaScript('window.__cmdTerminalInterceptor?.userSendBlock?.() ?? null')
+      return typeof reason === 'string' && /^[a-z-]{1,40}$/.test(reason) ? reason : null
+    } catch { return null }
+  }
+
+  /** force: an explicit 继续原任务 — the page stops a streaming reply and ends a stale wait first. */
+  async sendUserTask(text: string, force = false): Promise<FocusSendOutcome> {
     const contents = this.liveContents()
     if (!contents) return 'unavailable'
     let attempted = false
@@ -1603,7 +1615,7 @@ export class ChatGptEmbed {
       if (url.origin !== new URL(this.platform.homeUrl).origin) return 'unavailable'
       attempted = true
       const result = await contents.executeJavaScript(
-        'window.__cmdTerminalInterceptor?.sendUser(' + JSON.stringify(text) + ', ' + JSON.stringify(url.pathname) + ') ?? "unavailable"'
+        'window.__cmdTerminalInterceptor?.sendUser(' + JSON.stringify(text) + ', ' + JSON.stringify(url.pathname) + (force ? ', { force: true }' : '') + ') ?? "unavailable"'
       )
       return ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed', 'unavailable', 'invalid'].includes(result) ? result : 'stuck'
     } catch { return attempted ? 'stuck' : 'unavailable' }
@@ -1967,6 +1979,13 @@ export class ChatGptEmbed {
         if (payload.reason === 'continue-clicked') this.clickAt(payload.x, payload.y)
         console.info(`[embed:${this.platform.id}] interceptor ${JSON.stringify(payload)}`)
         break
+      case 'native-edit':
+        // Same rule as 继续生成: the page measured the control; only a trusted input event presses it.
+        // Limited to the automatic resend of a leaked safety verdict during computer-use recognition.
+        if ((payload.reason === 'safety-leak-edit-click' || payload.reason === 'safety-leak-send-click') &&
+          this.platform.id === 'deepseek' && this.computerUseRecognitionEnabled && this.platform.page.nativeEdit) this.clickAt(payload.x, payload.y)
+        console.info(`[embed:${this.platform.id}] interceptor ${JSON.stringify(payload)}`)
+        break
       case 'focus-ui-click':
         if (payload.focusEditToken && this.focusUiNativeClick?.token === payload.focusEditToken) this.focusUiNativeClick.dispatch()
         break
@@ -2153,7 +2172,7 @@ export class ChatGptEmbed {
           this.handlers.onQuestionRecorded(payload.messageId, payload.rawJson)
         }
         break
-      case 'task-finished':
+      case 'task-finished': {
         /*
          * Logged, because this is a STATE TRANSITION with teeth: it is what clears
          * `awaitingReplySince` on the page and what decides whether the task is over. A reply
@@ -2165,10 +2184,17 @@ export class ChatGptEmbed {
             `messageId=${payload.messageId ?? '?'}`
         )
         if (payload.completed === true && this.interceptor.taskFinishedAt === null) {
-          this.completeTask()
-          this.handlers.onTaskCompleted()
+          const source = this.taskActionSource(payload)
+          if (this.computerUseRecognitionEnabled && this.platform.id === 'deepseek' &&
+            (!source || payload.computerPageEpoch !== this.computerPageEpoch ||
+              typeof payload.messageId !== 'string' || !payload.messageId.trim() || payload.messageId.length > 512)) break
+          const generation = this.taskPromptGeneration
+          if (this.handlers.onTaskCompleted(payload.messageId, source) === false) break
+          // The coordinator's completion callback may already have ended this embed.
+          if (this.taskPromptGeneration === generation) this.completeTask()
         }
         break
+      }
       case 'computer-request': {
         computerAccepted = false
         // This is an untrusted recognition event, never an executable command or a Shell fallback.
@@ -2312,12 +2338,20 @@ export class ChatGptEmbed {
       viewId: contents?.id ?? null,
       conversationId: contents ? conversationIdOf(this.platform, contents.getURL()) : null,
       mainPendingQuestion: this.interceptor.pendingQuestion !== null,
+      mainTaskPromptGeneration: this.taskPromptGeneration,
       computerAccepted,
       questionAccepted
     })
     if (replyLogPath && replyLogPath !== this.replyDiagnosticLogPath) {
       this.replyDiagnosticLogPath = replyLogPath
       console.info(`[embed:${this.platform.id}] reply diagnostics log: ${replyLogPath}`)
+    }
+    // A refused live desktop request is never answered; end the page's wait for it so a resume or a
+    // human send is not refused as "awaiting reply" forever.
+    if (payload.event === 'computer-request' && computerAccepted === false && payload.live === true &&
+      typeof payload.messageId === 'string' && /^computer:[a-zA-Z0-9:-]{1,150}$/.test(payload.messageId)) {
+      const contents = this.liveContents()
+      if (contents) void contents.executeJavaScript(`window.__cmdTerminalInterceptor?.releaseRejectedComputer(${JSON.stringify(payload.messageId)})`).catch(() => {})
     }
     writePromptDiagnostic(this.platform.id, payload, {
       taskPromptInjected: this.taskPromptInjected,

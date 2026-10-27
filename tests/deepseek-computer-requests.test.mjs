@@ -26,6 +26,7 @@ function load(path, dependencies = {}) {
 const platforms = load('../src/shared/platforms.ts', { './types': { isConversationId: id => typeof id === 'string' && !!id } })
 const { parseAutonomousTask } = load('../src/shared/autonomous-task.ts')
 const protocol = load('../src/shared/computer-use-protocol.ts')
+const { OBSERVE_DEFINITION } = load('../src/shared/windows-observation.ts')
 const { TaskCoordinator } = load('../src/main/task-coordinator.ts', { 'node:crypto': { createHash, randomUUID } })
 const { TaskProgression } = load('../src/main/task-progression.ts', { 'node:crypto': { createHash, randomUUID } })
 const source = readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8')
@@ -88,6 +89,20 @@ const turn = (key, content, extra = []) => element('div', { 'data-virtual-list-i
   ...extra, element('div', { class: 'ds-assistant-message-main-content' }, content)
 ])
 const requestJson = JSON.stringify({ type: 'computer', version: 1, action: 'observe', step_token: 'token-from-future-validator' })
+const dsmlToken = 'cu_' + 'a'.repeat(32)
+const dsmlParameters = [
+  ['action', 'true', 'observe'], ['target', 'true', 'window'],
+  ['window_id', 'true', 'win_' + '1'.repeat(32)], ['max_dimension', 'false', '1600'],
+  ['include_controls', 'false', 'true'], ['max_depth', 'false', '4'], ['max_elements', 'false', '80'],
+  ['description', 'true', '观察新建演示文稿编辑界面，定位标题和正文占位符'], ['step_token', 'true', dsmlToken]
+]
+function dsmlComputer(parameters = dsmlParameters, tag = 'invocation', marker = ' | | DSML | | ', wrapper = '') {
+  const call = '<' + marker + tag + ' name="computer">\n' + parameters.map(([name, string, value]) =>
+    '<' + marker + 'parameter name="' + name + '" string="' + string + '">' + value + '</' + marker + 'parameter>').join('\n') +
+    '\n</' + marker + tag + '>'
+  return wrapper ? '<' + marker + wrapper + '>\n' + call + '\n</' + marker + wrapper + '>' : call
+}
+const dsmlBody = raw => raw.split('\n').map(line => element('p', {}, line))
 function pageFixture(initial = [element('div', { 'data-virtual-list-item-key': '1' }, '先前的用户消息')], page = platforms.DEEPSEEK_PAGE) {
   const events = [], timers = new Map(), window = {}, body = element('body', {}, initial)
   const location = { pathname: '/a/chat/s/chat-A' }
@@ -214,6 +229,173 @@ test('the current code-block banner (json · 复制 · 下载) is not read as te
     assert.equal(f.requests()[0].computerIssue, null)
     assert.equal(f.requests()[0].rawJson, requestJson)
   }
+})
+
+test('native invoke/invocation computer calls become v1 requests with the screenshot parameter types', () => {
+  for (const marker of [' | | DSML | | ', '｜DSML｜', '｜｜DSML｜｜']) {
+    for (const tag of ['invoke', 'invocation']) {
+      for (const wrapper of ['', 'function_calls', 'calls']) {
+        const f = pageFixture()
+        f.controller.configure({ computerProtocol: { definitions: [OBSERVE_DEFINITION], stepToken: dsmlToken } })
+        const submission = f.confirm()
+        f.replace([turn('2', dsmlBody(dsmlComputer(dsmlParameters, tag, marker, wrapper)))])
+        f.settle()
+        assert.equal(f.requests().length, 1, marker + tag + wrapper)
+        const event = f.requests()[0], request = JSON.parse(event.rawJson)
+        assert.equal(event.sourceSubmissionId, submission)
+        assert.equal(event.computerOutcome, 'candidate')
+        assert.equal(event.computerProtocolCode, null)
+        assert.deepEqual(request, {
+          type: 'computer', version: 1, action: 'observe', target: 'window', window_id: 'win_' + '1'.repeat(32),
+          max_dimension: 1600, include_controls: true, max_depth: 4, max_elements: 80,
+          description: dsmlParameters.find(([name]) => name === 'description')[2], step_token: dsmlToken
+        })
+        assert.equal(f.actions().length, 0)
+        f.settle()
+        assert.equal(f.requests().length, 1, 'a rerender cannot emit the same native request twice')
+      }
+    }
+  }
+})
+
+test('native computer conversion retains explicit versions, duplicates, raw typed JSON and token validation', () => {
+  const without = name => dsmlParameters.filter(([key]) => key !== name)
+  const cases = [
+    [[['type', 'true', 'computer'], ['version', 'false', '1'], ...dsmlParameters], null],
+    [[...dsmlParameters, ['version', 'false', '2']], 'unsupported_version'],
+    [[...dsmlParameters, ['action', 'true', 'click']], 'duplicate_field'],
+    [[...dsmlParameters, ['metadata', 'false', '{"a":1,"a":2}']], 'duplicate_field'],
+    [[...dsmlParameters, ['__proto__', 'false', '{}']], 'unsafe_field'],
+    [[...dsmlParameters, ['command', 'true', 'must-not-run']], 'ambiguous_request'],
+    [[...without('max_elements'), ['max_elements', 'true', '80']], 'invalid_parameters'],
+    [[...without('max_elements'), ['max_elements', 'false', '[1,]']], 'invalid_json'],
+    [without('step_token'), 'invalid_step_token'],
+    [[...without('step_token'), ['step_token', 'true', 'cu_' + 'b'.repeat(32)]], 'stale_step_token']
+  ]
+  for (const [parameters, expected] of cases) {
+    const f = pageFixture()
+    f.controller.configure({ computerProtocol: { definitions: [OBSERVE_DEFINITION], stepToken: dsmlToken } })
+    f.confirm(); f.replace([turn('2', dsmlBody(dsmlComputer(parameters)))]); f.settle()
+    assert.equal(f.requests().length, 1)
+    assert.equal(f.requests()[0].computerProtocolCode, expected)
+    assert.equal(f.actions().length, 0)
+  }
+})
+
+test('native computer strings keep whitespace, newlines and literal Windows paths', () => {
+  const text = '  C:\\工作\\草稿 {标题}\n第二行  '
+  const parameters = [['action', 'true', 'type_text'], ['description', 'true', '输入正文'],
+    ['step_token', 'true', dsmlToken], ['text', 'true', text]]
+  const f = pageFixture()
+  f.controller.configure({ computerProtocol: { definitions: [
+    { action: 'type_text', parameters: [{ name: 'text', type: 'string', required: true }] }
+  ], stepToken: dsmlToken } })
+  f.confirm(); f.replace([turn('2', dsmlComputer(parameters))]); f.settle()
+  assert.equal(f.requests()[0].computerProtocolCode, null)
+  assert.equal(JSON.parse(f.requests()[0].rawJson).text, text)
+})
+
+test('JSON text containing DSML examples keeps its original bytes and is not recursively normalized', () => {
+  const raw = JSON.stringify({ type: 'computer', version: 1, action: 'type_text', step_token: dsmlToken,
+    description: '输入调用格式示例', text: dsmlComputer() })
+  for (const content of [code(raw), '```json\n' + raw + '\n```']) {
+    const f = pageFixture()
+    f.controller.configure({ computerProtocol: { definitions: [
+      { action: 'type_text', parameters: [{ name: 'text', type: 'string', required: true }] }
+    ], stepToken: dsmlToken } })
+    f.confirm(); f.replace([turn('2', content)]); f.settle()
+    assert.equal(f.requests().length, 1)
+    assert.equal(f.requests()[0].rawJson, raw)
+    assert.equal(f.requests()[0].computerProtocolCode, null)
+    assert.equal(f.actions().length, 0)
+  }
+})
+
+test('malformed native computer markup stays a rejected computer envelope without legacy fallback', () => {
+  const raw = dsmlComputer()
+  for (const malformed of [
+    raw.replace(' name="action" string="true"', ' name="action"'),
+    raw.replace('name="computer">', 'name="computer">unparsed-body'),
+    raw.replace('</ | | DSML | | invocation>', '</ | | DSML | | invoke>'),
+    raw.replace('</ | | DSML | | invocation>', ''),
+    dsmlComputer([...dsmlParameters, ['type', 'true', 'command'], ['command', 'true', 'must-not-run']])
+  ]) {
+    const f = pageFixture()
+    f.confirm(); f.replace([turn('2', malformed)]); f.settle()
+    assert.equal(f.requests().length, 1)
+    assert.equal(f.requests()[0].computerOutcome, 'invalid')
+    assert.equal(f.requests()[0].computerIssue, 'invalid-json')
+    assert.equal(f.actions().length, 0)
+    assert.equal(f.events.some(event => event.event === 'task-finished'), false)
+  }
+})
+
+test('multiple, mixed and oversized native desktop requests remain non-executable', () => {
+  const raw = dsmlComputer()
+  const cases = [
+    [raw + '\n' + raw, 'ambiguous-request'],
+    [raw + '\n{"command":"must-not-run","description":"混合请求"}', 'ambiguous-request'],
+    ['这是一个调用示例：\n' + raw, 'ambiguous-request'],
+    [dsmlComputer([...dsmlParameters, ['text', 'true', 'x'.repeat(64_000)]]), 'oversized-request']
+  ]
+  for (const [text, issue] of cases) {
+    const f = pageFixture()
+    f.confirm(); f.replace([turn('2', text)]); f.settle()
+    assert.equal(f.requests().length, 1)
+    assert.equal(f.requests()[0].computerOutcome, 'invalid')
+    assert.equal(f.requests()[0].computerIssue, issue)
+    assert.equal(f.actions().length, 0)
+  }
+})
+
+test('native desktop markup in reasoning, quotations or restored history cannot authorize a request', () => {
+  const raw = dsmlComputer()
+  for (const body of [
+    turn('2', '最终回答', [element('div', { class: 'ds-think-content' }, raw)]),
+    turn('2', element('blockquote', {}, raw)),
+    turn('2', element('q', {}, raw))
+  ]) {
+    const f = pageFixture()
+    f.confirm(); f.replace([body]); f.settle()
+    assert.equal(f.requests().length, 0)
+    assert.equal(f.actions().length, 0)
+  }
+  const history = pageFixture([turn('2', raw)])
+  history.controller.checkNow(); history.tick(250)
+  assert.equal(history.requests().length, 0)
+  assert.equal(history.actions().length, 0)
+})
+
+test('a streamed native call waits for a settled closing tag before recognition', () => {
+  const f = pageFixture(undefined, { ...platforms.DEEPSEEK_PAGE, replyStreamingAttribute: 'data-streaming' })
+  f.controller.configure({ computerProtocol: { definitions: [OBSERVE_DEFINITION], stepToken: dsmlToken } })
+  f.confirm()
+  const partial = turn('2', dsmlComputer().replace('</ | | DSML | | invocation>', ''))
+  partial.attributes['data-streaming'] = 'true'
+  f.replace([partial]); f.settle()
+  assert.equal(f.requests().length, 0)
+  const final = turn('2', dsmlBody(dsmlComputer()))
+  final.attributes['data-streaming'] = 'false'
+  f.replace([final]); f.settle()
+  assert.equal(f.requests().length, 1)
+  assert.equal(f.requests()[0].computerProtocolCode, null)
+})
+
+test('main refusing a live desktop request ends exactly that wait, so a resume or human send is not refused', () => {
+  const f = pageFixture(); f.confirm(); f.replace([turn('2', code(requestJson))]); f.settle()
+  const messageId = f.requests()[0].messageId
+  assert.notEqual(f.controller.status().awaitingReplySince, 0)
+  assert.equal(f.controller.releaseRejectedComputer('computer:other:1'), false, 'another request cannot end this wait')
+  assert.equal(f.controller.releaseRejectedComputer(messageId), true)
+  assert.equal(f.controller.status().awaitingReplySince, 0)
+  assert.ok(f.events.some(event => event.event === 'reply-state' && event.reason === 'computer-rejected'))
+  assert.equal(f.controller.releaseRejectedComputer(messageId), false, 'released once')
+
+  const g = pageFixture(); g.confirm(); g.replace([turn('2', code(requestJson))]); g.settle()
+  const old = g.requests()[0].messageId
+  g.advance(1); g.result()
+  assert.equal(g.controller.releaseRejectedComputer(old), false, 'a later wait belongs to a newer send')
+  assert.notEqual(g.controller.status().awaitingReplySince, 0)
 })
 
 test('reasoning, quotations, examples and nested discriminator data never become desktop input', () => {
@@ -371,7 +553,7 @@ test('duplicate fields and escaped discriminators remain unchanged for strict pr
 test('the page runs the shared strict validator and reports its diagnostic without altering raw bytes', () => {
   const currentToken = 'cu_' + 'a'.repeat(32)
   const definition = { action: 'observe', description: 'Synthetic', parameters: [], example: {} }
-  const base = { type: 'computer', version: 1, action: 'observe', step_token: currentToken }
+  const base = { type: 'computer', version: 1, action: 'observe', step_token: currentToken, description: '观察当前桌面' }
   const cases = [
     [JSON.stringify(base), null],
     [JSON.stringify({ ...base, version: 2 }), 'unsupported_version'],
@@ -424,11 +606,14 @@ function actualClass(path, className, names, globals = {}) {
   }).join('\n')
   return new Script(compile(`class Actual { ${methods} }; Actual`)).runInNewContext({ structuredClone, URL, ...globals })
 }
-const Runtime = actualClass('../src/main/session-runtime.ts', 'SessionRuntime', ['receiveComputerUseRequest', 'syncAutonomousTask', 'advanceComputerUse'], {
-  computerUseProtocol: protocol.computerUseProtocol
+const Runtime = actualClass('../src/main/session-runtime.ts', 'SessionRuntime', ['receiveComputerUseRequest', 'syncAutonomousTask', 'advanceComputerUse', 'completeComputerTaskFromModel'], {
+  computerUseProtocol: protocol.computerUseProtocol,
+  taskPresentationLease: load('../src/shared/task-presentation.ts').taskPresentationLease
 })
-const Embed = actualClass('../src/main/embed.ts', 'ChatGptEmbed', ['handlePageReport', 'taskActionSource', 'invalidateComputerDocument', 'getComputerUsePageEpoch'], {
+const Embed = actualClass('../src/main/embed.ts', 'ChatGptEmbed', ['handlePageReport', 'taskActionSource', 'invalidateComputerDocument', 'getComputerUsePageEpoch',
+  'endTask', 'completeTask', 'resetTaskPrompt'], {
   randomUUID,
+  setTimeout, clearTimeout,
   INTERCEPTOR_LOG_TAG: '[cmd-terminal] ', console: { info() {}, warn() {} }, writeReplyDiagnostic() {}, writePromptDiagnostic() {},
   conversationIdOf: (platform, url) => platform.conversationIdFromPath(new URL(url).pathname)
 })
@@ -466,7 +651,7 @@ function mainFixture(conversationId = 'chat-A') {
   runtime.taskProgression = progression
   let url = 'https://chat.deepseek.com/a/chat/s/chat-A'
   const embed = Object.assign(new Embed(), { platform: platforms.DEEPSEEK_PLATFORM, computerUseRecognitionEnabled: true,
-    taskPromptGeneration: 3, computerPageEpoch: 'document-a', liveContents: () => ({ getURL: () => url }), interceptor: { pendingQuestion: null },
+    taskPromptGeneration: 3, computerPageEpoch: 'document-a', liveContents: () => ({ getURL: () => url, executeJavaScript: async () => false }), interceptor: { pendingQuestion: null },
     getInterceptorStatus: () => ({}), handlers: {
       onComputerRequest(request) { receipts.push(request); return runtime.receiveComputerUseRequest('deepseek', request) }, onInterceptor() {}
     } })
@@ -477,6 +662,121 @@ function mainFixture(conversationId = 'chat-A') {
     setURL(value) { url = value }
   }
 }
+
+test('a settled model completion reaches main with the old generation and finishes without complete_task', () => {
+  for (const text of ['【任务完成】\n演示文稿尚未保存，内容已列在回复中。', '任务完成。', '**【任务完成】**']) {
+    const page = pageFixture(), main = mainFixture(), submission = page.confirm()
+    main.submit(submission)
+    let cancelled = 0
+    Object.assign(main.runtime, {
+      options: {}, deferredCommands: new Map(), backgroundTasks: { cancelNotifications() {} },
+      backgroundTaskResults: { isSending: false, cancel() { cancelled++ } }
+    })
+    main.embed.installInterceptor = async () => {}
+    main.embed.interceptor.taskStartedAt = 100000
+    main.embed.interceptor.taskFinishedAt = null
+    main.embed.handlers.onTaskCompleted = (id, source) => main.runtime.completeComputerTaskFromModel('deepseek', id, source)
+    page.replace([turn('2', text)]); page.settle()
+    const event = page.events.find(e => e.event === 'task-finished')
+    assert.ok(event)
+    assert.equal(event.completed, true)
+    assert.equal(event.sourceSubmissionId, submission)
+    assert.equal(event.taskPromptGeneration, 3, 'the ending event retains its pre-reset owner')
+    assert.equal(page.controller.status().taskPromptGeneration, 4)
+    main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(event))
+    const done = main.records.get(main.writes.at(-1).id)
+    assert.equal(done.status, 'completed')
+    assert.equal(done.modelCompletion.messageId, event.messageId)
+    assert.equal(main.coordinator.current('deepseek'), null)
+    assert.equal(main.embed.taskPromptGeneration, 4)
+    assert.equal(cancelled, 1)
+    main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(event))
+    assert.equal(cancelled, 1, 'duplicate ending events do not finish or notify twice')
+
+    main.submit('user:new-goal:1')
+    main.runtime.taskEnded = false
+    main.embed.interceptor.taskFinishedAt = null
+    // A delayed old completion cannot close the fresh task, even with the current page generation.
+    main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify({ ...event, taskPromptGeneration: 4 }))
+    assert.equal(main.coordinator.current('deepseek').status, 'recorded')
+    assert.equal(main.embed.interceptor.taskFinishedAt, null)
+    main.coordinator.dispose()
+  }
+})
+
+test('discussion, negation and restored history do not declare completion', () => {
+  for (const text of ['任务完成后再保存文件。', '任务尚未完成。', '还没有任务完成的证据。']) {
+    const page = pageFixture()
+    page.confirm(); page.replace([turn('2', text)]); page.settle()
+    assert.equal(page.events.some(e => e.event === 'task-finished' && e.completed === true), false)
+  }
+  const page = pageFixture([turn('2', '【任务完成】历史任务')])
+  page.settle()
+  assert.equal(page.events.some(e => e.event === 'task-finished' && e.completed === true), false)
+})
+
+test('ending a task preserves the next human goal and desktop request in either configure/stop order', async () => {
+  for (const configureFirst of [true, false]) {
+    const page = pageFixture(), main = mainFixture()
+    page.confirm(); page.replace([turn('2', code(requestJson))]); page.scan()
+    let pendingConfig
+    main.embed.userSubmissions = new Set()
+    main.embed.computerUseProtocolContext = { definitions: [], stepToken: null }
+    main.embed.interceptor.taskStartedAt = Date.now()
+    main.embed.interceptor.taskFinishedAt = null
+    main.embed.installInterceptor = async () => {
+      const config = { taskPromptGeneration: main.embed.taskPromptGeneration, taskPromptInjected: main.embed.taskPromptInjected }
+      if (configureFirst) page.controller.configure(config)
+      else pendingConfig = config
+    }
+    const pageWindow = { __cmdTerminalInterceptor: page.controller }
+    main.embed.liveContents = () => ({
+      getURL: () => 'https://chat.deepseek.com/a/chat/s/chat-A',
+      executeJavaScript: async script => new Script(script).runInNewContext({ window: pageWindow })
+    })
+    main.coordinator.stop('deepseek')
+    const stopped = await main.embed.endTask()
+    assert.equal(stopped.stopRequestAcknowledged, true)
+    assert.equal(main.embed.taskPromptGeneration, 4)
+    assert.equal(page.controller.status().taskPromptGeneration, 4)
+    page.tick(250)
+    assert.equal(page.requests().length, 0, 'the stopped task cannot emit a late desktop request')
+
+    const submissionId = page.confirm()
+    if (pendingConfig) page.controller.configure(pendingConfig)
+    assert.notEqual(page.controller.status().awaitingReplySince, 0, 'a delayed same-generation config cannot discard the new send')
+    main.embed.handlers.onUserStarted = (_text, _files, _edit, submission) => {
+      main.submit(submission.id)
+      return 'turn-after-stop'
+    }
+    main.embed.deliverUserMessage = async () => {}
+    const send = page.events.filter(event => event.event === 'user-message').at(-1)
+    main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(send))
+    assert.equal(main.coordinator.current('deepseek').sourceSubmissionId, submissionId)
+    assert.equal(main.coordinator.current('deepseek').status, 'recorded')
+    page.replace([turn('2', code(requestJson)), turn('4', code(requestJson))]); page.settle()
+    assert.equal(page.requests().length, 1)
+    const request = page.requests()[0]
+    assert.equal(request.taskPromptGeneration, main.embed.taskPromptGeneration)
+    main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(request))
+    assert.equal(main.receipts.length, 1, 'the current request reaches the main-process desktop bridge')
+    assert.equal(main.coordinator.current('deepseek').progress.stepCount, 1)
+    assert.equal(main.coordinator.current('deepseek').progress.currentStep.execution, 'not_executed', 'the offline fixture has no desktop backend')
+    main.coordinator.dispose()
+  }
+})
+
+test('an older stop boundary cannot clear a newer confirmed reply', () => {
+  const page = pageFixture()
+  page.controller.configure({ taskPromptGeneration: 5 })
+  page.confirm(); page.replace([turn('2', code(requestJson))]); page.scan()
+  for (const generation of [4, -1, 4.5, '5']) assert.equal(page.controller.endTask(generation), false)
+  assert.equal(page.controller.status().taskPromptGeneration, 5)
+  assert.notEqual(page.controller.status().awaitingReplySince, 0)
+  page.tick(250)
+  assert.equal(page.requests().length, 1)
+  assert.equal(page.requests()[0].taskPromptGeneration, 5)
+})
 
 test('the actual bridge preserves recognition and returns a protocol result without running an unavailable desktop', () => {
   const f = mainFixture()
@@ -491,6 +791,29 @@ test('the actual bridge preserves recognition and returns a protocol result with
   const count = f.writes.length
   f.report()
   assert.equal(f.writes.length, count, 'duplicate events cannot record another step')
+})
+
+test('a normalized native observe request reaches the owned bridge and stale generations remain rejected', () => {
+  const page = pageFixture(), main = mainFixture()
+  const submissionId = page.confirm()
+  main.submit(submissionId)
+  const token = main.coordinator.computerStepToken('deepseek')
+  const capability = main.runtime.getComputerUseCapability()
+  main.runtime.getComputerUseCapability = () => ({ ...capability, actionDefinitions: [OBSERVE_DEFINITION], actions: ['observe'] })
+  page.controller.configure({ computerProtocol: { definitions: [OBSERVE_DEFINITION], stepToken: token } })
+  const parameters = dsmlParameters.map(field => field[0] === 'step_token' ? ['step_token', 'true', token] : field)
+  page.replace([turn('2', dsmlBody(dsmlComputer(parameters)))]); page.settle()
+  const event = page.requests()[0]
+  assert.equal(event.computerProtocolCode, null)
+  main.report({ ...event, taskPromptGeneration: 2 })
+  assert.equal(main.receipts.length, 0)
+  main.report(event)
+  assert.equal(main.receipts.length, 1)
+  const task = main.coordinator.current('deepseek')
+  assert.equal(task.sourceSubmissionId, submissionId)
+  assert.equal(task.progress.currentStep.action, 'observe')
+  assert.equal(task.progress.currentStep.execution, 'not_executed', 'the offline bridge has no desktop backend')
+  assert.equal(task.progress.stepCount, 1)
 })
 
 test('a full document change rejects late events from the previous document on the same route', () => {

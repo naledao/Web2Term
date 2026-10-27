@@ -86,10 +86,10 @@ export class TaskProgression {
     const originalCall = request.call
     // Recovery is an executor admission rule, not a replacement system prompt or plan.
     // Discovery may find the window to observe; only a successful fresh observe lifts it.
-    if (request.call && task.recovery?.requiresObservation && !['list_apps', 'list_windows', 'observe'].includes(request.call.action)) {
+    if (request.call && task.recovery?.requiresObservation && !['list_apps', 'list_windows', 'observe', 'inspect_interactions', 'validate_observation', 'wait_for', 'focus_window'].includes(request.call.action)) {
       const { call, ...owner } = request
       request = { ...owner, result: { type: 'computer_result', version: 1, action: call.action, ok: false, execution: 'not_executed',
-        code: 'recovery_required', message: '当前任务需要先核对真实后状态，包括任务恢复、未知回执或操作后的观察失败；请先使用 list_windows／observe，再决定补救步骤。本次动作未派发。',
+        code: 'recovery_required', message: '当前任务需要先核对真实后状态，包括任务恢复、未知回执或操作后的观察失败；可先发现窗口/弹窗、只读复核或等待，必要时恢复已知窗口，再用observe核对；本次输入未派发，未知操作不得重放。',
         data: { recovery: task.recovery, history_only: true, requires_fresh_observation: true, goal_verified: false } } }
     }
     const progressBlocked = request.call ? this.deps.coordinator.inspectComputerStep(request, request.call) : null
@@ -105,6 +105,7 @@ export class TaskProgression {
       handledMessageIds: [...progress.handledMessageIds, request.sourceMessageId], detail: null,
       ...(request.receipt ? { computerRequest: { ...structuredClone(request.receipt), receivedAt: now } } : {}),
       currentStep: { id: randomUUID(), sourceMessageId: request.sourceMessageId, action: request.call?.action || request.result?.action || 'protocol', tool: 'computer',
+        ...(originalCall?.description ? { description: originalCall.description } : {}),
         machine: structuredClone(this.deps.machine?.(request) ?? task.machine),
         status: 'queued', execution: 'not_executed', delivery: 'pending', message: null, resultText: null, createdAt: now, updatedAt: now }
     }
@@ -246,7 +247,7 @@ export class TaskProgression {
             op.stage = 'executing'
             op.progress.phase = 'executing-tool'; op.progress.detail = null
             step.status = 'executing'; step.execution = 'unknown'
-            if (!this.save(op, { event: 'dispatch' })) return
+            if (!this.save(op, { event: 'dispatch', ...(typeof op.request.call.parameters.observation_id === 'string' ? { observationId: op.request.call.parameters.observation_id } : {}) })) return
             op.executionAbort = new AbortController()
             const stop = (): void => op.executionAbort?.abort()
             op.abort.signal.addEventListener('abort', stop, { once: true })

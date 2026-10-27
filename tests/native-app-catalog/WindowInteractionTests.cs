@@ -60,7 +60,9 @@ internal static class WindowInteractionTests
     private static void Expiry() {
         var f = new Fixture(); f.Discovery.Windows = [f.Root, Window("0x2000", f.Root.Handle)];
         string id = Data(f.Inspect()).windows[0].window.window_id!; f.Now = At.AddSeconds(31);
-        Check(f.Catalog.Resolve(Scope, id, CancellationToken.None) == null && f.Catalog.Resolve(Scope, f.Parent, CancellationToken.None) != null, "derived expiry widened/revoked source");
+        Check(f.Catalog.Resolve(Scope, id, CancellationToken.None) != null && f.Catalog.Resolve(Scope, f.Parent, CancellationToken.None) != null, "persistent dialog expired like a transient menu");
+        var menu = new Fixture(); menu.Menu(); string menuId = Data(menu.Inspect()).menu.keyboard_window_id!; menu.Now = At.AddSeconds(31);
+        Check(menu.Catalog.Resolve(Scope, menuId, CancellationToken.None) == null, "transient menu outlived its short context");
         for (int i = 0; i < 70; i++) Data(f.Inspect());
         f.Menu(); id = Data(f.Inspect()).menu.keyboard_window_id!;
         f.Discovery.Windows = [f.Root, f.Discovery.Windows[1] with { Lifetime = "reused" }];

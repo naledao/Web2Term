@@ -31,7 +31,7 @@ const id = (prefix, digit = 'a') => prefix + digit.repeat(32)
 const at = Date.parse('2026-10-26T00:00:00Z'), waitId = '11111111-1111-4111-8111-111111111111'
 const window = { window_id: id('win_'), hwnd: '0x1234', pid: 42, process_started_at: new Date(at - 10000).toISOString(), thread_id: 100,
   class_name: 'ExampleWindow', title: 'Report', application: { name: 'Editor', executable_path: 'C:\\Apps\\Editor.exe', app_user_model_id: null },
-  visible: true, minimized: false, foreground: false, enabled: true, cloaked: false, owner_hwnd: null, owner_window_id: null, identity_verified: true, identity_status: 'verified' }
+  visible: true, minimized: false, foreground: false, enabled: true, cloaked: false, owner_hwnd: null, owner_window_id: null, identity_verified: true, identity_status: 'verified', bounds: { x: 0, y: 0, width: 800, height: 600 } }
 const probe = (patch = {}) => ({ wait_id: waitId, condition: 'window_present', snapshot_id: id('wset_'), scope_collected_at: new Date(at).toISOString(),
   scope_expires_at: new Date(at + 120000).toISOString(), before_at: new Date(at).toISOString(), checked_at: new Date(at + 10).toISOString(),
   window, controls: null, status: 'met', matches: 1, complete: true, limitations: [], revision: '1:2', input_ready: false, goal_verified: false, ...patch })
@@ -39,16 +39,17 @@ const plain = value => JSON.parse(JSON.stringify(value))
 
 test('public conditions have strict mutually exclusive selectors and bounded deadlines', () => {
   for (const p of [{ condition: 'window_present', query: '报表', pid: 42 }, { condition: 'text_present', window_id: window.window_id, text: '完成' },
-    { condition: 'control_available', window_id: window.window_id, selector: { name: '保存', role: 'button' }, timeout_ms: 30000, observation: 'window' }]) {
+    { condition: 'control_available', window_id: window.window_id, selector: { name: '保存', role: 'button' }, timeout_ms: 30000, observation: 'window' },
+    { condition: 'control_present', window_id: window.window_id, selector: { name: '保存' }, timeout_ms: 180000 }]) {
     assert.equal(metadata.validateWaitParameters(p), null)
-    assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'wait_for', step_token: id('cu_'), ...p }), [metadata.WAIT_FOR_DEFINITION]).ok, true)
+    assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'wait_for', description: '等待界面更新', step_token: id('cu_'), ...p }), [metadata.WAIT_FOR_DEFINITION]).ok, true)
   }
   for (const p of [{ condition: 'script', code: 'true' }, { condition: 'window_present', query: ' ' }, { condition: 'window_present', query: 'x', text: 'x' },
     { condition: 'window_present', query: 'x', window_id: window.window_id }, { condition: 'window_present', query: 'x', pid: 0 },
     { condition: 'text_present', window_id: window.window_id, text: '' }, { condition: 'text_present', window_id: window.window_id, text: 'x', regex: true },
     { condition: 'control_available', window_id: window.window_id, selector: { name: 'Save', role: 'invented' } },
     { condition: 'control_available', window_id: window.window_id, selector: { name: 'Save', element_id: id('el_') } },
-    ...[null, 0, 99, 30001, 100.5].map(timeout_ms => ({ condition: 'window_present', query: 'x', timeout_ms }))]) assert.ok(metadata.validateWaitParameters(p))
+    ...[null, 0, 99, 3600001, 100.5].map(timeout_ms => ({ condition: 'window_present', query: 'x', timeout_ms }))]) assert.ok(metadata.validateWaitParameters(p))
 })
 
 test('UIA presence, uniqueness, visibility and partial reads have different evidence requirements', () => {
@@ -62,7 +63,9 @@ test('UIA presence, uniqueness, visibility and partial reads have different evid
   assert.equal(check(control, [row, row]).status, 'ambiguous')
   assert.equal(check(control, [row]).status, 'met')
   assert.equal(check(control, [row], true, { ...window, enabled: false }).status, 'not_met')
-  for (const patch of [{ password: true }, { password: null }, { offscreen: true }, { properties_complete: false }, { bounds: null }]) assert.equal(check(text, [{ ...row, ...patch }]).matches, 0)
+  for (const patch of [{ password: true }, { password: null }, { offscreen: true }, { bounds: null }]) assert.equal(check(text, [{ ...row, ...patch }]).matches, 0)
+  assert.equal(check(text, [{ ...row, properties_complete: false }]).matches, 1)
+  assert.equal(check({ ...control, condition: 'control_present' }, [row, row], false).status, 'met')
   assert.equal(check(control, [{ ...row, name_truncated: true }]).matches, 0)
   assert.equal(check(text, [row], true, { ...window, minimized: true }).status, 'unavailable')
 })
@@ -72,7 +75,7 @@ test('native window evidence is independently checked for identity, source, quer
   assert.equal(implementation.validateWaitProbe(probe(), p, waitId, null, at + 20), true)
   for (const patch of [{ wait_id: 'other' }, { condition: 'text_present' }, { status: 'met', matches: 2 }, { input_ready: true }, { goal_verified: true },
     { extra: 'field' }, { window: { ...window, minimized: true } }, { window: { ...window, pid: 43 } }, { window: { ...window, class_name: '#32768' } },
-    { scope_expires_at: new Date(at + 300000).toISOString() }, { complete: true, limitations: ['state_changed'] }]) assert.equal(implementation.validateWaitProbe(probe(patch), p, waitId, null, at + 20), false)
+    { scope_expires_at: new Date(at + 16 * 60000).toISOString() }, { complete: true, limitations: ['state_changed'] }]) assert.equal(implementation.validateWaitProbe(probe(patch), p, waitId, null, at + 20), false)
   assert.equal(implementation.validateWaitProbe(probe({ status: 'ambiguous', matches: 2, window: null }), p, waitId, null, at + 20), true)
   assert.equal(implementation.validateWaitProbe(probe({ status: 'not_met', matches: 0, window: null }), p, waitId, null, at + 20), true)
 })
@@ -96,6 +99,11 @@ test('deadline is monotonic and bounded; even a positive result arriving late is
   assert.equal(result.status, 'timeout'); assert.equal(result.elapsed_ms, 1000); assert.deepEqual(f.sleeps, [250, 500, 250])
   const late = scheduler(), deadline = await implementation.pollWindowsWait({ timeout_ms: 100 }, late.check(() => { late.advance(101); return { status: 'met' } }), late.clock, late.current)
   assert.equal(deadline.status, 'timeout'); assert.equal(deadline.checks, 1)
+})
+test('a bounded long business wait is not truncated after 128 local checks', async () => {
+  const f = scheduler()
+  const result = await implementation.pollWindowsWait({ timeout_ms: 180000 }, f.check(n => ({ status: n === 140 ? 'met' : 'not_met' })), f.clock, f.current)
+  assert.equal(result.status, 'met'); assert.equal(result.checks, 140); assert.ok(result.elapsed_ms < 180000)
 })
 test('ambiguity stops immediately and cancellation or task replacement stops further checks', async () => {
   const f = scheduler(), result = await implementation.pollWindowsWait({}, f.check(() => ({ status: 'ambiguous' })), f.clock, f.current)

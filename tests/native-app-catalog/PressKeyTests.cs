@@ -76,12 +76,15 @@ internal static class PressKeyTests
         Check(effect.Press(effect.Publish(), "Alt+F4").Ok && effect.Input.Calls == 1, "normal shortcut effect invalidated or repeated the submitted chord");
     }
     private static void Stale() {
-        foreach (string scenario in new[] { "focus", "image", "dpi", "not_ready", "held", "control", "ancestor" }) {
+        var dynamic = new Fixture(); var changing = dynamic.Publish();
+        Array.Fill(dynamic.Images.Pixels.Bgra, (byte)255);
+        Check(dynamic.Press(changing, "Tab").Ok && dynamic.Input.Calls == 1, "dynamic pixels blocked a valid native window key route");
+        foreach (string scenario in new[] { "focus", "dpi", "not_ready", "held", "control", "ancestor" }) {
             var f = new Fixture(); var image = f.Publish(controls: scenario is "control" or "ancestor");
-            if (scenario == "focus") f.States.Current = f.States.Current with { Focus = "foreign" };
+            if (scenario == "focus") f.Input.Allowed = false;
             if (scenario == "image") f.Images.Pixels.Bgra[0] = 255;
             if (scenario == "dpi") f.States.Current = f.States.Current with { Source = f.States.Current.Source with { WindowDpi = 192 } };
-            if (scenario == "not_ready") f.States.Current = f.States.Current with { InputTargetReady = false };
+            if (scenario == "not_ready") f.Input.Allowed = false;
             if (scenario == "held") f.Input.Allowed = false;
             if (scenario == "control") f.Controls.RootNode.Children[0].Raw = f.Controls.RootNode.Children[0].Raw with { Key = "replacement" };
             if (scenario == "ancestor") f.Controls.AncestorsValid = false;

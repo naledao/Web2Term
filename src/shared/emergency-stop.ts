@@ -15,5 +15,7 @@ export interface EmergencyStopState {
   canReset: boolean
   message: string
 }
+/** A physical input interrupted one desktop step; the limit-th in a row pauses the task. Kind of input only. */
+export interface DesktopInputWarning { strike: number; limit: number; input: 'keyboard' | 'click' | 'wheel' | null; at: number }
 export interface EmergencyStopResetResult { ok: boolean; state: EmergencyStopState; message: string }
 export const EMERGENCY_STOP_SHORTCUT = 'CommandOrControl+Alt+Shift+F12'

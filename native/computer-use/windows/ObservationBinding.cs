@@ -37,7 +37,7 @@ internal sealed class ObservationRegistry(IObservationStateBackend states, IObse
         string? reason = e.Expires <= Now ? "expired" : e.Mutation != mutation ? "layout_changed" : null;
         if (reason == null) {
             ObservationState current = states.Read(e.Request, cancellation);
-            reason = Difference(first ? e.State : e.State with { Revision = current.Revision }, current);
+            reason = Difference(e.State, current, contentRevision: false);
             if (reason == null && !current.InputTargetReady) reason = "input_target_unavailable";
         }
         if (reason != null) entries.Remove(owner.Scope);
@@ -51,13 +51,19 @@ internal sealed class ObservationRegistry(IObservationStateBackend states, IObse
         string? reason = e.Expires <= Now ? "expired" : e.Mutation != mutation ? "layout_changed" : null;
         if (reason == null) {
             ObservationState current = states.Read(e.Request, cancellation);
-            reason = Difference(e.State, current);
-            if (reason == null && !(locator.Purpose == "pointer" ? current.PointerTargetReady ?? current.InputTargetReady : current.InputTargetReady)) reason = "input_target_unavailable";
+            // A window-level shortcut has no UIA control target. The native keyboard
+            // guard below verifies the real foreground/focus route immediately before
+            // SendInput; an incomplete UIA tree must not reject Ctrl+N/Enter/etc.
+            reason = locator.Purpose == "pointer" || locator.ElementId == null && locator.Purpose == "keyboard"
+                ? InputDifference(e.State, current) : Difference(e.State, current, contentRevision: false);
+            if (reason == null && locator.ElementId != null && !(locator.Purpose == "pointer" ? current.PointerTargetReady ?? current.InputTargetReady : current.InputTargetReady)) reason = "input_target_unavailable";
         }
         if (reason != null) entries.Remove(owner.Scope);
         return Result(owner, locator, reason);
     }
-    internal string? Difference(ObservationState before, ObservationState after)
+    // contentRevision: false ignores the window's object-event revision (repaints, live content), never identity,
+    // geometry, DPI, focus or popups.
+    internal string? Difference(ObservationState before, ObservationState after, bool contentRevision = true)
     {
         if (before.Source.Window?.Menu?.ContextId != after.Source.Window?.Menu?.ContextId) return "layout_changed";
         DiscoveredWindow? a = before.Source.Window?.Window, b = after.Source.Window?.Window;
@@ -67,8 +73,25 @@ internal sealed class ObservationRegistry(IObservationStateBackend states, IObse
         if (!before.Source.Monitors.SequenceEqual(after.Source.Monitors) || before.Source.Monitor != after.Source.Monitor || before.Source.WindowDpi != after.Source.WindowDpi) return "desktop_changed";
         if (before.Focus != after.Focus) return "focus_changed";
         if (before.Popups != after.Popups) return "popup_changed";
-        if (before.Revision != after.Revision) return "layout_changed";
+        if (contentRevision && before.Revision != after.Revision) return "layout_changed";
         return null;
+    }
+    /** State that can invalidate a coordinate/window-level native input; focus and UIA
+     * readiness are checked by the native input backend, not by the old observation. */
+    internal string? InputDifference(ObservationState before, ObservationState after)
+    {
+        if (before.Source.Window?.Menu?.ContextId != after.Source.Window?.Menu?.ContextId) return "layout_changed";
+        DiscoveredWindow? a = before.Source.Window?.Window, b = after.Source.Window?.Window;
+        if ((a == null) != (b == null) || a != null && (b == null || !a.SameIdentity(b))) return "window_changed";
+        if (a != null && b != null && (a.Visible != b.Visible || a.Minimized != b.Minimized || a.Enabled != b.Enabled || a.Cloaked != b.Cloaked || a.OwnerHandle != b.OwnerHandle)) return "window_state_changed";
+        if (before.Source.Bounds != after.Source.Bounds) return "layout_changed";
+        if (!before.Source.Monitors.SequenceEqual(after.Source.Monitors) || before.Source.Monitor != after.Source.Monitor || before.Source.WindowDpi != after.Source.WindowDpi) return "desktop_changed";
+        return null;
+    }
+    /** A read captures a moment in a changing UI. Input has its own live target checks. */
+    internal string? CaptureDifference(ObservationState before, ObservationState after)
+    {
+        return InputDifference(before, after);
     }
     internal void Publish(ObservationProvenance owner, ObservationRequest request, ObservationState state, object result)
     {
@@ -76,22 +99,30 @@ internal sealed class ObservationRegistry(IObservationStateBackend states, IObse
         if (entries.Count >= 16 && !entries.ContainsKey(owner.Scope)) entries.Remove(entries.MinBy(pair => pair.Value.Expires).Key);
         ControlTreeResult? tree = result is ControlsOnlyResult only ? only.controls : (result as ObservationResult)?.controls;
         PrivateControlSnapshot? snapshot = tree == null ? null : controls.TakeSnapshot(tree.observation_id);
-        entries[owner.Scope] = new(owner, request, state, result, snapshot, Now.AddMinutes(2), mutation);
+        entries[owner.Scope] = new(owner, request, state, result, snapshot, Now.Add(WindowCatalog.ReferenceLifetime), mutation);
     }
     private static bool Matches(Entry entry, string id) => entry.Result is ObservationResult image &&
         (image.observation_id == id || image.controls?.observation_id == id) || entry.Result is ControlsOnlyResult only && only.observation_id == id;
     private ObservationValidation Result(ObservationProvenance owner, ObservationLocator locator, string? reason) =>
         new(locator.ObservationId, owner.Step, Now.ToString("O"), reason == null, reason);
-    internal ObservationValidation Validate(ObservationProvenance owner, ObservationLocator locator, CancellationToken cancellation)
+    /*
+     * A coordinate click (localPoint, opted in by ClickService only) lands on the pixels around one point. Apps that keep repainting (Electron/QQ
+     * animations, live lists, blinking carets) raise their window's object-event revision and change the whole
+     * image constantly, so a byte-identical window would never be reached. For that purpose only: the window's
+     * identity, geometry, DPI, focus and popups must hold, and the pixels near the point must still match
+     * (ObservationPng.PatchMatches). checkPixels: false is the after-move recheck, where hover highlights are expected.
+     */
+    internal ObservationValidation Validate(ObservationProvenance owner, ObservationLocator locator, CancellationToken cancellation, bool localPoint = false, bool checkPixels = true)
     {
         cancellation.ThrowIfCancellationRequested();
-        if ((locator.X == null) != (locator.Y == null) || locator.X is < 0 or > 2559 || locator.Y is < 0 or > 2559 ||
+        if ((locator.X == null) != (locator.Y == null) || locator.X is < 0 or > ObservationPng.MaximumDimension - 1 || locator.Y is < 0 or > ObservationPng.MaximumDimension - 1 ||
             locator.ElementId != null && locator.X != null || locator.Purpose is not ("inspect" or "pointer" or "keyboard") ||
             locator.Purpose == "pointer" && locator.ElementId == null && locator.X == null || locator.Purpose == "keyboard" && locator.ElementId == null)
             return Result(owner, locator, "locator_unavailable");
         if (!entries.TryGetValue(owner.Scope, out Entry? entry) || !Matches(entry, locator.ObservationId)) return Result(owner, locator, "unknown_observation");
         string? reason = null;
         ImagePointResolution? coordinate = null;
+        bool local = localPoint && locator.Purpose == "pointer" && locator.ElementId == null && locator.X != null;
         if (entry.Owner != owner) reason = "source_step_mismatch";
         else if (entry.Expires <= Now) reason = "expired";
         else if (entry.Mutation != mutation) reason = "layout_changed";
@@ -100,13 +131,28 @@ internal sealed class ObservationRegistry(IObservationStateBackend states, IObse
             if (reason == null)
             {
                 ObservationState before = states.Read(entry.Request, cancellation);
-                reason = Difference(entry.State, before);
-                if (reason == null && locator.Purpose != "inspect" && (entry.State.Source.Window == null ||
+                bool livePointer = locator.ElementId != null && locator.Purpose == "pointer";
+                reason = local || livePointer || locator.ElementId == null && locator.X == null ? InputDifference(entry.State, before) : Difference(entry.State, before, locator.ElementId == null);
+                // Coordinate clicks and window-level shortcuts are guarded by the
+                // live native input path. Do not require a complete UIA tree or its
+                // derived input_ready flag for those two paths.
+                if (reason == null && locator.Purpose != "inspect" && locator.ElementId != null && (entry.State.Source.Window == null ||
                     !(locator.Purpose == "pointer" ? before.PointerTargetReady ?? before.InputTargetReady : before.InputTargetReady))) reason = "input_target_unavailable";
                 if (reason == null && locator.ElementId != null) reason = CheckElement(entry, locator, cancellation);
                 else if (reason == null && entry.Result is ObservationResult image)
                 {
                     if (locator.X != null && (locator.X < 0 || locator.Y < 0 || locator.X >= image.image.width || locator.Y >= image.image.height)) reason = "locator_unavailable";
+                    else if (local)
+                    {
+                        if (checkPixels)
+                        {
+                            var seen = image.source_png == null ? null : ObservationPng.DecodeOwn(image.source_png);
+                            CapturedPixels current = images.Capture(before.Source, cancellation);
+                            if (seen is not { } decoded || decoded.Width != image.image.width || decoded.Height != image.image.height ||
+                                current.Width != before.Source.Bounds.width || current.Height != before.Source.Bounds.height ||
+                                !ObservationPng.PatchMatches(decoded, current, image.crop, locator.X!.Value, locator.Y!.Value)) reason = "image_changed";
+                        }
+                    }
                     else
                     {
                         CapturedPixels pixels = images.Capture(before.Source, cancellation);
@@ -118,7 +164,7 @@ internal sealed class ObservationRegistry(IObservationStateBackend states, IObse
                 else if (reason == null && locator.X != null) reason = "locator_unavailable";
                 else if (reason == null) reason = CheckTree(entry, cancellation);
                 // Re-read after UIA/WGC and directly before returning to the native caller.
-                if (reason == null) reason = Difference(entry.State, states.Read(entry.Request, cancellation));
+                if (reason == null) reason = local || livePointer || locator.ElementId == null && locator.X == null ? InputDifference(entry.State, states.Read(entry.Request, cancellation)) : Difference(entry.State, states.Read(entry.Request, cancellation), locator.ElementId == null);
                 if (reason == null && locator.X != null)
                 {
                     coordinate = entry.Result is ObservationResult picture ? CoordinateMapper.Resolve(picture, locator.X.Value, locator.Y!.Value) : null;
@@ -147,7 +193,7 @@ internal sealed class ObservationRegistry(IObservationStateBackend states, IObse
     {
         for (int depth = 0; depth <= 8; depth++)
         {
-            if (Fingerprint(oldTree, old) != Fingerprint(fresh, current)) return false;
+            if (Key(oldTree, old.element_id) is not string key || key != Key(fresh, current.element_id)) return false;
             if (old.parent_id == null || current.parent_id == null) return old.parent_id == current.parent_id;
             ControlRow? a = oldTree.Result.elements.FirstOrDefault(row => row.element_id == old.parent_id), b = fresh.Result.elements.FirstOrDefault(row => row.element_id == current.parent_id);
             if (a == null || b == null) return false;
@@ -163,9 +209,9 @@ internal sealed class ObservationRegistry(IObservationStateBackend states, IObse
         PrivateControlSnapshot? fresh = Fresh(entry, cancellation);
         ControlRow? current = fresh?.Result.elements.SingleOrDefault(value => Key(fresh, value.element_id) == key);
         if (row == null || current == null || fresh == null) return "element_unavailable";
-        if (!row.properties_complete || !current.properties_complete || !SameAncestors(tree, row, fresh, current)) return "element_changed";
-        bool nativeMenu = entry.State.Source.Window?.Menu != null && locator.Purpose != "keyboard";
-        if (tree.Result.focus.status == "changed" || tree.Result.focus.status == "unavailable" && !nativeMenu || tree.Result.focus.status != fresh.Result.focus.status || Key(tree, tree.Result.focus.element_id) != Key(fresh, fresh.Result.focus.element_id)) return "focus_changed";
+        if (!SameAncestors(tree, row, fresh, current) || !ControlTreeService.MatchesRaw(row,
+            new(key, current.control_type, current.name, current.password, current.enabled, current.focused, current.offscreen, current.selected, current.bounds, current.patterns, current.properties_complete), input: locator.Purpose != "inspect")) return "element_changed";
+        if (locator.Purpose == "keyboard" && (tree.Result.focus.status is "changed" or "unavailable" || tree.Result.focus.status != fresh.Result.focus.status || Key(tree, tree.Result.focus.element_id) != Key(fresh, fresh.Result.focus.element_id))) return "focus_changed";
         if (locator.Purpose != "inspect" && (current.enabled != true || current.offscreen != false)) return "input_target_unavailable";
         if (locator.Purpose == "keyboard" && (current.focused != true || fresh.Result.focus.status != "inside_target" || fresh.Result.focus.element_id != current.element_id)) return "focus_changed";
         return null;
@@ -179,20 +225,113 @@ internal sealed class ObservationRegistry(IObservationStateBackend states, IObse
             tree.Result.complete == fresh.Result.complete && tree.Result.limitations.SequenceEqual(fresh.Result.limitations) ? null : "element_changed";
     }
     // Future input handlers MUST call this on the same MTA immediately before their bounded native dispatch.
-    // Window shortcuts may be used without an exposed UIA control. They still verify the observed content and Win32 keyboard route.
+    // Window shortcuts need the bound source and live Win32 keyboard route, not byte-identical content.
     internal ActionResult WithCurrentWindowKey(ObservationProvenance owner, ObservationLocator locator, Func<ImagePointResolution?, ActionResult> dispatch, CancellationToken cancellation)
     {
         if (locator.ElementId != null || locator.X != null || locator.Y != null) return new(false, "not_executed", "invalid_parameters", "窗口按键入口不能覆盖控件或坐标。");
-        ObservationValidation check = Validate(owner, locator with { Purpose = "inspect" }, cancellation);
-        cancellation.ThrowIfCancellationRequested();
-        if (check.valid) check = ValidateState(owner, locator with { Purpose = "keyboard" }, cancellation);
+        ObservationValidation check = ValidateState(owner, locator with { Purpose = "keyboard" }, cancellation);
         if (!check.valid) return new(false, "not_executed", "stale_observation", "窗口观察或实际键盘路由已失效，未按键。", check);
         try { return dispatch(null); } finally { InvalidateMutations(); }
     }
-    // The callback is not stored or replayed; read-only validate_observation does not call it.
-    internal ActionResult WithCurrentObservation(ObservationProvenance owner, ObservationLocator locator, Func<ImagePointResolution?, ActionResult> dispatch, CancellationToken cancellation)
+    /*
+     * Desktop clicks (an opt-in setting checked by main) use a window-less desktop/region observation. There is
+     * no business window to hold steady, so the check is local: same capture source and monitors, and the
+     * pixels around the requested point still match what the model saw. The native handler then checks the
+     * window under the point itself. Like WithCurrentObservation, the callback is never stored or replayed.
+     */
+    internal ActionResult WithCurrentDesktopPoint(ObservationProvenance owner, ObservationLocator locator, Func<ImagePointResolution, CaptureSource, ActionResult> dispatch, CancellationToken cancellation, bool consume = true)
     {
-        ObservationValidation check = Validate(owner, locator, cancellation);
+        cancellation.ThrowIfCancellationRequested();
+        string? reason = null;
+        ImagePointResolution? coordinate = null;
+        CaptureSource? source = null;
+        if (locator.ElementId != null || locator.X is not int x || locator.Y is not int y || locator.Purpose != "pointer") reason = "locator_unavailable";
+        else if (!entries.TryGetValue(owner.Scope, out Entry? entry) || !Matches(entry, locator.ObservationId)) reason = "unknown_observation";
+        else if (entry.Owner != owner) reason = "source_step_mismatch";
+        else if (entry.Expires <= Now) reason = "expired";
+        else if (entry.Mutation != mutation) reason = "layout_changed";
+        else if (entry.State.Source.Window != null || entry.Result is not ObservationResult image || image.source_png == null) reason = "input_target_unavailable";
+        else
+        {
+            try
+            {
+                CaptureSource current = images.Source(entry.Request, cancellation);
+                if (current.Window != null || current.Bounds != entry.State.Source.Bounds || current.Monitor != entry.State.Source.Monitor ||
+                    !current.Monitors.SequenceEqual(entry.State.Source.Monitors)) reason = "desktop_changed";
+                else if ((coordinate = CoordinateMapper.Resolve(image, x, y)) == null) reason = "locator_unavailable";
+                else
+                {
+                    var seen = ObservationPng.DecodeOwn(image.source_png);
+                    CapturedPixels pixels = images.Capture(current, cancellation);
+                    if (seen is not { } decoded || decoded.Width != image.image.width || decoded.Height != image.image.height ||
+                        pixels.Width != current.Bounds.width || pixels.Height != current.Bounds.height || !ObservationPng.PatchMatches(decoded, pixels, image.crop, x, y)) reason = "image_changed";
+                    else source = current;
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { reason = "state_unavailable"; }
+        }
+        if (reason != null || coordinate == null || source == null)
+        {
+            entries.Remove(owner.Scope); // A failed reference never becomes live again.
+            return new(false, "not_executed", "stale_observation", "桌面观察在点击位置附近已变化或不可核对，原点击未执行。", Result(owner, locator, reason ?? "state_unavailable"));
+        }
+        try { return dispatch(coordinate, source); } finally { if (consume) InvalidateMutations(); }
+    }
+    /**
+     * Window screenshot coordinate input intentionally does not re-read UIA or compare
+     * the pixel patch again. Hovering a PowerPoint/QQ canvas can repaint the image after
+     * the cursor arrives, and providers can return incomplete trees even though the native
+     * window and pixel coordinate are still valid. The click backend performs the live
+     * window, foreground, hit-test and input-state checks immediately before SendInput.
+     */
+    internal ActionResult WithCurrentWindowPoint(ObservationProvenance owner, ObservationLocator locator, Func<ImagePointResolution, CaptureSource, ActionResult> dispatch, CancellationToken cancellation, bool consume = true)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        string? reason = null;
+        ImagePointResolution? coordinate = null;
+        CaptureSource? source = null;
+        if (locator.ElementId != null || locator.X is not int x || locator.Y is not int y || locator.Purpose != "pointer") reason = "locator_unavailable";
+        else if (!entries.TryGetValue(owner.Scope, out Entry? entry) || !Matches(entry, locator.ObservationId)) reason = "unknown_observation";
+        else if (entry.Owner != owner) reason = "source_step_mismatch";
+        else if (entry.Expires <= Now) reason = "expired";
+        else if (entry.Mutation != mutation) reason = "layout_changed";
+        else if (entry.State.Source.Window == null || entry.Result is not ObservationResult image) reason = "input_target_unavailable";
+        else
+        {
+            try
+            {
+                CaptureSource current = images.Source(entry.Request, cancellation);
+                if (current.Window == null || !entry.State.Source.Window.Window.SameIdentity(current.Window.Window) ||
+                    current.Bounds != entry.State.Source.Bounds || current.WindowDpi != entry.State.Source.WindowDpi ||
+                    !current.Monitors.SequenceEqual(entry.State.Source.Monitors)) reason = "window_changed";
+                else if ((coordinate = CoordinateMapper.Resolve(image, x, y)) == null) reason = "locator_unavailable";
+                else source = current;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (ObservationException error) { reason = error.Code == "stale_window" ? "window_changed" : "state_unavailable"; }
+            catch { reason = "state_unavailable"; }
+        }
+        if (reason != null || coordinate == null || source == null)
+        {
+            entries.Remove(owner.Scope);
+            return new(false, "not_executed", "stale_observation", "窗口坐标观察无法确认来源，原点击未执行。", Result(owner, locator, reason ?? "state_unavailable"));
+        }
+        try { return dispatch(coordinate, source); } finally { if (consume) InvalidateMutations(); }
+    }
+    internal ObservationValidation ValidatePoint(ObservationProvenance owner, ObservationLocator locator, CancellationToken cancellation)
+    {
+        locator = locator with { Purpose = "pointer" };
+        ActionResult Read(ImagePointResolution point, CaptureSource source) => new(true, "executed", "ok", "坐标来源已核对，未执行输入。", Result(owner, locator, null) with { coordinate = point });
+        ActionResult result = ClickTarget(owner, locator.ObservationId)?.Source.Window == null
+            ? WithCurrentDesktopPoint(owner, locator, Read, cancellation, consume: false)
+            : WithCurrentWindowPoint(owner, locator, Read, cancellation, consume: false);
+        return result.Data as ObservationValidation ?? Result(owner, locator, "state_unavailable");
+    }
+    // The callback is not stored or replayed; read-only validate_observation does not call it.
+    internal ActionResult WithCurrentObservation(ObservationProvenance owner, ObservationLocator locator, Func<ImagePointResolution?, ActionResult> dispatch, CancellationToken cancellation, bool localPoint = false)
+    {
+        ObservationValidation check = Validate(owner, locator, cancellation, localPoint);
         cancellation.ThrowIfCancellationRequested();
         if (!check.valid) return new(false, "not_executed", "stale_observation", "观察已失效，原定位未执行。", check);
         if (locator.Purpose == "inspect") return new(false, "not_executed", "invalid_parameters", "输入入口需要具体定位及输入用途。");
@@ -234,8 +373,8 @@ internal sealed class BoundObserveAction(IWindowsAction inner, ObservationRegist
             execution = result.Execution;
             if (!result.Ok || result.Data == null) return result;
             ObservationState after = registry.ReadState(r, cancellation);
-            if (registry.Difference(before, after) is string reason)
-                return new(false, "executed", "stale_observation", "观察采集期间窗口、布局、焦点或弹窗变化，请重新观察。", new ObservationValidation("", owner.Step, DateTime.UtcNow.ToString("O"), false, reason));
+            if (registry.CaptureDifference(before, after) is string reason)
+                return new(false, "executed", "stale_observation", $"观察采集一致性检查未通过（{reason}），请重新观察。", new ObservationValidation("", owner.Step, DateTime.UtcNow.ToString("O"), false, reason));
             if (result.Data is ObservationResult image && (image.source_bounds != after.Source.Bounds || image.window_id != after.Source.Window?.WindowId ||
                 !image.monitors.SequenceEqual(after.Source.Monitors) || image.coordinate_context != CoordinateMapper.Context(after.Source)))
                 return new(false, "executed", "stale_observation", "截图几何、窗口 DPI 或显示器状态与当前来源不一致，请重新观察。");
@@ -263,10 +402,11 @@ internal sealed class ValidateObservationAction(ObservationRegistry registry) : 
             string? element = p.GetProperty("element_id").GetString();
             int? x = p.GetProperty("x").ValueKind == JsonValueKind.Null ? null : p.GetProperty("x").GetInt32(), y = p.GetProperty("y").ValueKind == JsonValueKind.Null ? null : p.GetProperty("y").GetInt32();
             if (!ObservationBindingProtocol.Id(observation, "obs_") || element != null && !ObservationBindingProtocol.Id(element, "el_") ||
-                (x == null) != (y == null) || x is < 0 or > 2559 || y is < 0 or > 2559 || element != null && x != null ||
+                (x == null) != (y == null) || x is < 0 or > ObservationPng.MaximumDimension - 1 || y is < 0 or > ObservationPng.MaximumDimension - 1 || element != null && x != null ||
                 purpose is not ("inspect" or "pointer" or "keyboard") || purpose == "pointer" && element == null && x == null || purpose == "keyboard" && element == null) return ObservationBindingProtocol.Invalid();
             cancellation.ThrowIfCancellationRequested(); execution = "executed";
-            ObservationValidation result = registry.Validate(owner, new(observation, element, x, y, purpose), cancellation);
+            ObservationLocator locator = new(observation, element, x, y, purpose);
+            ObservationValidation result = x != null ? registry.ValidatePoint(owner, locator, cancellation) : registry.Validate(owner, locator, cancellation);
             return new(result.valid, "executed", result.valid ? "ok" : "stale_observation", result.valid ? "只读复核完成，未执行输入；后续输入必须再次在原生入口复核。" : "观察已失效，原定位未执行，请使用新观察重新判断。", result);
         }
         catch (OperationCanceledException) { return new(false, execution, "cancelled", "观察复核已取消。"); }

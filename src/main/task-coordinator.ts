@@ -157,7 +157,8 @@ export class TaskCoordinator {
   }
   completionNotificationAllowed(platformId: string, conversationId: string | null): boolean {
     const state = this.entries.get(platformId)
-    return state?.conversationId !== conversationId || !state.task || state.task.status === 'completed' && state.task.completion?.report?.state === 'delivered'
+    return state?.conversationId !== conversationId || !state.task || state.task.status === 'completed' &&
+      (!!state.task.modelCompletion || state.task.completion?.report?.state === 'delivered')
   }
   reconcileCompletionDependencies(platformId: string, background: readonly BackgroundTask[]): void {
     const task = this.current(platformId)
@@ -311,6 +312,24 @@ export class TaskCoordinator {
     this.publish({ ...state, task })
   }
 
+  /** The user's completion policy accepts a live model marker, without inventing evidence. */
+  completeFromModel(lease: TaskLease, messageId: string): boolean {
+    if (!this.owns(lease) || typeof messageId !== 'string' || !messageId.trim() || messageId.length > 512) return false
+    const state = this.entries.get(lease.platformId)!, current = state.task!
+    if (!current.progress) return false
+    const task = this.interrupted(current, 'stopped')
+    task.status = 'completed'
+    task.modelCompletion = { messageId, receivedAt: task.updatedAt }
+    task.progress!.phase = 'completed'
+    task.progress!.lastReply = { messageId, kind: 'response' }
+    task.progress!.detail = '模型已输出“任务完成”，本轮自动操作已结束。'
+    this.store.saveAutonomousTasks([task])
+    this.computerTokens.delete(lease.platformId)
+    this.computerClaims.delete(task.id)
+    this.publish({ ...state, task })
+    return true
+  }
+
   /** Does not restore history or bind a new conversation as a side effect. */
   current(platformId: string): AutonomousTask | null {
     const state = this.entries.get(platformId)
@@ -318,7 +337,7 @@ export class TaskCoordinator {
   }
   isLimited(platformId: string, conversationId: string | null): boolean {
     const state = this.entries.get(platformId)
-    return state?.conversationId === conversationId && (!!state.task?.control?.halted || !!state.error)
+    return state?.conversationId === conversationId && (!!state.task?.control?.halted && !state.task.modelCompletion || !!state.error)
   }
 
   owns(lease: TaskLease): boolean {
@@ -474,7 +493,10 @@ export class TaskCoordinator {
       const checked = parseTaskCompletionState({ ...task.completion, report })
       if (checked?.report?.stepId === update.executionId && (checked.report.state === 'rejected' || checked.report.state === 'ready' && update.result.ok && update.result.execution === 'executed')) task.completion = checked
     }
-    if (update.result.diagnosis) task.control.recovering = true
+    const diagnosis = update.result.diagnosis
+    if (diagnosis && !['partial_observation', 'target_not_found'].includes(diagnosis.category) &&
+      !(diagnosis.category === 'loading_timeout' && !update.result.progress_control?.action_timed_out) &&
+      !(diagnosis.category === 'no_progress' && ['list_apps', 'list_windows', 'observe', 'validate_observation', 'inspect_interactions', 'wait_for'].includes(update.result.action))) task.control.recovering = true
     if (update.result.execution === 'unknown' || update.result.diagnosis?.requires_fresh_observation) {
       task.recovery = { version: 1, reason: update.result.execution === 'unknown' ? 'unknown_result' : 'result_verification', sourceTaskId: task.id, sourceGeneration: task.generation,
         checkpointAt: update.at, requiresObservation: true, unknownExecutionId: update.result.execution === 'unknown' ? update.executionId : task.recovery?.unknownExecutionId ?? null, observationStepId: null }
@@ -506,7 +528,7 @@ export class TaskCoordinator {
     }
     if (pendingTaskQuestion(task)) { task.progress.phase = 'waiting-user'; task.progress.detail = state.task!.progress?.detail ?? '等待必要澄清，尚未取得真实回答。' }
     if (update?.event === 'dispatch' || progress.currentStep?.tool === 'command' && progress.currentStep.status === 'executing' && state.task!.progress?.currentStep?.status !== 'executing')
-      task.completion = advanceCompletion(state.task!, progress.currentStep!.action)
+      task.completion = advanceCompletion(state.task!, progress.currentStep!.action, update?.event === 'dispatch' ? update.observationId : undefined)
     if (task.completion && progress.currentStep?.delivery === 'sent') {
       task.completion = structuredClone(task.completion)
       for (const e of task.completion.evidence) if (e.stepId === progress.currentStep.id) e.delivered = true

@@ -58,7 +58,7 @@ const id = (prefix, char = 'a') => prefix + char.repeat(32)
 const now = Date.parse('2026-10-25T00:00:00Z')
 const owner = { sessionId: 'session-A', platformId: 'deepseek', conversationId: 'conversation-A', taskId: 'task-A', generation: 1 }
 const row = { window_id: id('win_'), hwnd: '0x1234', pid: 42, process_started_at: new Date(now - 10000).toISOString(), thread_id: 44, class_name: 'Example', title: 'Example window', application: { name: 'Editor', executable_path: null, app_user_model_id: null },
-  visible: true, minimized: false, foreground: false, enabled: true, cloaked: false, owner_hwnd: null, owner_window_id: null, identity_verified: true, identity_status: 'verified' }
+  visible: true, minimized: false, foreground: false, enabled: true, cloaked: false, owner_hwnd: null, owner_window_id: null, identity_verified: true, identity_status: 'verified', bounds: { x: 0, y: 0, width: 800, height: 600 } }
 const bounds = { x: -1920, y: -100, width: 4, height: 2 }
 const monitor = { monitor_id: id('mon_'), bounds, primary: true, dpi_x: 144, dpi_y: 144, scale_percent: 150 }
 const plain = value => JSON.parse(JSON.stringify(value))
@@ -74,7 +74,7 @@ function png(width, height) {
 }
 function observation(p = { target: 'desktop' }) {
   const crop = p.crop ?? (p.target === 'region' ? { x: p.x, y: p.y, width: p.width, height: p.height } : { x: 0, y: 0, width: 4, height: 2 })
-  const scale = Math.min(1, (p.max_dimension ?? 1600) / Math.max(crop.width, crop.height))
+  const scale = Math.min(1, (p.max_dimension ?? 8192) / Math.max(crop.width, crop.height))
   const width = Math.max(1, Math.floor(crop.width * scale)), height = Math.max(1, Math.floor(crop.height * scale)), bytes = png(width, height)
   const data = { observation_id: id('obs_'), target: p.target, window_id: p.window_id ?? null, monitor_id: p.window_id ? null : p.monitor_id ?? monitor.monitor_id,
     window_identity: p.window_id ? { hwnd: row.hwnd, pid: row.pid, process_started_at: row.process_started_at, thread_id: row.thread_id, class_name: row.class_name } : null,
@@ -334,16 +334,16 @@ test('ambiguous discovery never guesses a window or captures the whole desktop',
   assert.equal(result.data.post_observation_error.code, 'target_unresolved'); assert.equal(f.requests.length, 1)
 })
 
-test('a final changed control or unavailable observation cannot turn an earlier match into success', async t => {
+test('sampled conditions survive later changes or capture failure, while malformed samples never establish a match', async t => {
   for (const scenario of ['changed', 'failed', 'malformed']) {
     const f = fixture(t)
     if (scenario === 'changed') f.mutate(result => { result.data.controls.elements[1].name = 'Loading' })
     if (scenario === 'failed') f.after(() => f.failure({ ok: false, execution: 'not_executed', code: 'capture_failed', message: 'Synthetic blocked capture' }))
     if (scenario === 'malformed') f.waitMutate(data => { data.matches = 99 })
     const result = await f.wait({ condition: 'control_available', window_id: row.window_id, selector: { name: 'Search', role: 'edit' } })
-    assert.equal(result.code, 'wait_failed'); assert.equal(result.data.condition_met, false)
-    if (scenario === 'changed') assert.equal(result.data.status, 'changed')
-    if (scenario === 'failed') assert.equal(result.data.status, 'observation_failed')
+    assert.equal(result.code, scenario === 'malformed' ? 'wait_failed' : 'ok'); assert.equal(result.data.condition_met, scenario !== 'malformed')
+    if (scenario === 'changed') { assert.equal(result.data.status, 'met'); assert.equal(result.data.post_condition_met, false) }
+    if (scenario === 'failed') { assert.equal(result.data.status, 'met'); assert.equal(result.data.post_condition_met, null); assert.equal(result.data.post_observation_error.code, 'capture_failed') }
     if (scenario === 'malformed') assert.equal(result.data.check_error.code, 'invalid_result')
     assert.equal(f.requests.filter(r => r.action === 'wait_for').length, 1)
     assert.equal(f.requests.filter(r => r.action === 'observe').length, 1)
@@ -384,7 +384,7 @@ test('observe and wait are advertised only for the supported live helper and unr
   f.unregister(); assert.equal(f.tool.definitions().length, 0)
 })
 test('strict page/main validators reject arbitrary paths, raw handles, incomplete crops and conflicting sources', async t => {
-  const f = fixture(t), base = { type: 'computer', version: 1, action: 'observe', step_token: id('cu_') }
+  const f = fixture(t), base = { type: 'computer', version: 1, action: 'observe', description: '观察当前界面', step_token: id('cu_') }
   for (const parameters of [{ target: 'all' }, { target: 'desktop', output_path: 'C:\\capture.png' }, { target: 'desktop', scope_id: id('ws_') },
     { target: 'desktop', hwnd: '0x1234' }, { target: 'window' }, { target: 'desktop', window_id: row.window_id },
     { target: 'window', window_id: row.window_id, monitor_id: monitor.monitor_id }, { target: 'region', x: 0, y: 0, width: 1 },
@@ -399,10 +399,12 @@ test('desktop defaults to a single source and returns only task-owned opaque att
   const f = fixture(t), result = await f.invoke()
   assert.equal(result.ok, true); assert.equal(result.data.transform.origin_x, -1920); assert.equal(result.data.input_ready, false)
   assert.equal(result.attachments.length, 1); assert.doesNotMatch(JSON.stringify(result), /output_path|AppData|base64/)
-  const request = f.requests[0]; assert.equal(request.action, 'observe'); assert.equal(request.parameters.max_dimension, 1600)
+  const request = f.requests[0]; assert.equal(request.action, 'observe'); assert.equal(request.parameters.max_dimension, 8192)
   assert.match(request.parameters.scope_id, /^ws_[a-f0-9]{32}$/); assert.equal(request.parameters.monitor_id, null)
   const [image] = await f.service.prepare(result.attachments, owner)
   assert.equal(image.mimeType, 'image/png'); assert.equal(image.sha256, result.data.image.sha256)
+  // The browser names the uploaded File after the path; the page rejects any other declared name as a changed draft.
+  assert.equal(image.fileName, path.basename(image.path), 'declared name matches the file the browser will upload')
   await assert.rejects(f.service.prepare(result.attachments, { ...owner, taskId: 'task-B' }))
   await assert.rejects(f.service.prepare([{ ...result.attachments[0], sha256: '0'.repeat(64) }], owner))
   f.service.release(result.attachments, { ...owner, taskId: 'task-B' }); assert.equal((await f.service.prepare(result.attachments, owner)).length, 1)
@@ -465,7 +467,7 @@ test('control options are strictly scoped, bounded and cannot carry arbitrary se
     { target: 'desktop', include_controls: true }, { target: 'window', window_id: row.window_id, max_depth: 2 },
     { target: 'window', window_id: row.window_id, include_controls: false, include_selection: true }]) assert.equal((await f.invoke(p)).code, 'invalid_parameters')
   assert.equal(f.requests.length, 0)
-  const checked = protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'observe', step_token: id('cu_'), ...base }), [metadata.OBSERVE_DEFINITION])
+  const checked = protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'observe', description: '观察目标窗口', step_token: id('cu_'), ...base }), [metadata.OBSERVE_DEFINITION])
   assert.equal(checked.ok, true)
 })
 test('image and controls are validated and delivered together with explicit non-atomic timestamps', async t => {
@@ -532,7 +534,7 @@ test('actual page caption sender admits bounded UIA summaries only on the owned 
 test('observations bind to consumed source-step provenance without exposing tokens or private scopes', async t => {
   const f = fixture(t), result = await f.invoke({ target: 'window', window_id: row.window_id, include_controls: true })
   assert.equal(result.ok, true); assert.equal(result.data.binding.source_step_id, f.context.step.id)
-  assert.equal(Date.parse(result.data.binding.expires_at), now + 120000)
+  assert.equal(Date.parse(result.data.binding.expires_at), now + 15 * 60000)
   assert.deepEqual(plain(result.data.controls.binding), plain(result.data.binding))
   const check = await f.check({ observation_id: result.data.observation_id, element_id: result.data.controls.elements[1].element_id, purpose: 'keyboard' })
   assert.equal(check.ok, true); assert.equal(check.data.input_ready, false); assert.equal(check.data.action_not_executed, true)
@@ -575,7 +577,7 @@ test('controls aliases, expiry and refresh failure preserve stale facts without 
   const alias = fixture(t), combined = await alias.invoke({ target: 'window', window_id: row.window_id, include_controls: true })
   assert.equal((await alias.check({ observation_id: combined.data.controls.observation_id, element_id: combined.data.controls.elements[1].element_id })).ok, true)
   const f = fixture(t), image = await f.invoke()
-  f.setTime(now + 120001); f.failure({ ok: false, execution: 'not_executed', code: 'capture_blocked', message: 'blocked' })
+  f.setTime(now + 15 * 60000 + 1); f.failure({ ok: false, execution: 'not_executed', code: 'capture_blocked', message: 'blocked' })
   const result = await f.check({ observation_id: image.data.observation_id })
   assert.equal(result.code, 'stale_observation'); assert.equal(result.data.validation.reason, 'expired')
   assert.equal(result.data.refresh_error.code, 'capture_blocked'); assert.equal(result.attachments, undefined)
@@ -657,10 +659,32 @@ test('click metadata enforces one observed locator and rejects scripts native ha
     { ...base, x: 0, y: 0, desktop_x: -1920 }, { ...base, x: 0, y: 0, modifiers: ['Control'] }, { ...base, x: 0, y: 0, request_id: 'override' }])
     assert.equal((await f.click(p)).code, 'invalid_parameters')
   assert.equal(f.requests.length, 1)
-  const checked = protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'click', step_token: id('cu_'), ...base, x: 0, y: 0, click_count: 2 }), [clickMetadata.CLICK_DEFINITION])
+  const checked = protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'click', description: '双击目标位置', step_token: id('cu_'), ...base, x: 0, y: 0, click_count: 2 }), [clickMetadata.CLICK_DEFINITION])
   assert.equal(checked.ok, true)
   const g = fixture(t), overview = await g.invoke(); assert.equal((await g.click({ observation_id: overview.data.observation_id, x: 0, y: 0 })).code, 'click_blocked')
   assert.equal(g.requests.length, 1)
+})
+
+test('desktop coordinate clicks are off by default; enabled, they click a desktop image point and observe the same area again', async t => {
+  const f = fixture(t), desktop = await f.invoke({ target: 'desktop' })
+  const off = await f.click({ observation_id: desktop.data.observation_id, x: 1, y: 1 })
+  assert.equal(off.code, 'click_blocked'); assert.match(off.message, /允许点击桌面任意位置/)
+  assert.equal(f.requests.some(request => request.action === 'click'), false, 'a disabled desktop click never reaches the helper')
+
+  const enabled = { capability: () => ({ ...f.context.capability(), desktopPointClickEnabled: true }) }
+  assert.equal((await f.click({ observation_id: desktop.data.observation_id, element_id: id('el_') }, enabled)).code, 'invalid_parameters', 'desktop images have no controls')
+  const result = await f.click({ observation_id: desktop.data.observation_id, x: 1, y: 1, button: 'right', click_count: 2 }, enabled)
+  assert.equal(result.ok, true); assert.equal(result.data.click.window_id, null); assert.equal(result.data.click.click_completed, true)
+  assert.deepEqual(f.requests.map(request => request.action), ['observe', 'click', 'observe'])
+  const sent = f.requests[1].parameters
+  assert.equal(sent.x, 1); assert.equal(sent.button, 'right'); assert.equal(sent.click_count, 2); assert.equal(sent.element_id, null)
+  assert.equal(result.data.observation.target, 'desktop', 'the same desktop source is observed after the click')
+  assert.equal(result.data.interaction_hint, undefined)
+  assert.equal(result.attachments.length, 1)
+
+  const g = fixture(t), region = await g.invoke({ target: 'region', x: 0, y: 0, width: 2, height: 2 })
+  const regional = await g.click({ observation_id: region.data.observation_id, x: 1, y: 1 }, { capability: () => ({ ...g.context.capability(), desktopPointClickEnabled: true }) })
+  assert.equal(regional.ok, true); assert.equal(regional.data.observation.target, 'region')
 })
 
 test('mouse click dispatches once with trusted provenance and returns one new task-bound observation', async t => {
@@ -774,10 +798,20 @@ test('type_text rejects unsafe text syntax and publishes a strict focus-bound de
     assert.equal((await f.type({ ...base, ...patch })).code, 'invalid_parameters')
   }
   assert.equal(f.requests.length, 0)
-  const request = { type: 'computer', version: 1, action: 'type_text', step_token: id('cu_'), ...base, text: '', mode: 'replace' }
+  const request = { type: 'computer', version: 1, action: 'type_text', description: '替换输入框内容', step_token: id('cu_'), ...base, text: '', mode: 'replace' }
   assert.equal(protocol.computerUseProtocol.check(JSON.stringify(request), [typeTextMetadata.TYPE_TEXT_DEFINITION]).ok, true)
   const chunks = typeTextMetadata.unicodeTextChunks('x'.repeat(31) + '😀\r\n中文\t{ENTER}^%')
   assert.equal(chunks[0].length, 31); assert.equal(chunks.join(''), 'x'.repeat(31) + '😀\r中文\t{ENTER}^%')
+})
+test('window text insertion accepts no UIA target but cannot fabricate content verification', async t => {
+  const f = fixture(t), shot = await f.invoke({ target: 'window', window_id: row.window_id })
+  f.typeMutate(r => { r.data.verification = 'unavailable'; r.data.content_verified = false })
+  const result = await f.type({ observation_id: shot.data.observation_id, text: '自绘编辑区😀' })
+  assert.equal(result.ok, true); assert.equal(result.data.type_text.element_id, null)
+  assert.equal(result.data.type_text.content_verified, false)
+  const g = fixture(t), current = await g.invoke({ target: 'window', window_id: row.window_id })
+  assert.equal((await g.type({ observation_id: current.data.observation_id, text: 'replace', mode: 'replace' })).code, 'invalid_parameters')
+  assert.equal(g.requests.some(r => r.action === 'type_text'), false)
 })
 
 test('type_text sends original literal text once with private provenance and one fresh observation', async t => {
@@ -869,7 +903,7 @@ test('press_key metadata rejects raw codes scripts holds repeats and unsupported
     { vk: 13 }, { scan_code: 28 }, { text: 'literal' }, { repeat: 2 }, { hold_ms: 100 }, { script: 'code' }, { x: 1, y: 1 }])
     assert.equal((await f.press({ ...base, ...patch })).code, 'invalid_parameters')
   assert.equal(f.requests.length, 0)
-  assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'press_key', step_token: id('cu_'), ...base }), [pressKeyMetadata.PRESS_KEY_DEFINITION]).ok, true)
+  assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'press_key', description: '发送目标按键', step_token: id('cu_'), ...base }), [pressKeyMetadata.PRESS_KEY_DEFINITION]).ok, true)
   f.state.actions = f.state.actions.filter(action => action !== 'press_key')
   assert.equal(f.context.capability().actions.includes('press_key'), false)
   assert.equal((await f.press(base)).ok, false); assert.equal(f.requests.length, 0)
@@ -950,14 +984,14 @@ test('key post-capture failure and stale contexts preserve dispatch facts and ca
 test('scroll requires an explicit exclusive locator and one bounded direction with no native overrides', async t => {
   const f = fixture(t), base = { observation_id: id('obs_'), x: 1, y: 1, direction: 'down' }
   for (const patch of [{ direction: 'diagonal' }, { direction: null }, { amount: 0 }, { amount: 11 }, { amount: 1.5 }, { amount: '3' }, { amount: null },
-    { element_id: id('el_') }, { x: undefined }, { y: undefined }, { x: -1 }, { y: 2560 }, { delta: -120 }, { pixels: 300 },
+    { element_id: id('el_') }, { x: undefined }, { y: undefined }, { x: -1 }, { y: 8192 }, { delta: -120 }, { pixels: 300 },
     { repeat: 3 }, { hwnd: '0x1234' }, { modifiers: ['Shift'] }, { script: 'code' }, { binding_scope: id('ws_') }])
     assert.equal((await f.scroll({ ...base, ...patch })).code, 'invalid_parameters')
   assert.equal((await f.scroll({ observation_id: id('obs_'), direction: 'down' })).code, 'invalid_parameters')
   assert.equal(f.requests.length, 0)
   for (const p of [base, { observation_id: id('obs_'), element_id: id('el_'), direction: 'right', amount: 10 }]) {
     assert.equal(scrollMetadata.validateScrollParameters(p), null)
-    assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'scroll', step_token: id('cu_'), ...p }), [scrollMetadata.SCROLL_DEFINITION]).ok, true)
+    assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'scroll', description: '滚动目标页面', step_token: id('cu_'), ...p }), [scrollMetadata.SCROLL_DEFINITION]).ok, true)
   }
   f.state.actions = f.state.actions.filter(action => action !== 'scroll')
   assert.equal(f.context.capability().actions.includes('scroll'), false)
@@ -1072,12 +1106,12 @@ test('drag metadata requires complete bounded original-image paths and rejects r
   const f = fixture(t), base = { observation_id: id('obs_'), path: smallDragPath }
   for (const patch of [{ path: [] }, { path: [{ x: 0, y: 0 }] }, { path: Array.from({ length: 34 }, (_, i) => ({ x: i, y: 0 })) },
     { path: [{ x: 0, y: 0 }, { x: 0, y: 0 }] }, { path: [{ x: 0, y: 0 }, { x: 2 }] }, { path: [{ x: 0, y: 0 }, { x: -1, y: 0 }] },
-    { path: [{ x: 0, y: 0 }, { x: 1, y: 0, pressure: 1 }] }, { path: [{ x: 0, y: 0 }, { x: 2560, y: 0 }] }, { path: '0,0;1,1' },
+    { path: [{ x: 0, y: 0 }, { x: 1, y: 0, pressure: 1 }] }, { path: [{ x: 0, y: 0 }, { x: 8192, y: 0 }] }, { path: '0,0;1,1' },
     { path: [{ x: 0, y: 0 }, { x: 1.5, y: 0 }] }, { duration_ms: 99 }, { duration_ms: 3001 }, { duration_ms: null }, { button: null }, { button: 'pen' },
     { repeat: 2 }, { hwnd: '0x1234' }, { script: 'code' }, { element_id: id('el_') }, { x: 1, y: 1 }, { modifiers: ['Shift'] }, { hold: true }])
     assert.equal((await f.drag({ ...base, ...patch })).code, 'invalid_parameters')
   assert.equal(f.requests.length, 0)
-  assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'drag', step_token: id('cu_'), ...base }), [dragMetadata.DRAG_DEFINITION]).ok, true)
+  assert.equal(protocol.computerUseProtocol.check(JSON.stringify({ type: 'computer', version: 1, action: 'drag', description: '拖动目标控件', step_token: id('cu_'), ...base }), [dragMetadata.DRAG_DEFINITION]).ok, true)
   f.state.actions = f.state.actions.filter(action => action !== 'drag')
   assert.equal(f.context.capability().actions.includes('drag'), false); assert.equal((await f.drag(base)).ok, false); assert.equal(f.requests.length, 0)
 })

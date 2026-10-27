@@ -83,7 +83,7 @@ static class WindowFocusTests
     {
         var f = Fixture(); f.Source.Windows = [Window() with { Lifetime = "1:2" }];
         Check(Focus(f).Code == "stale_window" && f.Backend.Activations == 0, "reused identity focused");
-        DateTime now = At; var expired = Fixture(clock: () => now); now = now.AddMinutes(2);
+        DateTime now = At; var expired = Fixture(clock: () => now); now = now.AddMinutes(15);
         Check(Focus(expired).Code == "stale_window" && expired.Backend.Activations == 0, "expired identity focused");
     }
     static void Replaced()
