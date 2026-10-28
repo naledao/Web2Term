@@ -57,3 +57,10 @@ npm run dist:win     # 打 Windows 安装包
 ```
 
 改完代码至少让 `npm run build` 通过再交付。
+
+## 推送后写更新说明
+
+每次推送到 `main` 都会触发 `Build and Release Desktop`，自动把 patch 版本号加一并发布 Release。推送后：
+
+1. 用 `web2term-release-notes` 为新版本写更新说明，格式参照上一版，内容面向用户，先存为**草稿**。
+2. 等这次 workflow 成功、GitHub Release 出现后，再发布这份更新说明。workflow 失败就保持草稿，并告诉用户。
