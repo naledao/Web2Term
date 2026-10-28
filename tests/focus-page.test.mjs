@@ -49,6 +49,7 @@ function fixture() {
     latestReplyNode: nodes => nodes.at(-1), turnKeyOf: node => node.id,
     readReplyText: node => node.body || '', readReplyMarkdown: node => node.markdown || '', smartUiCardsOf: () => [], smartUiLayoutsOf: () => [], focusComposerModesOf: () => [],
     focusModelSettingsOf: () => ({ model: null, effort: null, models: [], efforts: [] }),
+    focusModelPickerParts: () => null,
     extractCommand: () => null, PAGE: DEEPSEEK_PAGE,
     queryAll: () => [], isVisibleElement: () => true, focusSendFailureOf: () => null
   })
@@ -64,6 +65,22 @@ test('the read-only focus snapshot exposes a later native send rejection and cle
   f.context.focusSendFailureOf = () => null
   assert.equal(f.snapshot().sendFailure, null)
   assert.equal(f.calls.length, 0)
+})
+
+test('a new ChatGPT composer can be ready before its model trigger without requesting any native input', () => {
+  const f = fixture()
+  f.context.PAGE = CHATGPT_PAGE
+  let mounted = false, disabled = false
+  f.context.focusModelPickerParts = () => mounted ? { trigger: {} } : null
+  f.context.controlDisabled = () => disabled
+  assert.equal(f.snapshot().ready, true)
+  assert.equal(f.snapshot().modelSettingsReady, false)
+  mounted = true
+  assert.equal(f.snapshot().modelSettingsReady, true)
+  disabled = true
+  assert.equal(f.snapshot().modelSettingsReady, false, 'a still-loading trigger must not start the automatic menu read')
+  assert.equal(f.calls.length, 0)
+  assert.equal(f.reports.length, 0)
 })
 
 test('app composer preserves multiline input and waits for confirmed user-send outcome', async () => {

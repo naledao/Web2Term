@@ -13,6 +13,7 @@ interface FocusDiagnostic extends FocusEditDiagnostic {
   action?: 'choose' | 'submit'
   taskOpen?: boolean
   ready?: boolean
+  modelSettingsReady?: boolean
   nativeDraft?: boolean
   waiting?: boolean
   generating?: 'active' | 'idle' | 'unknown'
@@ -41,7 +42,7 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
     const details: Record<string, string | number | boolean | null> = {
       event: payload.event, sessionId: identifier(owner.sessionId), conversationId: identifier(owner.conversationId)
     }
-    for (const key of ['ready', 'nativeDraft', 'waiting', 'sendFailed', 'retryable', 'taskOpen', 'anchored', 'submitted', 'originalMatches', 'draftMatches',
+    for (const key of ['ready', 'modelSettingsReady', 'nativeDraft', 'waiting', 'sendFailed', 'retryable', 'taskOpen', 'anchored', 'submitted', 'originalMatches', 'draftMatches',
       'requestBodyReadable', 'requestTextMatches', 'requestOriginalMatches', 'requestStateMatches', 'requestStatePresent', 'requestPathMatches',
       'nativeClickReceived', 'clickTrusted', 'clickPrevented'] as const) if (typeof payload[key] === 'boolean') details[key] = payload[key]!
     if (payload.action === 'choose' || payload.action === 'submit') details.action = payload.action

@@ -755,6 +755,7 @@ export class ChatGptEmbed {
      * long load, which on a cold start is the several seconds the splash is up.
      */
     contents.on('dom-ready', () => {
+      this.keepRenderingWhileHidden()
       void this.installTheme()
       void this.installSelectionQuestion()
     })
@@ -781,6 +782,7 @@ export class ChatGptEmbed {
       this.captureCurrentConversation()
     })
     contents.on('did-navigate-in-page', () => {
+      this.keepRenderingWhileHidden()
       this.publishState()
       this.captureCurrentConversation()
       this.dismissSelectionQuestion()
@@ -1398,6 +1400,7 @@ export class ChatGptEmbed {
         !reply || typeof reply.sourceMessageId !== 'string' || reply.sourceMessageId.length > 160 || typeof reply.answer !== 'string' || reply.answer.length > 250000))) return null
       if (raw.composerModes !== undefined && !validFocusComposerModes(raw.composerModes)) return null
       if (raw.modelSettings !== undefined && !validFocusModelSettings(raw.modelSettings)) return null
+      if (raw.modelSettingsReady !== undefined && typeof raw.modelSettingsReady !== 'boolean') return null
       if (raw.sendFailure != null && !validFocusSendFailure(raw.sendFailure)) return null
       return raw
     } catch { return null }

@@ -144,6 +144,8 @@ export interface FocusPageSnapshot {
   smartReplies?: { sourceMessageId: string; answer: string }[]
   composerModes?: FocusComposerMode[]
   modelSettings?: FocusModelSettings
+  /** The current page has one rendered, enabled model trigger; independent of the composer. */
+  modelSettingsReady?: boolean
 }
 export interface FocusChatState extends FocusOwner {
   ready: boolean
@@ -157,6 +159,7 @@ export interface FocusChatState extends FocusOwner {
   smartReplies?: { sourceMessageId: string; answer: string }[]
   composerModes?: FocusComposerMode[]
   modelSettings?: FocusModelSettings
+  modelSettingsReady?: boolean
   /** Set while computer use is on and the Windows helper is not ready: why sending waits. */
   sendBlock?: string | null
 }

@@ -465,8 +465,10 @@ export default function FocusChatView(props: Props): JSX.Element {
   const [sending, setSending] = useState(false)
   const [changingMode, setChangingMode] = useState<FocusComposerModeId | null>(null)
   const [settingPending, setSettingPending] = useState<FocusModelSettingKind | null>(null)
+  const [settingError, setSettingError] = useState('')
   const settingBusy = useRef(false)
   const modelReadAttempted = useRef(false)
+  const modelReadAttempts = useRef(0)
   const [editingId, setEditingId] = useState<string | null>(null)
   const readEpoch = useRef(0)
   const [stopping, setStopping] = useState(false)
@@ -574,10 +576,10 @@ export default function FocusChatView(props: Props): JSX.Element {
   const ready = state?.ready === true
   // Computer use waits for its Windows helper; the composer keeps the draft meanwhile.
   const sendBlock = state?.sendBlock || ''
-  const updateModelSettings = useCallback(async (kind: FocusModelSettingKind, value?: string): Promise<void> => {
+  const updateModelSettings = useCallback(async (kind: FocusModelSettingKind, value?: string, automatic = false): Promise<void> => {
     if (sendLock.current || working || editingId || !ready || !visible) return
     sendLock.current = true; settingBusy.current = true; readEpoch.current++
-    setSettingPending(kind); setError('')
+    setSettingPending(kind); setSettingError(''); setError('')
     try {
       const result = await window.api.updateFocusModelSettings({ ...owner, kind, ...(value !== undefined ? { value } : {}) })
       readEpoch.current++
@@ -587,20 +589,39 @@ export default function FocusChatView(props: Props): JSX.Element {
         const updated = { ...next, modelSettings: result.settings ?? next.modelSettings }
         lastSnapshot.current = JSON.stringify(updated); setState(updated)
       }
-      if (result.outcome !== 'ok') setError(result.outcome === 'busy' ? '当前正在处理任务，请稍后切换模型或思考强度。' :
+      // Only failures before native input may be retried automatically. A dispatched
+      // click with an unknown result must remain a user-confirmed operation.
+      const retryBeforeInput = kind === 'read' && automatic && modelReadAttempts.current < 3 &&
+        (result.outcome === 'busy' || result.outcome === 'unavailable' && ['control-missing', 'page-unavailable'].includes(result.reason ?? ''))
+      if (retryBeforeInput) modelReadAttempted.current = false
+      else if (result.outcome !== 'ok') setSettingError(result.outcome === 'busy' ? '当前正在处理任务，请稍后切换模型或思考强度。' :
         kind === 'read' ? '暂时无法读取模型设置，请点击顶部刷新或到原始视图检查。' : '切换结果尚未确认，请到原始视图核对后再发送。')
-    } catch { if (alive.current) setError('暂时无法同步模型设置，请到原始视图检查。') }
+    } catch { if (alive.current) setSettingError('暂时无法同步模型设置，请到原始视图检查。') }
     finally { sendLock.current = false; settingBusy.current = false; if (alive.current) setSettingPending(null) }
   }, [ownerKey, working, editingId, ready, visible])
   useEffect(() => {
     if (owner.platformId !== 'chatgpt' || !visible || !ready || working || editingId || sendLock.current || modelReadAttempted.current) return
-    modelReadAttempted.current = true
     // A new conversation id remounts this view after the first send. Its page
     // snapshot already carries the confirmed settings; do not reopen a hidden
     // native menu as soon as the task finishes.
-    if (state?.modelSettings?.model) return
-    void updateModelSettings('read')
-  }, [ownerKey, visible, ready, working, editingId, sending, state?.modelSettings?.model, updateModelSettings])
+    if (state?.modelSettings?.model) { modelReadAttempted.current = true; return }
+    // The home composer can mount well before its model trigger. Passive snapshots
+    // wait for that control without consuming the one owned menu read or locking send.
+    if (state?.modelSettingsReady !== true || settingPending !== null) return
+    modelReadAttempted.current = true
+    modelReadAttempts.current++
+    void updateModelSettings('read', undefined, true)
+  }, [ownerKey, visible, ready, working, editingId, sending, settingPending, state?.modelSettings?.model, state?.modelSettingsReady, updateModelSettings])
+  useEffect(() => {
+    if (state?.modelSettings?.model) setSettingError('')
+  }, [ownerKey, state?.modelSettings?.model])
+  const startNewChat = (): void => {
+    // Loading home again can retain conversationId=null and this React instance.
+    modelReadAttempted.current = false
+    modelReadAttempts.current = 0
+    setSettingError('')
+    props.onNewChat()
+  }
   const changeMode = async (id: FocusComposerModeId, active: boolean): Promise<void> => {
     if (sendLock.current || working || editingId || !ready) return
     sendLock.current = true
@@ -866,7 +887,7 @@ export default function FocusChatView(props: Props): JSX.Element {
     <header className="focus-chat__header">
       <span>{modelIcon ? <img className="focus-chat__brand-icon" src={modelIcon} alt={modelLabel} /> : <strong>{modelLabel}</strong>}</span>
       <button type="button" className="focus-chat__new-chat" aria-label="新建对话" title="新建对话"
-        disabled={props.newChatDisabled || working || sending || stopping || !!editingId || settingPending !== null} onClick={props.onNewChat}>
+        disabled={props.newChatDisabled || working || sending || stopping || !!editingId || settingPending !== null} onClick={startNewChat}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
           <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
           <path d="M18.375 2.625a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4Z" />
@@ -878,6 +899,7 @@ export default function FocusChatView(props: Props): JSX.Element {
       </dl> : null}
       {owner.platformId === 'chatgpt' ? <FocusModelSettings settings={state?.modelSettings ?? null}
         disabled={working || sending || stopping || !!editingId || !ready} pending={settingPending}
+        waiting={ready && !state?.modelSettings?.model && !modelReadAttempted.current && settingPending === null}
         onChange={(kind, value) => { void updateModelSettings(kind, value) }} onRefresh={() => { void updateModelSettings('read') }} /> : null}
     </header>
     <div className="focus-chat__transcript" ref={transcriptRef}>
@@ -898,6 +920,7 @@ export default function FocusChatView(props: Props): JSX.Element {
           <button type="button" onClick={props.onOriginal}>查看原始视图</button>
         </div>
       </div> : null}
+      {settingError ? <div className="focus-chat__error" role="alert">{settingError}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       {error ? <div className="focus-chat__error" role="alert">{error}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       <form className="focus-composer" onSubmit={event => void submit(event)}>
         {draftFiles.length ? <div className="focus-composer__files" aria-label="待发送附件">{draftFiles.map(item =>

@@ -1,10 +1,11 @@
 import type { JSX } from 'react'
 import type { FocusModelSettings as ModelSettings, FocusModelSettingKind } from '@shared/focus-chat'
 
-export default function FocusModelSettings({ settings, disabled, pending, onChange, onRefresh }: {
+export default function FocusModelSettings({ settings, disabled, pending, waiting = false, onChange, onRefresh }: {
   settings: ModelSettings | null
   disabled: boolean
   pending: FocusModelSettingKind | null
+  waiting?: boolean
   onChange(kind: 'model' | 'effort', value: string): void
   onRefresh(): void
 }): JSX.Element {
@@ -16,7 +17,7 @@ export default function FocusModelSettings({ settings, disabled, pending, onChan
         <span className="focus-chat__model-select">
           <select value={item.value ?? ''} disabled={disabled || pending !== null || item.options.length === 0}
             onChange={event => onChange(item.kind, event.currentTarget.value)}>
-            {!item.value ? <option value="" disabled>{pending === 'read' ? '读取中…' : '尚未读取'}</option> : null}
+            {!item.value ? <option value="" disabled>{pending === 'read' || waiting ? '读取中…' : '尚未读取'}</option> : null}
             {item.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
           <svg viewBox="0 0 12 8" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m2 2 4 4 4-4" /></svg>
@@ -26,6 +27,6 @@ export default function FocusModelSettings({ settings, disabled, pending, onChan
       aria-label="刷新模型和思考强度" title={pending ? '正在同步原网页设置' : '从原网页重新读取模型和思考强度'} onClick={onRefresh}>
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M16 6a7 7 0 1 0 1 7M16 2v4h-4" /></svg>
     </button>
-    {pending ? <span className="focus-chat__model-status" role="status">{pending === 'read' ? '读取中…' : '切换中…'}</span> : null}
+    {pending || waiting ? <span className="focus-chat__model-status" role="status">{pending === 'read' ? '读取中…' : pending ? '切换中…' : '正在等待模型控件…'}</span> : null}
   </div>
 }

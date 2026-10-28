@@ -1515,6 +1515,7 @@ export class SessionRuntime {
       this.focusUiRecoveredTurn = null
     }
     writeFocusDiagnostic(owner, { event: 'view-state', ready: page?.ready === true,
+      modelSettingsReady: page?.modelSettingsReady,
       sendFailed: !!page?.sendFailure, retryable: page?.sendFailure?.retryable === true,
       nativeDraft: page?.nativeDraft === true, waiting: page?.waiting === true, generating: page?.generating ?? 'unknown',
       turnCount: this.focusChat.turns(owner.platformId, owner.conversationId).length,
@@ -1530,6 +1531,7 @@ export class SessionRuntime {
       smartReplies: page?.smartReplies ?? [],
       composerModes: page?.composerModes ?? [],
       modelSettings: page?.modelSettings,
+      modelSettingsReady: page?.modelSettingsReady,
       sendBlock: computerUseSendBlock(this.getComputerUseCapability(owner.platformId)),
       executions: owner.conversationId ? this.options.store.listExecutions(owner.conversationId).filter(record => !archivedExecutions.has(record.messageId)) : [] }
   }

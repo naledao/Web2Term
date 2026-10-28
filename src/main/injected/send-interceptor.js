@@ -5854,6 +5854,8 @@
       const sendFailure = focusSendFailureOf()?.data ?? null
       const composerModes = rules.composerModes ? focusComposerModesOf().map(mode => mode.data) : undefined
       const modelSettings = rules.modelSettings ? focusModelSettingsOf() : undefined
+      const modelControl = rules.modelSettings ? focusModelPickerParts() : null
+      const modelSettingsReady = rules.modelSettings ? !!modelControl && !controlDisabled(modelControl.trigger) : undefined
       const rendered = new Map()
       const markdownOf = node => {
         if (!rendered.has(node)) rendered.set(node, readReplyMarkdown(node))
@@ -5875,7 +5877,7 @@
           // through a widget marker. Oversize replies use the normal answer channel.
           return answer.length <= 250000 ? [{ sourceMessageId: messageIdOf(node), answer }] : []
         }) : []
-      if (focusEditing) return { path: location.pathname, ready: !!composer, nativeDraft: false, waiting: true, generating: 'unknown', reply: null, smartReplies, composerModes, modelSettings }
+      if (focusEditing) return { path: location.pathname, ready: !!composer, nativeDraft: false, waiting: true, generating: 'unknown', reply: null, smartReplies, composerModes, modelSettings, modelSettingsReady }
       let generating = 'unknown'
       if (rules.generatingIcon) {
         const { primaryControlSelector, generatingPrefixes, idlePrefixes } = rules.generatingIcon
@@ -5941,7 +5943,7 @@
       }
       const historyDraft = !!rules.edit && queryAll([rules.edit.editorSelector]).some(isVisibleElement)
       return { path: location.pathname, ready: !!composer, nativeDraft: historyDraft || (!!composer && collapse(readComposer(composer)) !== ''),
-        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply, smartReplies, composerModes, modelSettings, sendFailure }
+        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply, smartReplies, composerModes, modelSettings, modelSettingsReady, sendFailure }
     },
 
     async recoverCommand(token, generation, allowSend, manual = false, expectedMessageId = null) {

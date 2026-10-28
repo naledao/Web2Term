@@ -28,7 +28,7 @@ function actual(name, context, method = false, path = pagePath) {
   }
   const node = find(file)
   assert.ok(node, name)
-  const code = method ? '({' + node.getText(file) + '}).' + name : '(' + node.initializer.getText(file) + ')'
+  const code = method ? '({' + node.getText(file).replace(/^(?:private|public|protected)\s+/, '') + '}).' + name : '(' + node.initializer.getText(file) + ')'
   return new Script(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText).runInContext(context)
 }
 function automaticRead(context) {
@@ -239,7 +239,8 @@ test('a remounted focus view keeps confirmed settings when its task becomes idle
   }
   const context = createContext({ owner: { platformId: 'chatgpt' }, visible: true, ready: true, working: true,
     editingId: null, sendLock: { current: false }, modelReadAttempted: { current: false },
-    state: { modelSettings: f.read() }, updateModelSettings: kind => { reads.push(kind) } })
+    modelReadAttempts: { current: 0 }, settingPending: null,
+    state: { modelSettings: f.read(), modelSettingsReady: true }, updateModelSettings: kind => { reads.push(kind) } })
   const effect = automaticRead(context)
   effect()
   assert.equal(context.modelReadAttempted.current, false, 'wait while the task is working')
@@ -256,6 +257,131 @@ test('a remounted focus view keeps confirmed settings when its task becomes idle
   effect()
   effect()
   assert.deepEqual(reads, ['read'], 'a different conversation without settings still reads once')
+})
+
+test('initialization waits for a late model trigger instead of spending its only read on a ready composer', () => {
+  const reads = []
+  const context = createContext({ owner: { platformId: 'chatgpt' }, visible: true, ready: true, working: false,
+    editingId: null, sendLock: { current: false }, modelReadAttempted: { current: false }, modelReadAttempts: { current: 0 },
+    settingPending: null, state: { modelSettingsReady: false, modelSettings: { model: null, effort: null, models: [], efforts: [] } },
+    updateModelSettings: kind => reads.push(kind) })
+  const effect = automaticRead(context)
+  for (let snapshot = 0; snapshot < 8; snapshot++) effect()
+  assert.deepEqual(reads, [])
+  assert.equal(context.modelReadAttempted.current, false)
+  assert.equal(context.modelReadAttempts.current, 0)
+  assert.equal(context.sendLock.current, false, 'waiting for hydration must leave the local draft usable')
+  context.state.modelSettingsReady = true
+  effect(); effect()
+  assert.deepEqual(reads, ['read'])
+  assert.equal(context.modelReadAttempts.current, 1)
+})
+
+test('new chat resets initialization even when reloading home keeps the same null conversation owner', () => {
+  let navigations = 0
+  const context = createContext({ modelReadAttempted: { current: true }, modelReadAttempts: { current: 3 }, setSettingError() {},
+    props: { onNewChat() {
+      assert.equal(context.modelReadAttempted.current, false)
+      assert.equal(context.modelReadAttempts.current, 0)
+      navigations++
+    } } })
+  const start = actual('startNewChat', context, false, '../src/renderer/src/components/FocusChatView.tsx')
+  start()
+  assert.equal(navigations, 1)
+})
+
+function rendererInitialization(results) {
+  const owner = { sessionId: 'workspace', platformId: 'chatgpt', conversationId: null }
+  const empty = { model: null, effort: null, models: [], efforts: [] }
+  let pending, requests = 0
+  const errors = [], context = createContext({ owner, ownerKey: 'workspace:home', visible: true, ready: true, working: false,
+    editingId: null, sendLock: { current: false }, settingBusy: { current: false }, readEpoch: { current: 0 }, alive: { current: true },
+    lastSnapshot: { current: '' }, modelReadAttempted: { current: false }, modelReadAttempts: { current: 0 }, settingPending: null,
+    state: { ...owner, ready: true, modelSettingsReady: true, modelSettings: empty },
+    useCallback: callback => callback, focusOwnerKey: () => 'workspace:home',
+    setSettingPending(value) { context.settingPending = value }, setSettingError(value) { errors.push(value) }, setError() {},
+    setState(value) { context.state = value }, window: { api: {
+      async updateFocusModelSettings() { requests++; return results.shift() },
+      async getFocusChat() { return context.state }
+    } } })
+  const update = actual('updateModelSettings', context, false, '../src/renderer/src/components/FocusChatView.tsx')
+  context.updateModelSettings = (...args) => { pending = update(...args); return pending }
+  return { context, errors, effect: automaticRead(context), wait: () => pending, requests: () => requests }
+}
+
+test('a pre-input trigger race recovers on readiness without showing a persistent error or replaying a click', async () => {
+  const settings = { model: 'GPT-6', effort: 'high', models: [{ value: 'GPT-6', label: 'GPT-6' }], efforts: [{ value: 'high', label: 'High' }] }
+  const f = rendererInitialization([{ outcome: 'unavailable', reason: 'control-missing', settings: null }, { outcome: 'ok', settings }])
+  f.effect(); await f.wait()
+  assert.equal(f.requests(), 1)
+  assert.equal(f.context.modelReadAttempted.current, false)
+  assert.deepEqual(f.errors.filter(Boolean), [])
+  f.context.state.modelSettingsReady = false
+  f.effect()
+  assert.equal(f.requests(), 1)
+  f.context.state.modelSettingsReady = true
+  f.effect(); await f.wait()
+  assert.equal(f.context.state.modelSettings.model, 'GPT-6')
+  assert.equal(f.context.state.modelSettings.effort, 'high')
+  f.effect()
+  assert.equal(f.requests(), 2)
+  assert.equal(f.context.sendLock.current, false)
+  assert.equal(f.context.settingBusy.current, false)
+})
+
+test('automatic recovery is bounded and never retries an uncertain native input result', async () => {
+  const missing = () => ({ outcome: 'unavailable', reason: 'control-missing', settings: null })
+  const f = rendererInitialization([missing(), missing(), missing()])
+  for (let attempt = 0; attempt < 5; attempt++) { f.effect(); await f.wait() }
+  assert.equal(f.requests(), 3)
+  assert.equal(f.context.modelReadAttempted.current, true)
+  assert.equal(f.errors.filter(Boolean).length, 1)
+  for (const result of [{ outcome: 'unknown', reason: 'native-input-failed' }, { outcome: 'unknown', reason: 'menu-unavailable' }]) {
+    const g = rendererInitialization([{ ...result, settings: null }])
+    g.effect(); await g.wait(); g.effect()
+    assert.equal(g.requests(), 1)
+    assert.equal(g.context.modelReadAttempted.current, true)
+    assert.equal(g.errors.filter(Boolean).length, 1)
+  }
+})
+
+test('new documents and client-side navigation keep the hidden view painting without showing or focusing it', () => {
+  const path = '../src/main/embed.ts'
+  const file = ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
+  const handlers = new Map()
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.getText(file) === 'contents.on' && ts.isStringLiteral(node.arguments[0]) &&
+      ['dom-ready', 'did-finish-load', 'did-navigate-in-page'].includes(node.arguments[0].text)) handlers.set(node.arguments[0].text, node.arguments[1])
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  const settings = [], context = createContext({})
+  const keepRendering = actual('keepRenderingWhileHidden', context, true, path)
+  const embed = { liveContents: () => ({ setBackgroundThrottling: value => settings.push(value) }),
+    installInterceptor() {}, installTheme() {}, installSelectionQuestion() {}, publishState() {}, captureCurrentConversation() {},
+    dismissSelectionQuestion() {} }
+  embed.keepRenderingWhileHidden = () => keepRendering.call(embed)
+  context.embed = embed
+  for (const event of ['dom-ready', 'did-finish-load', 'did-navigate-in-page']) {
+    assert.ok(handlers.has(event), event)
+    new Script('(function () { (' + handlers.get(event).getText(file) + ')() }).call(embed)').runInContext(context)
+  }
+  assert.deepEqual(settings, [false, false, false])
+})
+
+test('the embed snapshot boundary accepts boolean model readiness and rejects malformed readiness', async () => {
+  const context = createContext({ URL, Promise, setTimeout, clearTimeout,
+    validFocusComposerModes: shared.validFocusComposerModes, validFocusModelSettings: shared.validFocusModelSettings,
+    validFocusSendFailure: shared.validFocusSendFailure })
+  const read = actual('readFocusSnapshot', context, true, '../src/main/embed.ts')
+  for (const value of [undefined, false, true, 'true', 1, null]) {
+    const raw = { path: '/', ready: true, nativeDraft: false, waiting: false, generating: 'idle', reply: null, modelSettingsReady: value }
+    const embed = { focusPage: () => ({ getURL: () => 'https://chatgpt.com/', isDestroyed: () => false,
+      executeJavaScript: async () => raw }) }
+    const snapshot = await read.call(embed)
+    if (value === undefined || typeof value === 'boolean') assert.equal(snapshot, raw)
+    else assert.equal(snapshot, null)
+  }
 })
 
 test('manual navigation and switching between conversations discard settings even if a reply is active', async () => {
@@ -383,4 +509,8 @@ test('header renders two labelled native selects, actual options, and a recovera
   assert.equal((unknown.match(/<select[^>]*disabled/g) || []).length, 2)
   assert.match(unknown, /刷新模型和思考强度/)
   assert.doesNotMatch(unknown, /GPT-6/)
+  const waiting = renderToStaticMarkup(Controls({ settings: null, disabled: false, pending: null, waiting: true, onChange() {}, onRefresh() {} }))
+  assert.match(waiting, /正在等待模型控件/)
+  assert.match(waiting, /读取中…/)
+  assert.doesNotMatch(waiting, /尚未读取/)
 })
