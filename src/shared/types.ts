@@ -37,6 +37,7 @@ export const IpcChannels = {
   githubRepositoryCloneProgress: 'github-repositories:clone-progress',
   embedSetBounds: 'embed:set-bounds',
   embedSetVisible: 'embed:set-visible',
+  embedSnapshot: 'embed:snapshot',
   embedCommand: 'embed:command',
   embedNavigate: 'embed:navigate',
   embedGetState: 'embed:get-state',
@@ -2312,6 +2313,8 @@ export interface AppApi {
   setEmbedBounds(bounds: EmbedBounds): void
   /** Hide/show the native view (needed while a modal covers it). */
   setEmbedVisible(visible: boolean): void
+  /** A still picture of the chat page, taken as a dialog hides it. */
+  onEmbedSnapshot(listener: (dataUrl: string) => void): () => void
   sendEmbedCommand(command: EmbedCommand): void
   navigateEmbed(url: string): void
   /** Current embed snapshot; call once on mount to cover events fired before subscribing. */

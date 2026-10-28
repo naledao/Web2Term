@@ -198,6 +198,11 @@ const api: AppApi = {
   setEmbedVisible: (visible: boolean): void => {
     ipcRenderer.send(IpcChannels.embedSetVisible, visible)
   },
+  onEmbedSnapshot: (listener: (dataUrl: string) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, dataUrl: string): void => listener(dataUrl)
+    ipcRenderer.on(IpcChannels.embedSnapshot, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.embedSnapshot, handler)
+  },
 
   sendEmbedCommand: (command: EmbedCommand): void => {
     ipcRenderer.send(IpcChannels.embedCommand, command)

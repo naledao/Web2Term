@@ -424,6 +424,8 @@ export class SessionRuntime {
   private active = false
   private lastSummaryTaskRunning = false
   private embedVisible = true
+  /** Orders hide requests, so a late snapshot never hides a page that was shown again meanwhile. */
+  private embedSnapshotSerial = 0
   /**
    * Last rectangle the renderer reported for the slot.
    *
@@ -1444,8 +1446,21 @@ export class SessionRuntime {
      * session in front, and is this platform the shown one). Applying `visible` to the active
      * view alone would lose the request when it arrives while the session is in the manager.
      */
+    // Several dialogs may each ask to hide; a repeat must not cancel the picture being taken.
+    if (!visible && !this.embedVisible) return
+    const serial = ++this.embedSnapshotSerial
+    const shown = this.active && this.embedVisible
     this.embedVisible = visible
-    this.applyVisibility()
+    const embed = this.activeEmbed().embed
+    if (visible || !shown || !embed) { this.applyVisibility(); return }
+    // The page paints above the DOM, so a dialog hides it. Its slot shows a still picture of it
+    // instead of the loading hint; hiding waits briefly for that picture.
+    const timeout = new Promise<null>(resolve => setTimeout(() => resolve(null), 200))
+    void Promise.race([embed.captureSnapshot(), timeout]).catch(() => null).then(snapshot => {
+      if (serial !== this.embedSnapshotSerial || this.disposed) return
+      if (snapshot) this.send(IpcChannels.embedSnapshot, snapshot)
+      this.applyVisibility()
+    })
   }
 
   setQuestionChatViewport(id: string, bounds: unknown, visible: boolean): void {

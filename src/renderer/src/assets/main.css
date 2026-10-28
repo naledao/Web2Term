@@ -455,6 +455,17 @@ body {
     padding: 13px 15px;
   }
 }
+/* A still picture of the hidden native page, sized to the slot it was taken from. */
+.stage__snapshot {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
+}
+
 .stage__hint {
   position: absolute;
   inset: 0;

@@ -1940,6 +1940,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     window.api.setWorkspaceSshDialogOpen(sshDialogOpen)
   }, [nativeEmbedVisible, sshDialogOpen])
 
+  // While a dialog hides the page, its slot shows the picture main took just before hiding it.
+  const [embedSnapshot, setEmbedSnapshot] = useState<string | null>(null)
+  useEffect(() => window.api.onEmbedSnapshot(setEmbedSnapshot), [])
+  useEffect(() => { if (nativeEmbedVisible) setEmbedSnapshot(null) }, [nativeEmbedVisible])
+  useEffect(() => setEmbedSnapshot(null), [sessionId, platformId])
+
   // SSH state and saved hosts.
   useEffect(() => {
     let cancelled = false
@@ -2424,7 +2430,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               </ConversationTranscript>
             </div>
           ) : null}
-          {!showFocusView && !showLocalView ? (
+          {!showFocusView && !showLocalView && embedSnapshot && !nativeEmbedVisible ? (
+            <img className="stage__snapshot" src={embedSnapshot} alt="" aria-hidden="true" draggable={false} />
+          ) : !showFocusView && !showLocalView ? (
             <div className="stage__hint">
               <p className="stage__hint-title">正在加载 {activePlatformHost || '站点'} …</p>
               <p className="stage__hint-sub">

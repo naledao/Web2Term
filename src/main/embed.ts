@@ -923,6 +923,16 @@ export class ChatGptEmbed {
     }
   }
 
+  /** A still picture of the page as shown now, for its slot while a dialog hides it; null when not on screen. */
+  async captureSnapshot(): Promise<string | null> {
+    const view = this.view
+    if (!view || view.webContents.isDestroyed() || !this.visible || this.bounds.width < 1 || this.bounds.height < 1) return null
+    try {
+      const image = await view.webContents.capturePage()
+      return image.isEmpty() ? null : 'data:image/jpeg;base64,' + image.toJPEG(85).toString('base64')
+    } catch { return null }
+  }
+
   setVisible(visible: boolean): void {
     this.visible = visible
     this.selectionQuestion?.setVisible(visible)
