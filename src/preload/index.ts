@@ -2,6 +2,7 @@ import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult 
 import type { ToolboxInvocation } from '../shared/toolbox'
 import type { ComputerUseCapability } from '../shared/computer-use'
 import type { ConversationToolsOwner, ConversationToolsState, ConversationToolsUpdate } from '../shared/conversation-tools'
+import type { ScheduledTasksState, ScheduledTaskDraft, ScheduledTaskAction } from '../shared/scheduled-tasks'
 import type { AutonomousTaskState, TaskResumeRequest } from '../shared/autonomous-task'
 import type { TaskLease } from '../shared/autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from '../shared/task-presentation'
@@ -517,6 +518,15 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   },
   getExtraTerminals: (): Promise<ExtraTerminalsState> => ipcRenderer.invoke(IpcChannels.extraTerminalsGet),
   getBackgroundTasks: (sessionId: string): Promise<BackgroundTasksState> => ipcRenderer.invoke(IpcChannels.backgroundTasksGet, sessionId),
+  getScheduledTasks: (sessionId: string): Promise<ScheduledTasksState> => ipcRenderer.invoke(IpcChannels.scheduledTasksGet, sessionId),
+  saveScheduledTask: (draft: ScheduledTaskDraft): Promise<ScheduledTasksState> => ipcRenderer.invoke(IpcChannels.scheduledTaskSave, draft),
+  actOnScheduledTask: (sessionId: string, id: string, action: ScheduledTaskAction, runId?: string): Promise<ScheduledTasksState> =>
+    ipcRenderer.invoke(IpcChannels.scheduledTaskAction, sessionId, id, action, runId),
+  onScheduledTasksChanged: (listener: (state: ScheduledTasksState, sessionId: string) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: ScheduledTasksState, sessionId: string): void => listener(state, sessionId)
+    ipcRenderer.on(IpcChannels.scheduledTasksChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.scheduledTasksChanged, handler)
+  },
   stopBackgroundTask: (sessionId: string, taskId: string): Promise<BackgroundTaskStopResult> => ipcRenderer.invoke(IpcChannels.backgroundTaskStop, sessionId, taskId),
   onBackgroundTasksChanged: (listener: (state: BackgroundTasksState, sessionId: string) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, state: BackgroundTasksState, sessionId: string): void => listener(state, sessionId)

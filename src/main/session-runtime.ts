@@ -1,4 +1,9 @@
 import { randomUUID } from 'node:crypto'
+import type { ScheduledTasks } from './scheduled-tasks'
+import { sameScheduledTarget } from './scheduled-task-target'
+import type { ScheduledDelivery } from './scheduled-tasks'
+import { parseScheduledTaskRequest, scheduledTaskToolPrompt } from '../shared/scheduled-tasks'
+import type { ScheduledTask, ScheduledTaskDraft, ScheduledTaskRun, ScheduledTaskTarget, ScheduledToolCall } from '../shared/scheduled-tasks'
 import { computerOverlaySnapshot, ComputerOverlayLifetime } from '../shared/computer-overlay'
 import type { ComputerOverlaySnapshot } from '../shared/computer-overlay'
 import { reportedArtifactEvidence, samePresentationLease, taskActivity, taskPresentationLease, validTaskPresentationRequest } from '../shared/task-presentation'
@@ -199,6 +204,7 @@ export const EMPTY_SSH_STATE: SshState = {
 }
 
 export interface SessionRuntimeOptions {
+  scheduledTasks?: ScheduledTasks
   windowsHelper?: WindowsHelperManager
   computerUseObservations?: WindowsObservationService
   onAutomationSafetyChanged?: () => void
@@ -446,6 +452,9 @@ export class SessionRuntime {
   private pendingTaskReply: { lease: TaskLease; messageId: string; kind: 'response' | 'question' } | null = null
   private legacyToolSend: { context: TaskToolContext; abort: AbortController } | null = null
   private focusSending = false
+  private scheduledSendAbort: AbortController | null = null
+  private scheduledSubmission: { task: ScheduledTask; runId: string; text: string; autonomousTaskId: string | null } | null = null
+  private readonly lastSubmissions = new Map<string, string>()
   private taskRecoverySend: { request: TaskResumeRequest; text: string; pageEpoch: string; acknowledged: boolean } | null = null
   /** One 继续原任务 at a time: a forced resume waits for the app's own work, and a second click must not send twice. */
   private resumingTask = false
@@ -934,11 +943,19 @@ export class SessionRuntime {
         this.options.store.upsertMany(scraped)
         this.broadcastConversations()
       },
-      onUserStarted: (text, files, editToken, submission) => {
+      onUserStarted: (text, files, editToken, submission, scheduledRunId) => {
         if (this.disposed) return undefined
         const controlsCurrent = !this.disposed && this.active && isActive()
+        const automatic = scheduledRunId !== undefined || submission?.id.startsWith('user:scheduled:') === true
+        const scheduled = this.scheduledSubmission
+        const scheduledCurrent = automatic && !!scheduled && scheduledRunId === scheduled.runId &&
+          submission?.id === 'user:scheduled:' + scheduled.runId && text === scheduled.text && !this.scheduledSendAbort?.signal.aborted && this.scheduledOwnerCurrent(scheduled.task)
+        if (automatic && !scheduledCurrent) return undefined
+        // A due plan starts a fresh goal. It never resumes a stopped goal or releases human control.
+        if (scheduledCurrent && controlsCurrent) this.taskEnded = false
+        if (submission) this.lastSubmissions.set(platform.id, submission.id)
         if (controlsCurrent && record().conversationId === null) this.conversationTools.submitted(platform.id)
-        if (controlsCurrent && this.options.automationBlocked?.() !== true && !this.stoppingTask && this.options.desktopCoordinator?.canReleaseHumanControl() !== false &&
+        if (!automatic && controlsCurrent && this.options.automationBlocked?.() !== true && !this.stoppingTask && this.options.desktopCoordinator?.canReleaseHumanControl() !== false &&
           (submission?.kind !== 'clarification' || !!submission.answerTo && this.taskCoordinator.waitingForUser(platform.id))) this.taskEnded = false
         const revision = this.focusRevision
         if (editToken && (!revision || revision.acknowledged || revision.token !== editToken || revision.platformId !== platform.id ||
@@ -970,7 +987,7 @@ export class SessionRuntime {
             if (recoveryMessage && !resumes) return turnId
             // After the user's input paused computer use, their next message continues that same task.
             const paused = !recoveryMessage && submission.kind === 'goal' ? this.taskCoordinator.context(platform.id, record().conversationId).task : null
-            const continuesPause = !!paused && taskPausedByInput(paused)
+            const continuesPause = !automatic && !!paused && taskPausedByInput(paused)
             const submit = (resume?: { taskId: string; generation: number; userText?: boolean }): AutonomousTask | null =>
               this.taskCoordinator.submit({ platformId: platform.id, conversationId: record().conversationId,
                 submission, turnId, text, attachments: files ?? [], capability: this.getComputerUseCapability(platform.id),
@@ -984,7 +1001,8 @@ export class SessionRuntime {
               if (!task) this.taskCoordinator.fail(platform.id, record().conversationId)
               else recovery.acknowledged = true
             }
-            if (task?.status === 'recorded' && submission.kind === 'goal') this.options.desktopCoordinator?.releaseHumanControl()
+            if (scheduledCurrent && scheduled) scheduled.autonomousTaskId = task?.id ?? null
+            if (!automatic && task?.status === 'recorded' && submission.kind === 'goal') this.options.desktopCoordinator?.releaseHumanControl()
           } catch (error) {
             console.warn('[task] failed to record confirmed submission:', error instanceof Error ? error.name : 'Error')
             this.taskCoordinator.fail(platform.id, record().conversationId)
@@ -1002,6 +1020,7 @@ export class SessionRuntime {
         this.captureConversationMessage(platform.id, 'user', text, null, attachments, turnId)
       },
       onRawSent: () => this.focusChat.rawSent(platform.id),
+      onScheduledTask: call => { if (isActive()) this.receiveScheduledTask(call) },
       onAssistantMessage: (messageId, text) => {
         this.captureConversationMessage(platform.id, 'assistant', text, messageId)
         this.focusChat.settled(platform.id, messageId, text)
@@ -1186,12 +1205,14 @@ export class SessionRuntime {
   }
 
   setActive(active: boolean): void {
+    if (!active) this.scheduledSendAbort?.abort()
     if (this.active && !active) this.interruptTaskControl(this.activePlatformId)
     this.active = active
     this.syncWindowsHelperDemand()
     this.taskProgression?.reconcile()
     if (active) void this.taskProgression?.wake()
     this.applyVisibility()
+    if (active) this.options.scheduledTasks?.wake()
   }
 
   /**
@@ -1720,6 +1741,7 @@ export class SessionRuntime {
   }
   private stopAutomation(reason: TaskStopReason, allPlatforms: boolean): Promise<InterceptorStatus> {
     this.taskEnded = true
+    this.scheduledSendAbort?.abort()
     this.focusUploadAbort?.abort(); this.legacyToolSend?.abort.abort()
     this.taskRecoverySend = null; this.pendingTaskCommand = null; this.pendingTaskComputer = null; this.pendingTaskReply = null
     this.deferredCommands.clear()
@@ -2226,6 +2248,7 @@ export class SessionRuntime {
 
   /** Control-page handover revokes authority; switching a business window never calls this. */
   private interruptTaskControl(platformId: string): void {
+    this.scheduledSendAbort?.abort()
     const task = this.taskCoordinator.current(platformId)
     this.stopAutonomousTask(platformId, 'interrupted')
     if (!task) return
@@ -2284,6 +2307,122 @@ export class SessionRuntime {
     return { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.activeEmbed().conversationId }
   }
 
+  private scheduledTarget(): ScheduledTaskTarget {
+    if (this.web2term) {
+      if (!this.web2term.alive) throw new Error('等待原远程设备重新连接。')
+      return { machineId: this.options.localMachineId, transport: 'web2term', key: this.web2term.hostId,
+        cwd: this.web2term.cwd, label: this.options.web2term?.binding.deviceName || '远程设备' }
+    }
+    const ssh = this.ssh.getState()
+    if (ssh.attached) {
+      if (ssh.status !== 'connected' || !this.remoteShell?.alive) throw new Error('等待原 SSH 主机重新连接。')
+      return { machineId: this.options.localMachineId, transport: 'ssh', key: JSON.stringify([ssh.hostId, ssh.target]),
+        cwd: this.remoteShell.cwd, label: ssh.name || ssh.target || 'SSH' }
+    }
+    return { machineId: this.options.localMachineId, transport: 'local', key: this.options.localMachineId,
+      cwd: this.runner.getLocalWorkingDirectory() || this.lastPersistedLocalCwd || homedir(), label: '本机' }
+  }
+
+  private scheduledOwnerCurrent(task: ScheduledTask): boolean {
+    if (this.disposed || !this.active || task.owner.sessionId !== this.id || this.activePlatformId !== task.owner.platformId ||
+      this.embed.getState().conversationId !== task.owner.conversationId || this.options.automationBlocked?.() || this.stoppingTask ||
+      this.runner.getAutomation().paused || this.options.desktopCoordinator?.getState().humanControl ||
+      taskPausedByInput(this.taskCoordinator.latest(task.owner.platformId)) || !this.toolPreferences(task.owner.platformId).scheduledTasksEnabled) return false
+    const latest = this.options.scheduledTasks?.store.get(task.id)
+    if (!latest || !latest.enabled || latest.deleted || latest.revision !== task.revision) return false
+    try {
+      const target = this.scheduledTarget()
+      return sameScheduledTarget(target, task.target)
+    } catch { return false }
+  }
+
+  scheduledTasksChanged(): void {
+    if (this.options.scheduledTasks) this.send(IpcChannels.scheduledTasksChanged, this.options.scheduledTasks.store.snapshot(this.id))
+  }
+
+  saveScheduledTask(draft: ScheduledTaskDraft): void {
+    if (!draft || !draft.owner || !sameConversationToolsOwner(draft.owner, this.toolsOwner()) || this.disposed ||
+      typeof draft.requestId !== 'string' || !/^[\w-]{1,128}$/.test(draft.requestId) || !this.options.scheduledTasks) throw new Error('当前对话已变化，请重新打开定时任务。')
+    if (!this.toolPreferences().scheduledTasksEnabled) throw new Error('请先在工具设置中启用定时任务。')
+    if (draft.id) this.options.scheduledTasks.edit(this.id, draft)
+    else this.options.scheduledTasks.create(draft.owner, this.scheduledTarget(), { type: 'scheduled_task', schedule: draft.schedule, prompt: draft.prompt },
+      JSON.stringify(['ui', this.id, draft.requestId]))
+  }
+
+  private receiveScheduledTask(call: ScheduledToolCall): void {
+    if (this.disposed || !this.active || this.taskEnded || this.options.automationBlocked?.() || !this.options.scheduledTasks ||
+      call.pageEpoch !== this.embed.getComputerUsePageEpoch() || (this.embed.getState().conversationId !== null && this.embed.getState().conversationId !== call.conversationId) ||
+      !this.toolPreferences().scheduledTasksEnabled || !call.sourceSubmissionId ||
+      this.lastSubmissions.get(this.activePlatformId) !== call.sourceSubmissionId || this.runner.getAutomation().paused) return
+    try {
+      const request = parseScheduledTaskRequest(JSON.parse(call.rawJson))
+      if (!request) throw new Error('周期或任务描述无效。schedule 使用固定分钟间隔或五段 Cron；prompt 为非空自然语言任务。')
+      this.options.scheduledTasks.create({ ...this.toolsOwner(), conversationId: call.conversationId }, this.scheduledTarget(), request,
+        JSON.stringify(['model', this.id, this.activePlatformId, call.conversationId, call.sourceSubmissionId, call.messageId]), true, call.sourceSubmissionId)
+    } catch (error) {
+      const owner = this.toolsOwner(), epoch = this.embed.getComputerUsePageEpoch()
+      void this.embed.sendTaskResult('【定时任务未创建】\n' + (error instanceof Error ? error.message : '参数无效。') + '\n请修正参数后重新提交。',
+        call.conversationId, new AbortController().signal, () => !this.disposed && this.active && sameConversationToolsOwner(owner, this.toolsOwner()) &&
+          epoch === this.embed.getComputerUsePageEpoch() && this.lastSubmissions.get(owner.platformId) === call.sourceSubmissionId).catch(() => {})
+    }
+  }
+
+  scheduledTaskReady(task: ScheduledTask, run: ScheduledTaskRun): string | null {
+    if (this.disposed || !this.active) return '等待选中原工作区。'
+    if (this.activePlatformId !== task.owner.platformId || this.embed.getState().conversationId !== task.owner.conversationId) return '等待回到原 AI 平台和对话。'
+    if (run.kind === 'receipt' && (this.taskEnded || task.receiptSubmissionId !== this.lastSubmissions.get(task.owner.platformId))) return 'cancel:原任务已切换或结束，创建确认不再自动回传；计划仍已保存。'
+    if (this.options.automationBlocked?.()) return '全局急停中，等待手动解除。'
+    if (this.runner.getAutomation().paused || this.options.desktopCoordinator?.getState().humanControl || taskPausedByInput(this.taskCoordinator.latest(task.owner.platformId))) return '自动化已暂停或由用户接管，等待用户继续。'
+    if (!this.toolPreferences().scheduledTasksEnabled) return '当前对话已关闭定时任务工具。'
+    try {
+      const current = this.scheduledTarget()
+      if (!sameScheduledTarget(current, task.target)) return '等待恢复计划绑定的执行主机和工作目录。'
+    } catch (error) { return error instanceof Error ? error.message : '执行目标不可用。' }
+    if (this.focusSending || this.focusRevision || this.stoppingTask || this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending) return '等待当前发送或工具执行结束。'
+    const status = this.embed.getInterceptorStatus()
+    if (!status.enabled || !status.installed || !status.promptInjectionEnabled) return '等待启用原对话的终端模式和提示词注入。'
+    if (status.pendingQuestion || this.taskCoordinator.waitingForUser(task.owner.platformId)) return '等待用户回答原任务的问题。'
+    const block = computerUseSendBlock(this.getComputerUseCapability(task.owner.platformId))
+    if (block) return '等待 computer use 能力恢复。'
+    if (run.kind === 'task' && this.taskRunning()) return '等待当前 AI 任务结束。'
+    return null
+  }
+
+  async sendScheduledTask(task: ScheduledTask, run: ScheduledTaskRun, signal: AbortSignal): Promise<ScheduledDelivery> {
+    if (signal.aborted) return { outcome: 'cancelled' }
+    if (this.scheduledTaskReady(task, run)) return { outcome: 'busy' }
+    const controller = new AbortController(), abort = (): void => controller.abort()
+    this.scheduledSendAbort = controller
+    signal.addEventListener('abort', abort, { once: true })
+    this.focusSending = true
+    const current = (): boolean => !controller.signal.aborted && this.scheduledOwnerCurrent(task) &&
+      (run.kind !== 'receipt' || !this.taskEnded && task.receiptSubmissionId === this.lastSubmissions.get(task.owner.platformId))
+    try {
+      if (!current()) return { outcome: 'cancelled' }
+      if (run.kind === 'receipt') return { outcome: await this.embed.sendTaskResult(run.text, task.owner.conversationId, controller.signal, current) }
+      const text = ['【定时任务】', `任务编号：${task.id}`, `本次计划时间：${new Date(run.plannedAt).toISOString()}`,
+        ...(run.missedSince !== null ? [`此前错过的周期已合并，从 ${new Date(run.missedSince).toISOString()} 起仅执行本次。`] : []),
+        '这是本次需要执行的任务，请按当前工具能力处理：', '', task.prompt].join('\n')
+      const submission = { task, runId: run.id, text, autonomousTaskId: null as string | null }
+      this.scheduledSubmission = submission
+      const outcome = await this.embed.sendScheduledUser(text, task.owner.conversationId, run.id, controller.signal, current)
+      let message: string | undefined
+      if (outcome === 'busy') {
+        const reason = await this.embed.userSendBlockReason()
+        const messages: Record<string, string> = { 'text-draft': '原对话有未发送的文字，等待用户处理草稿。',
+          'attachment-draft': '原对话有未发送的附件，等待用户处理草稿。', 'image-draft': '原对话有未发送的图片，等待用户处理草稿。',
+          'model-generating': 'AI 正在生成，等待当前回复结束。', 'awaiting-reply': '正在等待原任务的回复或用户回答。' }
+        message = reason ? messages[reason] : undefined
+      }
+      return { outcome: ['upload-failed', 'unsupported-file-type'].includes(outcome) ? 'unknown' : outcome as ScheduledDelivery['outcome'], autonomousTaskId: submission.autonomousTaskId, message }
+    } finally {
+      signal.removeEventListener('abort', abort)
+      if (this.scheduledSendAbort === controller) this.scheduledSendAbort = null
+      this.scheduledSubmission = null
+      this.focusSending = false
+    }
+  }
+
   getConversationTools(owner?: ConversationToolsOwner): ConversationToolsState {
     const current = this.toolsOwner()
     if (owner !== undefined && (!owner || !sameConversationToolsOwner(owner, current))) throw new Error('当前对话已变化，请重新打开工具设置。')
@@ -2297,6 +2436,8 @@ export class SessionRuntime {
         message: this.web2term ? '当前远程设备暂不支持文件读取工具。' : platformSupported ? '' : '当前平台暂不支持文件读取工具。', prompt: readFilesToolPrompt },
       { id: 'background', name: '后台任务', enabled: preferences.backgroundTasksEnabled, available: platformSupported,
         message: platformSupported ? '' : '当前平台暂不支持后台任务工具。', prompt: backgroundTaskToolPrompt },
+      { id: 'scheduled', name: '定时任务', enabled: preferences.scheduledTasksEnabled, available: platformSupported,
+        message: platformSupported ? '' : '当前平台暂不支持定时任务工具。', prompt: scheduledTaskToolPrompt },
       { id: 'computer', name: '电脑操作（computer use）', enabled: preferences.computerUseEnabled, available: capability.scopeSupported,
         message: capability.scopeSupported ? '' : capability.message,
         prompt: computerUseCapabilityPrompt(preview, preferences.computerUseEnabled && capability.available
@@ -2308,6 +2449,7 @@ export class SessionRuntime {
   updateConversationTools(request: ConversationToolsUpdate): ConversationToolsState {
     if (this.disposed || !request || !sameConversationToolsOwner(request, this.toolsOwner())) throw new Error('当前对话已变化，工具设置未保存。')
     this.conversationTools.update(request.platformId, request.conversationId, request.patch)
+    if (request.patch.scheduledTasksEnabled === false) this.scheduledSendAbort?.abort()
     this.refreshComputerUseCapabilities(request)
     return this.getConversationTools()
   }
@@ -2320,10 +2462,11 @@ export class SessionRuntime {
       taskPausedByInput(this.taskCoordinator?.latest(platformId)))
     const disabled = [
       ...(!preferences.fileReadingEnabled ? ['当前对话已关闭文件读取工具，不要输出 read_files 请求。'] : []),
-      ...(!preferences.backgroundTasksEnabled ? ['当前对话已关闭后台任务工具，不要输出 background:true 或后台登记标记。'] : [])
+      ...(!preferences.backgroundTasksEnabled ? ['当前对话已关闭后台任务工具，不要输出 background:true 或后台登记标记。'] : []),
+      ...(!preferences.scheduledTasksEnabled ? ['当前对话已关闭定时任务工具，不要输出 scheduled_task 请求。'] : [])
     ]
     return toolPromptForPlatform(platformId, !this.web2term && preferences.fileReadingEnabled,
-      [computerPrompt, ...disabled].filter(Boolean).join('\n\n'), preferences.backgroundTasksEnabled)
+      [computerPrompt, ...disabled].filter(Boolean).join('\n\n'), preferences.backgroundTasksEnabled, preferences.scheduledTasksEnabled ? scheduledTaskToolPrompt : '')
   }
 
   /** Only computer tool metadata changes; the base system prompt remains unchanged. */
@@ -2459,11 +2602,13 @@ export class SessionRuntime {
   }
 
   setPaused(paused: boolean): AutomationState {
+    if (paused) this.scheduledSendAbort?.abort()
     const state = this.runner.setPaused(paused)
     this.taskCoordinator.setPaused(paused)
     void this.taskProgression?.wake()
     this.send(IpcChannels.automationChanged, state)
     this.options.onSummaryChanged()
+    if (!paused) this.options.scheduledTasks?.wake()
     return state
   }
 
@@ -3286,6 +3431,7 @@ export class SessionRuntime {
   }
 
   dispose(): void {
+    this.scheduledSendAbort?.abort()
     if (this.disposed) return
     this.disposed = true
     this.options.desktopCoordinator?.releaseSession(this.id)
@@ -3483,7 +3629,7 @@ export class SessionRuntime {
   private send(channel: string, payload: unknown): void {
     const window = this.window
     if (!this.active || !window || window.isDestroyed()) return
-    if (channel === IpcChannels.mysqlConnChanged || channel === IpcChannels.redisConnChanged || channel === IpcChannels.nacosConnChanged || channel === IpcChannels.questionChatState || channel === IpcChannels.backgroundTasksChanged) {
+    if (channel === IpcChannels.mysqlConnChanged || channel === IpcChannels.redisConnChanged || channel === IpcChannels.nacosConnChanged || channel === IpcChannels.questionChatState || channel === IpcChannels.backgroundTasksChanged || channel === IpcChannels.scheduledTasksChanged) {
       window.webContents.send(channel, payload, this.id)
     } else {
       window.webContents.send(channel, payload)

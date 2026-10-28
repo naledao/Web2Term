@@ -251,7 +251,7 @@
   const report = (payload) => {
     try {
       if (payload.event === 'user-message') computerResultToken = null
-      // Only the confirmed human-send paths emit user-message. Automatic tool results do not.
+      // Confirmed human sends and main-owned scheduled goals emit user-message. Tool results do not.
       const submission = payload.event === 'user-message' ? {
         submissionId: `user:${userSubmissionScope}:${++userSubmissionSerial}`, submissionKind: 'goal',
         taskPromptGeneration: state.taskPromptGeneration
@@ -2129,6 +2129,7 @@
         scheduleScrollToBottom()
       }
       if (ok && !isRaw) report({ event: 'user-message', text: userTextOf(text), attachmentToken: attachmentToken || undefined,
+        ...(sendContext.scheduledRunId ? { scheduledRunId: sendContext.scheduledRunId, submissionId: 'user:scheduled:' + sendContext.scheduledRunId } : {}),
         submissionKind: clarification ? 'clarification' : 'goal', ...(clarification ? {
           answeredQuestionId: sendContext.question.messageId, questionSource: sendContext.question.source,
           taskPromptGeneration: sendContext.taskPromptGeneration } : {}) })
@@ -3679,7 +3680,8 @@
    * reliable safety net in that case; the main process also applies the same guard at insert
    * time for pages that report an assistant turn through another path.
    */
-  const looksLikeCommandReply = (text) => /\{\s*["']command["']\s*:\s*["']/s.test(String(text || '')) || looksLikeReadFilesReply(text)
+  const looksLikeScheduledReply = (text) => /"type"\s*:\s*"scheduled_task"/.test(String(text || ''))
+  const looksLikeCommandReply = (text) => /\{\s*["']command["']\s*:\s*["']/s.test(String(text || '')) || looksLikeReadFilesReply(text) || looksLikeScheduledReply(text)
 
   // Older transcript rows were saved before the page's inline-code marker was
   // understood. Refresh only turns with a stable page id: the main process updates
@@ -4031,6 +4033,26 @@
       return
     }
     if (checkComputerRequest(node, messageId)) return
+    if (looksLikeScheduledReply(text)) {
+      if (state.awaitingReplySince === 0 || !state.enabled) { state.lastCommandMessageId = messageId; return }
+      const candidates = balancedObjects(String(text).replace(/```[a-zA-Z0-9_-]*/g, '\n')).filter(raw => {
+        try { return JSON.parse(raw)?.type === 'scheduled_task' } catch (_) { return false }
+      })
+      if (candidates.length !== 1 || candidates[0].length > 25000) {
+        if (state.lastUnparsedMessageId !== messageId) {
+          state.lastUnparsedMessageId = messageId
+          report({ event: 'parse-failed', reason: 'invalid-scheduled-task', text: text.slice(0, 2000) })
+        }
+        return
+      }
+      const sourceSubmissionId = computerSourceSubmissionId
+      state.lastCommandMessageId = messageId
+      state.replyActionDetected = true
+      setReplyWaiting(0, 'scheduled-task-detected', messageId)
+      report({ event: 'scheduled-task', messageId, rawJson: candidates[0], live: true,
+        sourceSubmissionId, pagePath: location.pathname, computerPageEpoch })
+      return
+    }
     if (looksLikeReadFilesReply(text)) {
       const parsed = extractReadFiles(text)
       if (!parsed) {
@@ -5426,7 +5448,8 @@
       if (state.enabled && state.promptInjectionEnabled && !state.prefix) return Promise.resolve('unavailable')
       const shouldInject = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected
       const payload = shouldInject ? state.prefix + USER_TEXT_SENTINEL + normalizeLineEndings(text) : normalizeLineEndings(text)
-      const sendContext = { taskPromptGeneration: state.taskPromptGeneration, promptInjected: shouldInject }
+      const sendContext = { taskPromptGeneration: state.taskPromptGeneration, promptInjected: shouldInject,
+        ...(options?.scheduledRunId ? { scheduledRunId: options.scheduledRunId, computerResultToken: options.computerResultToken, path: expectedPath } : {}) }
       state.programmatic = true
       if (!insertText(element, payload) || !composerMatches(element, payload)) {
         state.programmatic = false
@@ -5441,6 +5464,15 @@
         payload, 0, false, resolve, Date.now() + SEND_TIMEOUT_MS, 0,
         Date.now() + SEND_BUTTON_GRACE_MS, null, sendContext
       ))
+    },
+
+    sendScheduledUser(text, expectedPath, runId) {
+      if (typeof runId !== 'string' || !/^[\w-]{1,128}$/.test(runId)) return Promise.resolve('invalid')
+      const token = 'scheduled:' + runId
+      computerResultToken = token
+      return this.sendUser(text, expectedPath, { scheduledRunId: runId, computerResultToken: token }).finally(() => {
+        if (computerResultToken === token) computerResultToken = null
+      })
     },
 
     async editUser(request, expectedPath) {

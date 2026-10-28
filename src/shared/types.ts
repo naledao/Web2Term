@@ -2,6 +2,7 @@ import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult 
 import type { ToolboxInvocation } from './toolbox'
 import type { ComputerUsePreferences, ComputerUseCapability } from './computer-use'
 import type { ConversationToolsOwner, ConversationToolsState, ConversationToolsUpdate } from './conversation-tools'
+import type { ScheduledTasksState, ScheduledTaskDraft, ScheduledTaskAction } from './scheduled-tasks'
 import type { AutonomousTaskState, TaskResumeRequest } from './autonomous-task'
 import type { TaskLease } from './autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from './task-presentation'
@@ -161,6 +162,10 @@ export const IpcChannels = {
   backgroundTasksGet: 'background-tasks:get',
   backgroundTaskStop: 'background-tasks:stop',
   backgroundTasksChanged: 'background-tasks:changed',
+  scheduledTasksGet: 'scheduled-tasks:get',
+  scheduledTaskSave: 'scheduled-tasks:save',
+  scheduledTaskAction: 'scheduled-tasks:action',
+  scheduledTasksChanged: 'scheduled-tasks:changed',
   terminalNotesGet: 'terminal-notes:get',
   terminalNotesSet: 'terminal-notes:set',
   terminalNotesChanged: 'terminal-notes:changed',
@@ -983,10 +988,10 @@ export const readFilesToolPrompt = [
 ].join('\n')
 
 /** Only expose tools that the selected platform can execute. */
-export function toolPromptForPlatform(platformId: string, fileReading = true, capabilityPrompt = '', backgroundTasks = true): string {
+export function toolPromptForPlatform(platformId: string, fileReading = true, capabilityPrompt = '', backgroundTasks = true, scheduledPrompt = ''): string {
   const platform = fileReadingPlatform(platformId)
   return platform ? [...(fileReading ? [readFilesToolPrompt] : []), ...(backgroundTasks ? [backgroundTaskToolPrompt] : []),
-    ...(capabilityPrompt ? [capabilityPrompt] : [])].join('\n\n') : ''
+    ...(scheduledPrompt ? [scheduledPrompt] : []), ...(capabilityPrompt ? [capabilityPrompt] : [])].join('\n\n') : ''
 }
 
 /** The parts of the prompt only true of a Windows PowerShell session. */
@@ -1289,6 +1294,7 @@ export interface InterceptorPageEvent {
     | 'inject-failed'
     | 'command'
     | 'read-files'
+    | 'scheduled-task'
     | 'computer-request'
     | 'parse-failed'
     | 'command-recovery'
@@ -1314,6 +1320,7 @@ export interface InterceptorPageEvent {
   focusSendToken?: string
   /** Correlation and origin of a confirmed human send, never an automatic result. */
   submissionId?: string
+  scheduledRunId?: string
   submissionKind?: 'goal' | 'clarification'
   /** Private question/answer provenance; never a model-facing questions parameter. */
   questionSource?: import('./task-clarification').TaskQuestionSource
@@ -2486,6 +2493,10 @@ export interface AppApi {
   closeExtraTerminal(id: string): Promise<ExtraTerminalsState>
   onExtraTerminalsChanged(listener: (state: ExtraTerminalsState) => void): () => void
   getBackgroundTasks(sessionId: string): Promise<BackgroundTasksState>
+  getScheduledTasks(sessionId: string): Promise<ScheduledTasksState>
+  saveScheduledTask(draft: ScheduledTaskDraft): Promise<ScheduledTasksState>
+  actOnScheduledTask(sessionId: string, id: string, action: ScheduledTaskAction, runId?: string): Promise<ScheduledTasksState>
+  onScheduledTasksChanged(listener: (state: ScheduledTasksState, sessionId: string) => void): () => void
   stopBackgroundTask(sessionId: string, taskId: string): Promise<BackgroundTaskStopResult>
   onBackgroundTasksChanged(listener: (state: BackgroundTasksState, sessionId: string) => void): () => void
 

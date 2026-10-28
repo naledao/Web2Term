@@ -1,16 +1,18 @@
 import type { ComputerUseCapability, ComputerUsePreferences } from './computer-use'
 import { normalizeComputerResultDelay } from './computer-progress'
 
-export type ConversationToolId = 'files' | 'background' | 'computer'
+export type ConversationToolId = 'files' | 'background' | 'scheduled' | 'computer'
 
 export interface ConversationToolPreferences extends ComputerUsePreferences {
   fileReadingEnabled: boolean
   backgroundTasksEnabled: boolean
+  scheduledTasksEnabled: boolean
 }
 
 export const DEFAULT_CONVERSATION_TOOLS: Readonly<ConversationToolPreferences> = Object.freeze({
   fileReadingEnabled: true,
   backgroundTasksEnabled: true,
+  scheduledTasksEnabled: true,
   computerUseEnabled: false,
   desktopControlEnabled: false,
   desktopPointClickEnabled: false,
@@ -40,7 +42,7 @@ export interface ConversationToolsState {
 }
 
 export interface ConversationToolsUpdate extends ConversationToolsOwner {
-  patch: Partial<Pick<ConversationToolPreferences, 'fileReadingEnabled' | 'backgroundTasksEnabled' | 'computerUseEnabled' | 'computerResultDelaySeconds'>>
+  patch: Partial<Pick<ConversationToolPreferences, 'fileReadingEnabled' | 'backgroundTasksEnabled' | 'scheduledTasksEnabled' | 'computerUseEnabled' | 'computerResultDelaySeconds'>>
 }
 
 export function normalizeConversationTools(value: unknown): ConversationToolPreferences {
@@ -49,6 +51,7 @@ export function normalizeConversationTools(value: unknown): ConversationToolPref
   return {
     fileReadingEnabled: input.fileReadingEnabled !== false,
     backgroundTasksEnabled: input.backgroundTasksEnabled !== false,
+    scheduledTasksEnabled: input.scheduledTasksEnabled !== false,
     computerUseEnabled: on,
     desktopControlEnabled: on,
     desktopPointClickEnabled: on,

@@ -13,7 +13,7 @@ export interface TaskOwner {
   conversationId: string | null
 }
 
-/** Issued only after the page confirms a human message was submitted. */
+/** Issued after a confirmed human message or a main-owned scheduled goal was submitted. */
 export interface TaskSubmission {
   id: string
   kind: 'goal' | 'clarification'

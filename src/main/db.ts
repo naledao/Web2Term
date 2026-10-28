@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
+import { ScheduledTaskStore } from './scheduled-task-store'
 import { parseAutonomousTask, parseTaskToolContext } from '../shared/autonomous-task'
 import type { AutonomousTask, TaskToolContext, TaskLease } from '../shared/autonomous-task'
 import { validComputerActionClaim } from '../shared/computer-actions'
@@ -405,7 +406,7 @@ interface MessageAttachmentRow {
  * DeepSeek's native DSML tool-call markup (`<｜DSML｜invoke name="…">`) is the same request.
  */
 function isAssistantCommandReply(content: string): boolean {
-  return /\{\s*["']command["']\s*:\s*["']/s.test(String(content || '')) || /"type"\s*:\s*"read_files"/.test(content) ||
+  return /\{\s*["']command["']\s*:\s*["']/s.test(String(content || '')) || /"type"\s*:\s*"(?:read_files|scheduled_task)"/.test(content) ||
     /<\s*[\s|｜]*DSML[\s|｜]*invoke\s+name\s*=/.test(content)
 }
 
@@ -492,6 +493,7 @@ function toExecutionRecord(row: ExecutionRow): ExecutionRecord {
  */
 export class ConversationStore {
   private readonly db: DatabaseSync
+  readonly scheduledTasks: ScheduledTaskStore
   private readonly attachmentsDir: string
 
   constructor(filePath: string) {
@@ -502,6 +504,7 @@ export class ConversationStore {
     this.db = new DatabaseSync(filePath)
     this.db.exec('PRAGMA journal_mode = WAL;')
     this.db.exec(SCHEMA)
+    this.scheduledTasks = new ScheduledTaskStore(this.db)
     this.migrate()
     const computerInterrupted = recoverInterruptedComputerActions(this.db)
     if (computerInterrupted > 0) console.info(`[db] recovered ${computerInterrupted} interrupted computer action(s) from the previous run`)
@@ -1806,6 +1809,7 @@ export class ConversationStore {
   }
 
   removeManagedSession(id: string): void {
+    this.scheduledTasks.removeSession(id)
     this.db.prepare('DELETE FROM focus_turns WHERE session_id = ?').run(id)
     this.db.prepare('DELETE FROM background_tasks WHERE session_id = ?').run(id)
     this.db.prepare('DELETE FROM managed_sessions WHERE id = ?').run(id)

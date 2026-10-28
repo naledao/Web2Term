@@ -1,5 +1,6 @@
 import { BrowserWindow, WebContentsView, session, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
+import type { ScheduledToolCall } from '../shared/scheduled-tasks'
 import type { TaskSubmission } from '../shared/autonomous-task'
 import { validTaskQuestionSource, sameQuestionSource } from '../shared/task-clarification'
 import type { TaskQuestion, TaskQuestionSource, TaskQuestionRequest } from '../shared/task-clarification'
@@ -426,7 +427,8 @@ export interface EmbedHandlers {
   /** Terminal-mode interceptor changed state. */
   onInterceptor(status: InterceptorStatus): void
   /** Clean user text, with the injected system prefix already removed. */
-  onUserStarted?(text: string, files?: FocusAttachmentInfo[], editToken?: string, submission?: TaskSubmission): string | undefined
+  onUserStarted?(text: string, files?: FocusAttachmentInfo[], editToken?: string, submission?: TaskSubmission, scheduledRunId?: string): string | undefined
+  onScheduledTask?(request: ScheduledToolCall): void
   onUserMessage(text: string, attachments: ConversationImageAttachmentInput[], focusTurnId?: string, imageSource?: 'provided' | 'page'): void
   onRawSent?(): void
   /** An assistant message that belongs in the app's conversation transcript. */
@@ -1624,6 +1626,38 @@ export class ChatGptEmbed {
     } catch { return attempted ? 'stuck' : 'unavailable' }
   }
 
+  /** A scheduled goal follows the user-task pipeline, with its own cancellable submission identity. */
+  async sendScheduledUser(text: string, conversationId: string, runId: string, signal: AbortSignal, isCurrent: () => boolean): Promise<FocusSendOutcome> {
+    const contents = this.liveContents()
+    if (!contents) return 'unavailable'
+    const generation = this.taskPromptGeneration, epoch = this.computerPageEpoch
+    const current = (): boolean => {
+      if (signal.aborted || !isCurrent() || contents.isDestroyed() || generation !== this.taskPromptGeneration || epoch !== this.computerPageEpoch) return false
+      try {
+        const url = new URL(contents.getURL())
+        return url.origin === new URL(this.platform.homeUrl).origin && this.platform.conversationIdFromPath(url.pathname) === conversationId
+      } catch { return false }
+    }
+    if (!current()) return 'cancelled'
+    const token = 'scheduled:' + runId
+    const cancel = (): void => {
+      if (!contents.isDestroyed()) void contents.executeJavaScript(`window.__cmdTerminalInterceptor?.cancelComputerResult(${JSON.stringify(token)})`).catch(() => {})
+    }
+    signal.addEventListener('abort', cancel, { once: true })
+    let attempted = false
+    try {
+      if (!current()) return 'cancelled'
+      const path = new URL(contents.getURL()).pathname
+      attempted = true
+      const result: unknown = await contents.executeJavaScript(
+        `window.__cmdTerminalInterceptor?.sendScheduledUser(${JSON.stringify(text)},${JSON.stringify(path)},${JSON.stringify(runId)}) ?? 'unavailable'`)
+      if (result === 'ok') return 'ok'
+      if (!current()) return 'unknown'
+      return ['busy', 'no-composer', 'unavailable', 'invalid', 'insert-failed'].includes(String(result)) ? result as FocusSendOutcome : 'unknown'
+    } catch { return attempted ? 'unknown' : 'cancelled' }
+    finally { signal.removeEventListener('abort', cancel) }
+  }
+
   async sendFocusFiles(text: string, files: PreparedAttachment[], token: string, current: () => boolean, signal: AbortSignal,
     images: ConversationImageAttachmentInput[] = []): Promise<FocusSendOutcome> {
     const contents = this.focusPage()
@@ -2059,7 +2093,8 @@ export class ChatGptEmbed {
           const files = Array.isArray(payload.focusFiles) ? payload.focusFiles.slice(0, 3).filter(file =>
             file && typeof file.fileName === 'string' && file.fileName.length <= 240 &&
             typeof file.mimeType === 'string' && file.mimeType.length <= 160 && Number.isSafeInteger(file.sizeBytes) && file.sizeBytes > 0) : []
-          const turnId = this.handlers.onUserStarted?.(text, files, editToken, submission)
+          const scheduledRunId = typeof payload.scheduledRunId === 'string' && payload.scheduledRunId.length <= 128 ? payload.scheduledRunId : undefined
+          const turnId = this.handlers.onUserStarted?.(text, files, editToken, submission, scheduledRunId)
           if (editToken && !turnId) break
           if (submission) {
             this.userSubmissions.add(submission.id)
@@ -2257,6 +2292,18 @@ export class ChatGptEmbed {
         if (fileReadingPlatform(this.platform.id) && request && typeof payload.messageId === 'string' && payload.messageId) {
           this.handlers.onCommand({ ...request, messageId: payload.messageId, live: payload.live === true, ...(taskSource ? { taskSource } : {}) })
         }
+        break
+      }
+      case 'scheduled-task': {
+        if (payload.live !== true || typeof payload.messageId !== 'string' || !payload.messageId || payload.messageId.length > 512 ||
+          typeof payload.rawJson !== 'string' || payload.rawJson.length > 25_000 || payload.computerPageEpoch !== this.computerPageEpoch) break
+        const contents = this.liveContents()
+        if (!contents) break
+        const url = new URL(contents.getURL())
+        const conversationId = this.platform.conversationIdFromPath(url.pathname)
+        if (url.origin !== new URL(this.platform.homeUrl).origin || !conversationId || payload.pagePath !== url.pathname) break
+        this.handlers.onScheduledTask?.({ messageId: payload.messageId, rawJson: payload.rawJson, conversationId,
+          pageEpoch: this.computerPageEpoch, sourceSubmissionId: typeof payload.sourceSubmissionId === 'string' ? payload.sourceSubmissionId : undefined })
         break
       }
       case 'parse-failed':

@@ -235,7 +235,7 @@ export function cleanFocusAnswer(text: string): string {
   try { value = JSON.parse(body) }
   catch {
     // Never flash an unfinished transport request while its code block streams.
-    return /^\{\s*(?:"command"\s*:|"type"\s*:\s*"(?:questions?|read_files)"(?:\s*[,}]|\s*$))/.test(body) ? '' : answer
+    return /^\{\s*(?:"command"\s*:|"type"\s*:\s*"(?:questions?|read_files|scheduled_task)"(?:\s*[,}]|\s*$))/.test(body) ? '' : answer
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return answer
   if (typeof value.command === 'string' || value.type === 'read_files') return ''

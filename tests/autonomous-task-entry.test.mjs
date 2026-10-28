@@ -215,6 +215,7 @@ test('actual page-report and session handlers create goals only for current conf
   let rawSends = 0, humanTurns = 0
   Object.assign(runtime, {
     id: 'session-A', active: true, disposed: false, taskCoordinator: coordinator, activePlatformId: 'deepseek',
+    lastSubmissions: new Map(),
     embeds: new Map([['deepseek', { conversationId: 'conversation-A' }]]),
     focusChat: { begin() { return `turn-${++humanTurns}` }, rawSent() { rawSends++ } },
     options: { localMachineId: 'machine-A' }, environment: { workingDirectory: 'C:\\old' },

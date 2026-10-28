@@ -36,6 +36,7 @@ const computerUse = load('../src/shared/computer-use.ts', { './computer-use-prot
 const autonomousTasks = load('../src/shared/autonomous-task.ts')
 const notes = load('../src/main/terminal-notes.ts')
 const { ConversationStore } = load('../src/main/db.ts', {
+  './scheduled-task-store': load('../src/main/scheduled-task-store.ts'),
   './computer-action-storage': load('../src/main/computer-action-storage.ts'),
   './computer-recovery': load('../src/main/computer-recovery.ts', { '../shared/autonomous-task': load('../src/shared/autonomous-task.ts') }),
   '../shared/computer-actions': load('../src/shared/computer-actions.ts'),
@@ -45,6 +46,8 @@ const { ConversationStore } = load('../src/main/db.ts', {
   './execution-recovery': { recoverInterruptedExecutions: () => 0, interruptRunningCommands: () => 0 }
 })
 const { SessionRuntime } = load('../src/main/session-runtime.ts', {
+  './scheduled-task-target': load('../src/main/scheduled-task-target.ts'),
+  '../shared/scheduled-tasks': load('../src/shared/scheduled-tasks.ts'),
   './computer-recovery': {},
   './task-coordinator': {},
   './computer-use-tool': {},

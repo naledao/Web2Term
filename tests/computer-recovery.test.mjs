@@ -205,6 +205,7 @@ function runtime(f, send, status = { enabled: true, promptInjectionEnabled: true
     userSendBlockReason: async () => 'text-draft',
     sendUserTask: (text, force) => { forced.push(force); return send(text, subject) } }
   const subject = Object.assign(new Runtime(), { id: 'session-a', active: true, activePlatformId: 'deepseek', embed,
+    lastSubmissions: new Map(),
     options: { store: f.store, localMachineId: 'machine-a' }, taskCoordinator: f.coordinator, taskProgression: { wake: async () => {} },
     embeds: new Map([['deepseek', { conversationId: 'chat-a', embed }]]),
     ownsFocus: request => request.sessionId === 'session-a' && request.platformId === 'deepseek' && request.conversationId === 'chat-a',
@@ -259,7 +260,7 @@ test('stale task identities and other conversations cannot submit a recovery', a
   assert.equal(calls, 0)
 })
 
-test('an explicit resume clears the app's own blockers: pause, terminal mode, prompt injection and an open question', async t => {
+test("an explicit resume clears the app's own blockers: pause, terminal mode, prompt injection and an open question", async t => {
   let calls = 0
   const status = { enabled: false, promptInjectionEnabled: false, pendingQuestion: { messageId: 'question-a', questions: [] } }
   const f = fixture(t), { subject, owner, forced } = runtime(f, async () => { calls++; return 'stuck' }, status)

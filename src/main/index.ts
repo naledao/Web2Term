@@ -1,4 +1,6 @@
 import { EmergencyStopController } from './emergency-stop'
+import { ScheduledTasks } from './scheduled-tasks'
+import type { ScheduledTaskDraft, ScheduledTaskAction } from '../shared/scheduled-tasks'
 import { COMPUTER_OVERLAY_GET, COMPUTER_OVERLAY_CHANGED, COMPUTER_OVERLAY_FIT, computerOverlayEmergencySnapshot } from '../shared/computer-overlay'
 import type { ComputerOverlaySnapshot } from '../shared/computer-overlay'
 import { ToolboxRouter } from './toolbox-router'
@@ -11,7 +13,7 @@ import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/b
 import { join, posix } from 'node:path'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, screen, session, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, Tray } from 'electron'
 import { APP_ID, APP_NAME, configureAppIdentity } from './app-identity'
 import { taskbarCountIcon } from './taskbar-badge'
 import { LINUX_AGENT_FILE_NAME, LinuxAgentDownloader } from './linux-agent-download'
@@ -176,6 +178,7 @@ const linuxAgentDownloader = new LinuxAgentDownloader((state) => {
 let tray: Tray | null = null
 let quitting = false
 let store: ConversationStore | null = null
+let scheduledTasks: ScheduledTasks | null = null
 let backendAuth: BackendAuthService | null = null
 let web2termConnection: Web2termConnection | null = null
 let localMachineId = ''
@@ -984,6 +987,7 @@ function createSession(
   const initialMode: ExecutionMode = savedMode === 'auto' ? 'auto' : 'manual'
   let runtime: SessionRuntime | null = null
   runtime = new SessionRuntime({
+    scheduledTasks: scheduledTasks ?? undefined,
     windowsHelper,
     automationBlocked: () => emergencyStop.isActive(),
     onAutomationSafetyChanged: () => emergencyStop.refresh(),
@@ -1787,6 +1791,23 @@ function registerIpcHandlers(): void {
     const runtime = runtimeForEvent(event)
     return runtime?.id === sessionId ? runtime.backgroundTasks.getState() : { tasks: [] }
   })
+  ipcMain.handle(IpcChannels.scheduledTasksGet, (event, sessionId: string) => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime || runtime.id !== sessionId || !scheduledTasks) throw new Error('当前工作区不可用，请重新打开定时任务。')
+    return scheduledTasks.store.snapshot(runtime.id)
+  })
+  ipcMain.handle(IpcChannels.scheduledTaskSave, (event, draft: ScheduledTaskDraft) => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime || !scheduledTasks) throw new Error('当前工作区不可用。')
+    runtime.saveScheduledTask(draft)
+    return scheduledTasks.store.snapshot(runtime.id)
+  })
+  ipcMain.handle(IpcChannels.scheduledTaskAction, (event, sessionId: string, id: string, action: ScheduledTaskAction, runId?: string) => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime || runtime.id !== sessionId || !scheduledTasks) throw new Error('当前工作区不可用。')
+    scheduledTasks.act(runtime.id, id, action, runId)
+    return scheduledTasks.store.snapshot(runtime.id)
+  })
   ipcMain.handle(IpcChannels.backgroundTaskStop, async (event, sessionId: string, taskId: string): Promise<BackgroundTaskStopResult> => {
     const runtime = runtimeForEvent(event)
     if (!runtime || runtime.id !== sessionId || typeof taskId !== 'string' || taskId.length > 128) {
@@ -2182,6 +2203,15 @@ if (!app.requestSingleInstanceLock()) {
 
     const conversationStore = new ConversationStore(join(app.getPath('userData'), 'conversations.db'))
     store = conversationStore
+    scheduledTasks = new ScheduledTasks(conversationStore.scheduledTasks, {
+      ready: (task, run) => {
+        const runtime = runtimes.get(task.owner.sessionId)
+        return runtime ? runtime.scheduledTaskReady(task, run) : '等待原工作区恢复。'
+      },
+      send: (task, run, signal) => runtimes.get(task.owner.sessionId)?.sendScheduledTask(task, run, signal) ?? Promise.resolve({ outcome: 'unavailable' }),
+      changed: sessionId => runtimes.get(sessionId)?.scheduledTasksChanged()
+    })
+    powerMonitor.on('resume', () => scheduledTasks?.wake())
     localMachineId = conversationStore.getSetting(SETTING_LOCAL_MACHINE_ID) ?? ''
     if (localMachineId === '') {
       localMachineId = randomUUID()
@@ -2268,6 +2298,7 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     restoreWorkspaceSelection(savedWorkspaceSessionId, savedWorkspaceOpenSshDialog)
+    scheduledTasks.start()
 
     if (web2termConnection) {
       const count = restoreWeb2termSessions(web2termConnection,
@@ -2284,6 +2315,7 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', () => {
   quitting = true
+  scheduledTasks?.dispose()
   desktopCoordinator.dispose()
   desktopWindows.dispose()
   desktopObservations.dispose()

@@ -20,6 +20,8 @@ import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
 import ExtraTerminalPane from './components/ExtraTerminalPane'
 import BackgroundTasksPane from './components/BackgroundTasksPane'
+import ScheduledTasksPane from './components/ScheduledTasksPane'
+import type { ScheduledTasksState } from '@shared/scheduled-tasks'
 import GithubRepositoriesPane from './components/GithubRepositoriesPane'
 import type { BackgroundTasksState } from '@shared/background-tasks'
 import PanelAddMenu from './components/PanelAddMenu'
@@ -89,7 +91,7 @@ const PANEL_DEFAULT_WIDTH = 400
 const PANEL_MAX_RESERVE = 520
 
 /** `extra:<id>` is a terminal the user added from the + menu. */
-type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question' | 'background' | 'github' | `extra:${string}`
+type PanelTab = 'control' | 'terminal' | 'toolbox' | 'question' | 'background' | 'scheduled' | 'github' | `extra:${string}`
 
 function adjacentPanelTab(ids: PanelTab[], removed: PanelTab, remaining = ids.filter(id => id !== removed)): PanelTab {
   const index = ids.indexOf(removed)
@@ -133,6 +135,7 @@ const STORAGE_PANEL_WIDTH = 'layout.panelWidth'
 const STORAGE_PANEL_COLLAPSED = 'layout.panelCollapsed'
 const STORAGE_PANEL_TAB = 'layout.panelTab'
 const STORAGE_BACKGROUND_TASKS_OPEN = 'layout.backgroundTasksOpen'
+const STORAGE_SCHEDULED_TASKS_OPEN = 'layout.scheduledTasksOpen'
 const STORAGE_GITHUB_REPOSITORIES_OPEN = 'layout.githubRepositoriesOpen'
 const STORAGE_BACKGROUND_TASK_LATEST = 'layout.backgroundTaskLatest'
 
@@ -432,12 +435,14 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   // All chat views share the same sidebar layout within this session.
   const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), false))
   const [backgroundTasksOpen, setBackgroundTasksOpen] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_BACKGROUND_TASKS_OPEN, sessionId), false))
+  const [scheduledTasksOpen, setScheduledTasksOpen] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_SCHEDULED_TASKS_OPEN, sessionId), false))
   const [githubRepositoriesOpen, setGithubRepositoriesOpen] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_GITHUB_REPOSITORIES_OPEN, sessionId), false))
   const [panelTab, setPanelTab] = useState<PanelTab>(() => {
     try {
       const stored = window.localStorage.getItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId))
       // An added terminal outlives a session switch but not a restart; checked once the list loads.
       return stored === 'terminal' || stored === 'toolbox' || (stored === 'background' && backgroundTasksOpen)
+        || (stored === 'scheduled' && scheduledTasksOpen)
         || (stored === 'github' && githubRepositoriesOpen) || stored?.startsWith('extra:') ? stored as PanelTab : 'control'
     } catch {
       return 'control'
@@ -682,11 +687,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), panelCollapsed ? '1' : '0')
       window.localStorage.setItem(sessionLayoutKey(STORAGE_PANEL_TAB, sessionId), panelTab)
       window.localStorage.setItem(sessionLayoutKey(STORAGE_BACKGROUND_TASKS_OPEN, sessionId), backgroundTasksOpen ? '1' : '0')
+      window.localStorage.setItem(sessionLayoutKey(STORAGE_SCHEDULED_TASKS_OPEN, sessionId), scheduledTasksOpen ? '1' : '0')
       window.localStorage.setItem(sessionLayoutKey(STORAGE_GITHUB_REPOSITORIES_OPEN, sessionId), githubRepositoriesOpen ? '1' : '0')
     } catch {
       /* storage unavailable; the sizes just will not persist */
     }
-  }, [sessionId, panelWidth, panelCollapsed, panelTab, backgroundTasksOpen, githubRepositoriesOpen])
+  }, [sessionId, panelWidth, panelCollapsed, panelTab, backgroundTasksOpen, scheduledTasksOpen, githubRepositoriesOpen])
 
   const conversationId = embed.conversationId
   const [autonomousTaskState, setAutonomousTaskState] = useState<AutonomousTaskState | null>(null)
@@ -927,6 +933,24 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     return () => { cancelled = true; off() }
   }, [sessionId])
 
+  useEffect(() => {
+    let cancelled = false
+    let known: Set<string> | null = null
+    let pushed = false
+    const mountedAt = Date.now()
+    const apply = (state: ScheduledTasksState): void => {
+      if (cancelled) return
+      const added = state.tasks.some(task => known ? !known.has(task.id) : task.createdAt >= mountedAt)
+      known = new Set(state.tasks.map(task => task.id))
+      if (added) { setScheduledTasksOpen(true); setPanelCollapsed(false); setPanelTab('scheduled') }
+    }
+    const off = window.api.onScheduledTasksChanged((state, ownerId) => {
+      if (ownerId === sessionId) { pushed = true; apply(state) }
+    })
+    void window.api.getScheduledTasks(sessionId).then(state => { if (!pushed) apply(state) }).catch(() => {})
+    return () => { cancelled = true; off() }
+  }, [sessionId])
+
   const panelTabs = useMemo<PanelTabItem<PanelTab>[]>(() => {
     const items: PanelTabItem<PanelTab>[] = [
       { id: 'control', title: '控制' },
@@ -935,10 +959,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     ]
     if (questionChatOpen) items.push({ id: 'question', title: '侧边聊天', closable: true, closeDisabled: questionChatCreating })
     if (backgroundTasksOpen) items.push({ id: 'background', title: '后台任务', closable: true, closeTitle: '关闭后台任务页签（任务继续运行）' })
+    if (scheduledTasksOpen) items.push({ id: 'scheduled', title: '定时任务', closable: true, closeTitle: '关闭定时任务页签（计划继续运行）' })
     if (githubRepositoriesOpen) items.push({ id: 'github', title: 'GitHub 仓库管理', closable: true })
     for (const item of extraTerminals ?? []) items.push({ id: `extra:${item.id}`, title: item.title, closable: true })
     return items
-  }, [questionChatOpen, questionChatCreating, backgroundTasksOpen, githubRepositoriesOpen, extraTerminals])
+  }, [questionChatOpen, questionChatCreating, backgroundTasksOpen, scheduledTasksOpen, githubRepositoriesOpen, extraTerminals])
   const panelTabIds = useMemo(() => panelTabs.map(item => item.id), [panelTabs])
   const panelTabIdsRef = useRef(panelTabIds)
   panelTabIdsRef.current = panelTabIds
@@ -1014,6 +1039,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setQuestionChat(null)
       setQuestionChatOpen(false)
     } else if (id === 'background') setBackgroundTasksOpen(false)
+    else if (id === 'scheduled') setScheduledTasksOpen(false)
     else if (id === 'github') setGithubRepositoriesOpen(false)
     else return
     const next = adjacentPanelTab(panelTabIdsRef.current, id)
@@ -2434,6 +2460,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                   setBackgroundTasksOpen(true)
                   setPanelCollapsed(false)
                   setPanelTab('background')
+                } else if (item === 'scheduled') {
+                  setScheduledTasksOpen(true)
+                  setPanelCollapsed(false)
+                  setPanelTab('scheduled')
                 } else if (item === 'github') {
                   setGithubRepositoriesOpen(true)
                   setPanelCollapsed(false)
@@ -2693,6 +2723,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         ) : null}
 
         {backgroundTasksOpen ? <BackgroundTasksPane sessionId={sessionId} visible={panelTab === 'background' && !panelCollapsed} /> : null}
+        {scheduledTasksOpen ? <ScheduledTasksPane owner={{ sessionId, platformId, conversationId }} visible={panelTab === 'scheduled' && !panelCollapsed} /> : null}
 
         {githubRepositoriesOpen ? <GithubRepositoriesPane visible={panelTab === 'github' && !panelCollapsed}
           owner={{ sessionId, platformId, conversationId }} taskRunning={taskRunning} commandRecovery={interceptor?.commandRecovery}
