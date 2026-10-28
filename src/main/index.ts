@@ -90,13 +90,15 @@ import type {
   TerminalState,
   ExtraTerminalsState,
   LinuxAgentDownloadState,
-  UpdateStatus
+  UpdateStatus,
+  DiagnosticLogsExportResult
 } from '../shared/types'
 import { embedAuthState, importCookieSet, importSessionToken, previewSessionImport } from './session-import'
 import { ConversationStore } from './db'
 import { workspaceProjectDraft, workspaceSessionOptions } from './workspace-projects'
 import { EMPTY_SSH_STATE, SessionRuntime } from './session-runtime'
 import { installAppLog, installNetLog } from './app-log'
+import { exportDiagnosticLogs } from './log-export'
 import { EMPTY_NACOS_VIEW_STATE, isQuestionPayload } from '../shared/types'
 import { NacosView } from './nacos-view'
 import { applyUpdateProxy, checkForUpdates, downloadUpdate, getUpdateStatus, installUpdate, setUpdaterBroadcast, startUpdateSchedule } from './updater'
@@ -2221,6 +2223,21 @@ function registerIpcHandlers(): void {
     if (isManagerEvent(event) && state.phase === 'done' && state.path) shell.showItemInFolder(state.path)
   })
   ipcMain.handle(IpcChannels.updateInstall, (): void => installUpdate())
+  ipcMain.handle(IpcChannels.diagnosticLogsExport, async (event): Promise<DiagnosticLogsExportResult> => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')
+    const options = { title: '导出诊断日志', defaultPath: join(app.getPath('downloads'), `web2term-logs-${app.getVersion()}-${stamp}.zip`),
+      filters: [{ name: 'Zip', extensions: ['zip'] }] }
+    const result = window && !window.isDestroyed() ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) return { status: 'cancelled' }
+    try {
+      const saved = await exportDiagnosticLogs(result.filePath)
+      shell.showItemInFolder(result.filePath)
+      return { status: 'saved', path: result.filePath, ...saved }
+    } catch (error) {
+      return { status: 'error', message: error instanceof Error ? error.message : String(error) }
+    }
+  })
 }
 
 if (!app.requestSingleInstanceLock()) {

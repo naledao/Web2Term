@@ -227,6 +227,7 @@ export const IpcChannels = {
   updateDownload: 'update:download',
   updateInstall: 'update:install',
   updateChanged: 'update:changed',
+  diagnosticLogsExport: 'diagnostics:export-logs',
   gitLog: 'git:log',
   gitDiff: 'git:diff',
   mysqlConnList: 'mysql-conn:list',
@@ -274,6 +275,12 @@ export interface UpdateStatus {
   /** Human-readable detail for the error phase. */
   message: string
 }
+
+/** Outcome of saving recent diagnostic logs as one zip. */
+export type DiagnosticLogsExportResult =
+  | { status: 'saved'; path: string; fileCount: number; bytes: number }
+  | { status: 'cancelled' }
+  | { status: 'error'; message: string }
 
 /** State of the single-window workspace shell. */
 export interface WorkspaceState {
@@ -1475,8 +1482,11 @@ export interface InterceptorPageEvent {
    * `text` used to be capped at 300 characters and the user-facing hint guessed at the cause
    * ("多半是引号没转义"). That guess is wrong often enough to send the model — and the reader —
    * after the wrong thing, and 300 characters did not even reach the end of the `command` value.
+   * Also on `sent-raw`: the length of the text the app sent.
    */
   textLength?: number
+  /** On `sent-raw` for an attachment send: a computer observation, or files read for the model. */
+  attachmentKind?: 'computer' | 'files'
   objectCount?: number
   lastObject?: string | null
   commandSource?: 'code' | 'rendered'
@@ -2640,6 +2650,8 @@ export interface AppApi {
   installUpdate(): Promise<void>
   /** Fires on every updater phase/progress change. */
   onUpdateChanged(listener: (status: UpdateStatus) => void): () => void
+  /** Ask where to save, then zip the last few days of diagnostic logs there. */
+  exportDiagnosticLogs(): Promise<DiagnosticLogsExportResult>
 }
 
 /** One cancellable PDF read bound to its original SSH host. */

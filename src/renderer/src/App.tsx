@@ -646,6 +646,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   /** True between clicking download and the first progress event. */
   const [preparingDownload, setPreparingDownload] = useState(false)
+  const [logExport, setLogExport] = useState<{ busy: boolean; message: string }>({ busy: false, message: '' })
 
   /** While an SSH transcript is on screen it replaces the local terminal. */
   const sshActive = ssh !== null && ssh.attached
@@ -3882,6 +3883,17 @@ ${record.command}`
                       <button type="button" className="settings-outline-btn" disabled={updateStatus !== null && (updateStatus.phase === 'checking' || updateStatus.phase === 'downloading')} onClick={() => void window.api.checkForUpdates()}>检查更新</button>
                       {updateStatus?.phase === 'available' ? <button type="button" className="settings-outline-btn" disabled={preparingDownload} onClick={() => { setPreparingDownload(true); void window.api.downloadUpdate().finally(() => setPreparingDownload(false)) }}>{preparingDownload ? <><span className="btn-spinner" />正在准备下载…</> : '下载更新'}</button> : null}
                       {updateStatus?.phase === 'downloaded' ? <button type="button" className="settings-outline-btn" onClick={() => void window.api.installUpdate()}>重启并安装</button> : null}
+                    </div>
+                    <div className="settings-log-export">
+                      <button type="button" className="settings-outline-btn" disabled={logExport.busy} onClick={() => {
+                        setLogExport({ busy: true, message: '' })
+                        void window.api.exportDiagnosticLogs().then(result => setLogExport({ busy: false,
+                          message: result.status === 'saved' ? `已导出 ${result.fileCount} 个日志文件（${(result.bytes / 1024 / 1024).toFixed(1)} MB）：${result.path}`
+                            : result.status === 'error' ? '导出失败：' + result.message : '' }),
+                        () => setLogExport({ busy: false, message: '导出失败，请重试。' }))
+                      }}>{logExport.busy ? <><span className="btn-spinner" />正在导出…</> : '导出诊断日志'}</button>
+                      <p className="settings-backend-hint">打包最近 7 天的诊断日志为 zip，用于排查问题。日志可能包含本机路径和对话片段，只发给信任的人。</p>
+                      {logExport.message ? <p className="settings-backend-hint">{logExport.message}</p> : null}
                     </div>
                   </div>
                 </section>

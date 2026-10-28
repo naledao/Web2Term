@@ -2263,7 +2263,7 @@
       report(
         ok
           ? isRaw
-            ? { event: 'sent-raw', text: text.slice(0, 200) }
+            ? { event: 'sent-raw', text: text.slice(0, 200), textLength: text.length }
             : {
                 event: 'sent', text: userTextOf(text).slice(0, 400),
                 promptInjected: sendContext.promptInjected,
@@ -5045,7 +5045,8 @@
             submissionKind: focus.submissionKind })
           report({ event: 'sent', text: focus.text.slice(0, 400), promptInjected: focus.promptInjected,
             taskPromptGeneration: focus.generation })
-        } else report({ event: 'sent-raw', text: computer ? '[computer observation attachment]' : '[read_files attachments]' })
+        } else report({ event: 'sent-raw', text: computer ? '[computer observation attachment]' : '[read_files attachments]',
+          attachmentKind: computer ? 'computer' : 'files' })
         if (state.enabled && state.awaitingReplySince !== 0) scheduleCheck()
         scheduleScrollToBottom()
         return { status: 'sent' }

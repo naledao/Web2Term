@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChatPlatform } from '../shared/platforms'
 import type { InterceptorPageEvent } from '../shared/types'
+import type { InjectionLedger, InjectionPlan } from '../shared/prompt-injection'
 
 const logPaths = new Map<ChatPlatform['id'], string>()
 const events = ['configured', 'send-observed', 'injected', 'sent', 'inject-failed', 'send-failed', 'send-recovery']
@@ -17,7 +18,7 @@ const reasons = [
 export function writePromptDiagnostic(
   platformId: ChatPlatform['id'],
   payload: InterceptorPageEvent,
-  mainState: { taskPromptInjected: boolean; taskPromptGeneration: number }
+  mainState: { taskPromptInjected: boolean; taskPromptGeneration: number; injectionMode?: string | null }
 ): string | null {
   if (!['chatgpt', 'deepseek', 'claude', 'gemini'].includes(platformId) || !events.includes(payload.event)) return null
   const details: Record<string, string | number | boolean | null> = { event: payload.event }
@@ -46,6 +47,36 @@ export function writePromptDiagnostic(
   if (Number.isSafeInteger(mainState.taskPromptGeneration) && mainState.taskPromptGeneration >= 0) {
     details.mainTaskPromptGeneration = mainState.taskPromptGeneration
   }
+  if (typeof mainState.injectionMode === 'string') details.injectionMode = mainState.injectionMode
+  return appendPromptLog(platformId, details)
+}
+
+/** Section keys are the prompt's own headings; no prompt or conversation text is logged. */
+const sectionKeys = (keys: string[]) => keys.slice(0, 20).map(key => key.slice(0, 24))
+
+/** The prefix main pushed for the next task start changed. */
+export function writeInjectionPlanDiagnostic(platformId: ChatPlatform['id'], plan: InjectionPlan | null, prefixLength: number): string | null {
+  if (!plan) return appendPromptLog(platformId, { event: 'injection-plan', mode: 'unplanned', prefixLength })
+  return appendPromptLog(platformId, { event: 'injection-plan', mode: plan.mode, reason: plan.reason, prefixLength,
+    fullLength: plan.fullLength, charsSinceFull: plan.charsSinceFull, violations: plan.violations, budget: plan.budget,
+    changed: sectionKeys(plan.changed).join('|'), removed: sectionKeys(plan.removed).join('|') })
+}
+
+/** The conversation's ledger moved: a confirmed injection, a violation, a reset, or a send the plan no longer matched. */
+export function writeInjectionLedgerDiagnostic(
+  platformId: ChatPlatform['id'],
+  event: 'injection-committed' | 'injection-unmatched' | 'injection-violation' | 'injection-reset',
+  conversation: 'draft' | 'saved',
+  ledger: InjectionLedger | null,
+  mode?: string
+): string | null {
+  return appendPromptLog(platformId, { event, conversation, ...(mode ? { mode } : {}),
+    ...(ledger ? { charsSinceFull: ledger.charsSinceFull, violations: ledger.violations, sendsSinceFull: ledger.sendsSinceFull,
+      sections: Object.keys(ledger.sections).length } : { ledger: null }) })
+}
+
+function appendPromptLog(platformId: ChatPlatform['id'], details: Record<string, string | number | boolean | null>): string | null {
+  if (!['chatgpt', 'deepseek', 'claude', 'gemini'].includes(platformId)) return null
   try {
     let logPath = logPaths.get(platformId)
     if (!logPath) {

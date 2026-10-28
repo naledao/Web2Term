@@ -90,6 +90,7 @@ import type {
   ExtraTerminalsState,
   LinuxAgentDownloadState,
   UpdateStatus,
+  DiagnosticLogsExportResult,
   NacosConnectionDraft,
   NacosConnectionsState,
   NacosSaveResult,
@@ -721,6 +722,7 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   checkForUpdates: (): Promise<UpdateStatus> => ipcRenderer.invoke(IpcChannels.updateCheck),
   downloadUpdate: (): Promise<UpdateStatus> => ipcRenderer.invoke(IpcChannels.updateDownload),
   installUpdate: (): Promise<void> => ipcRenderer.invoke(IpcChannels.updateInstall),
+  exportDiagnosticLogs: (): Promise<DiagnosticLogsExportResult> => ipcRenderer.invoke(IpcChannels.diagnosticLogsExport),
 
   onUpdateChanged: (listener: (status: UpdateStatus) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, status: UpdateStatus): void => listener(status)

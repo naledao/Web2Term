@@ -1,6 +1,8 @@
 import { normalizeConversationTools } from '../shared/conversation-tools'
 import type { ConversationToolPreferences, ConversationToolsUpdate } from '../shared/conversation-tools'
 import { parseComputerUsePreferencesPatch } from './computer-use-settings'
+import { parseInjectionLedger } from '../shared/prompt-injection'
+import type { InjectionLedger } from '../shared/prompt-injection'
 
 interface SettingsStore {
   getSetting(key: string): string | null
@@ -10,6 +12,9 @@ interface SettingsStore {
 
 /** Conversation choices outlive a window or workspace; a new chat has its own temporary draft. */
 export class ConversationTools {
+  /** An unsaved chat's ledger stays in memory: a stale draft must never claim a fresh chat has the prompt. */
+  private readonly draftLedgers = new Map<string, InjectionLedger>()
+
   constructor(private readonly sessionId: string, private readonly store: SettingsStore) {}
 
   private key(platformId: string, conversationId: string | null): string {
@@ -30,6 +35,21 @@ export class ConversationTools {
   /** Confirmed sends preserve evidence of the complete system/tool prefix in this conversation. */
   markPromptInjected(platformId: string, conversationId: string | null): void {
     if (!this.hasInjectedPrompt(platformId, conversationId)) this.store.setSetting(this.key(platformId, conversationId) + ':promptInjected', '1')
+  }
+
+  injectionLedger(platformId: string, conversationId: string | null): InjectionLedger | null {
+    if (conversationId === null) return this.draftLedgers.get(platformId) ?? null
+    return parseInjectionLedger(this.store.getSetting(this.key(platformId, conversationId) + ':promptLedger'))
+  }
+
+  /** null forgets what the conversation was given, so its next task start sends the full prompt. */
+  setInjectionLedger(platformId: string, conversationId: string | null, ledger: InjectionLedger | null): void {
+    if (conversationId === null) {
+      if (ledger) this.draftLedgers.set(platformId, ledger)
+      else this.draftLedgers.delete(platformId)
+      return
+    }
+    this.store.setSetting(this.key(platformId, conversationId) + ':promptLedger', ledger ? JSON.stringify(ledger) : '')
   }
 
   update(platformId: string, conversationId: string | null, value: unknown): ConversationToolPreferences {
@@ -56,6 +76,10 @@ export class ConversationTools {
   }
 
   bind(platformId: string, previousId: string | null, conversationId: string | null): void {
+    // Leaving for a new chat, or the draft becoming a conversation: either way the draft ledger is spent.
+    const draftLedger = this.draftLedgers.get(platformId)
+    this.draftLedgers.delete(platformId)
+    if (previousId === null && conversationId !== null && draftLedger) this.setInjectionLedger(platformId, conversationId, draftLedger)
     if (previousId !== null || conversationId === null) return
     const draftKey = this.key(platformId, null), raw = this.store.getSetting(draftKey)
     const promptInjected = this.hasInjectedPrompt(platformId, null)

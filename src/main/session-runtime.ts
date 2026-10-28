@@ -11,6 +11,9 @@ import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from '
 import { recheckCompletionFile } from './task-completion'
 import { TaskCoordinator } from './task-coordinator'
 import { ConversationTools } from './conversation-tools'
+import { writeInjectionLedgerDiagnostic } from './prompt-log'
+import { addInjectionTraffic, commitInjection, noteInjectionViolation, planInjection } from '../shared/prompt-injection'
+import type { InjectionLedger } from '../shared/prompt-injection'
 import { MailNotifications } from './mail-notifications'
 import { mailNotificationToolPrompt } from '../shared/mail-notification'
 import type { MailNotificationCall } from '../shared/mail-notification'
@@ -931,6 +934,7 @@ export class SessionRuntime {
           // The first send creates its conversation id; keep that task's injection.
           // A real conversation change starts with an unused prompt in every execution mode.
           if (!createdNewChat) entry.embed?.resetTaskPrompt()
+          else entry.embed?.refreshInjectionPlan()
           this.refreshComputerUseCapabilities()
           /*
            * Arming the baseline on a background view would be wasted work, and skipping it
@@ -1043,7 +1047,11 @@ export class SessionRuntime {
         if (discarded) return
         this.captureConversationMessage(platform.id, 'user', text, null, attachments, turnId)
       },
-      onRawSent: () => this.focusChat.rawSent(platform.id),
+      onRawSent: textLength => {
+        this.focusChat.rawSent(platform.id)
+        this.updateInjectionLedger(platform.id, ledger => addInjectionTraffic(ledger, textLength))
+      },
+      onContextTraffic: chars => { this.updateInjectionLedger(platform.id, ledger => addInjectionTraffic(ledger, chars)) },
       onScheduledTask: call => { if (isActive()) this.receiveScheduledTask(call) },
       onMailNotification: call => {
         if (isActive()) this.mailNotifications.receive(call,
@@ -1064,6 +1072,25 @@ export class SessionRuntime {
       hasConversationPrompt: conversationId => this.conversationTools.hasInjectedPrompt(platform.id, conversationId),
       onPromptInjected: conversationId => {
         if (!this.disposed) this.conversationTools.markPromptInjected(platform.id, conversationId)
+      },
+      planInjection: (fullPrefix, conversationId) => this.disposed ? null
+        : planInjection(this.conversationTools.injectionLedger(platform.id, conversationId), fullPrefix, platform.id),
+      onInjectionSent: (conversationId, plan) => {
+        if (this.disposed) return
+        const conversation = conversationId === null ? 'draft' : 'saved'
+        if (!plan) {
+          writeInjectionLedgerDiagnostic(platform.id, 'injection-unmatched', conversation, this.conversationTools.injectionLedger(platform.id, conversationId))
+          return
+        }
+        const ledger = commitInjection(this.conversationTools.injectionLedger(platform.id, conversationId), plan, Date.now())
+        this.conversationTools.setInjectionLedger(platform.id, conversationId, ledger)
+        writeInjectionLedgerDiagnostic(platform.id, 'injection-committed', conversation, ledger, plan.mode)
+        record().embed?.refreshInjectionPlan()
+      },
+      onConversationBranched: conversationId => {
+        if (this.disposed) return
+        this.conversationTools.setInjectionLedger(platform.id, conversationId, null)
+        writeInjectionLedgerDiagnostic(platform.id, 'injection-reset', conversationId === null ? 'draft' : 'saved', null)
       },
       onInterceptor: (status) => {
         this.mailNotifications?.reconcile()
@@ -1151,6 +1178,10 @@ export class SessionRuntime {
         if (!isActive()) return
         if (payload.live !== false) this.focusChat.parseFailed(platform.id, payload)
         this.runner.noteParseFailure(payload.text ?? '')
+        if (payload.live === true) {
+          const ledger = this.updateInjectionLedger(platform.id, noteInjectionViolation)
+          if (ledger) writeInjectionLedgerDiagnostic(platform.id, 'injection-violation', record().conversationId === null ? 'draft' : 'saved', ledger)
+        }
         if (payload.live === true) void record().embed?.recoverCommand(this.active && this.runner.canSendAutomaticResult())
       },
       onCommandRecovery: recovery => {
@@ -2639,6 +2670,22 @@ export class SessionRuntime {
     )
   }
 
+  /**
+   * Move the current conversation's injection ledger. A conversation without one is left alone:
+   * its next task start already sends the full prompt. Replans so the page's next prefix follows.
+   */
+  private updateInjectionLedger(platformId: string, change: (ledger: InjectionLedger) => InjectionLedger): InjectionLedger | null {
+    const entry = this.embeds.get(platformId)
+    if (this.disposed || !entry) return null
+    const current = this.conversationTools.injectionLedger(platformId, entry.conversationId)
+    if (!current) return null
+    const ledger = change(current)
+    if (ledger === current) return current
+    this.conversationTools.setInjectionLedger(platformId, entry.conversationId, ledger)
+    entry.embed?.refreshInjectionPlan()
+    return ledger
+  }
+
   private captureConversationMessage(
     platformId: string,
     role: 'user' | 'assistant',
@@ -2648,6 +2695,7 @@ export class SessionRuntime {
     focusTurnId?: string
   ): void {
     if (text.trim() === '' && attachments.length === 0) return
+    this.updateInjectionLedger(platformId, ledger => addInjectionTraffic(ledger, text.length))
     const conversationId = this.embeds.get(platformId)?.conversationId ?? null
     if (conversationId) {
       const savedId = this.options.store.appendConversationMessage(

@@ -34,8 +34,9 @@ const shared = load('../src/shared/conversation-tools.ts')
 const scheduled = load('../src/shared/scheduled-tasks.ts')
 const mail = load('../src/shared/mail-notification.ts')
 const settings = load('../src/main/computer-use-settings.ts')
+const injection = load('../src/shared/prompt-injection.ts')
 const { ConversationTools } = load('../src/main/conversation-tools.ts', {
-  '../shared/conversation-tools': shared, './computer-use-settings': settings
+  '../shared/conversation-tools': shared, './computer-use-settings': settings, '../shared/prompt-injection': injection
 })
 const Store = methods('../src/main/db.ts', 'ConversationStore', ['getSetting', 'setSetting', 'setSettings'])
 const protocol = load('../src/shared/computer-use-protocol.ts')

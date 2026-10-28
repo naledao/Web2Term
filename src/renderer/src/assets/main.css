@@ -3567,6 +3567,7 @@ body {
 .settings-update-status--warn { color:#d66a4b; }
 .settings-update-status--warn .settings-update-check { background:#fff0eb; color:#d66a4b; }
 .settings-update-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.settings-log-export { display:flex; flex-direction:column; align-items:flex-start; gap:8px; }
 .settings-outline-btn { min-height:40px; padding:0 20px; border:1.5px solid #6758ed; border-radius:10px; background:#fff; color:#594bea; font-size:14px; font-weight:650; cursor:pointer; }
 .settings-outline-btn:hover:not(:disabled) { background:#f6f4ff; }
 .settings-outline-btn:disabled { opacity:.45; cursor:default; }

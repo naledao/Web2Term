@@ -22,7 +22,8 @@ import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo, FocusEdi
 import { supportsFocusView, validFocusComposerModes, validFocusModelSettings, validFocusSendFailure } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
 import { writeRawSendDiagnostic } from './raw-send-log'
-import { writePromptDiagnostic } from './prompt-log'
+import { writeInjectionPlanDiagnostic, writePromptDiagnostic } from './prompt-log'
+import type { InjectionPlan } from '../shared/prompt-injection'
 import { writeReplyDiagnostic } from './reply-log'
 import { observeFocusEditRequest, observeFocusPageRequest } from './focus-edit-request'
 import { smartUiSubmission } from './focus-ui-request'
@@ -431,13 +432,21 @@ export interface EmbedHandlers {
   /** Conversation history survives task completion and page/app reloads. */
   hasConversationPrompt?(conversationId: string): boolean
   onPromptInjected?(conversationId: string | null): void
+  /** The prefix the next task start carries, chosen from what this conversation already holds. */
+  planInjection?(fullPrefix: string, conversationId: string | null): InjectionPlan | null
+  /** A confirmed send carried a prefix; `plan` is null when the page's prefix no longer matches the plan. */
+  onInjectionSent?(conversationId: string | null, plan: InjectionPlan | null): void
+  /** An edit-and-resend drops later turns, possibly the one that held the prompt. */
+  onConversationBranched?(conversationId: string | null): void
   /** Clean user text, with the injected system prefix already removed. */
   onUserStarted?(text: string, files?: FocusAttachmentInfo[], editToken?: string, submission?: TaskSubmission, scheduledRunId?: string): string | undefined
   onScheduledTask?(request: ScheduledToolCall): void
   onMailNotification?(request: MailNotificationCall): void
   onToolPromptRead?(request: ToolPromptReadCall): void
   onUserMessage(text: string, attachments: ConversationImageAttachmentInput[], focusTurnId?: string, imageSource?: 'provided' | 'page'): void
-  onRawSent?(): void
+  onRawSent?(textLength: number): void
+  /** Attachments the page sent, as an estimate of the context they take, in characters. */
+  onContextTraffic?(chars: number): void
   /** An assistant message that belongs in the app's conversation transcript. */
   onAssistantMessage(messageId: string, text: string): void
   /** Re-read Markdown for an already stored assistant turn in restored history. */
@@ -512,6 +521,10 @@ export class ChatGptEmbed {
   }
   /** Kept per view so a full page reload preserves the current task's injection. */
   private taskPromptInjected = false
+  /** The plan behind the prefix last pushed to the page, and the length the page last injected. */
+  private injectionPlan: InjectionPlan | null = null
+  private pushedPrefix: string | null = null
+  private injectedPrefixLength: number | null = null
   private toolPromptRevision = 0
   private taskPromptGeneration = 0
   private computerUseRecognitionEnabled = false
@@ -1280,6 +1293,9 @@ export class ChatGptEmbed {
     const contents = this.liveContents()
     if (!contents) return
 
+    const prefix = this.planPrefix(contents.getURL())
+    if (prefix !== this.pushedPrefix) writeInjectionPlanDiagnostic(this.platform.id, this.injectionPlan, prefix.length)
+    this.pushedPrefix = prefix
     const config = JSON.stringify({
       enabled: this.interceptor.enabled,
       promptInjectionEnabled: this.interceptor.promptInjectionEnabled,
@@ -1287,7 +1303,7 @@ export class ChatGptEmbed {
       computerPageEpoch: this.computerPageEpoch,
       computerProtocol: this.computerUseProtocolContext,
       sendBlock: this.sendBlock,
-      prefix: this.interceptor.prefix,
+      prefix,
       taskPromptInjected: this.taskPromptInjected,
       toolPromptRevision: this.toolPromptRevision,
       taskPromptGeneration: this.taskPromptGeneration,
@@ -1308,6 +1324,18 @@ export class ChatGptEmbed {
       // A navigation during injection is normal; did-finish-load will retry.
       console.warn('[embed] interceptor injection failed:', (error as Error).message)
     }
+  }
+
+  /** The prefix for the next task start in the conversation at `url`; the full prompt when nothing plans. */
+  private planPrefix(url: string): string {
+    this.injectionPlan = this.handlers.planInjection?.(this.interceptor.prefix, conversationIdOf(this.platform, url)) ?? null
+    return this.injectionPlan ? this.injectionPlan.prefix : this.interceptor.prefix
+  }
+
+  /** The conversation's ledger changed: reconfigure the page only when its next prefix differs. */
+  refreshInjectionPlan(): void {
+    const contents = this.liveContents()
+    if (contents && this.planPrefix(contents.getURL()) !== this.pushedPrefix) void this.installInterceptor(false)
   }
 
   /** Install the selection UI without exposing a page IPC bridge. */
@@ -1591,9 +1619,12 @@ export class ChatGptEmbed {
       const path = url.pathname
       const conversationId = this.platform.conversationIdFromPath(path)
       if (!conversationId) return 'unavailable'
+      // The edit drops every later turn; the page must hold the full prompt before it resends.
+      this.handlers.onConversationBranched?.(conversationId)
+      if (this.planPrefix(contents.getURL()) !== this.pushedPrefix) await this.installInterceptor(false)
       stopObserving = observeFocusEditRequest(contents, {
         origin: url.origin, submissionPath: this.platform.page.focus.edit.submissionPath,
-        conversationId, text: request.text, originalText: request.originalText, prefix: this.interceptor.prefix
+        conversationId, text: request.text, originalText: request.originalText, prefix: this.pushedPrefix ?? this.interceptor.prefix
       }, submission => {
         const { messageId: _messageId, ...diagnostic } = submission
         diagnose({ ...diagnostic, stage: 'request' })
@@ -1668,7 +1699,8 @@ export class ChatGptEmbed {
     try {
       if (!current()) return 'cancelled'
       const path = new URL(contents.getURL()).pathname
-      const conversationPromptInjected = this.handlers.hasConversationPrompt?.(conversationId) === true
+      // A planned prefix already reflects what the conversation holds; the flag is the fallback without one.
+      const conversationPromptInjected = !this.injectionPlan && this.handlers.hasConversationPrompt?.(conversationId) === true
       attempted = true
       const result: unknown = await contents.executeJavaScript(
         `window.__cmdTerminalInterceptor?.sendScheduledUser(${JSON.stringify(text)},${JSON.stringify(path)},${JSON.stringify(runId)},${conversationPromptInjected}) ?? 'unavailable'`)
@@ -1686,6 +1718,7 @@ export class ChatGptEmbed {
     try {
       this.focusSendImages.set(token, images)
       const outcome = await sendPageFiles(contents, this.platform.id, files, token, current, signal, { userText: text, allowNewConversation: true })
+      if (outcome === 'ok') this.noteAttachmentTraffic(files)
       return outcome === 'not-submitted' ? 'upload-failed' : outcome
     } catch { return 'upload-failed' }
     finally { this.focusSendImages.delete(token) }
@@ -1828,7 +1861,15 @@ export class ChatGptEmbed {
       try { return new URL(contents.getURL()).origin === new URL(this.platform.homeUrl).origin } catch { return false }
     }
     if (!guard()) return 'cancelled'
-    return sendPageFiles(contents, platform.id, result.attachments, token, guard, signal)
+    const outcome = await sendPageFiles(contents, platform.id, result.attachments, token, guard, signal)
+    if (outcome === 'ok') this.noteAttachmentTraffic(result.attachments)
+    return outcome
+  }
+
+  /** Text files count by size (about two bytes a character); an image counts as a fixed amount. */
+  private noteAttachmentTraffic(attachments: PreparedAttachment[]): void {
+    const chars = attachments.reduce((sum, file) => sum + (file.mimeType.startsWith('image/') ? 1500 : Math.round(file.sizeBytes / 2)), 0)
+    if (chars > 0) this.handlers.onContextTraffic?.(chars)
   }
 
   /**
@@ -2028,6 +2069,8 @@ export class ChatGptEmbed {
 
     let questionAccepted: boolean | undefined
     let computerAccepted: boolean | undefined
+    // A confirmed send replans at once; the log line describes the plan the send carried.
+    const injectionMode = this.injectionPlan?.mode ?? null
     switch (payload.event) {
       case 'installed':
         this.interceptor.installed = true
@@ -2059,12 +2102,13 @@ export class ChatGptEmbed {
          */
         console.info(
           `[embed:${this.platform.id}] configured enabled=${payload.enabled} ` +
-            `page-prompt=${payload.prefixLength ?? '?'} main-prompt=${this.interceptor.prefix.length} ` +
-            `${payload.prefixLength === this.interceptor.prefix.length ? 'MATCH' : 'MISMATCH'}`
+            `page-prompt=${payload.prefixLength ?? '?'} main-prompt=${this.pushedPrefix?.length ?? this.interceptor.prefix.length} ` +
+            `${payload.prefixLength === (this.pushedPrefix?.length ?? this.interceptor.prefix.length) ? 'MATCH' : 'MISMATCH'}`
         )
         break
       case 'injected':
         this.interceptor.injectedCount += 1
+        this.injectedPrefixLength = Number.isSafeInteger(payload.prefixLength) ? payload.prefixLength! : null
         /*
          * Log which prompt the PAGE actually holds, and compare it with what main thinks it
          * pushed. The two can diverge because the prefix lives per view: a view created before
@@ -2073,9 +2117,9 @@ export class ChatGptEmbed {
          */
         console.info(
           `[embed:${this.platform.id}] injected #${this.interceptor.injectedCount} ` +
-            `page-prompt=${payload.prefixLength ?? '?'} main-prompt=${this.interceptor.prefix.length} ` +
+            `page-prompt=${payload.prefixLength ?? '?'} main-prompt=${this.pushedPrefix?.length ?? this.interceptor.prefix.length} ` +
             `page-head=${JSON.stringify(payload.prefixHead ?? '')} ` +
-            `${payload.prefixLength === this.interceptor.prefix.length ? 'MATCH' : 'MISMATCH'}`
+            `${payload.prefixLength === (this.pushedPrefix?.length ?? this.interceptor.prefix.length) ? 'MATCH' : 'MISMATCH'}`
         )
         break
       case 'send-observed':
@@ -2145,7 +2189,8 @@ export class ChatGptEmbed {
         }
         break
       case 'sent-raw':
-        this.handlers.onRawSent?.()
+        // A computer observation's screenshot counts as a fixed amount of context, like noteAttachmentTraffic's images.
+        this.handlers.onRawSent?.((Number.isSafeInteger(payload.textLength) ? payload.textLength! : 0) + (payload.attachmentKind === 'computer' ? 1500 : 0))
         break
       case 'sent':
         if (payload.taskPromptGeneration !== this.taskPromptGeneration) break
@@ -2153,6 +2198,11 @@ export class ChatGptEmbed {
         if (payload.promptInjected === true || payload.conversationPromptInjected === true) {
           const contents = this.liveContents()
           if (contents) this.handlers.onPromptInjected?.(conversationIdOf(this.platform, contents.getURL()))
+          if (contents && payload.promptInjected === true) {
+            const plan = this.injectionPlan && this.injectionPlan.prefix.length === this.injectedPrefixLength ? this.injectionPlan : null
+            this.injectedPrefixLength = null
+            this.handlers.onInjectionSent?.(conversationIdOf(this.platform, contents.getURL()), plan)
+          }
         }
         console.info(
           `[embed:${this.platform.id}] sent promptInjected=${payload.promptInjected === true} ` +
@@ -2458,7 +2508,8 @@ export class ChatGptEmbed {
     }
     writePromptDiagnostic(this.platform.id, payload, {
       taskPromptInjected: this.taskPromptInjected,
-      taskPromptGeneration: this.taskPromptGeneration
+      taskPromptGeneration: this.taskPromptGeneration,
+      injectionMode
     })
     this.handlers.onInterceptor(this.getInterceptorStatus())
   }
