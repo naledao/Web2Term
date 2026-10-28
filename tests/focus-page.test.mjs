@@ -37,7 +37,7 @@ function fixture() {
     state: { enabled: true, promptInjectionEnabled: true, prefix: 'SYSTEM\n\n', taskPromptInjected: false,
       injectedCount: 0, taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: null },
     USER_TEXT_SENTINEL: '\u0000\u0001', SEND_TIMEOUT_MS: 6000, SEND_BUTTON_GRACE_MS: 500,
-    fileSend: null, focusEditing: null, focusEditExcludedIds: new Set(), focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
+    fileSend: null, computerResultToken: null, userTurns: () => [], focusEditing: null, focusEditExcludedIds: new Set(), focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
     getComposer: () => composer, collapse: text => String(text).replace(/\s+/g, ' ').trim(),
     readComposer: node => node.draft, findStopButton: () => null,
     attachmentSnapshot: () => ({}), draftAttachmentEvidence: () => false, hasDraftImageAttachment: () => false,
@@ -52,7 +52,7 @@ function fixture() {
     extractCommand: () => null, PAGE: DEEPSEEK_PAGE,
     queryAll: () => [], isVisibleElement: () => true, focusSendFailureOf: () => null
   })
-  for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'focusRowPosition', 'focusReplyAnchor']) context[name] = arrow(name, context)
+  for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'focusRowPosition', 'focusReplyAnchor', 'conversationPromptInHistory']) context[name] = arrow(name, context)
   return { context, composer, calls, reports, send: method('sendUser', context), snapshot: method('focusSnapshot', context) }
 }
 
@@ -84,6 +84,45 @@ test('app composer preserves multiline input and waits for confirmed user-send o
   assert.equal(f.calls[1][0], '继续')
   f.calls[1][3]('stuck')
   assert.equal(await next, 'stuck')
+})
+
+test('a scheduled send includes system and tool prompts when the conversation has no prior injection', async () => {
+  const f = fixture()
+  f.context.state.prefix = 'SYSTEM\n\nTOOLS\n\n'
+  const send = method('sendScheduledUser', f.context)
+  const pending = send.call({ sendUser: f.send }, '检查 GPU 温度', '/a/chat/s/one', 'run-first', false)
+  assert.equal(f.calls[0][0], 'SYSTEM\n\nTOOLS\n\n\u0000\u0001检查 GPU 温度')
+  assert.equal(f.calls[0].at(-1).promptInjected, true)
+  assert.equal(f.context.state.taskPromptInjected, false, 'preparing a send is not a confirmed injection')
+  f.calls[0][3]('stuck')
+  assert.equal(await pending, 'stuck')
+  assert.equal(f.context.state.taskPromptInjected, false)
+  assert.equal(f.context.computerResultToken, null)
+})
+
+test('scheduled sends reuse conversation prompts after a task reset or page reload, including older rendered history', async () => {
+  for (const evidence of ['persisted', 'current-task', 'history']) {
+    const f = fixture()
+    if (evidence === 'current-task') f.context.state.taskPromptInjected = true
+    if (evidence === 'history') f.context.userTurns = () => [{ textContent: '【角色】你是 PowerShell 终端助手。\n【工作协议】\n【执行环境】\n【工具：scheduled_task】' }]
+    const send = method('sendScheduledUser', f.context)
+    const pending = send.call({ sendUser: f.send }, '检查 GPU 温度', '/a/chat/s/one', 'run-next', evidence === 'persisted')
+    assert.equal(f.calls[0][0], '检查 GPU 温度', evidence)
+    assert.equal(f.calls[0].at(-1).promptInjected, false, evidence)
+    assert.equal(f.calls[0].at(-1).conversationPromptInjected, true, evidence)
+    assert.equal(f.reports.length, 0, 'reusing a prompt must not report another injection')
+    f.calls[0][3]('ok'); assert.equal(await pending, 'ok')
+    assert.equal(f.context.computerResultToken, null)
+  }
+})
+
+test('a tool mention or a system-only history message does not suppress the first complete scheduled prompt', async () => {
+  const f = fixture()
+  f.context.userTurns = () => [{ textContent: '说明【工具：scheduled_task】的用法' },
+    { textContent: '【角色】你是 PowerShell 终端助手。\n【工作协议】\n【执行环境】' }]
+  const pending = method('sendScheduledUser', f.context).call({ sendUser: f.send }, '新任务', '/a/chat/s/one', 'run-a')
+  assert.equal(f.calls[0].at(-1).promptInjected, true)
+  f.calls[0][3]('ok'); assert.equal(await pending, 'ok')
 })
 
 test('preserves native drafts, pending questions and uploads without attempting a send', async () => {

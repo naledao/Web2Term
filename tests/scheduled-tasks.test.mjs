@@ -137,6 +137,20 @@ test('uncertain web outcomes and interrupted sending are not automatically repla
   await f.tick(begin + 150 * minute); assert.equal(f.sends.length, 2)
 })
 
+test('a busy send stays queued and retries the same occurrence when the page becomes available', async t => {
+  const f = fixture(t)
+  f.create(); f.outcomes.push({ outcome: 'busy', message: 'AI 正在生成，等待当前回复结束。' }); f.scheduler.start()
+  await f.tick(begin + 30 * minute)
+  const queued = f.snapshot().runs[0]
+  assert.equal(f.sends.length, 1); assert.equal(queued.status, 'pending')
+  assert.match(queued.message, /AI 正在生成/)
+  assert.equal([...f.timers][0].delay, 10_000)
+  await f.tick(begin + 30 * minute + 10_000)
+  assert.equal(f.sends.length, 2); assert.equal(f.sends[1].run.id, queued.id)
+  assert.equal(f.snapshot().runs.length, 1); assert.equal(f.snapshot().runs[0].status, 'sent')
+  await f.tick(); assert.equal(f.sends.length, 2, 'a confirmed send must not be replayed')
+})
+
 test('known pre-submit busy is retried; pausing cancels queued work and resume starts a fresh interval', async t => {
   const f = fixture(t), task = f.create()
   f.outcomes.push({ outcome: 'busy' }); f.scheduler.start()
@@ -237,13 +251,49 @@ function methods(path, className, names, globals = {}) {
   return new Script(compile(`class Actual { ${body} }; Actual`)).runInNewContext({ structuredClone, AbortController, console, ...globals })
 }
 
-test('runtime waits for original owner, idle tools, original target and human control; a completed goal does not disable future plans', () => {
+test('scheduled transport restores confirmed conversation prompt history without recording prepared or failed injections', async () => {
+  const recorded = new Set(), sends = []
+  const Embed = methods('../src/main/embed.ts', 'ChatGptEmbed', ['handlePageReport', 'sendScheduledUser'], {
+    URL, INTERCEPTOR_LOG_TAG: '[cmd-terminal] ', writeReplyDiagnostic() {}, writePromptDiagnostic() {},
+    conversationIdOf: (platform, url) => platform.conversationIdFromPath(new URL(url).pathname)
+  })
+  const contents = { id: 1, isDestroyed: () => false, getURL: () => 'https://chat.deepseek.com/a/chat/s/chat-a',
+    executeJavaScript: script => new Script(script).runInNewContext({ window: { __cmdTerminalInterceptor: {
+      sendScheduledUser: (...args) => { sends.push(args); return 'ok' }
+    } } }) }
+  const embed = Object.assign(new Embed(), {
+    taskPromptGeneration: 1, computerPageEpoch: 'page-a', taskPromptInjected: false,
+    platform: { id: 'deepseek', homeUrl: 'https://chat.deepseek.com/', conversationIdFromPath: path => path.split('/').at(-1) },
+    interceptor: { prefix: 'system and tools', injectedCount: 0, taskStartedAt: null, taskFinishedAt: null },
+    liveContents: () => contents, getInterceptorStatus: () => ({}), handlers: {
+      onInterceptor() {}, hasConversationPrompt: id => recorded.has(id), onPromptInjected: id => recorded.add(id)
+    }
+  })
+  const report = event => embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(event))
+  report({ event: 'injected' }); report({ event: 'send-failed' })
+  assert.equal(recorded.size, 0, 'writing a prefix or failing to send cannot establish prompt history')
+  report({ event: 'sent', promptInjected: true, taskPromptGeneration: 0 })
+  report({ event: 'sent', promptInjected: false, taskPromptGeneration: 1 })
+  assert.equal(recorded.size, 0)
+  await embed.sendScheduledUser('first task', 'chat-a', 'run-first', new AbortController().signal, () => true)
+  assert.equal(sends[0][3], false)
+  report({ event: 'sent', promptInjected: true, taskPromptGeneration: 1 })
+  assert.equal(recorded.has('chat-a'), true)
+  embed.taskPromptInjected = false; embed.taskPromptGeneration++
+  await embed.sendScheduledUser('next task', 'chat-a', 'run-next', new AbortController().signal, () => true)
+  assert.equal(sends[1][3], true, 'task completion must not discard conversation prompt history')
+  recorded.clear()
+  report({ event: 'sent', promptInjected: false, conversationPromptInjected: true, taskPromptGeneration: 2 })
+  assert.equal(recorded.has('chat-a'), true, 'confirmed reuse upgrades older rendered history to a durable record')
+})
+
+test('runtime checks send availability and owner controls without waiting for AI task completion', () => {
   const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['scheduledTaskReady'], {
     taskPausedByInput: task => task?.paused === true, computerUseSendBlock: () => null, sameScheduledTarget: targets.sameScheduledTarget
   })
   const task = { ...request, owner, target }, run = { kind: 'task' }
   const subject = Object.assign(new Runtime(), { id: owner.sessionId, active: true, activePlatformId: owner.platformId, taskEnded: true,
-    embed: { getState: () => ({ conversationId: owner.conversationId }), getInterceptorStatus: () => ({ enabled: true, installed: true, promptInjectionEnabled: true }) },
+    embed: { getState: () => ({ conversationId: owner.conversationId }), getInterceptorStatus: () => ({ enabled: true, installed: true, promptInjectionEnabled: true, taskStartedAt: begin, taskFinishedAt: null }) },
     runner: { getAutomation: () => ({ paused: false }), hasInFlightWork: () => false }, backgroundTaskResults: { isSending: false },
     taskCoordinator: { latest: () => null, waitingForUser: () => false }, options: {}, toolPreferences: () => ({ scheduledTasksEnabled: true }),
     scheduledTarget: () => target, getComputerUseCapability: () => ({}), taskRunning: () => false })
@@ -252,7 +302,11 @@ test('runtime waits for original owner, idle tools, original target and human co
   subject.options.automationBlocked = () => true; assert.match(subject.scheduledTaskReady(task, run), /急停/); delete subject.options.automationBlocked
   subject.options.desktopCoordinator = { getState: () => ({ humanControl: true }) }; assert.match(subject.scheduledTaskReady(task, run), /接管/); delete subject.options.desktopCoordinator
   subject.scheduledTarget = () => ({ ...target, cwd: 'C:\\other' }); assert.match(subject.scheduledTaskReady(task, run), /工作目录/)
-  subject.scheduledTarget = () => target; subject.taskRunning = () => true; assert.match(subject.scheduledTaskReady(task, run), /任务结束/)
+  subject.scheduledTarget = () => target; subject.taskEnded = false; subject.taskRunning = () => true
+  assert.equal(subject.scheduledTaskReady(task, run), null, 'an unfinished AI task must not block an available send channel')
+  subject.runner.hasInFlightWork = () => true; assert.match(subject.scheduledTaskReady(task, run), /发送或工具执行/)
+  subject.runner.hasInFlightWork = () => false; subject.focusSending = true; assert.match(subject.scheduledTaskReady(task, run), /发送或工具执行/)
+  subject.focusSending = false; assert.equal(subject.scheduledTaskReady(task, run), null)
 })
 
 test('a confirmed scheduled goal starts a fresh task without releasing human control; unowned acknowledgements are ignored', () => {

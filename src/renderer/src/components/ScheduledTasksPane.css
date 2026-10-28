@@ -31,8 +31,6 @@
 .scheduled-tasks .scheduled-tasks__danger, .scheduled-tasks__error { color: var(--danger); }
 .scheduled-tasks__error { margin-bottom: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .scheduled-tasks__error p { margin: 0 0 8px; }
-.scheduled-tasks__empty { padding: 20px 0; }
-.scheduled-tasks__empty p { margin: 0 0 14px; color: var(--text-muted); line-height: 1.7; }
 .scheduled-tasks__task { padding: 14px 0; border-top: 1px solid var(--border); }
 .scheduled-tasks .scheduled-tasks__open { display: flex; flex-direction: column; gap: 7px; width: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; text-align: left; }
 .scheduled-tasks .scheduled-tasks__open:hover { background: transparent; }

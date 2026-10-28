@@ -99,7 +99,6 @@ export default function ScheduledTasksPane({ owner, visible }: { owner: Conversa
       <button type="button" disabled={busy || !owner.conversationId} onClick={() => openEditor()}>新建计划</button>
     </div>
     <div className="scheduled-tasks__body">
-      <p className="scheduled-tasks__notice">软件需保持运行。任务绑定创建时的 AI 对话、主机和目录；原对话忙碌或未选中时等待，错过多次合并执行一次。</p>
       {!owner.conversationId ? <p className="scheduled-tasks__notice">先在当前 AI 对话发送一条消息，即可为这个对话创建计划。</p> : null}
       {error ? <div className="scheduled-tasks__error" role="alert"><p>{error}</p>
         {!state ? <button type="button" onClick={() => setReload(value => value + 1)}>重新加载</button> : null}</div> : null}
@@ -119,19 +118,15 @@ export default function ScheduledTasksPane({ owner, visible }: { owner: Conversa
                   {['周日', '周一', '周二', '周三', '周四', '周五', '周六'].map((label, index) => <option key={index} value={index}>{label}</option>)}</select> : null}
                 <input aria-label="触发时间" type="time" value={time} required onChange={event => setTime(event.target.value)} /></>}
           </div>
-          {cycle !== 'interval' ? <label className="scheduled-tasks__timezone">时区<input value={timeZone} maxLength={100} required onChange={event => setTimeZone(event.target.value)} /></label>
-            : <p className="scheduled-tasks__hint">首次在保存后的一个周期触发，后续按计划时间计算。</p>}
+          {cycle !== 'interval' ? <label className="scheduled-tasks__timezone">时区<input value={timeZone} maxLength={100} required onChange={event => setTimeZone(event.target.value)} /></label> : null}
         </fieldset>
         <label className="scheduled-tasks__prompt">任务描述<textarea value={prompt} maxLength={16000} required rows={5}
           disabled={busy || !currentEditor} placeholder="例如：检查当前项目的后台服务状态，发现异常时分析原因并告诉我。"
           onChange={event => setPrompt(event.target.value)} /></label>
-        <p className="scheduled-tasks__hint">{editor.task ? `保留原绑定：${editor.task.owner.platformId} · ${editor.task.target.label} · ${editor.task.target.cwd}` : `绑定当前 ${owner.platformId} 对话及执行目标。`}保存修改后重新计算下次时间。</p>
         <div className="scheduled-tasks__actions"><button type="button" disabled={busy} onClick={() => setEditor(null)}>取消</button>
           <button type="submit" className="scheduled-tasks__primary" disabled={busy || !currentEditor || !prompt.trim()}>{busy ? '保存中…' : '保存计划'}</button></div>
       </form> : null}
       {!state && !error ? <p role="status" className="scheduled-tasks__notice">正在读取定时计划…</p> : null}
-      {state?.tasks.length === 0 && !editor ? <div className="scheduled-tasks__empty"><h3>把重复的事情交给计划</h3><p>设置周期和任务描述，到期后软件会自动发给这个对话的 AI。</p>
-        <button type="button" disabled={!owner.conversationId || busy} onClick={() => openEditor()}>新建第一个计划</button></div> : null}
       <div className="scheduled-tasks__list">
         {state?.tasks.map(task => {
           const runs = state.runs.filter(run => run.taskId === task.id)

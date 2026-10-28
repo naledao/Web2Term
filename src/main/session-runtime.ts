@@ -1032,6 +1032,10 @@ export class SessionRuntime {
         // The focus view keeps its own copy of each answer; refresh that one too.
         if (conversationId && supportsFocusView(platform.id)) this.focusChat.refreshAnswer(platform.id, conversationId, messageId, text)
       },
+      hasConversationPrompt: conversationId => this.conversationTools.hasInjectedPrompt(platform.id, conversationId),
+      onPromptInjected: conversationId => {
+        if (!this.disposed) this.conversationTools.markPromptInjected(platform.id, conversationId)
+      },
       onInterceptor: (status) => {
         this.captureGoal(status.lastSentText)
         if (!this.disposed) this.options.onPendingQuestionsChanged(this.id, platform.id, status.pendingQuestion?.questions.length ?? 0)
@@ -2384,7 +2388,7 @@ export class SessionRuntime {
     if (status.pendingQuestion || this.taskCoordinator.waitingForUser(task.owner.platformId)) return '等待用户回答原任务的问题。'
     const block = computerUseSendBlock(this.getComputerUseCapability(task.owner.platformId))
     if (block) return '等待 computer use 能力恢复。'
-    if (run.kind === 'task' && this.taskRunning()) return '等待当前 AI 任务结束。'
+    // An unfinished AI task does not block delivery; the scheduler retries busy sends.
     return null
   }
 

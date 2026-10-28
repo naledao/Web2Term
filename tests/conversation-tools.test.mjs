@@ -73,6 +73,30 @@ test('choices persist by platform and conversation across workspace instances wi
   assert.deepEqual(plain(reopened.read('chatgpt', 'chat-a')), plain(shared.DEFAULT_CONVERSATION_TOOLS))
 })
 
+test('confirmed prompt history persists across workspaces and stays isolated by platform and conversation', t => {
+  const f = fixture(t)
+  assert.equal(f.choices.hasInjectedPrompt('chatgpt', 'chat-a'), false)
+  f.choices.markPromptInjected('chatgpt', 'chat-a')
+  f.choices.update('chatgpt', 'chat-a', { backgroundTasksEnabled: false })
+  const reopened = new ConversationTools('another-workspace', Object.assign(new Store(), { db: f.db }))
+  assert.equal(reopened.hasInjectedPrompt('chatgpt', 'chat-a'), true)
+  assert.equal(reopened.hasInjectedPrompt('chatgpt', 'chat-b'), false)
+  assert.equal(reopened.hasInjectedPrompt('deepseek', 'chat-a'), false)
+  assert.equal(reopened.read('chatgpt', 'chat-a').backgroundTasksEnabled, false)
+})
+
+test('a first injected send transfers prompt history even with default tools and never leaks to the next new chat', t => {
+  const f = fixture(t)
+  f.choices.markPromptInjected('chatgpt', null)
+  f.choices.bind('chatgpt', null, 'new-chat')
+  assert.equal(f.choices.hasInjectedPrompt('chatgpt', 'new-chat'), true)
+  assert.equal(f.choices.hasInjectedPrompt('chatgpt', null), false)
+  f.choices.bind('chatgpt', 'new-chat', null)
+  f.choices.bind('chatgpt', null, 'another-chat')
+  assert.equal(f.choices.hasInjectedPrompt('chatgpt', 'another-chat'), false)
+  assert.equal(new ConversationTools('another-workspace', f.store).hasInjectedPrompt('chatgpt', null), false)
+})
+
 test('a confirmed first send transfers its draft choices once and the following new chat starts with defaults', t => {
   const f = fixture(t)
   f.choices.update('deepseek', null, { fileReadingEnabled: false, computerUseEnabled: true })

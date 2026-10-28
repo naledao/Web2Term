@@ -1343,6 +1343,8 @@ export interface InterceptorPageEvent {
   prefixLength?: number
   /** Present on `sent`: this confirmed user message carried the task's prompt. */
   promptInjected?: boolean
+  /** A scheduled send reused the system/tool prefix already present in this conversation. */
+  conversationPromptInjected?: boolean
   /** Present on `sent` and `user-message`: ignore confirmations from an already-ended task. */
   taskPromptGeneration?: number
   /** User-send diagnostics contain flags/counts, never draft or prompt text. */

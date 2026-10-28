@@ -2141,6 +2141,7 @@
             : {
                 event: 'sent', text: userTextOf(text).slice(0, 400),
                 promptInjected: sendContext.promptInjected,
+                conversationPromptInjected: sendContext.conversationPromptInjected === true,
                 taskPromptGeneration: sendContext.taskPromptGeneration
               }
           : {
@@ -2358,6 +2359,14 @@
     if (at === -1) return text
     return text.slice(at + USER_TEXT_SENTINEL.length)
   }
+
+  // Older conversations may predate the persisted injection flag. Read only user
+  // turns, requiring both the system protocol and tool declarations as evidence.
+  const conversationPromptInHistory = () => userTurns().some(node => {
+    const text = node.textContent || node.innerText || ''
+    return text.includes('【角色】') && text.includes('终端助手') && text.includes('【工作协议】') &&
+      text.includes('【执行环境】') && text.includes('【工具：')
+  })
 
   /** Forward one explicit focus action to the live native component, once. */
   const actOnSmartUi = async (request, expectedPath, diagnostic = {}) => {
@@ -5445,10 +5454,11 @@
         attachmentInputFiles: attachments.inputFiles, attachmentImages: attachments.images, attachmentUploading: attachments.uploading
       })
       if (hasDraftImageAttachment()) return busy('image-draft')
-      if (state.enabled && state.promptInjectionEnabled && !state.prefix) return Promise.resolve('unavailable')
-      const shouldInject = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected
+      const conversationPromptInjected = !!options?.scheduledRunId && options.conversationPromptInjected === true
+      const shouldInject = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected && !conversationPromptInjected
+      if (shouldInject && !state.prefix) return Promise.resolve('unavailable')
       const payload = shouldInject ? state.prefix + USER_TEXT_SENTINEL + normalizeLineEndings(text) : normalizeLineEndings(text)
-      const sendContext = { taskPromptGeneration: state.taskPromptGeneration, promptInjected: shouldInject,
+      const sendContext = { taskPromptGeneration: state.taskPromptGeneration, promptInjected: shouldInject, conversationPromptInjected,
         ...(options?.scheduledRunId ? { scheduledRunId: options.scheduledRunId, computerResultToken: options.computerResultToken, path: expectedPath } : {}) }
       state.programmatic = true
       if (!insertText(element, payload) || !composerMatches(element, payload)) {
@@ -5466,11 +5476,12 @@
       ))
     },
 
-    sendScheduledUser(text, expectedPath, runId) {
+    sendScheduledUser(text, expectedPath, runId, conversationPromptInjected = false) {
       if (typeof runId !== 'string' || !/^[\w-]{1,128}$/.test(runId)) return Promise.resolve('invalid')
       const token = 'scheduled:' + runId
       computerResultToken = token
-      return this.sendUser(text, expectedPath, { scheduledRunId: runId, computerResultToken: token }).finally(() => {
+      const promptKnown = conversationPromptInjected === true || state.taskPromptInjected || conversationPromptInHistory()
+      return this.sendUser(text, expectedPath, { scheduledRunId: runId, computerResultToken: token, conversationPromptInjected: promptKnown }).finally(() => {
         if (computerResultToken === token) computerResultToken = null
       })
     },

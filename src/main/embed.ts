@@ -426,6 +426,9 @@ export interface EmbedHandlers {
   onSynced(conversations: ScrapedConversation[]): void
   /** Terminal-mode interceptor changed state. */
   onInterceptor(status: InterceptorStatus): void
+  /** Conversation history survives task completion and page/app reloads. */
+  hasConversationPrompt?(conversationId: string): boolean
+  onPromptInjected?(conversationId: string | null): void
   /** Clean user text, with the injected system prefix already removed. */
   onUserStarted?(text: string, files?: FocusAttachmentInfo[], editToken?: string, submission?: TaskSubmission, scheduledRunId?: string): string | undefined
   onScheduledTask?(request: ScheduledToolCall): void
@@ -1648,9 +1651,10 @@ export class ChatGptEmbed {
     try {
       if (!current()) return 'cancelled'
       const path = new URL(contents.getURL()).pathname
+      const conversationPromptInjected = this.handlers.hasConversationPrompt?.(conversationId) === true
       attempted = true
       const result: unknown = await contents.executeJavaScript(
-        `window.__cmdTerminalInterceptor?.sendScheduledUser(${JSON.stringify(text)},${JSON.stringify(path)},${JSON.stringify(runId)}) ?? 'unavailable'`)
+        `window.__cmdTerminalInterceptor?.sendScheduledUser(${JSON.stringify(text)},${JSON.stringify(path)},${JSON.stringify(runId)},${conversationPromptInjected}) ?? 'unavailable'`)
       if (result === 'ok') return 'ok'
       if (!current()) return 'unknown'
       return ['busy', 'no-composer', 'unavailable', 'invalid', 'insert-failed'].includes(String(result)) ? result as FocusSendOutcome : 'unknown'
@@ -2129,6 +2133,10 @@ export class ChatGptEmbed {
       case 'sent':
         if (payload.taskPromptGeneration !== this.taskPromptGeneration) break
         if (payload.promptInjected === true) this.taskPromptInjected = true
+        if (payload.promptInjected === true || payload.conversationPromptInjected === true) {
+          const contents = this.liveContents()
+          if (contents) this.handlers.onPromptInjected?.(conversationIdOf(this.platform, contents.getURL()))
+        }
         console.info(
           `[embed:${this.platform.id}] sent promptInjected=${payload.promptInjected === true} ` +
             `taskPromptInjected=${this.taskPromptInjected}`

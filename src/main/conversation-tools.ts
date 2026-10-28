@@ -23,6 +23,15 @@ export class ConversationTools {
     catch { return normalizeConversationTools(undefined) }
   }
 
+  hasInjectedPrompt(platformId: string, conversationId: string | null): boolean {
+    return this.store.getSetting(this.key(platformId, conversationId) + ':promptInjected') === '1'
+  }
+
+  /** Confirmed sends preserve evidence of the complete system/tool prefix in this conversation. */
+  markPromptInjected(platformId: string, conversationId: string | null): void {
+    if (!this.hasInjectedPrompt(platformId, conversationId)) this.store.setSetting(this.key(platformId, conversationId) + ':promptInjected', '1')
+  }
+
   update(platformId: string, conversationId: string | null, value: unknown): ConversationToolPreferences {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('工具设置格式无效。')
     const input = value as ConversationToolsUpdate['patch']
@@ -48,10 +57,12 @@ export class ConversationTools {
   bind(platformId: string, previousId: string | null, conversationId: string | null): void {
     if (previousId !== null || conversationId === null) return
     const draftKey = this.key(platformId, null), raw = this.store.getSetting(draftKey)
-    if (!raw) return
+    const promptInjected = this.hasInjectedPrompt(platformId, null)
+    if (!raw && !promptInjected) return
     const target = this.key(platformId, conversationId)
     const carry = this.store.getSetting(draftKey + ':submitted') === '1' && this.store.getSetting(target) === null
     this.store.setSettings({ ...(carry ? { [target]: JSON.stringify(this.read(platformId, null)) } : {}),
-      [draftKey]: '', [draftKey + ':submitted']: '' })
+      ...(promptInjected ? { [target + ':promptInjected']: '1' } : {}),
+      [draftKey]: '', [draftKey + ':submitted']: '', [draftKey + ':promptInjected']: '' })
   }
 }
