@@ -14,6 +14,8 @@ import {
   WEB2TERM_GUIDE_URL,
   LINUX_AGENT_GUIDE_URL,
   COMPUTER_USE_GUIDE_URL,
+  SCHEDULED_TASKS_GUIDE_URL,
+  MAIL_NOTIFICATIONS_GUIDE_URL,
 } from './site-config'
 
 type Step = {
@@ -72,6 +74,16 @@ const features = [
     title: '长任务放到后台，结果自动回来',
     body: '软件负责启动和监控非交互后台任务，保留 PID、日志和退出码，向原对话发送创建通知与最终结果。主终端可以继续工作，关闭任务页签仍保留监控。',
     tag: 'BACKGROUND TASKS',
+  },
+  {
+    title: '重复检查交给定时任务',
+    body: '设置固定间隔或带时区的日历周期，到期向原 AI 对话提交任务。可手动创建或让 AI 创建计划，集中管理下次时间与运行记录。',
+    tag: 'SCHEDULED TASKS',
+  },
+  {
+    title: '需要关注的结果，发到 QQ 邮箱',
+    body: '配置收发邮箱后，AI 可用邮件通知工具发送结果或提醒。标题和正文由模型提供，发送结果回到原对话；工具按对话开关。',
+    tag: 'EMAIL NOTIFICATIONS',
   },
   {
     title: '给自己多开一个独立终端',
@@ -264,6 +276,7 @@ export default function Home() {
         <nav id="site-navigation" className={menuOpen ? 'site-nav site-nav--open' : 'site-nav'} aria-label="主导航">
           <button onClick={() => scrollTo('models')}>AI 平台</button>
           <button onClick={() => scrollTo('workflow')}>工作流</button>
+          <button onClick={() => scrollTo('automation')}>定时与通知</button>
           <button onClick={() => scrollTo('computer-use')}>Computer Use</button>
           <button onClick={() => scrollTo('macos')}>macOS</button>
           <button onClick={() => scrollTo('web2term')}>Linux 设备</button>
@@ -279,7 +292,7 @@ export default function Home() {
         <div className="hero-copy">
           <p className="hero-overline"><span className="live-dot" /> AI × 本机与远程终端</p>
           <h1>让对话<br /><em>抵达终端。</em></h1>
-          <p className="hero-lede">{PRODUCT_NAME} 把模型网页、项目对话与本机、SSH、Linux 设备上的命令执行放进同一个工作区。在 Windows 本机会话中，还能让 ChatGPT 或 DeepSeek 通过 Computer Use 查看界面、操作桌面应用。</p>
+          <p className="hero-lede">{PRODUCT_NAME} 把模型网页、项目对话与本机、SSH、Linux 设备上的命令执行放进同一个工作区。支持定时任务与 AI 邮件通知；在 Windows 本机会话中，还能让 ChatGPT 或 DeepSeek 通过 Computer Use 查看界面、操作桌面应用。</p>
           <div className="hero-actions">
             <a className="button button--primary" href={WINDOWS_DOWNLOAD_URL} download>下载 Windows 版 <DownloadIcon /></a>
             <a className="button button--secondary" href={MACOS_DOWNLOAD_URL} download>下载 macOS 版 <DownloadIcon /></a>
@@ -475,6 +488,44 @@ export default function Home() {
         <div className="feature-rail">{features.map((feature, index) => <article className="feature-row" key={feature.tag}><span className="feature-index">0{index + 1}</span><div className="feature-content"><p>{feature.tag}</p><h3>{feature.title}</h3><span>{feature.body}</span></div><ArrowIcon /></article>)}</div>
       </section>
 
+      <section className="automation section" id="automation" aria-labelledby="automation-title">
+        <div className="toolbox-heading">
+          <h2 id="automation-title">按计划执行，<br /><span>需要时邮件通知。</span></h2>
+          <p>定好周期，让 AI 在原对话中开始下一次检查。需要把结果或提醒送到邮箱时，再调用邮件通知工具。两个工具都可在「查看工具提示词」中按对话开关，默认开启。</p>
+        </div>
+        <div className="automation-grid">
+          <article className="automation-card" aria-labelledby="scheduled-tasks-title">
+            <p className="section-mark">SCHEDULED TASKS</p>
+            <h3 id="scheduled-tasks-title">让重复检查按时开始</h3>
+            <p>从右侧「＋ → 定时任务」保存周期与任务描述，也可以直接让 AI 创建计划。固定间隔至少 1 分钟，保存后从下一个周期开始。</p>
+            <ul>
+              <li>支持分钟／小时／天间隔、每天、工作日、每周，以及带时区的五段 Cron。</li>
+              <li>可暂停、恢复、编辑、删除或立即运行，查看下次时间与最近运行记录。</li>
+              <li>计划在本机保存，关闭页签保留计划，重新启动客户端后恢复。</li>
+            </ul>
+            <p className="automation-card__scope">应用需保持运行，选中原工作区、平台和对话，并恢复原主机与目录。忙碌、有草稿、断线或暂停时等待；错过多个周期时合并为最近一次。「已投递」表示任务消息已发送，执行结果在原对话中查看。</p>
+            <a className="text-link" href={SCHEDULED_TASKS_GUIDE_URL} target="_blank" rel="noreferrer">查看定时任务说明 <ArrowIcon /></a>
+          </article>
+          <article className="automation-card automation-card--mail" aria-labelledby="mail-notifications-title">
+            <p className="section-mark">EMAIL NOTIFICATIONS</p>
+            <h3 id="mail-notifications-title">把结果发送到你的邮箱</h3>
+            <p>在「设置 → 邮件通知」保存接收通知的 QQ 邮箱、发件邮箱和 SMTP 授权码，再让 AI 发送指定内容或任务结果。</p>
+            <ul>
+              <li>支持个人 @qq.com 邮箱，收发可使用同一个地址，也可分别设置。</li>
+              <li>AI 只提供标题和纯文本正文，读取已保存配置发信，授权码不会传给模型。</li>
+              <li>结果回传原 AI 对话，终端保留提示；不需要开启 Computer Use。</li>
+            </ul>
+            <p className="automation-card__scope">邮件从运行客户端的电脑发出。每次调用做去重，结果不确定时不自动重发。服务器接受邮件后，实际送达仍需查看收件箱及垃圾邮件箱；当前支持纯文本正文。</p>
+            <a className="text-link" href={MAIL_NOTIFICATIONS_GUIDE_URL} target="_blank" rel="noreferrer">查看邮件通知说明 <ArrowIcon /></a>
+          </article>
+        </div>
+        <div className="automation-example">
+          <span className="section-mark">一起使用</span>
+          <blockquote>“每个工作日早上 9 点检查服务，发现异常时用邮件通知我。”</blockquote>
+          <p>先配置邮箱并启用两个工具。计划满足原对话的投递条件时提交检查任务，AI 再根据检查结果决定是否发送邮件。</p>
+        </div>
+      </section>
+
       <section className="toolbox section" id="toolbox" aria-labelledby="toolbox-title">
         <div className="toolbox-heading"><h2 id="toolbox-title">代码、数据、配置，<br /><span>工具箱就在手边。</span></h2><p>从右侧页签打开“工具箱”，在可最小化、恢复的工具窗口中查看改动、编辑表数据、查询缓存或打开配置控制台。GitHub 仓库管理从旁边的“＋”进入。</p></div>
         <div className="toolbox-workbench">
@@ -516,7 +567,22 @@ export default function Home() {
         <div className="download-terminal"><div className="download-terminal__head"><span>SESSION SETUP</span><span>工作区入口</span></div><dl className="download-environments"><div><dt>本机终端</dt><dd>Windows · PowerShell / macOS · zsh</dd></div><div><dt>Computer Use</dt><dd>Windows x64 · ChatGPT / DeepSeek · 本机</dd></div><div><dt>远程连接</dt><dd>SSH / web2term</dd></div><div><dt>工具箱</dt><dd>Git / MySQL / Redis / Nacos</dd></div><div><dt>模型</dt><dd>ChatGPT / Claude / Gemini / DeepSeek</dd></div></dl></div>
       </section>
 
-      <footer className="site-footer"><div className="footer-brand"><Mark /><div><strong>{PRODUCT_NAME}</strong><span>CONVERSATION, MEET EXECUTION.</span></div></div><div className="footer-links"><button onClick={() => scrollTo('models')}>AI 平台</button><button onClick={() => scrollTo('workflow')}>工作流</button><button onClick={() => scrollTo('computer-use')}>Computer Use</button><button onClick={() => scrollTo('macos')}>macOS 安装</button><button onClick={() => scrollTo('web2term')}>Linux 设备</button><button onClick={() => scrollTo('toolbox')}>工具箱</button><button onClick={() => scrollTo('download')}>下载</button><a href={WINDOWS_DOWNLOAD_URL} download>Windows 下载 <ArrowIcon /></a><a href={MACOS_DOWNLOAD_URL} download>macOS 下载 <ArrowIcon /></a></div><span className="footer-note">© 2026 · Built for the next command.</span></footer>
+      <footer className="site-footer">
+        <div className="footer-brand"><Mark /><div><strong>{PRODUCT_NAME}</strong><span>CONVERSATION, MEET EXECUTION.</span></div></div>
+        <div className="footer-links">
+          <button onClick={() => scrollTo('models')}>AI 平台</button>
+          <button onClick={() => scrollTo('workflow')}>工作流</button>
+          <button onClick={() => scrollTo('automation')}>定时与通知</button>
+          <button onClick={() => scrollTo('computer-use')}>Computer Use</button>
+          <button onClick={() => scrollTo('macos')}>macOS 安装</button>
+          <button onClick={() => scrollTo('web2term')}>Linux 设备</button>
+          <button onClick={() => scrollTo('toolbox')}>工具箱</button>
+          <button onClick={() => scrollTo('download')}>下载</button>
+          <a href={WINDOWS_DOWNLOAD_URL} download>Windows 下载 <ArrowIcon /></a>
+          <a href={MACOS_DOWNLOAD_URL} download>macOS 下载 <ArrowIcon /></a>
+        </div>
+        <span className="footer-note">© 2026 · Built for the next command.</span>
+      </footer>
     </main>
   )
 }

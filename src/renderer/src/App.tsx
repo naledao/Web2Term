@@ -13,6 +13,7 @@ import { useToolWindows, ToolWindowDock } from './components/ToolWindows'
 import type { PdfPreviewTarget } from './components/PdfPreviewDialog'
 import BackendLoginForm from './components/BackendLoginForm'
 import Web2termDevicesSettings from './components/Web2termDevicesSettings'
+import QqMailSettings from './components/QqMailSettings'
 import ToolPromptsDialog from './components/ToolPromptsDialog'
 import type { AutonomousTaskState } from '@shared/autonomous-task'
 import TerminalActionsMenu from './components/TerminalActionsMenu'
@@ -106,6 +107,7 @@ const SETTINGS_SECTIONS = [
   { id: 'chat', label: '对话' },
   { id: 'backend', label: '后端服务' },
   { id: 'devices', label: 'web2term 设备' },
+  { id: 'qqMail', label: '邮件通知' },
   { id: 'proxy', label: '网络代理' },
   { id: 'updates', label: '应用更新' },
   { id: 'session', label: '浏览器登录态' }
@@ -120,6 +122,7 @@ function SettingsSectionIcon({ section }: { section: SettingsSection }): JSX.Ele
       {section === 'chat' ? <><path d="M4 5h16v11H9l-5 4V5z" /><path d="M8 9h8M8 12h5" /></> : null}
       {section === 'backend' ? <><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M12 10v4" /></> : null}
       {section === 'devices' ? <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8m-4-4v4M7 9l2 2-2 2m5 0h4" /></> : null}
+      {section === 'qqMail' ? <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 6 9 7 9-7" /></> : null}
       {section === 'proxy' ? <><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></> : null}
       {section === 'updates' ? <><path d="M12 3v12m-5-5 5 5 5-5" /><path d="M4 16v4h16v-4" /></> : null}
       {section === 'session' ? <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 8h18" /><circle cx="12" cy="12" r="2" /><path d="M8 18c0-2 1.8-3.5 4-3.5s4 1.5 4 3.5" /></> : null}
@@ -523,6 +526,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [backendLoginOpen, setBackendLoginOpen] = useState(false)
   const [backendLoginBusy, setBackendLoginBusy] = useState(false)
   const [deviceSettingsBusy, setDeviceSettingsBusy] = useState(false)
+  const [mailSettingsBusy, setMailSettingsBusy] = useState(false)
+  const settingsOperationBusy = deviceSettingsBusy || mailSettingsBusy
   const [userAvatarDraft, setUserAvatarDraft] = useState('')
   const [userAvatarSourceDraft, setUserAvatarSourceDraft] = useState('')
   const [userAvatarPositionXDraft, setUserAvatarPositionXDraft] = useState(50)
@@ -2012,11 +2017,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   useEffect(() => {
     if (!settingsOpen) return
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !event.defaultPrevented && !savingSettings && !backendLoginBusy && !deviceSettingsBusy) setSettingsOpen(false)
+      if (event.key === 'Escape' && !event.defaultPrevented && !savingSettings && !backendLoginBusy && !settingsOperationBusy) setSettingsOpen(false)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [settingsOpen, savingSettings, backendLoginBusy, deviceSettingsBusy])
+  }, [settingsOpen, savingSettings, backendLoginBusy, settingsOperationBusy])
 
   const clearPromptHighlights = useCallback((): void => {
     const registry = (CSS as unknown as { highlights?: { delete(name: string): boolean } }).highlights
@@ -2112,7 +2117,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [promptOpen])
 
   const saveSettings = useCallback(async (): Promise<void> => {
-    if (savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null) return
+    if (savingSettings || backendLoginBusy || settingsOperationBusy || settingsLoading || settingsLoadFailed || settings === null) return
     let backendUrl: string
     try {
       backendUrl = normalizeBackendUrl(backendUrlDraft)
@@ -2166,7 +2171,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     } finally {
       setSavingSettings(false)
     }
-  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, deviceSettingsBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
+  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, settingsOperationBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
 
   /** Drag the shared sidebar's left edge to resize it. */
   const startPanelResize = useCallback(
@@ -3467,7 +3472,7 @@ ${record.command}`
           aria-modal="true"
           aria-label="设置"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !savingSettings && !backendLoginBusy && !deviceSettingsBusy) setSettingsOpen(false)
+            if (event.target === event.currentTarget && !savingSettings && !backendLoginBusy && !settingsOperationBusy) setSettingsOpen(false)
           }}
         >
           <div className="modal__box settings-modal">
@@ -3476,7 +3481,7 @@ ${record.command}`
                 <div className="settings-modal__title">设置</div>
               </div>
               <span className="panel__spacer" />
-              <button type="button" className="settings-modal__close" aria-label="关闭" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy} onClick={() => setSettingsOpen(false)}>×</button>
+              <button type="button" className="settings-modal__close" aria-label="关闭" disabled={savingSettings || backendLoginBusy || settingsOperationBusy} onClick={() => setSettingsOpen(false)}>×</button>
             </div>
 
             <div className="settings-modal__layout">
@@ -3486,7 +3491,7 @@ ${record.command}`
                 aria-label="设置项"
                 aria-orientation="vertical"
                 onKeyDown={(event) => {
-                  if (deviceSettingsBusy) return
+                  if (settingsOperationBusy) return
                   const direction = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
                   if (!direction && event.key !== 'Home' && event.key !== 'End') return
                   event.preventDefault()
@@ -3502,7 +3507,7 @@ ${record.command}`
                     id={`settings-tab-${section.id}`}
                     type="button"
                     role="tab"
-                    disabled={deviceSettingsBusy}
+                    disabled={settingsOperationBusy || savingSettings}
                     className="settings-nav__item"
                     aria-selected={settingsSection === section.id}
                     aria-controls={`settings-panel-${section.id}`}
@@ -3750,6 +3755,20 @@ ${record.command}`
                   {settingsSection === 'devices' ? <Web2termDevicesSettings onOpenBackend={() => setSettingsSection('backend')} onBusyChange={setDeviceSettingsBusy} /> : null}
                 </section>
                 <section
+                  id="settings-panel-qqMail"
+                  role="tabpanel"
+                  aria-labelledby="settings-tab-qqMail"
+                  tabIndex={0}
+                  hidden={settingsSection !== 'qqMail'}
+                  className="settings-card"
+                >
+                  <div className="settings-card__heading">
+                    <span className="settings-card__icon"><SettingsSectionIcon section="qqMail" /></span>
+                    <h2>邮件通知设置</h2>
+                  </div>
+                  {settingsSection === 'qqMail' ? <QqMailSettings onBusyChange={setMailSettingsBusy} /> : null}
+                </section>
+                <section
                   id="settings-panel-proxy"
                   role="tabpanel"
                   aria-labelledby="settings-tab-proxy"
@@ -3918,8 +3937,8 @@ ${record.command}`
             <div className="modal__foot settings-modal__foot">
               {settingsError ? <p className="settings-feedback settings-feedback--save" role="alert">{settingsError}</p> : null}
               <span className="panel__spacer" />
-              <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setDefaultPlatformDraft(settings?.defaultPlatformId ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' ? '关闭' : '取消'}</button>
-              {settingsSection !== 'devices' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || deviceSettingsBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' || settingsSection === 'chat' ? '保存' : '保存并重新加载'}</button> : null}
+              <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || settingsOperationBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setDefaultPlatformDraft(settings?.defaultPlatformId ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' || settingsSection === 'qqMail' ? '关闭' : '取消'}</button>
+              {settingsSection !== 'devices' && settingsSection !== 'qqMail' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || settingsOperationBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' || settingsSection === 'chat' ? '保存' : '保存并重新加载'}</button> : null}
             </div>
           </div>
         </div>

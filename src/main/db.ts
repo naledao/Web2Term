@@ -406,7 +406,7 @@ interface MessageAttachmentRow {
  * DeepSeek's native DSML tool-call markup (`<｜DSML｜invoke name="…">`) is the same request.
  */
 function isAssistantCommandReply(content: string): boolean {
-  return /\{\s*["']command["']\s*:\s*["']/s.test(String(content || '')) || /"type"\s*:\s*"(?:read_files|scheduled_task)"/.test(content) ||
+  return /\{\s*["']command["']\s*:\s*["']/s.test(String(content || '')) || /"type"\s*:\s*"(?:read_files|scheduled_task|send_email)"/.test(content) ||
     /<\s*[\s|｜]*DSML[\s|｜]*invoke\s+name\s*=/.test(content)
 }
 

@@ -184,6 +184,7 @@
   }
 
   let computerSourceSubmissionId = null
+  let mailSourceSubmissionId = null
   // A native edit-and-resend of the last user message that is waiting for generation to start.
   let nativeEditRetry = null
   // Leaked moderation verdicts answered by an automatic unchanged resend; reset by a genuine send.
@@ -198,6 +199,7 @@
   const resetTaskPrompt = (generation = state.taskPromptGeneration + 1) => {
     computerReplyWait = null
     computerSourceSubmissionId = null
+    mailSourceSubmissionId = null
     pendingComputerRecognition = null
     state.taskPromptGeneration = generation
     state.taskPromptInjected = false
@@ -269,6 +271,7 @@
       } : {}
       const event = { ...diagnostic, ...submission, ...payload }
       if (event.event === 'user-message') {
+        mailSourceSubmissionId = event.submissionId
         if (event.submissionKind === 'goal') computerSourceSubmissionId = event.submissionId
         if (computerReplyWait) computerReplyWait.sourceSubmissionId = computerSourceSubmissionId
       }
@@ -397,7 +400,10 @@
       sourceSubmissionId: computerSourceSubmissionId, baseline: computerBaseline || computerBaselineOf(), reported: false,
       pageEpoch: computerPageEpoch
     } : null
-    if (reason === 'history-baseline' || reason === 'configured-baseline' || reason === 'task-ended') computerSourceSubmissionId = null
+    if (reason === 'history-baseline' || reason === 'configured-baseline' || reason === 'task-ended') {
+      computerSourceSubmissionId = null
+      mailSourceSubmissionId = null
+    }
     const awaitingReplyBefore = state.awaitingReplySince !== 0
     state.awaitingReplySince = since
     report({ event: 'reply-state', reason, messageId, awaitingReplyBefore })
@@ -3690,7 +3696,35 @@
    * time for pages that report an assistant turn through another path.
    */
   const looksLikeScheduledReply = (text) => /"type"\s*:\s*"scheduled_task"/.test(String(text || ''))
-  const looksLikeCommandReply = (text) => /\{\s*["']command["']\s*:\s*["']/s.test(String(text || '')) || looksLikeReadFilesReply(text) || looksLikeScheduledReply(text)
+  const looksLikeMailReply = (text) => /"type"\s*:\s*"send_email"/.test(String(text || ''))
+  const looksLikeCommandReply = (text) => /\{\s*["']command["']\s*:\s*["']/s.test(String(text || '')) || looksLikeReadFilesReply(text) || looksLikeScheduledReply(text) || looksLikeMailReply(text)
+
+  const checkMailNotification = (messageId, text) => {
+    if (!looksLikeMailReply(text)) return false
+    if (!state.enabled || state.awaitingReplySince === 0 || !mailSourceSubmissionId) {
+      state.lastCommandMessageId = messageId
+      return true
+    }
+    // The scanner already ignores outer Markdown fences. Replacing fences would
+    // corrupt code snippets inside a JSON body. Malformed/mixed requests go to
+    // main for a failure receipt and can never fall through to another tool.
+    const candidates = balancedObjects(String(text))
+    let rawJson = candidates.length === 1 ? candidates[0] : String(text)
+    if (candidates.length === 1) {
+      const outside = String(text).replace(candidates[0], '').replace(/```(?:json)?/gi, '')
+        .replace(/^(?:json|Copy code|复制代码|复制)\s*$/gim, '').trim()
+      // A schema example inside a normal explanation is not a send instruction.
+      if (outside) rawJson = '{"type":"send_email","invalid":true}'
+    }
+    if (rawJson.length > 125000) rawJson = '{"type":"send_email","invalid":true}'
+    state.lastCommandMessageId = messageId
+    state.replyActionDetected = true
+    setReplyWaiting(0, 'mail-notification-detected', messageId)
+    report({ event: 'mail-notification', messageId, rawJson, live: true,
+      sourceSubmissionId: mailSourceSubmissionId, taskPromptGeneration: state.taskPromptGeneration,
+      pagePath: location.pathname, computerPageEpoch })
+    return true
+  }
 
   // Older transcript rows were saved before the page's inline-code marker was
   // understood. Refresh only turns with a stable page id: the main process updates
@@ -4042,6 +4076,7 @@
       return
     }
     if (checkComputerRequest(node, messageId)) return
+    if (checkMailNotification(messageId, text)) return
     if (looksLikeScheduledReply(text)) {
       if (state.awaitingReplySince === 0 || !state.enabled) { state.lastCommandMessageId = messageId; return }
       const candidates = balancedObjects(String(text).replace(/```[a-zA-Z0-9_-]*/g, '\n')).filter(raw => {
@@ -5222,6 +5257,7 @@
         computerReplyWait = null
         pendingComputerRecognition = null
         computerSourceSubmissionId = null
+        mailSourceSubmissionId = null
       }
       if (config.computerProtocol && Array.isArray(config.computerProtocol.definitions)) {
         computerProtocolContext = { definitions: config.computerProtocol.definitions,
@@ -5249,6 +5285,7 @@
         if (config.taskPromptGeneration > state.taskPromptGeneration) {
           computerReplyWait = null
           computerSourceSubmissionId = null
+          mailSourceSubmissionId = null
           pendingComputerRecognition = null
           state.programmatic = false
           draftRejected = false

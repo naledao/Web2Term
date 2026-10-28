@@ -34,6 +34,9 @@ import { sshWorkingDirectory } from '../shared/ssh-directory'
 import { nodeFallback } from './environment'
 import { DEFAULT_BACKEND_URL, normalizeBackendUrl, readBackendUrl } from '../shared/backend-url'
 import { BackendAuthService } from './backend-auth'
+import { QqMailService } from './qq-mail'
+import { verifyQqMailConnection, sendQqMailNotification } from './qq-mail-transport'
+import type { QqMailSettingsDraft, QqMailResult } from '../shared/qq-mail'
 import { DEFAULT_COMPUTER_USE_PREFERENCES, resolveComputerUseCapability } from '../shared/computer-use'
 import { parseComputerUsePreferencesPatch, readComputerUsePreferences, saveComputerUsePreferences } from './computer-use-settings'
 import { desktopActivityRequestsPause, HUMAN_PAUSE_STRIKES, WindowsHelperManager } from './windows-helper'
@@ -180,6 +183,7 @@ let quitting = false
 let store: ConversationStore | null = null
 let scheduledTasks: ScheduledTasks | null = null
 let backendAuth: BackendAuthService | null = null
+let qqMail: QqMailService | null = null
 let web2termConnection: Web2termConnection | null = null
 let localMachineId = ''
 let settings: AppSettings = { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: DEFAULT_BACKEND_URL, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW }
@@ -987,6 +991,7 @@ function createSession(
   const initialMode: ExecutionMode = savedMode === 'auto' ? 'auto' : 'manual'
   let runtime: SessionRuntime | null = null
   runtime = new SessionRuntime({
+    qqMail: qqMail ?? undefined,
     scheduledTasks: scheduledTasks ?? undefined,
     windowsHelper,
     automationBlocked: () => emergencyStop.isActive(),
@@ -1991,6 +1996,21 @@ function registerIpcHandlers(): void {
     return runtimeForEvent(event)?.resumeAutonomousTask(request) ?? '原会话已关闭。'
   })
   ipcMain.handle(IpcChannels.autonomousTaskQuestionReopen, (event, request) => runtimeForEvent(event)?.reopenTaskQuestion(request) ?? '原会话已关闭。')
+  const requireQqMailClient = (event: IpcMainInvokeEvent): QqMailService => {
+    if (!isManagerEvent(event) || !qqMail) throw new Error('只有客户端设置界面可以操作 QQ 邮箱配置。')
+    return qqMail
+  }
+  const updateQqMail = (event: IpcMainInvokeEvent, change: (service: QqMailService) => QqMailResult): QqMailResult => {
+    const result = change(requireQqMailClient(event))
+    if (result.ok) for (const runtime of runtimes.values()) runtime.mailSettingsChanged()
+    return result
+  }
+  ipcMain.handle(IpcChannels.qqMailGet, event => requireQqMailClient(event).getSettings())
+  ipcMain.handle(IpcChannels.qqMailSave, (event, draft: QqMailSettingsDraft) => updateQqMail(event, service => service.save(draft)))
+  ipcMain.handle(IpcChannels.qqMailClear, event => updateQqMail(event, service => service.clear()))
+  ipcMain.handle(IpcChannels.qqMailVerify, (event, draft: QqMailSettingsDraft) => requireQqMailClient(event).verify(draft))
+  ipcMain.handle(IpcChannels.qqMailRecipientSave, (event, recipientEmail: unknown) => updateQqMail(event, service => service.saveRecipient(recipientEmail)))
+  ipcMain.handle(IpcChannels.qqMailRecipientClear, event => updateQqMail(event, service => service.clearRecipient()))
   ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW })
   ipcMain.handle(IpcChannels.settingsUpdate, async (event, patch: AppSettingsPatch): Promise<AppSettings> => {
     if (!isManagerEvent(event) || event.senderFrame !== event.sender.mainFrame || !store) return { ...settings }
@@ -2203,6 +2223,14 @@ if (!app.requestSingleInstanceLock()) {
 
     const conversationStore = new ConversationStore(join(app.getPath('userData'), 'conversations.db'))
     store = conversationStore
+    qqMail = new QqMailService(conversationStore, {
+      encryptionAvailable: () => safeStorage.isEncryptionAvailable()
+        && (process.platform !== 'linux' || safeStorage.getSelectedStorageBackend() !== 'basic_text'),
+      encrypt: value => safeStorage.encryptString(value).toString('base64'),
+      decrypt: value => safeStorage.decryptString(Buffer.from(value, 'base64')),
+      verify: verifyQqMailConnection,
+      send: sendQqMailNotification
+    })
     scheduledTasks = new ScheduledTasks(conversationStore.scheduledTasks, {
       ready: (task, run) => {
         const runtime = runtimes.get(task.owner.sessionId)

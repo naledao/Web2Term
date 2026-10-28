@@ -1,0 +1,23 @@
+.qq-mail-settings { display: grid; gap: 20px; }
+.qq-mail-settings__recipient { display: grid; gap: 16px; padding-bottom: 24px; border-bottom: 1px solid #e5e9f0; }
+.qq-mail-settings__section-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.qq-mail-settings__status { display: flex; align-items: center; gap: 9px; color: #667085; font-size: 13px; }
+.qq-mail-settings__status i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.qq-mail-settings__status--ready, .qq-mail-settings__success { color: #148466; }
+.qq-mail-settings__form { display: grid; gap: 20px; }
+.qq-mail-settings__secret { display: flex; gap: 8px; min-width: 0; }
+.qq-mail-settings__secret .settings-input { flex: 1; min-width: 0; }
+.qq-mail-settings__secret button { flex: none; padding: 0 14px; }
+.qq-mail-settings__actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.qq-mail-settings__success { margin: 0; font-size: 13px; line-height: 1.6; }
+.qq-mail-settings__help { border-top: 1px solid #e5e9f0; padding-top: 18px; font-size: 13px; color: #667085; line-height: 1.8; }
+.qq-mail-settings__help summary { cursor: pointer; font-weight: 600; }
+.qq-mail-settings__help ol { padding-left: 22px; }
+.qq-mail-settings__help a { color: #594bea; }
+.workspace[data-theme='dark'] .qq-mail-settings__help,
+.workspace[data-theme='dark'] .qq-mail-settings__status { color: var(--text-muted); }
+.workspace[data-theme='dark'] .qq-mail-settings__status--ready,
+.workspace[data-theme='dark'] .qq-mail-settings__success { color: #56caa5; }
+.workspace[data-theme='dark'] .qq-mail-settings__help,
+.workspace[data-theme='dark'] .qq-mail-settings__recipient { border-color: var(--border); }
+.workspace[data-theme='dark'] .qq-mail-settings__help a { color: #b8aaff; }

@@ -1,4 +1,5 @@
 import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult } from '../shared/emergency-stop'
+import type { QqMailResult, QqMailSettings, QqMailSettingsDraft } from '../shared/qq-mail'
 import type { ToolboxInvocation } from '../shared/toolbox'
 import type { ComputerUseCapability } from '../shared/computer-use'
 import type { ConversationToolsOwner, ConversationToolsState, ConversationToolsUpdate } from '../shared/conversation-tools'
@@ -312,6 +313,13 @@ removeConversation: (id: string): Promise<Conversation[]> =>
 
   updateSettings: (patch: AppSettingsPatch): Promise<AppSettings> =>
     ipcRenderer.invoke(IpcChannels.settingsUpdate, patch),
+
+  getQqMailSettings: (): Promise<QqMailSettings> => ipcRenderer.invoke(IpcChannels.qqMailGet),
+  saveQqMailSettings: (draft: QqMailSettingsDraft): Promise<QqMailResult> => ipcRenderer.invoke(IpcChannels.qqMailSave, draft),
+  clearQqMailSettings: (): Promise<QqMailResult> => ipcRenderer.invoke(IpcChannels.qqMailClear),
+  verifyQqMailSettings: (draft: QqMailSettingsDraft): Promise<QqMailResult> => ipcRenderer.invoke(IpcChannels.qqMailVerify, draft),
+  saveQqMailRecipient: (recipientEmail: string): Promise<QqMailResult> => ipcRenderer.invoke(IpcChannels.qqMailRecipientSave, recipientEmail),
+  clearQqMailRecipient: (): Promise<QqMailResult> => ipcRenderer.invoke(IpcChannels.qqMailRecipientClear),
 
   getComputerUseCapability: (): Promise<ComputerUseCapability> =>
     ipcRenderer.invoke(IpcChannels.computerUseGetCapability),

@@ -1,4 +1,5 @@
 import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult } from './emergency-stop'
+import type { QqMailResult, QqMailSettings, QqMailSettingsDraft } from './qq-mail'
 import type { ToolboxInvocation } from './toolbox'
 import type { ComputerUsePreferences, ComputerUseCapability } from './computer-use'
 import type { ConversationToolsOwner, ConversationToolsState, ConversationToolsUpdate } from './conversation-tools'
@@ -90,6 +91,12 @@ export const IpcChannels = {
   interceptorEvent: 'interceptor:event',
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
+  qqMailGet: 'qq-mail:get',
+  qqMailSave: 'qq-mail:save',
+  qqMailClear: 'qq-mail:clear',
+  qqMailVerify: 'qq-mail:verify',
+  qqMailRecipientSave: 'qq-mail:recipient-save',
+  qqMailRecipientClear: 'qq-mail:recipient-clear',
   computerUseGetCapability: 'computer-use:get-capability',
   computerUseCapabilityChanged: 'computer-use:capability-changed',
   conversationToolsGet: 'conversation-tools:get',
@@ -988,10 +995,10 @@ export const readFilesToolPrompt = [
 ].join('\n')
 
 /** Only expose tools that the selected platform can execute. */
-export function toolPromptForPlatform(platformId: string, fileReading = true, capabilityPrompt = '', backgroundTasks = true, scheduledPrompt = ''): string {
+export function toolPromptForPlatform(platformId: string, fileReading = true, capabilityPrompt = '', backgroundTasks = true, scheduledPrompt = '', mailPrompt = ''): string {
   const platform = fileReadingPlatform(platformId)
   return platform ? [...(fileReading ? [readFilesToolPrompt] : []), ...(backgroundTasks ? [backgroundTaskToolPrompt] : []),
-    ...(scheduledPrompt ? [scheduledPrompt] : []), ...(capabilityPrompt ? [capabilityPrompt] : [])].join('\n\n') : ''
+    ...(scheduledPrompt ? [scheduledPrompt] : []), ...(mailPrompt ? [mailPrompt] : []), ...(capabilityPrompt ? [capabilityPrompt] : [])].join('\n\n') : ''
 }
 
 /** The parts of the prompt only true of a Windows PowerShell session. */
@@ -1295,6 +1302,7 @@ export interface InterceptorPageEvent {
     | 'command'
     | 'read-files'
     | 'scheduled-task'
+    | 'mail-notification'
     | 'computer-request'
     | 'parse-failed'
     | 'command-recovery'
@@ -2387,6 +2395,12 @@ export interface AppApi {
   /** Persisted app settings, including the web2term backend address. */
   getSettings(): Promise<AppSettings>
   updateSettings(patch: AppSettingsPatch): Promise<AppSettings>
+  getQqMailSettings(): Promise<QqMailSettings>
+  saveQqMailSettings(draft: QqMailSettingsDraft): Promise<QqMailResult>
+  clearQqMailSettings(): Promise<QqMailResult>
+  verifyQqMailSettings(draft: QqMailSettingsDraft): Promise<QqMailResult>
+  saveQqMailRecipient(recipientEmail: string): Promise<QqMailResult>
+  clearQqMailRecipient(): Promise<QqMailResult>
   getComputerUseCapability(): Promise<ComputerUseCapability>
   onComputerUseCapabilityChanged(listener: (capability: ComputerUseCapability) => void): () => void
   getConversationTools(owner: ConversationToolsOwner): Promise<ConversationToolsState>

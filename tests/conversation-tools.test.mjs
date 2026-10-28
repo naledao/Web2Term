@@ -32,6 +32,7 @@ function methods(path, name, names, globals = {}) {
 }
 const shared = load('../src/shared/conversation-tools.ts')
 const scheduled = load('../src/shared/scheduled-tasks.ts')
+const mail = load('../src/shared/mail-notification.ts')
 const settings = load('../src/main/computer-use-settings.ts')
 const { ConversationTools } = load('../src/main/conversation-tools.ts', {
   '../shared/conversation-tools': shared, './computer-use-settings': settings
@@ -57,6 +58,7 @@ test('new conversations enable files and background while computer use stays off
   const preferences = f.choices.read('deepseek', 'chat-a')
   assert.equal(preferences.fileReadingEnabled, true); assert.equal(preferences.backgroundTasksEnabled, true)
   assert.equal(preferences.scheduledTasksEnabled, true)
+  assert.equal(preferences.mailNotificationsEnabled, true)
   assert.equal(preferences.computerUseEnabled, false); assert.equal(preferences.desktopControlEnabled, false)
   assert.equal(preferences.desktopPointClickEnabled, false)
 })
@@ -131,7 +133,7 @@ test('drafts stay isolated by workspace and platform and survive reopening their
 
 test('invalid patches do not partially save and corrupt historical JSON falls back to the defaults', t => {
   const f = fixture(t), before = f.rows()
-  for (const patch of [null, [], { fileReadingEnabled: 'false' }, { backgroundTasksEnabled: 0 }, { scheduledTasksEnabled: 'false' },
+  for (const patch of [null, [], { fileReadingEnabled: 'false' }, { backgroundTasksEnabled: 0 }, { scheduledTasksEnabled: 'false' }, { mailNotificationsEnabled: 'true' },
     { computerUseEnabled: true, computerResultDelaySeconds: -1 }, { computerUseEnabled: 'true' }]) {
     assert.throws(() => f.choices.update('deepseek', 'chat-a', patch))
     assert.deepEqual(f.rows(), before)
@@ -161,12 +163,13 @@ test('prompt composition independently includes only enabled file, background an
     assert.match(onlyBackground, /【工具：background_task】/); assert.doesNotMatch(onlyBackground, /【工具：read_files】/)
     assert.equal(types.toolPromptForPlatform(platform, false, 'computer declaration', false), 'computer declaration')
     assert.match(types.toolPromptForPlatform(platform, false, '', false, scheduled.scheduledTaskToolPrompt), /【工具：scheduled_task】/)
+    assert.equal(types.toolPromptForPlatform(platform, false, '', false, '', mail.mailNotificationToolPrompt), mail.mailNotificationToolPrompt)
   }
 })
 
 const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', [
   'toolPreferences', 'toolsOwner', 'getConversationTools', 'updateConversationTools', 'getComputerUseCapability', 'toolPrompt'
-], { ...computer, ...shared, ...types, ...scheduled, process: { platform: 'win32', arch: 'x64' }, taskPausedByInput: () => false })
+], { ...computer, ...shared, ...types, ...scheduled, ...mail, process: { platform: 'win32', arch: 'x64' }, taskPausedByInput: () => false })
 
 test('runtime rejects stale conversation/workspace writes and derives computer capability from this conversation', t => {
   const f = fixture(t), entry = { conversationId: 'chat-a' }, refreshes = []
@@ -177,7 +180,7 @@ test('runtime rejects stale conversation/workspace writes and derives computer c
   const owner = { sessionId: 'workspace-a', platformId: 'deepseek', conversationId: 'chat-a' }
   assert.equal(runtime.getComputerUseCapability().computerUseEnabled, false, 'old global intent cannot enable a new conversation')
   const first = runtime.getConversationTools(owner)
-  assert.deepEqual(plain(first.tools.map(tool => tool.name)), ['文件读取', '后台任务', '定时任务', '电脑操作（computer use）'])
+  assert.deepEqual(plain(first.tools.map(tool => tool.name)), ['文件读取', '后台任务', '定时任务', '邮件通知', '电脑操作（computer use）'])
   assert.ok(first.tools.every(tool => tool.prompt.length > 0), 'closed tools still have a readable preview')
   const saved = runtime.updateConversationTools({ ...owner, patch: { computerUseEnabled: true, fileReadingEnabled: false } })
   assert.equal(saved.computerUseCapability.computerUseEnabled, true)
@@ -187,6 +190,11 @@ test('runtime rejects stale conversation/workspace writes and derives computer c
   runtime.updateConversationTools({ ...owner, patch: { scheduledTasksEnabled: false } })
   assert.doesNotMatch(runtime.toolPrompt('deepseek'), /【工具：scheduled_task】/)
   assert.match(runtime.toolPrompt('deepseek'), /当前对话已关闭定时任务工具/)
+  runtime.updateConversationTools({ ...owner, patch: { mailNotificationsEnabled: false } })
+  assert.doesNotMatch(runtime.toolPrompt('deepseek'), /【工具：send_email】/)
+  assert.match(runtime.toolPrompt('deepseek'), /当前对话已关闭邮件通知工具/)
+  assert.equal(f.choices.read('deepseek', 'chat-a').mailNotificationsEnabled, false)
+  assert.equal(f.choices.read('deepseek', 'chat-b').mailNotificationsEnabled, true)
   const before = f.rows()
   entry.conversationId = 'chat-b'
   assert.throws(() => runtime.updateConversationTools({ ...owner, patch: { computerUseEnabled: true } }), /对话已变化/)

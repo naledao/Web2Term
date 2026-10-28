@@ -103,7 +103,8 @@ export default function ToolPromptsDialog({ owner, container, theme, trigger, on
                   className={tool.enabled ? 'switch switch--on' : 'switch'} disabled={saving || loading}
                   onClick={() => void save(tool.id === 'files' ? { fileReadingEnabled: !tool.enabled }
                     : tool.id === 'background' ? { backgroundTasksEnabled: !tool.enabled }
-                      : tool.id === 'scheduled' ? { scheduledTasksEnabled: !tool.enabled } : { computerUseEnabled: !tool.enabled })}>
+                      : tool.id === 'scheduled' ? { scheduledTasksEnabled: !tool.enabled }
+                        : tool.id === 'mail' ? { mailNotificationsEnabled: !tool.enabled } : { computerUseEnabled: !tool.enabled })}>
                   <span className="switch__knob" />
                 </button>
               </div>

@@ -235,10 +235,10 @@ export function cleanFocusAnswer(text: string): string {
   try { value = JSON.parse(body) }
   catch {
     // Never flash an unfinished transport request while its code block streams.
-    return /^\{\s*(?:"command"\s*:|"type"\s*:\s*"(?:questions?|read_files|scheduled_task)"(?:\s*[,}]|\s*$))/.test(body) ? '' : answer
+    return /^\{\s*(?:"command"\s*:|"type"\s*:\s*"(?:questions?|read_files|scheduled_task|send_email)"(?:\s*[,}]|\s*$))/.test(body) ? '' : answer
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return answer
-  if (typeof value.command === 'string' || value.type === 'read_files') return ''
+  if (typeof value.command === 'string' || value.type === 'read_files' || value.type === 'send_email') return ''
   if (value.type !== 'question' && value.type !== 'questions') return answer
   const questions = value.type === 'questions' ? value.questions : [{ question: value.question }]
   if (!Array.isArray(questions) || questions.length < 1 || questions.length > 20 ||

@@ -36,14 +36,15 @@ export class ConversationTools {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('工具设置格式无效。')
     const input = value as ConversationToolsUpdate['patch']
     const patch = parseComputerUsePreferencesPatch(input)
-    for (const key of ['fileReadingEnabled', 'backgroundTasksEnabled', 'scheduledTasksEnabled'] as const) {
+    for (const key of ['fileReadingEnabled', 'backgroundTasksEnabled', 'scheduledTasksEnabled', 'mailNotificationsEnabled'] as const) {
       if (!Object.hasOwn(input, key)) continue
       if (typeof input[key] !== 'boolean') throw new Error(`${key} 必须为布尔值。`)
     }
     const preferences = normalizeConversationTools({ ...this.read(platformId, conversationId), ...patch,
       ...(input.fileReadingEnabled !== undefined ? { fileReadingEnabled: input.fileReadingEnabled } : {}),
       ...(input.backgroundTasksEnabled !== undefined ? { backgroundTasksEnabled: input.backgroundTasksEnabled } : {}),
-      ...(input.scheduledTasksEnabled !== undefined ? { scheduledTasksEnabled: input.scheduledTasksEnabled } : {}) })
+      ...(input.scheduledTasksEnabled !== undefined ? { scheduledTasksEnabled: input.scheduledTasksEnabled } : {}),
+      ...(input.mailNotificationsEnabled !== undefined ? { mailNotificationsEnabled: input.mailNotificationsEnabled } : {}) })
     this.store.setSetting(this.key(platformId, conversationId), JSON.stringify(preferences))
     return preferences
   }

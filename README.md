@@ -6,6 +6,8 @@
 
 Web2Term 把模型网页、项目对话和本机／远程终端放进同一个桌面工作区。使用 ChatGPT、DeepSeek、Claude 或 Gemini 的网页账号描述目标，由模型提出命令，客户端执行并把真实输出、退出码和工作目录回传，继续下一步。Windows x64 本机会话还可启用 **Computer Use**，让 ChatGPT 或 DeepSeek 通过截图和键鼠动作操作桌面应用。
 
+还可以创建**定时任务**，按固定间隔或日历周期向原 AI 对话提交任务；配置 QQ 邮箱后，模型可调用**邮件通知**工具，将结果或需要关注的事项发送到你的收件邮箱。
+
 仓库包含两个面向使用者的程序：
 
 | 程序 | 用途 | 当前发布目标 |
@@ -42,7 +44,7 @@ Windows 支持应用内检查、下载和安装更新；macOS 检查到更新后
 ```mermaid
 flowchart LR
   U[用户目标] --> M[模型网页]
-  M --> R[命令 / 文件读取 / 桌面动作 / 澄清问题]
+  M --> R[终端命令 / 工具请求 / 澄清问题]
   R --> C[桌面客户端]
   C --> T[本机 / SSH / Web2Term]
   T --> O[真实结果与退出码]
@@ -50,6 +52,11 @@ flowchart LR
   C --> D[Windows 本机桌面]
   D --> S[截图与操作回执]
   S --> M
+  C --> P[定时计划]
+  P -->|到期且原对话可用| M
+  C --> E[邮件通知]
+  E --> Q[已配置的 QQ 邮箱]
+  E -->|发送结果| M
 ```
 
 ![Web2Term 工作区示意](docs/screenshots/workspace.png)
@@ -75,10 +82,14 @@ flowchart LR
 | 侧边聊天、选区追问 | 支持 | 支持 | 支持 | 支持 |
 | `read_files` 完整附件回传（本机／SSH） | 已接入 | 已接入 | 已接入 | 已接入，自动回传待用户验收 |
 | `background: true` 后台任务 | 支持 | 支持 | 支持 | 支持 |
+| `scheduled_task` 定时任务 | 已接入 | 已接入 | 已接入 | 已接入 |
+| `send_email` 邮件通知 | 已接入 | 已接入 | 已接入 | 已接入 |
 
 专注对话仍通过原模型网页发送消息和读取答复，沿用其账号与登录态；支持添加附件和粘贴截图。第三方页面变化可能影响适配。
 
-右侧页签栏的 **＋** 可添加“终端”“后台任务”“GitHub 仓库管理”或“侧边聊天”。新增终端是用户独立操作的 Shell，不把其输出自动发送给模型。每次新建侧边聊天会替换原侧边实例；选区追问从本地已保存的对话生成上下文 Markdown，发到同平台的新聊天中，侧边聊天不执行终端命令。
+右侧页签栏的 **＋** 可添加“终端”“后台任务”“定时任务”“GitHub 仓库管理”或“侧边聊天”。新增终端是用户独立操作的 Shell，不把其输出自动发送给模型。每次新建侧边聊天会替换原侧边实例；选区追问从本地已保存的对话生成上下文 Markdown，发到同平台的新聊天中，侧边聊天不执行终端命令。
+
+“查看工具提示词”中可按对话开关文件读取、后台任务、定时任务、邮件通知和电脑操作。定时任务、邮件通知默认开启；邮件通知还需要先保存收发邮箱和授权码。
 
 ### Computer Use
 
@@ -140,6 +151,44 @@ SSH 两个 Shell 的环境变量和交互状态不共享，应用会尝试从交
 - 关闭页签保留观察；重启客户端后恢复任务列表，本机继续观察，远程任务在重新连接原主机或设备后继续观察。
 - “结束任务”取消该轮后台任务的自动回传，后台进程继续运行。当前面板不提供停止或重启后台进程的操作。
 - Web2Term 的后台观察通道也占一个设备终端名额；同一工作区的多个后台任务共用该通道。
+
+### 定时任务
+
+保存执行周期和自然语言任务描述，到期后由客户端向创建时绑定的 AI 对话提交一次新任务。可以从右侧 **＋ → 定时任务** 创建，也可以直接告诉模型：“每 30 分钟检查当前项目的服务状态，发现异常时分析原因。”
+
+支持固定分钟／小时／天间隔、每天、工作日、每周，以及带时区的五段 Cron 表达式。固定间隔至少 1 分钟，创建计划后从下一个周期开始，不立即执行。AI 使用 `scheduled_task`：
+
+```json
+{"type":"scheduled_task","schedule":{"kind":"interval","minutes":30},"prompt":"检查当前项目的后台服务状态，发现异常时分析原因。"}
+```
+
+管理页可暂停、恢复、编辑、删除、立即运行和查看最近运行记录。计划与每次投递记录保存在本机，关闭页签保留计划，重启客户端后恢复。
+
+- **客户端需保持运行。** 退出或休眠期间无法准时投递；重新启动或唤醒后，错过的多个周期合并为最近一次。
+- **投递绑定原工作区、平台、对话、执行主机和目录。** 回到原上下文并启用终端模式、提示词注入及定时任务工具后才可投递；断线、忙碌、未发送草稿、暂停或全局急停时等待。
+- **“已投递”表示任务消息已发送。** AI 的实际执行结果在原对话中查看；提交结果不确定时标记为需要核对，不自动重发。
+
+周期、运行记录和投递条件详见 [定时任务说明](docs/scheduled-tasks.md)。
+
+### 邮件通知
+
+AI 可调用 `send_email`，向预先配置好的 QQ 邮箱发送任务结果或提醒。它只提供标题和纯文本正文，客户端读取已保存的收发邮箱及 SMTP 授权码完成发送。
+
+1. 在 **设置 → 邮件通知** 保存“接收通知的 QQ 邮箱”，以及发件邮箱和 QQ 邮箱的 SMTP 授权码。收发地址均支持个人 `@qq.com` 邮箱，可以使用同一个地址；两部分独立保存和清除。
+2. 在当前对话的 **查看工具提示词 → 邮件通知** 中确认工具已开启，并保持终端模式和提示词注入开启。此工具不依赖 Computer Use。
+3. 向模型描述需求，例如：“任务完成后，用邮件通知工具把处理结果发给我。”首次试用也可直接要求发送一封指定标题和正文的测试邮件。
+
+```json
+{"type":"send_email","subject":"任务完成通知","body":"任务已完成。\n请查看项目中的报告。"}
+```
+
+标题最多 200 字符且不能换行，正文最多 20000 字符；当前发送纯文本，不提供附件或自定义收件人参数。授权码通过系统安全存储加密，AI 不会收到授权码。无论终端绑定本机、SSH 还是 Web2Term 设备，发信连接都从运行客户端的电脑发起。
+
+发送结果回到原 AI 对话，终端也保留一条结果提示。同一次调用持久化去重，历史回复不会重新触发发信；发送中断、无法确认结果时不自动重发。**SMTP 服务器接受邮件不代表已送达收件箱**，实际送达请检查收件箱及垃圾邮件箱。
+
+定时任务也可以配合邮件通知，例如：“每个工作日早上 9 点检查服务，发现异常时用邮件通知我。”需同时满足定时任务的投递条件，并配置、开启邮件通知工具。
+
+配置、结果状态和用户测试步骤详见 [邮件通知说明](docs/qq-mail-settings.md)。
 
 ### AI 读取文件
 
@@ -252,7 +301,7 @@ web2term autostart disable  # 关闭自启并停止系统服务
 
 ### 设置、数据与排查
 
-设置包含外观、对话、computer use、后端服务、web2term 设备、网络代理、应用更新和浏览器登录态。可分别配置模型网页、SSH、更新下载所用代理；Linux 小工具下载沿用更新代理。网页登录遇到限制时，可使用支持的平台登录态导入入口。
+设置包含外观、对话、后端服务、web2term 设备、邮件通知、网络代理、应用更新和浏览器登录态；电脑操作等工具按当前对话管理。可分别配置模型网页、SSH、更新下载所用代理；Linux 小工具下载沿用更新代理。网页登录遇到限制时，可使用支持的平台登录态导入入口。
 
 客户端在 Electron 用户数据目录的 `conversations.db` 中保存项目、对话、执行记录、任务、连接配置与设置；模型网页和 Nacos 使用持久网页分区保存各自登录态。数据库密码等凭据通过 Electron `safeStorage` 加密，导入的网页登录凭据仍需按密码保护。
 
@@ -264,6 +313,8 @@ web2term autostart disable  # 关闭自启并停止系统服务
 | 设备在线但终端不可用 | 设备是否启用、是否被其他客户端占用、3 个终端名额是否已满，以及终端是否真正创建成功。 |
 | 数据库地址可从远端访问、客户端却连不上 | 数据库工具从客户端电脑发起连接，检查该电脑到服务的网络路径。 |
 | 新版本小工具功能未生效 | 是否已替换二进制并重启旧后台进程／系统服务。 |
+| 定时任务到期未投递 | 客户端是否运行，是否已选中原工作区、平台和对话并恢复原主机与目录；是否存在草稿、忙碌、暂停或急停；查看运行记录中的等待原因。 |
+| 邮件通知未完成 | 收发 QQ 邮箱与 SMTP 授权码是否已保存，当前对话是否开启邮件工具；查看终端结果，并检查收件箱及垃圾邮件箱。结果不确定时先核对邮箱。 |
 
 客户端登录、连接及附件诊断日志写入系统临时目录的 `gpt-login-diag/`，Windows 为 `%TEMP%\gpt-login-diag\`，macOS 通常为 `$TMPDIR/gpt-login-diag/`；错误界面会给出具体路径。小工具登录时直接打印日志位置，运行日志通过 `web2term status` 查询，Linux 通常位于 `/tmp` 或 `TMPDIR` 指定目录。排查时提供相关日志，无需提供含 Token 的 `config.json`。
 
@@ -299,7 +350,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o dist/linux-amd64/web
 
 Windows PowerShell 交叉编译方式见 [小工具构建说明](agents/linux/README.md#构建与安装)。
 
-**测试由用户运行，智能体写代码并读取日志。** 智能体不启动 Electron 做功能测试，不自动访问真实模型登录／会话；构建检查使用 `npm run build`。交付状态为“构建通过，等待测试”，构建通过不等于真实登录、附件回传、远程终端或开机自启已验收。具体协作规则见 [AGENTS.md](AGENTS.md)。
+**测试由用户运行，智能体写代码并读取日志。** 智能体不启动 Electron 做功能测试，不自动访问真实模型登录／会话；构建检查使用 `npm run build`。交付状态为“构建通过，等待测试”，构建通过不等于真实登录、附件回传、定时投递、邮件送达、远程终端或开机自启已验收。具体协作规则见 [AGENTS.md](AGENTS.md)。
 
 ### 技术与目录
 
@@ -332,6 +383,8 @@ MIT
 ## English
 
 Web2Term brings model websites, project conversations, and local or remote terminals into one desktop workspace. Describe a goal in ChatGPT, DeepSeek, Claude, or Gemini; the model proposes a command, the client runs it on the selected machine, and the actual output, exit code, and working directory return to the conversation. Local Windows x64 sessions can also enable **Computer Use**, allowing ChatGPT or DeepSeek to operate desktop applications through screenshots and mouse/keyboard actions.
+
+**Scheduled tasks** submit new goals to the original AI conversation at fixed intervals or calendar times. With QQ Mail configured, the model can also use **email notifications** to send results or items needing your attention to your saved recipient.
 
 The repository contains the Web2Term desktop client and a separate Linux device tool, `web2term`. The client uses your model website accounts without requiring model API keys. Web2Term backend login is needed for device connections; local and SSH use do not require it. This README describes the current source; features in a published installer depend on its release version.
 
@@ -368,10 +421,14 @@ Projects group conversations and share supplementary Markdown instructions. Remo
 | Side chat and questions about selected answer text | Yes | Yes | Yes | Yes |
 | Full-file attachments through `read_files`, local / SSH | Integrated | Integrated | Integrated | Integrated; automatic delivery awaits user acceptance |
 | Managed background commands | Yes | Yes | Yes | Yes |
+| Scheduled tasks through `scheduled_task` | Integrated | Integrated | Integrated | Integrated |
+| Email notifications through `send_email` | Integrated | Integrated | Integrated | Integrated |
 
 The focus view presents messages, reasoning/search activity, and execution records in the client's UI while still using the original website account. It supports attachments and pasted screenshots. Side chats use the same platform login, open separate conversations, and do not execute terminal commands. Selection questions attach context exported from locally saved messages.
 
-The right panel's **＋** menu adds personal terminals, background tasks, GitHub repository management, or a side chat. Personal terminals are independent shells whose output is not automatically sent to the model.
+The right panel's **＋** menu adds personal terminals, background tasks, scheduled tasks, GitHub repository management, or a side chat. Personal terminals are independent shells whose output is not automatically sent to the model.
+
+“查看工具提示词” manages file reading, background tasks, scheduled tasks, email notifications, and computer use per conversation. Scheduled tasks and email notifications default to enabled; email also requires saved sender credentials and a recipient.
 
 ### Computer Use on Windows
 
@@ -422,6 +479,38 @@ The toolbox opens minimizable tool windows:
 **MySQL, Redis, and Nacos connect from the desktop computer**, without an automatic SSH or Web2Term tunnel. `127.0.0.1` refers to that computer. Database passwords use system-backed encryption.
 
 **＋ → GitHub 仓库管理** uses the locally installed `gh` and its active `github.com` account. It supports account checks, AI-assisted login, logout, repository search/filtering/sorting, and cloning into a selected local directory with progress. AI-assisted login requires a local terminal with terminal mode and prompt injection enabled.
+
+### Scheduled tasks
+
+Open **＋ → 定时任务** to save a schedule and a natural-language task, or ask the model to create one. Supported schedules include minute/hour/day intervals, daily, weekdays, weekly, and five-field Cron expressions with a timezone. Fixed intervals are at least one minute; creating a plan does not execute it immediately.
+
+```json
+{"type":"scheduled_task","schedule":{"kind":"interval","minutes":30},"prompt":"Check the project's background services and investigate any failures."}
+```
+
+The management tab supports pause/resume, editing, deletion, running immediately, and recent delivery records. Plans and delivery history persist locally across client restarts.
+
+- Keep the client running. After exit or sleep, missed occurrences merge into the latest one when the client resumes.
+- Delivery requires the original workspace, model platform, conversation, execution machine, and directory. Terminal mode, prompt injection, and the scheduled-task tool must be enabled. Busy pages, drafts, disconnections, pauses, and emergency stops hold delivery.
+- A sent occurrence confirms delivery of the task message. Check the original conversation for the AI's actual work; uncertain submissions require review and are not automatically sent again.
+
+See the [scheduled-task guide](docs/scheduled-tasks.md) for calendar schedules, management, and delivery conditions.
+
+### Email notifications
+
+Under **设置 → 邮件通知**, save the receiving QQ Mail address, the sender's QQ Mail address, and its SMTP authorization code. Both addresses use personal `@qq.com` mailboxes and may be the same; sender and recipient settings are independent. Enable **邮件通知** in the current conversation's tool dialog, with terminal mode and prompt injection enabled. Computer Use is not required.
+
+Ask the model to email a result or reminder. The `send_email` tool accepts only a subject and a plain-text body; the client supplies saved addresses and credentials:
+
+```json
+{"type":"send_email","subject":"Task completed","body":"The task is complete.\nPlease review the project report."}
+```
+
+Subjects are limited to 200 characters without line breaks; bodies to 20,000 characters. Attachments and recipient overrides are not supported. The SMTP authorization code is encrypted with system-backed storage and is not provided to the AI. Email is sent from the desktop computer, including in SSH and Web2Term device workspaces.
+
+Results return to the original AI conversation and appear in the terminal. Each call is durably deduplicated; historical replies do not trigger delivery again. Uncertain sends are not automatically retried. **SMTP acceptance does not prove inbox delivery**; check the inbox and spam folder.
+
+Combine the tools by asking, for example, “Every weekday at 9 a.m., check the services and email me if there is a problem.” The scheduled-task delivery conditions still apply, and email must be configured and enabled. See the [email-notification guide](docs/qq-mail-settings.md) for setup and user-run checks.
 
 ### Linux device tool setup
 
