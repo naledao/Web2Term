@@ -2422,20 +2422,32 @@ export class SessionRuntime {
   }
 
   private receiveScheduledTask(call: ScheduledToolCall): void {
-    if (this.disposed || !this.active || this.taskEnded || this.options.automationBlocked?.() || !this.options.scheduledTasks ||
-      call.pageEpoch !== this.embed.getComputerUsePageEpoch() || (this.embed.getState().conversationId !== null && this.embed.getState().conversationId !== call.conversationId) ||
-      !this.toolPreferences().scheduledTasksEnabled || !call.sourceSubmissionId ||
-      this.lastSubmissions.get(this.activePlatformId) !== call.sourceSubmissionId || this.runner.getAutomation().paused) return
+    if (this.disposed || !this.active) return
+    const conversationId = this.embed.getState().conversationId, scheduledTasks = this.options.scheduledTasks
+    // A stale or unauthorised request is never answered to the AI, but it must not vanish without a trace.
+    const ignored = !scheduledTasks ? '定时任务服务不可用。'
+      : this.taskEnded ? '任务已结束。'
+      : this.options.automationBlocked?.() ? '全局急停中。'
+      : this.runner.getAutomation().paused ? '自动化已暂停。'
+      : call.pageEpoch !== this.embed.getComputerUsePageEpoch() || (conversationId !== null && conversationId !== call.conversationId) ? '原对话已切换。'
+      : !call.sourceSubmissionId || this.lastSubmissions.get(this.activePlatformId) !== call.sourceSubmissionId ? '该请求不属于最新一次发送。'
+      : null
+    if (ignored || !scheduledTasks) { this.runner.refreshTerminal('定时任务请求未处理：' + ignored); return }
+    const refuse = (message: string): void => {
+      this.runner.refreshTerminal('定时任务未创建：' + message)
+      const owner = this.toolsOwner(), epoch = this.embed.getComputerUsePageEpoch()
+      void this.embed.sendTaskResult('【定时任务未创建】\n' + message,
+        call.conversationId, new AbortController().signal, () => !this.disposed && this.active && sameConversationToolsOwner(owner, this.toolsOwner()) &&
+          epoch === this.embed.getComputerUsePageEpoch() && this.lastSubmissions.get(owner.platformId) === call.sourceSubmissionId).catch(() => {})
+    }
+    if (!this.toolPreferences().scheduledTasksEnabled) { refuse('当前对话已关闭定时任务工具，不要再输出 scheduled_task 请求。'); return }
     try {
       const request = parseScheduledTaskRequest(JSON.parse(call.rawJson))
       if (!request) throw new Error('周期或任务描述无效。schedule 使用固定分钟间隔或五段 Cron；prompt 为非空自然语言任务。')
-      this.options.scheduledTasks.create({ ...this.toolsOwner(), conversationId: call.conversationId }, this.scheduledTarget(), request,
+      scheduledTasks.create({ ...this.toolsOwner(), conversationId: call.conversationId }, this.scheduledTarget(), request,
         JSON.stringify(['model', this.id, this.activePlatformId, call.conversationId, call.sourceSubmissionId, call.messageId]), true, call.sourceSubmissionId)
     } catch (error) {
-      const owner = this.toolsOwner(), epoch = this.embed.getComputerUsePageEpoch()
-      void this.embed.sendTaskResult('【定时任务未创建】\n' + (error instanceof Error ? error.message : '参数无效。') + '\n请修正参数后重新提交。',
-        call.conversationId, new AbortController().signal, () => !this.disposed && this.active && sameConversationToolsOwner(owner, this.toolsOwner()) &&
-          epoch === this.embed.getComputerUsePageEpoch() && this.lastSubmissions.get(owner.platformId) === call.sourceSubmissionId).catch(() => {})
+      refuse((error instanceof Error ? error.message : '参数无效。') + '\n请修正参数后重新提交。')
     }
   }
 

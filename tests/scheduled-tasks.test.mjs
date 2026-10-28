@@ -336,21 +336,39 @@ test('model-created plans take their owner from the live app and reject stale ep
   const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['receiveScheduledTask'], {
     parseScheduledTaskRequest: shared.parseScheduledTaskRequest, sameConversationToolsOwner: (a, b) => JSON.stringify(a) === JSON.stringify(b)
   })
-  const calls = [], errors = []
+  const calls = [], errors = [], notes = []
+  let scheduledTasksEnabled = true
   const subject = Object.assign(new Runtime(), { active: true, disposed: false, taskEnded: false, activePlatformId: owner.platformId,
     options: { scheduledTasks: { create(...args) { calls.push(args) } } }, lastSubmissions: new Map([[owner.platformId, 'user:first']]),
     embed: { getComputerUsePageEpoch: () => 'epoch-a', getState: () => ({ conversationId: owner.conversationId }),
       async sendTaskResult(text) { errors.push(text); return 'ok' } },
-    runner: { getAutomation: () => ({ paused: false }) }, toolPreferences: () => ({ scheduledTasksEnabled: true }),
-    scheduledTarget: () => target, toolsOwner: () => owner
+    runner: { getAutomation: () => ({ paused: false }), refreshTerminal: note => notes.push(note) },
+    toolPreferences: () => ({ scheduledTasksEnabled }), scheduledTarget: () => target, toolsOwner: () => owner
   })
   const call = { messageId: 'reply-a', rawJson: JSON.stringify(request), conversationId: owner.conversationId, pageEpoch: 'epoch-a', sourceSubmissionId: 'user:first' }
   subject.receiveScheduledTask(call)
   assert.equal(calls.length, 1); assert.deepEqual(plain(calls[0][0]), owner); assert.deepEqual(plain(calls[0][1]), target)
+  assert.equal(notes.length, 0)
   subject.receiveScheduledTask({ ...call, pageEpoch: 'old' })
   subject.receiveScheduledTask({ ...call, sourceSubmissionId: 'user:old' })
+  assert.equal(errors.length, 0, 'stale requests are never answered to the AI')
+  assert.deepEqual(notes, ['定时任务请求未处理：原对话已切换。', '定时任务请求未处理：该请求不属于最新一次发送。'])
   subject.receiveScheduledTask({ ...call, rawJson: JSON.stringify({ ...request, owner: { sessionId: 'wrong' } }) })
   assert.equal(calls.length, 1); assert.equal(errors.length, 1)
+  assert.match(errors[0], /^【定时任务未创建】\n周期或任务描述无效/)
+  scheduledTasksEnabled = false
+  subject.receiveScheduledTask(call)
+  assert.equal(calls.length, 1); assert.equal(errors.length, 2)
+  assert.match(errors[1], /已关闭定时任务工具/)
+  assert.match(notes.at(-1), /^定时任务未创建：当前对话已关闭定时任务工具/)
+})
+
+test('a plan requested after the user answers a question carries that answer as its source, like other tools', () => {
+  // The answer is a clarification submission; main records it as the latest send and admits only that source.
+  const page = readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8')
+  const branch = page.slice(page.indexOf('if (looksLikeScheduledReply(text)) {'), page.indexOf("report({ event: 'scheduled-task'"))
+  assert.match(branch, /const sourceSubmissionId = mailSourceSubmissionId\b/)
+  assert.match(page, /if \(event\.event === 'user-message'\) \{\s*mailSourceSubmissionId = event\.submissionId/)
 })
 
 test('the page preserves user drafts and scheduled identities; automatic task sources remain compatible with tool provenance', async () => {

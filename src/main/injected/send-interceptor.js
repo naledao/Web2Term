@@ -4232,7 +4232,8 @@
         }
         return
       }
-      const sourceSubmissionId = computerSourceSubmissionId
+      // The latest human send, answers included: main admits a plan only from the submission it saw last.
+      const sourceSubmissionId = mailSourceSubmissionId
       state.lastCommandMessageId = messageId
       state.replyActionDetected = true
       setReplyWaiting(0, 'scheduled-task-detected', messageId)
