@@ -43,6 +43,7 @@ const computer = load('../src/shared/computer-use.ts', { './computer-use-protoco
 const files = load('../src/shared/file-requests.ts')
 const background = load('../src/shared/background-tasks.ts', { './autonomous-task': taskContextModule })
 const types = load('../src/shared/types.ts', { './file-requests': files, './background-tasks': background })
+const toolPrompts = load('../src/shared/tool-prompts.ts', { './types': types })
 const plain = value => JSON.parse(JSON.stringify(value))
 function fixture(t) {
   const db = new DatabaseSync(':memory:')
@@ -168,8 +169,8 @@ test('prompt composition independently includes only enabled file, background an
 })
 
 const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', [
-  'toolPreferences', 'toolsOwner', 'getConversationTools', 'updateConversationTools', 'getComputerUseCapability', 'toolPrompt'
-], { ...computer, ...shared, ...types, ...scheduled, ...mail, process: { platform: 'win32', arch: 'x64' }, taskPausedByInput: () => false })
+  'toolPreferences', 'toolsOwner', 'getConversationTools', 'updateConversationTools', 'getComputerUseCapability', 'toolPrompt', 'fullToolPrompt'
+], { ...computer, ...shared, ...types, ...scheduled, ...mail, ...toolPrompts, process: { platform: 'win32', arch: 'x64' }, taskPausedByInput: () => false })
 
 test('runtime rejects stale conversation/workspace writes and derives computer capability from this conversation', t => {
   const f = fixture(t), entry = { conversationId: 'chat-a' }, refreshes = []
@@ -182,17 +183,30 @@ test('runtime rejects stale conversation/workspace writes and derives computer c
   const first = runtime.getConversationTools(owner)
   assert.deepEqual(plain(first.tools.map(tool => tool.name)), ['文件读取', '后台任务', '定时任务', '邮件通知', '电脑操作（computer use）'])
   assert.ok(first.tools.every(tool => tool.prompt.length > 0), 'closed tools still have a readable preview')
+  assert.ok(first.tools.every(tool => tool.summary.length > 0 && !tool.prompt.startsWith(tool.summary)), 'each tool shows its injected summary')
+  const injected = runtime.toolPrompt('deepseek')
+  for (const name of ['read_files', 'background_task', 'scheduled_task', 'send_email']) assert.match(injected, new RegExp(`- ${name}：`))
+  assert.doesNotMatch(injected, /- computer：/, 'unavailable computer use is not listed as readable')
+  assert.doesNotMatch(injected, /【工具：(?:read_files|background_task|scheduled_task|send_email)】/, 'full definitions are read on demand')
+  assert.match(injected, /"type":"read_tool_prompt"/)
+  assert.match(runtime.fullToolPrompt('read_files', 'deepseek').prompt, /【工具：read_files】/)
+  assert.match(runtime.fullToolPrompt('send_email', 'deepseek').prompt, /【工具：send_email】[\s\S]*当前邮箱尚未配置完成/)
+  assert.ok(runtime.fullToolPrompt('computer', 'deepseek').unavailable)
+  assert.ok(runtime.fullToolPrompt('read_files', 'unknown').unavailable)
   const saved = runtime.updateConversationTools({ ...owner, patch: { computerUseEnabled: true, fileReadingEnabled: false } })
   assert.equal(saved.computerUseCapability.computerUseEnabled, true)
   assert.equal(refreshes.length, 1)
-  assert.doesNotMatch(runtime.toolPrompt('deepseek'), /【工具：read_files】/)
+  assert.doesNotMatch(runtime.toolPrompt('deepseek'), /- read_files：/)
   assert.match(runtime.toolPrompt('deepseek'), /当前对话已关闭文件读取工具/)
+  assert.match(runtime.toolPrompt('deepseek'), /【computer use 状态】/, 'computer use state stays inline')
+  assert.match(runtime.fullToolPrompt('read_files', 'deepseek').unavailable, /已关闭文件读取/)
   runtime.updateConversationTools({ ...owner, patch: { scheduledTasksEnabled: false } })
-  assert.doesNotMatch(runtime.toolPrompt('deepseek'), /【工具：scheduled_task】/)
+  assert.doesNotMatch(runtime.toolPrompt('deepseek'), /- scheduled_task：/)
   assert.match(runtime.toolPrompt('deepseek'), /当前对话已关闭定时任务工具/)
   runtime.updateConversationTools({ ...owner, patch: { mailNotificationsEnabled: false } })
-  assert.doesNotMatch(runtime.toolPrompt('deepseek'), /【工具：send_email】/)
+  assert.doesNotMatch(runtime.toolPrompt('deepseek'), /- send_email：/)
   assert.match(runtime.toolPrompt('deepseek'), /当前对话已关闭邮件通知工具/)
+  assert.ok(runtime.fullToolPrompt('send_email', 'deepseek').unavailable)
   assert.equal(f.choices.read('deepseek', 'chat-a').mailNotificationsEnabled, false)
   assert.equal(f.choices.read('deepseek', 'chat-b').mailNotificationsEnabled, true)
   const before = f.rows()

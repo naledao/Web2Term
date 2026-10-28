@@ -1310,6 +1310,7 @@ export interface InterceptorPageEvent {
     | 'read-files'
     | 'scheduled-task'
     | 'mail-notification'
+    | 'tool-prompt-read'
     | 'computer-request'
     | 'parse-failed'
     | 'command-recovery'

@@ -2,6 +2,7 @@ import { BrowserWindow, WebContentsView, session, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import type { ScheduledToolCall } from '../shared/scheduled-tasks'
 import type { MailNotificationCall } from '../shared/mail-notification'
+import type { ToolPromptReadCall } from '../shared/tool-prompts'
 import type { TaskSubmission } from '../shared/autonomous-task'
 import { validTaskQuestionSource, sameQuestionSource } from '../shared/task-clarification'
 import type { TaskQuestion, TaskQuestionSource, TaskQuestionRequest } from '../shared/task-clarification'
@@ -434,6 +435,7 @@ export interface EmbedHandlers {
   onUserStarted?(text: string, files?: FocusAttachmentInfo[], editToken?: string, submission?: TaskSubmission, scheduledRunId?: string): string | undefined
   onScheduledTask?(request: ScheduledToolCall): void
   onMailNotification?(request: MailNotificationCall): void
+  onToolPromptRead?(request: ToolPromptReadCall): void
   onUserMessage(text: string, attachments: ConversationImageAttachmentInput[], focusTurnId?: string, imageSource?: 'provided' | 'page'): void
   onRawSent?(): void
   /** An assistant message that belongs in the app's conversation transcript. */
@@ -2318,6 +2320,20 @@ export class ChatGptEmbed {
         const conversationId = this.platform.conversationIdFromPath(url.pathname)
         if (url.origin !== new URL(this.platform.homeUrl).origin || !conversationId || payload.pagePath !== url.pathname) break
         this.handlers.onMailNotification?.({ messageId: payload.messageId, rawJson: payload.rawJson, conversationId,
+          pageEpoch: this.computerPageEpoch, sourceSubmissionId: payload.sourceSubmissionId })
+        break
+      }
+      case 'tool-prompt-read': {
+        if (payload.live !== true || payload.taskPromptGeneration !== this.taskPromptGeneration ||
+          typeof payload.sourceSubmissionId !== 'string' || !this.userSubmissions.has(payload.sourceSubmissionId) ||
+          typeof payload.messageId !== 'string' || !payload.messageId || payload.messageId.length > 512 ||
+          typeof payload.rawJson !== 'string' || payload.rawJson.length > 4000 || payload.computerPageEpoch !== this.computerPageEpoch) break
+        const contents = this.liveContents()
+        if (!contents) break
+        const url = new URL(contents.getURL())
+        const conversationId = this.platform.conversationIdFromPath(url.pathname)
+        if (url.origin !== new URL(this.platform.homeUrl).origin || !conversationId || payload.pagePath !== url.pathname) break
+        this.handlers.onToolPromptRead?.({ messageId: payload.messageId, rawJson: payload.rawJson, conversationId,
           pageEpoch: this.computerPageEpoch, sourceSubmissionId: payload.sourceSubmissionId })
         break
       }

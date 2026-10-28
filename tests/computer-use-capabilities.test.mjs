@@ -27,6 +27,7 @@ const persistence = load('../src/main/computer-use-settings.ts')
 const files = load('../src/shared/file-requests.ts')
 const background = load('../src/shared/background-tasks.ts', { './autonomous-task': taskContextModule })
 const types = load('../src/shared/types.ts', { './file-requests': files, './background-tasks': background })
+const toolPrompts = load('../src/shared/tool-prompts.ts', { './types': types })
 const enabled = { computerUseEnabled: true, desktopControlEnabled: true }
 const local = { sessionId: 'task-session', platformId: 'deepseek', hostPlatform: 'win32', hostArch: 'x64', connection: 'local' }
 const resolve = (preferences = enabled, context = {}) => capability.resolveComputerUseCapability(preferences, { ...local, ...context })
@@ -178,7 +179,7 @@ const methods = ['getComputerUseCapability', 'refreshComputerUseCapabilities', '
 const runtimeExports = {}
 new Script(compile(`class RuntimeFixture { ${methods.join('\n')} }\nexports.RuntimeFixture = RuntimeFixture`))
   .runInNewContext({ exports: runtimeExports, process: { platform: 'win32', arch: 'x64' },
-    ...capability, IpcChannels: types.IpcChannels, toolPromptForPlatform: types.toolPromptForPlatform, buildTerminalPromptParts: types.buildTerminalPromptParts })
+    ...capability, IpcChannels: types.IpcChannels, toolCatalogPrompt: toolPrompts.toolCatalogPrompt, buildTerminalPromptParts: types.buildTerminalPromptParts })
 
 test('runtime uses the live connection and refreshes cached platform prompts without executing work', () => {
   let preferences = enabled

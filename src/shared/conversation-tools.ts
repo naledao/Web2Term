@@ -33,6 +33,8 @@ export interface ConversationToolEntry {
   enabled: boolean
   available: boolean
   message: string
+  /** The line injected for this tool; the full prompt is sent only when the AI reads it. */
+  summary: string
   prompt: string
 }
 

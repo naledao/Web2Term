@@ -36,6 +36,8 @@
 .tool-prompts-dialog__prompt .wmde-markdown pre { max-width: 100%; overflow: visible; white-space: pre-wrap; background: var(--bg); }
 .tool-prompts-dialog__prompt .wmde-markdown pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-prompts-dialog__availability, .tool-prompts-dialog__loading { margin: 12px 0; color: var(--text-muted); }
+.tool-prompts-dialog__summary { margin: 10px 0 0; color: var(--text); line-height: 1.55; }
+.tool-prompts-dialog__summary > span { margin-right: 8px; color: var(--text-muted); }
 .tool-prompts-dialog__error { padding: 12px 0; color: var(--danger); }
 .tool-prompts-dialog__error p { margin: 0 0 8px; }
 .tool-prompts-dialog__footer { flex: none; min-height: 45px; padding: 12px 24px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12px; }

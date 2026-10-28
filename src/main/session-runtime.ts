@@ -14,6 +14,9 @@ import { ConversationTools } from './conversation-tools'
 import { MailNotifications } from './mail-notifications'
 import { mailNotificationToolPrompt } from '../shared/mail-notification'
 import type { MailNotificationCall } from '../shared/mail-notification'
+import { ToolPromptReads } from './tool-prompt-reads'
+import { TOOL_PROMPT_SUMMARIES, toolCatalogPrompt } from '../shared/tool-prompts'
+import type { ToolCatalogEntry, ToolPromptLookup, ToolPromptName, ToolPromptReadCall } from '../shared/tool-prompts'
 import type { QqMailService } from './qq-mail'
 import { sameConversationToolsOwner } from '../shared/conversation-tools'
 import type { ConversationToolsOwner, ConversationToolsState, ConversationToolsUpdate } from '../shared/conversation-tools'
@@ -46,7 +49,6 @@ import {
   FALLBACK_ENVIRONMENT,
   IpcChannels,
   buildTerminalPromptParts,
-  toolPromptForPlatform,
   readFilesToolPrompt,
   backgroundTaskToolPrompt,
   fileReadingPlatform,
@@ -55,7 +57,7 @@ import {
 } from '../shared/types'
 import { CHAT_PLATFORMS, DEEPSEEK_PLATFORM } from '../shared/platforms'
 import { selectionQuestionConversation } from '../shared/deepseek-question'
-import { computerUseCapabilityPrompt, computerUseSendBlock, resolveComputerUseCapability, supportsComputerUsePlatform } from '../shared/computer-use'
+import { computerUseCapabilityPrompt, computerUseStatusPrompt, computerUseSendBlock, resolveComputerUseCapability, supportsComputerUsePlatform } from '../shared/computer-use'
 import { normalizeComputerResultDelay } from '../shared/computer-progress'
 import { computerUseProtocol } from '../shared/computer-use-protocol'
 import type { ComputerUseProtocolError } from '../shared/computer-use-protocol'
@@ -347,7 +349,7 @@ export class SessionRuntime {
     current: (task, owner) => this.backgroundNotificationCurrent(task, owner),
     canSend: (owner, task) => {
       if (this.disposed || this.activePlatformId !== owner.platformId || !this.runner.canSendAutomaticResult()) return false
-      if (this.focusSending || this.mailNotifications?.busy || this.runner.hasInFlightWork()) return false
+      if (this.focusSending || this.mailNotifications?.busy || this.toolPromptReads?.busy || this.runner.hasInFlightWork()) return false
       if (task.taskContext && (!this.active || !this.getComputerUseCapability(owner.platformId).scopeSupported ||
         !['waiting-model', 'responded'].includes(this.taskCoordinator.current(owner.platformId)?.progress?.phase ?? ''))) return false
       const embed = this.embeds.get(owner.platformId)?.embed
@@ -460,6 +462,12 @@ export class SessionRuntime {
   private readonly mailNotifications = new MailNotifications({
     mail: () => this.options.qqMail,
     current: call => this.mailNotificationCurrent(call),
+    send: (text, call, signal, current) => this.embed.sendTaskResult(text, call.conversationId, signal, current),
+    note: message => this.runner.refreshTerminal(message)
+  })
+  private readonly toolPromptReads = new ToolPromptReads({
+    current: call => this.toolPromptReadCurrent(call),
+    lookup: name => this.fullToolPrompt(name, this.activePlatformId),
     send: (text, call, signal, current) => this.embed.sendTaskResult(text, call.conversationId, signal, current),
     note: message => this.runner.refreshTerminal(message)
   })
@@ -965,7 +973,7 @@ export class SessionRuntime {
         // A due plan starts a fresh goal. It never resumes a stopped goal or releases human control.
         if (scheduledCurrent && controlsCurrent) this.taskEnded = false
         if (submission) {
-          if (this.lastSubmissions.get(platform.id) !== submission.id) this.mailNotifications?.cancel()
+          if (this.lastSubmissions.get(platform.id) !== submission.id) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel() }
           this.lastSubmissions.set(platform.id, submission.id)
         }
         if (controlsCurrent && record().conversationId === null) this.conversationTools.submitted(platform.id)
@@ -1039,6 +1047,7 @@ export class SessionRuntime {
         if (isActive()) this.mailNotifications.receive(call,
           JSON.stringify([this.id, platform.id, call.conversationId, call.sourceSubmissionId, call.messageId]))
       },
+      onToolPromptRead: call => { if (isActive()) this.toolPromptReads.receive(call) },
       onAssistantMessage: (messageId, text) => {
         this.captureConversationMessage(platform.id, 'assistant', text, messageId)
         this.focusChat.settled(platform.id, messageId, text)
@@ -1056,6 +1065,7 @@ export class SessionRuntime {
       },
       onInterceptor: (status) => {
         this.mailNotifications?.reconcile()
+        this.toolPromptReads?.reconcile()
         this.captureGoal(status.lastSentText)
         if (!this.disposed) this.options.onPendingQuestionsChanged(this.id, platform.id, status.pendingQuestion?.questions.length ?? 0)
         const taskRunning = status.taskStartedAt !== null && status.taskFinishedAt === null
@@ -1228,7 +1238,7 @@ export class SessionRuntime {
   }
 
   setActive(active: boolean): void {
-    if (!active) this.mailNotifications?.cancel()
+    if (!active) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel() }
     if (!active) this.scheduledSendAbort?.abort()
     if (this.active && !active) this.interruptTaskControl(this.activePlatformId)
     this.active = active
@@ -1767,6 +1777,7 @@ export class SessionRuntime {
   }
   private stopAutomation(reason: TaskStopReason, allPlatforms: boolean): Promise<InterceptorStatus> {
     this.mailNotifications?.cancel()
+    this.toolPromptReads?.cancel()
     this.taskEnded = true
     this.scheduledSendAbort?.abort()
     this.focusUploadAbort?.abort(); this.legacyToolSend?.abort.abort()
@@ -2276,6 +2287,7 @@ export class SessionRuntime {
   /** Control-page handover revokes authority; switching a business window never calls this. */
   private interruptTaskControl(platformId: string): void {
     this.mailNotifications?.cancel()
+    this.toolPromptReads?.cancel()
     this.scheduledSendAbort?.abort()
     const task = this.taskCoordinator.current(platformId)
     this.stopAutonomousTask(platformId, 'interrupted')
@@ -2380,6 +2392,17 @@ export class SessionRuntime {
       !status.pendingQuestion && !this.taskCoordinator.waitingForUser(this.activePlatformId)
   }
 
+  private toolPromptReadCurrent(call: ToolPromptReadCall): boolean {
+    if (this.disposed || !this.active || this.taskEnded || this.stoppingTask || this.options.automationBlocked?.() ||
+      this.runner.getAutomation().paused || this.options.desktopCoordinator?.getState().humanControl ||
+      taskPausedByInput(this.taskCoordinator.latest(this.activePlatformId)) ||
+      this.lastSubmissions.get(this.activePlatformId) !== call.sourceSubmissionId ||
+      this.embed.getComputerUsePageEpoch() !== call.pageEpoch) return false
+    const conversationId = this.embed.getState().conversationId, status = this.embed.getInterceptorStatus()
+    return (conversationId === null || conversationId === call.conversationId) && status.enabled &&
+      !status.pendingQuestion && !this.taskCoordinator.waitingForUser(this.activePlatformId)
+  }
+
   mailSettingsChanged(): void {
     if (this.disposed) return
     this.mailNotifications.cancel()
@@ -2427,7 +2450,7 @@ export class SessionRuntime {
       const current = this.scheduledTarget()
       if (!sameScheduledTarget(current, task.target)) return '等待恢复计划绑定的执行主机和工作目录。'
     } catch (error) { return error instanceof Error ? error.message : '执行目标不可用。' }
-    if (this.focusSending || this.focusRevision || this.stoppingTask || this.mailNotifications?.busy || this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending) return '等待当前发送或工具执行结束。'
+    if (this.focusSending || this.focusRevision || this.stoppingTask || this.mailNotifications?.busy || this.toolPromptReads?.busy || this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending) return '等待当前发送或工具执行结束。'
     const status = this.embed.getInterceptorStatus()
     if (!status.enabled || !status.installed || !status.promptInjectionEnabled) return '等待启用原对话的终端模式和提示词注入。'
     if (status.pendingQuestion || this.taskCoordinator.waitingForUser(task.owner.platformId)) return '等待用户回答原任务的问题。'
@@ -2482,17 +2505,17 @@ export class SessionRuntime {
       this.computerUseTool.definitions(), capability.helper)
     return { owner: current, preferences, computerUseCapability: capability, tools: [
       { id: 'files', name: '文件读取', enabled: preferences.fileReadingEnabled, available: platformSupported && !this.web2term,
-        message: this.web2term ? '当前远程设备暂不支持文件读取工具。' : platformSupported ? '' : '当前平台暂不支持文件读取工具。', prompt: readFilesToolPrompt },
+        message: this.web2term ? '当前远程设备暂不支持文件读取工具。' : platformSupported ? '' : '当前平台暂不支持文件读取工具。', summary: TOOL_PROMPT_SUMMARIES.read_files, prompt: readFilesToolPrompt },
       { id: 'background', name: '后台任务', enabled: preferences.backgroundTasksEnabled, available: platformSupported,
-        message: platformSupported ? '' : '当前平台暂不支持后台任务工具。', prompt: backgroundTaskToolPrompt },
+        message: platformSupported ? '' : '当前平台暂不支持后台任务工具。', summary: TOOL_PROMPT_SUMMARIES.background_task, prompt: backgroundTaskToolPrompt },
       { id: 'scheduled', name: '定时任务', enabled: preferences.scheduledTasksEnabled, available: platformSupported,
-        message: platformSupported ? '' : '当前平台暂不支持定时任务工具。', prompt: scheduledTaskToolPrompt },
+        message: platformSupported ? '' : '当前平台暂不支持定时任务工具。', summary: TOOL_PROMPT_SUMMARIES.scheduled_task, prompt: scheduledTaskToolPrompt },
       { id: 'mail', name: '邮件通知', enabled: preferences.mailNotificationsEnabled,
         available: platformSupported && !!this.options.qqMail?.availability().available,
         message: platformSupported ? this.options.qqMail?.availability().message ?? '请先在「设置 → 邮件通知」配置邮箱。' : '当前平台暂不支持邮件通知工具。',
-        prompt: mailNotificationToolPrompt },
+        summary: TOOL_PROMPT_SUMMARIES.send_email, prompt: mailNotificationToolPrompt },
       { id: 'computer', name: '电脑操作（computer use）', enabled: preferences.computerUseEnabled, available: capability.scopeSupported,
-        message: capability.scopeSupported ? '' : capability.message,
+        message: capability.scopeSupported ? '' : capability.message, summary: TOOL_PROMPT_SUMMARIES.computer,
         prompt: computerUseCapabilityPrompt(preview, preferences.computerUseEnabled && capability.available
           ? this.taskCoordinator?.computerStepToken?.(current.platformId) ?? null : undefined,
         taskPausedByInput(this.taskCoordinator?.latest(current.platformId))) }
@@ -2508,10 +2531,11 @@ export class SessionRuntime {
     return this.getConversationTools()
   }
 
+  /** The injected tool section: summaries only; full definitions are sent when the AI reads them. */
   private toolPrompt(platformId: string): string {
     const capability = this.getComputerUseCapability(platformId)
     const preferences = this.toolPreferences(platformId)
-    const computerPrompt = computerUseCapabilityPrompt(capability,
+    const computerStatus = computerUseStatusPrompt(capability,
       capability.available ? this.taskCoordinator?.computerStepToken?.(platformId) ?? null : null,
       taskPausedByInput(this.taskCoordinator?.latest(platformId)))
     const disabled = [
@@ -2521,10 +2545,42 @@ export class SessionRuntime {
       ...(!preferences.mailNotificationsEnabled ? ['当前对话已关闭邮件通知工具，不要输出 send_email 请求。'] : [])
     ]
     const mail = this.options.qqMail?.availability()
-    const mailPrompt = preferences.mailNotificationsEnabled ? mailNotificationToolPrompt +
-      (mail?.available ? '' : '\n当前邮箱尚未配置完成：' + (mail?.message ?? '请在「设置 → 邮件通知」配置收发邮箱和 SMTP 授权码。')) : ''
-    return toolPromptForPlatform(platformId, !this.web2term && preferences.fileReadingEnabled,
-      [computerPrompt, ...disabled].filter(Boolean).join('\n\n'), preferences.backgroundTasksEnabled, preferences.scheduledTasksEnabled ? scheduledTaskToolPrompt : '', mailPrompt)
+    const entries: ToolCatalogEntry[] = [
+      ...(!this.web2term && preferences.fileReadingEnabled ? [{ name: 'read_files' as const }] : []),
+      ...(preferences.backgroundTasksEnabled ? [{ name: 'background_task' as const }] : []),
+      ...(preferences.scheduledTasksEnabled ? [{ name: 'scheduled_task' as const }] : []),
+      ...(preferences.mailNotificationsEnabled ? [{ name: 'send_email' as const, note: mail?.available ? ''
+        : '当前邮箱尚未配置完成：' + (mail?.message ?? '请在「设置 → 邮件通知」配置收发邮箱和 SMTP 授权码。') }] : []),
+      ...(capability.available ? [{ name: 'computer' as const }] : [])
+    ]
+    return toolCatalogPrompt(platformId, entries, [computerStatus, ...disabled].filter(Boolean).join('\n\n'))
+  }
+
+  /** One tool's full definition as it applies to this conversation right now. */
+  private fullToolPrompt(name: ToolPromptName, platformId: string): ToolPromptLookup {
+    if (!fileReadingPlatform(platformId)) return { unavailable: '当前平台不支持该工具。' }
+    const preferences = this.toolPreferences(platformId)
+    switch (name) {
+      case 'read_files':
+        if (this.web2term) return { unavailable: '当前远程设备不支持文件读取工具。' }
+        return preferences.fileReadingEnabled ? { prompt: readFilesToolPrompt } : { unavailable: '当前对话已关闭文件读取工具。' }
+      case 'background_task':
+        return preferences.backgroundTasksEnabled ? { prompt: backgroundTaskToolPrompt } : { unavailable: '当前对话已关闭后台任务工具。' }
+      case 'scheduled_task':
+        return preferences.scheduledTasksEnabled ? { prompt: scheduledTaskToolPrompt } : { unavailable: '当前对话已关闭定时任务工具。' }
+      case 'send_email': {
+        if (!preferences.mailNotificationsEnabled) return { unavailable: '当前对话已关闭邮件通知工具。' }
+        const mail = this.options.qqMail?.availability()
+        return { prompt: mailNotificationToolPrompt + (mail?.available ? ''
+          : '\n当前邮箱尚未配置完成：' + (mail?.message ?? '请在「设置 → 邮件通知」配置收发邮箱和 SMTP 授权码。')) }
+      }
+      case 'computer': {
+        const capability = this.getComputerUseCapability(platformId)
+        if (!capability.available) return { unavailable: '当前没有可调用的 computer 桌面动作。' }
+        return { prompt: computerUseCapabilityPrompt(capability, this.taskCoordinator?.computerStepToken?.(platformId) ?? null,
+          taskPausedByInput(this.taskCoordinator?.latest(platformId))) }
+      }
+    }
   }
 
   /** Only computer tool metadata changes; the base system prompt remains unchanged. */
@@ -2660,7 +2716,7 @@ export class SessionRuntime {
   }
 
   setPaused(paused: boolean): AutomationState {
-    if (paused) this.mailNotifications?.cancel()
+    if (paused) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel() }
     if (paused) this.scheduledSendAbort?.abort()
     const state = this.runner.setPaused(paused)
     this.taskCoordinator.setPaused(paused)
@@ -3491,6 +3547,7 @@ export class SessionRuntime {
 
   dispose(): void {
     this.mailNotifications?.cancel()
+    this.toolPromptReads?.cancel()
     this.scheduledSendAbort?.abort()
     if (this.disposed) return
     this.disposed = true

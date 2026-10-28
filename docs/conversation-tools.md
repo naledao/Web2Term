@@ -1,6 +1,6 @@
 # 按对话管理工具
 
-点击控制面板中的“查看工具提示词”打开工具弹框。每块区域包含中文工具名称、当前启用状态、开关和可展开的提示词，展开后可复制该工具的提示词。关闭工具时仍可查看启用后的提示词预览。
+点击控制面板中的“查看工具提示词”打开工具弹框。每块区域包含中文工具名称、当前启用状态、开关、注入摘要和可展开的完整提示词，展开后可复制完整提示词。关闭工具时仍可查看启用后的提示词预览。
 
 | 工具 | 新对话默认状态 |
 | --- | --- |
@@ -22,7 +22,15 @@ computer use 已从应用设置移入“电脑操作”区域，展开“电脑�
 
 ## 提示词与执行
 
-工具提示词按当前对话的开关组合。关闭文件读取后不再注入 read_files 定义，关闭后台任务后不再注入 background_task 定义，并附带当前对话的关闭状态说明。computer use 的能力、识别、执行和回传间隔全部从对话配置读取。
+工具提示词按当前对话的开关组合，但注入时只发送「工具目录」：每个已启用工具一行摘要，加上读取完整说明的方法。完整定义（调用格式、参数、限制）由 AI 按需读取：
+
+```json
+{"type":"read_tool_prompt","tools":["send_email","scheduled_task"]}
+```
+
+`tools` 为 1–5 个目录中列出的工具名（`read_files`、`background_task`、`scheduled_task`、`send_email`、`computer`），与 command、questions 及其他工具请求互斥。软件识别后把请求的完整说明作为一条普通文本消息自动发回同一对话（【工具说明】），读取时按当前对话配置现场生成；已关闭或不可用的工具在回传中注明「当前不可用」，格式错误时回传正确格式。回传与邮件通知结果走同一条自动发送通道：页面忙碌时每 2 秒重试，最多 60 次；对话切换、任务结束、暂停或接管时取消。同一任务中可以重复读取。AI 未读取而直接按正确格式调用工具时照常执行。专注模式中该请求显示为一行「正在读取工具说明：…」。
+
+以下内容随状态变化，仍直接注入而不放进完整说明：已关闭工具的「不要输出…请求」说明、邮箱未配置提示、computer use 的启用状态、暂停后继续说明和当前 step_token。computer use 的能力、识别、执行和回传间隔全部从对话配置读取。
 
 「邮件通知」使用 `send_email`，只接受标题和正文，从「设置 → 邮件通知」读取已保存的收发邮箱与授权码。关闭后移除工具定义并阻止新调用；发送中的事务也会取消。邮件通知独立于 computer use，在其关闭时仍可使用。详细格式、发送去重及结果语义见 [邮件通知设置](qq-mail-settings.md)。
 
@@ -32,12 +40,12 @@ computer use 已从应用设置移入“电脑操作”区域，展开“电脑�
 
 ## 用户测试
 
-新增 `tests/conversation-tools.test.mjs`，使用真实内存 SQLite 和实际持久化、提示词及运行时方法，覆盖默认值、跨对话和平台隔离、重开恢复、首次发送关联、历史对话隔离、无效设置、事务回滚、过期保存及提示词刷新。`tests/task-tool-collaboration.test.mjs` 补充关闭工具后的接纳、手动运行和准备中取消用例。
+新增 `tests/conversation-tools.test.mjs`，使用真实内存 SQLite 和实际持久化、提示词及运行时方法，覆盖默认值、跨对话和平台隔离、重开恢复、首次发送关联、历史对话隔离、无效设置、事务回滚、过期保存及提示词刷新，以及工具目录只含摘要、完整说明按当前配置生成。`tests/task-tool-collaboration.test.mjs` 补充关闭工具后的接纳、手动运行和准备中取消用例。`tests/tool-prompt-reads.test.mjs` 覆盖 `read_tool_prompt` 的解析、页面识别、桥接校验、运行时接纳、回传内容、忙碌重试与取消，以及专注模式的显示。
 
 由用户运行：
 
 ```powershell
-node --test tests/conversation-tools.test.mjs tests/task-tool-collaboration.test.mjs tests/computer-use-capabilities.test.mjs tests/computer-diagnostics.test.mjs
+node --test tests/conversation-tools.test.mjs tests/tool-prompt-reads.test.mjs tests/task-tool-collaboration.test.mjs tests/computer-use-capabilities.test.mjs tests/computer-diagnostics.test.mjs
 ```
 
 真实界面通过 `npm run dev` 由用户启动、操作并验收。交付状态为构建通过、等待测试。

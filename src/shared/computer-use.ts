@@ -317,6 +317,27 @@ function compactAction(definition: ComputerUseActionDefinition): string {
 }
 
 /**
+ * The computer use state injected with the tool summaries. The full definition is read on demand,
+ * but the step token, pause notice and availability change per step, so they always travel inline.
+ */
+export function computerUseStatusPrompt(capability: ComputerUseCapability, stepToken?: string | null, pausedByInput = false): string {
+  if (!capability.computerUseEnabled && !capability.desktopControlEnabled) return ''
+  return [
+    '【computer use 状态】',
+    `computer use：${capability.computerUseEnabled ? '已启用' : '已关闭'}；桌面控制：${capability.desktopControlEnabled ? '已允许' : '已关闭'}。`,
+    ...(pausedByInput ? [
+      '上一轮 computer use 因用户在桌面上连续 3 次键鼠操作而暂停，暂停时那一步的结果没有回传。本条用户消息继续同一任务：先重新观察真实界面，核对暂停前最后一步是否已生效，不要盲目重做；再按用户本条消息和原要求继续。'
+    ] : []),
+    ...(capability.context.platformId === 'deepseek' ? ['DeepSeek 网页视觉理解能力已由用户确认，无需再次确认或配置视觉模型 API Key。'] : []),
+    capability.message,
+    ...(!capability.available ? [
+      '当前没有可调用的 computer 桌面动作。不要输出 computer 工具请求，不要声称已观察或操作桌面。继续使用实际提供的现有工具。'
+    ] : stepToken === null ? ['当前步骤正在处理或令牌尚未就绪，等待 computer_result 返回 next_step_token 后再发起下一请求。']
+      : stepToken ? [`当前 step_token：${stepToken}`] : [])
+  ].filter(Boolean).join('\n')
+}
+
+/**
  * @param pausedByInput the conversation's task was paused by the user's keyboard/mouse input; this prompt
  *   travels with the user's next message, which continues that task.
  */

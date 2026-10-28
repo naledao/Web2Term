@@ -84,7 +84,7 @@ export default function ToolPromptsDialog({ owner, container, theme, trigger, on
           <div className="tool-prompts-dialog__head">
             <div>
               <Dialog.Title className="tool-prompts-dialog__title">工具提示词</Dialog.Title>
-              <Dialog.Description className="tool-prompts-dialog__description">仅应用于{owner.conversationId ? '当前对话' : '这个新对话'}，修改后自动保存。</Dialog.Description>
+              <Dialog.Description className="tool-prompts-dialog__description">仅应用于{owner.conversationId ? '当前对话' : '这个新对话'}，修改后自动保存。发送时只注入已启用工具的摘要，AI 需要时再读取完整提示词。</Dialog.Description>
             </div>
             <Dialog.Close ref={closeButton} className="tool-prompts-dialog__close" aria-label="关闭工具提示词">
               <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
@@ -108,12 +108,13 @@ export default function ToolPromptsDialog({ owner, container, theme, trigger, on
                   <span className="switch__knob" />
                 </button>
               </div>
+              <p className="tool-prompts-dialog__summary"><span>注入摘要</span>{tool.summary}</p>
               {!tool.available ? <p className="tool-prompts-dialog__availability">{tool.message}</p> : null}
               <details className="tool-prompts-dialog__details">
-                <summary>查看工具提示词</summary>
+                <summary>查看完整提示词</summary>
                 <div className="tool-prompts-dialog__prompt">
                   <div className="tool-prompts-dialog__prompt-head">
-                    <span>{tool.enabled ? '当前配置的提示词' : '启用后使用的提示词预览'}</span>
+                    <span>{tool.enabled ? 'AI 读取该工具时发送的完整提示词' : '启用后 AI 可读取的完整提示词预览'}</span>
                     <button type="button" onClick={() => void copy(tool.id, tool.prompt)}>{copied === tool.id ? '已复制' : '复制提示词'}</button>
                   </div>
                   <div className="tool-prompts-dialog__prompt-content" role="region" aria-label={`${tool.name}提示词`} tabIndex={0}>

@@ -3817,7 +3817,29 @@
    */
   const looksLikeScheduledReply = (text) => /"type"\s*:\s*"scheduled_task"/.test(String(text || ''))
   const looksLikeMailReply = (text) => /"type"\s*:\s*"send_email"/.test(String(text || ''))
-  const looksLikeCommandReply = (text) => /\{\s*["']command["']\s*:\s*["']/s.test(String(text || '')) || looksLikeReadFilesReply(text) || looksLikeScheduledReply(text) || looksLikeMailReply(text)
+  const looksLikeToolPromptReadReply = (text) => /"type"\s*:\s*"read_tool_prompt"/.test(String(text || ''))
+  const looksLikeCommandReply = (text) => /\{\s*["']command["']\s*:\s*["']/s.test(String(text || '')) || looksLikeReadFilesReply(text) || looksLikeScheduledReply(text) || looksLikeMailReply(text) || looksLikeToolPromptReadReply(text)
+
+  // Reading a tool definition has no side effect, so a request inside a short explanation is
+  // still honoured. Malformed requests go to main, which answers with the expected format.
+  const checkToolPromptRead = (messageId, text) => {
+    if (!looksLikeToolPromptReadReply(text)) return false
+    if (!state.enabled || state.awaitingReplySince === 0 || !mailSourceSubmissionId) {
+      state.lastCommandMessageId = messageId
+      return true
+    }
+    const candidates = balancedObjects(String(text)).filter((raw) => {
+      try { return JSON.parse(raw)?.type === 'read_tool_prompt' } catch (_) { return false }
+    })
+    const rawJson = candidates.length === 1 && candidates[0].length <= 4000 ? candidates[0] : '{"type":"read_tool_prompt","invalid":true}'
+    state.lastCommandMessageId = messageId
+    state.replyActionDetected = true
+    setReplyWaiting(0, 'tool-prompt-read-detected', messageId)
+    report({ event: 'tool-prompt-read', messageId, rawJson, live: true,
+      sourceSubmissionId: mailSourceSubmissionId, taskPromptGeneration: state.taskPromptGeneration,
+      pagePath: location.pathname, computerPageEpoch })
+    return true
+  }
 
   const checkMailNotification = (messageId, text) => {
     if (!looksLikeMailReply(text)) return false
@@ -4197,6 +4219,7 @@
     }
     if (checkComputerRequest(node, messageId)) return
     if (checkMailNotification(messageId, text)) return
+    if (checkToolPromptRead(messageId, text)) return
     if (looksLikeScheduledReply(text)) {
       if (state.awaitingReplySince === 0 || !state.enabled) { state.lastCommandMessageId = messageId; return }
       const candidates = balancedObjects(String(text).replace(/```[a-zA-Z0-9_-]*/g, '\n')).filter(raw => {

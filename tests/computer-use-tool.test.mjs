@@ -29,6 +29,7 @@ const { DesktopCoordinator } = load('../src/main/desktop-coordinator.ts')
 const files = load('../src/shared/file-requests.ts')
 const background = load('../src/shared/background-tasks.ts', { './autonomous-task': taskContextModule })
 const types = load('../src/shared/types.ts', { './file-requests': files, './background-tasks': background })
+const toolPrompts = load('../src/shared/tool-prompts.ts', { './types': types })
 const preferences = { computerUseEnabled: true, desktopControlEnabled: true }
 const local = { sessionId: 'session-A', platformId: 'deepseek', hostPlatform: 'win32', hostArch: 'x64', connection: 'local' }
 const definition = () => ({ action: 'observe', description: '取得已定位窗口的观察结果',
@@ -268,7 +269,7 @@ const runtimeMethods = ['getComputerUseCapability', 'invokeComputerUseTool', 're
 }).join('\n')
 const Runtime = new Script(compile(`class Runtime { ${runtimeMethods} }; Runtime`)).runInNewContext({
   process: { platform: 'win32', arch: 'x64' }, ...shared, IpcChannels: types.IpcChannels,
-  toolPromptForPlatform: types.toolPromptForPlatform, buildTerminalPromptParts: types.buildTerminalPromptParts
+  toolCatalogPrompt: toolPrompts.toolCatalogPrompt, buildTerminalPromptParts: types.buildTerminalPromptParts
 })
 
 test('actual runtime refreshes only tool descriptions and dispatches with its live session scope', async () => {
@@ -284,8 +285,10 @@ test('actual runtime refreshes only tool descriptions and dispatches with its li
   const unregister = runtime.computerUseTool.register(definition(), {
     validate: () => null, execute: async () => { executions++; return { message: 'observed' } }
   })
-  assert.match(prompts.get('deepseek').toolPrompt, /【computer 当前可调用动作与参数】/)
-  assert.doesNotMatch(prompts.get('chatgpt').toolPrompt, /【computer 当前可调用动作与参数】/)
+  // Only the summary and step state are injected; the action list is sent when the AI reads the computer tool.
+  assert.match(prompts.get('deepseek').toolPrompt, /- computer：[\s\S]*【computer use 状态】/)
+  assert.doesNotMatch(prompts.get('deepseek').toolPrompt, /【computer 当前可调用动作与参数】/)
+  assert.doesNotMatch(prompts.get('chatgpt').toolPrompt, /- computer：/)
   assert.equal(prompts.get('deepseek').basePrompt, types.buildTerminalPromptParts(runtime.environment).basePrompt)
   assert.equal((await runtime.invokeComputerUseTool({ action: 'observe', parameters: { window_id: 'window:real' } })).ok, true)
   runtime.remoteShell = { alive: true }
