@@ -1,55 +1,24 @@
-# Web2Term 版本更新说明服务
+# Web2Term 版本更新说明 API
 
-独立的 Go HTTP 服务，使用服务端 SQLite 文件保存版本更新 HTML 及按机器 ID 区分的已读状态。
-当前目录是独立 Go module，使用 Go 1.26+、标准库 `net/http` 和纯 Go 驱动 `modernc.org/sqlite`；构建无需 C 编译器。
+版本更新说明已合并到 Web2Term Go 后端，与邮箱登录、设备管理和 WebSocket 共用 HTTP 监听、进程、SQLite 文件与连接池。
+默认基础地址为 `http://127.0.0.1:10088`，服务端保存版本更新 HTML 及按机器 ID 区分的已读状态。
 
-## 启动
+## 配置与部署
 
-以下命令由用户在本目录运行。启动会创建数据目录和 SQLite 文件，并在事务内执行嵌入的数据库迁移。
-
-```powershell
-cd C:\codes\gpt-web-to-codex-terminal\services\release-notes
-$env:RELEASE_NOTES_ADMIN_TOKEN = '替换为你自己生成的管理令牌'
-go run ./cmd/server
-```
-
-默认监听 `127.0.0.1:8091`，数据库默认保存为工作目录下的 `data/release-notes.db`。
-服务启动日志使用 JSON，按 Ctrl+C 会停止接收请求并关闭数据库。
+构建、启动和 SSH 部署统一遵循 [后端说明](../README.md)，无需额外启动一个服务或部署第二个二进制。
+数据使用后端的 `WEB2TERM_DB_PATH`，默认 `data/web2term.db`；启动时在事务内执行嵌入的数据库迁移。
 管理令牌为空时，全部管理接口返回 `503 ADMIN_DISABLED`；读取和已读接口仍可使用。
-`.env.example` 仅说明变量，程序不自动加载 `.env` 文件。
+管理令牌独立于普通用户的登录 JWT，只有持有管理令牌的调用方才能维护说明。
 
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `RELEASE_NOTES_ADDR` | `127.0.0.1:8091` | HTTP 监听地址 |
-| `RELEASE_NOTES_DB` | `./data/release-notes.db` | SQLite 文件位置，相对路径按工作目录解析 |
+| `WEB2TERM_ADDR` | `:10088` | 后端统一 HTTP / WebSocket 监听地址 |
+| `WEB2TERM_DB_PATH` | `data/web2term.db` | 后端统一 SQLite 文件位置，相对路径按工作目录解析 |
 | `RELEASE_NOTES_ADMIN_TOKEN` | 空 | 管理接口的 Bearer 令牌；空值禁用管理接口 |
 
-可使用 `-addr` 和 `-db` 覆盖对应环境变量。对外提供访问时，将监听地址改为所需地址，并通过 HTTPS 入口提供服务；客户端通过 HTTP API 访问，数据库文件保留在服务端。
-
-```powershell
-go run ./cmd/server -addr 0.0.0.0:8091 -db ./data/release-notes.db
-```
-
-## 构建
-
-```powershell
-$env:CGO_ENABLED = '0'
-go build -o ./dist/release-notes.exe ./cmd/server
-```
-
-Linux amd64 交叉编译：
-
-```powershell
-$env:CGO_ENABLED = '0'
-$env:GOOS = 'linux'
-$env:GOARCH = 'amd64'
-go build -o ./dist/release-notes-linux-amd64 ./cmd/server
-Remove-Item Env:GOOS, Env:GOARCH
-```
-
-构建出的程序已包含 SQLite 驱动和初始建表 SQL，可与环境变量配置一起部署。
-SQLite 使用 WAL、外键约束和 5000 毫秒 busy timeout，连接设置会应用到每个新连接；当前连接池上限为 1。
-数据库迁移使用 `PRAGMA user_version`，初始版本为 1；遇到比程序更新的数据库版本会拒绝启动。
+旧的独立监听地址、数据库变量和命令行参数不再使用。线上配置写入 `/etc/web2term-backend/backend.env`，修改后由使用者重启 `web2term-backend.service`。
+后端的现有 GitHub 构建和 SSH 部署流程会一并包含本模块，不需要新增 workflow。
+SQLite 使用 WAL、外键约束和 5000 毫秒 busy timeout；连接池与账号、设备操作共用，上限为 1。
 
 ## 客户端接口
 
@@ -57,7 +26,7 @@ SQLite 使用 WAL、外键约束和 5000 毫秒 busy timeout，连接设置会�
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/healthz` | 检查服务及数据库连接 |
+| `GET` | `/healthz` | 后端统一 HTTP 存活检查 |
 | `GET` | `/api/v1/release-notes?machineId=UUID&limit=20&offset=0` | 分页获取可展示的版本及当前机器的已读状态 |
 | `GET` | `/api/v1/release-notes/{id}?machineId=UUID` | 获取单个版本的 HTML 正文和阅读状态 |
 | `POST` | `/api/v1/release-notes/{id}/read` | 将某个版本登记为当前机器已读 |
@@ -145,12 +114,12 @@ Content-Type: application/json
 新增返回 HTTP 201，附带管理详情的 `Location`；更新返回 200，删除返回 204。
 版本号冲突返回 409，未提供或错误的管理令牌返回 401。
 
-用户可编辑 `examples/release-note.json` 后发布：
+用户可在 `backend` 目录编辑 `examples/release-note.json` 后发布：
 
 ```powershell
 $headers = @{ Authorization = "Bearer $env:RELEASE_NOTES_ADMIN_TOKEN" }
 $body = Get-Content -LiteralPath ./examples/release-note.json -Raw -Encoding utf8
-Invoke-RestMethod -Uri http://127.0.0.1:8091/api/v1/admin/release-notes -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+Invoke-RestMethod -Uri http://127.0.0.1:10088/api/v1/admin/release-notes -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
 ```
 
 接口错误使用下列结构，服务端异常详情仅记录在日志中：
@@ -161,8 +130,11 @@ Invoke-RestMethod -Uri http://127.0.0.1:8091/api/v1/admin/release-notes -Method 
 
 ## 数据结构与迁移
 
-建表 SQL 位于 `internal/store/migrations/001_initial.sql`，通过 `go:embed` 编入程序，服务首次启动自动执行。
-不要将早期设计稿单独执行到新服务数据库；迁移以本目录的实际代码为准。
+需要由 Codex 管理更新说明时，可使用仓库内的 [更新说明管理 MCP](../mcp/README.md)。它封装上述管理接口，令牌保存在仓库外的私密 JSON 配置中。
+
+建表 SQL 位于后端的 `internal/store/release_notes_schema.sql`，通过 `go:embed` 编入程序。
+后端数据库版本从 `2` 升级到 `3` 时，在同一事务中添加这两张表；已有账号、验证码和设备记录不改写。
+新数据库会按顺序初始化设备、账号和更新说明结构。遇到更高版本或升级错误时拒绝启动，升级失败会回滚事务。
 
 | 表 | 内容 |
 | --- | --- |
@@ -173,9 +145,11 @@ Invoke-RestMethod -Uri http://127.0.0.1:8091/api/v1/admin/release-notes -Method 
 客户端清空本地应用数据而重新生成 UUID 后，按新机器计算阅读状态。
 数据库文件、WAL 文件、构建产物和本地环境文件已加入忽略规则。
 
+如果以前已经运行过独立版本并在其他位置保存了 `release-notes.db`，先备份，再把 `app_release_note` 和 `app_release_note_read` 的数据导入后端对应表，保留说明 ID 及阅读关联。不要直接用旧独立数据库文件替换后端数据库；它的版本号和账号/设备结构与后端不同。本次代码合并不连接或改写其他位置的历史数据库。
+
 ## 测试分工
 
-按仓库约定，测试由用户运行，智能体只编写测试和读取输出。
+按仓库约定，测试由用户在 `backend` 目录运行，智能体只执行构建、静态检查和读取输出。
 用例通过临时 SQLite 文件和 `httptest` 请求覆盖发布可见性、机器阅读隔离、重复登记、HTML 保留、接口鉴权、数据持久化、外键级联和输入边界，不依赖真实第三方网站。
 
 ```powershell

@@ -3,90 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
-	_ "embed"
 	"errors"
-	"fmt"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
-
-//go:embed migrations/001_initial.sql
-var initialSchema string
-
-type Store struct{ db *sql.DB }
-
-// Open opens only a local file. Connection pragmas apply even if a connection is replaced.
-func Open(ctx context.Context, path string) (*Store, error) {
-	if strings.TrimSpace(path) == "" {
-		return nil, errors.New("database path is empty")
-	}
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve database path: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(absolute), 0o700); err != nil {
-		return nil, fmt.Errorf("create database directory: %w", err)
-	}
-	uriPath := filepath.ToSlash(absolute)
-	if !strings.HasPrefix(uriPath, "/") {
-		uriPath = "/" + uriPath
-	}
-	params := url.Values{}
-	params.Add("_pragma", "foreign_keys(1)")
-	params.Add("_pragma", "busy_timeout(5000)")
-	params.Add("_pragma", "journal_mode(WAL)")
-	dsn := (&url.URL{Scheme: "file", Path: uriPath, RawQuery: params.Encode()}).String()
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	store := &Store{db: db}
-	initCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	if err := store.migrate(initCtx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return store, nil
-}
-
-func (s *Store) Close() error                   { return s.db.Close() }
-func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
-
-func (s *Store) migrate(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin migration: %w", err)
-	}
-	defer tx.Rollback()
-	var version int
-	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("read schema version: %w", err)
-	}
-	if version > 1 {
-		return fmt.Errorf("database schema %d is newer than supported schema 1", version)
-	}
-	if version == 0 {
-		if _, err := tx.ExecContext(ctx, initialSchema); err != nil {
-			return fmt.Errorf("apply schema 1: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
-			return fmt.Errorf("record schema version: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit migration: %w", err)
-	}
-	return nil
-}
 
 type scanner interface{ Scan(...any) error }
 
@@ -134,7 +55,7 @@ func IsBusy(err error) bool {
 
 const noteColumns = "id, version, title, content_html, status, published_at, created_at, updated_at"
 
-func (s *Store) Create(ctx context.Context, input NoteInput, now int64) (Note, error) {
+func (s *Store) CreateReleaseNote(ctx context.Context, input NoteInput, now int64) (Note, error) {
 	input, err := normalize(input)
 	if err != nil {
 		return Note{}, err
@@ -148,7 +69,7 @@ func (s *Store) Create(ctx context.Context, input NoteInput, now int64) (Note, e
 		input.Version, input.Title, input.ContentHTML, *input.Status, input.PublishedAt, now, now))
 }
 
-func (s *Store) Update(ctx context.Context, id int64, input NoteInput, now int64) (Note, error) {
+func (s *Store) UpdateReleaseNote(ctx context.Context, id int64, input NoteInput, now int64) (Note, error) {
 	input, err := normalize(input)
 	if err != nil {
 		return Note{}, err
@@ -161,11 +82,11 @@ func (s *Store) Update(ctx context.Context, id int64, input NoteInput, now int64
 		input.PublishedAt, now, input.PublishedAt, now, id))
 }
 
-func (s *Store) GetAdmin(ctx context.Context, id int64) (Note, error) {
+func (s *Store) GetAdminReleaseNote(ctx context.Context, id int64) (Note, error) {
 	return scanNote(s.db.QueryRowContext(ctx, "SELECT "+noteColumns+" FROM app_release_note WHERE id = ?", id))
 }
 
-func (s *Store) Delete(ctx context.Context, id int64) error {
+func (s *Store) DeleteReleaseNote(ctx context.Context, id int64) error {
 	result, err := s.db.ExecContext(ctx, "DELETE FROM app_release_note WHERE id = ?", id)
 	if err != nil {
 		return err
@@ -177,7 +98,7 @@ func (s *Store) Delete(ctx context.Context, id int64) error {
 	return err
 }
 
-func (s *Store) ListAdmin(ctx context.Context, limit, offset int) (AdminPage, error) {
+func (s *Store) ListAdminReleaseNotes(ctx context.Context, limit, offset int) (AdminPage, error) {
 	page := AdminPage{Items: []Note{}, Limit: limit, Offset: offset}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -209,7 +130,7 @@ func (s *Store) ListAdmin(ctx context.Context, limit, offset int) (AdminPage, er
 	return page, tx.Commit()
 }
 
-func (s *Store) List(ctx context.Context, machineID string, now int64, limit, offset int) (Page, error) {
+func (s *Store) ListReleaseNotes(ctx context.Context, machineID string, now int64, limit, offset int) (Page, error) {
 	page := Page{Items: []Summary{}, Limit: limit, Offset: offset}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -246,7 +167,7 @@ func (s *Store) List(ctx context.Context, machineID string, now int64, limit, of
 	return page, tx.Commit()
 }
 
-func (s *Store) Get(ctx context.Context, id int64, machineID string, now int64) (Detail, error) {
+func (s *Store) GetReleaseNote(ctx context.Context, id int64, machineID string, now int64) (Detail, error) {
 	var detail Detail
 	summary, err := scanSummary(s.db.QueryRowContext(ctx, `SELECT n.id, n.version, n.title, n.published_at,
 		r.release_note_id IS NOT NULL, r.read_at, n.content_html
@@ -256,7 +177,7 @@ func (s *Store) Get(ctx context.Context, id int64, machineID string, now int64) 
 	return detail, err
 }
 
-func (s *Store) MarkRead(ctx context.Context, id int64, machineID string, now int64) (int64, error) {
+func (s *Store) MarkReleaseNoteRead(ctx context.Context, id int64, machineID string, now int64) (int64, error) {
 	var readAt int64
 	err := s.db.QueryRowContext(ctx, `INSERT INTO app_release_note_read (machine_id, release_note_id, read_at)
 		SELECT ?, n.id, ? FROM app_release_note n WHERE n.id = ? AND n.status = 1 AND n.published_at <= ?

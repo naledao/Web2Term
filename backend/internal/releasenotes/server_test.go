@@ -1,4 +1,4 @@
-package httpapi
+package releasenotes
 
 import (
 	"encoding/json"
@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"web2term/release-notes/internal/store"
+	"web2term/backend/internal/store"
 )
 
 const testMachine = "f15f800e-0123-4123-8123-123456789abc"

@@ -10,7 +10,7 @@ func TestLocalAccountsDoNotInheritExternalDeviceOwners(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	// Simulate schema 1 with an external user ID before the local-account migration.
-	if _, err := s.db.Exec("DROP TABLE login_code; DROP TABLE user_account; PRAGMA user_version = 1"); err != nil {
+	if _, err := s.db.Exec("DROP TABLE app_release_note_read; DROP TABLE app_release_note; DROP TABLE login_code; DROP TABLE user_account; PRAGMA user_version = 1"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Connect(ctx, 42, deviceID, "legacy device"); err != nil {

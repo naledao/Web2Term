@@ -1,4 +1,4 @@
-package httpapi
+package releasenotes
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"web2term/release-notes/internal/store"
+	"web2term/backend/internal/store"
 )
 
 type API struct {
@@ -36,7 +36,6 @@ func New(database *store.Store, adminToken string, logger *slog.Logger) http.Han
 
 func (a *API) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", a.health)
 	mux.HandleFunc("GET /api/v1/release-notes", a.list)
 	mux.HandleFunc("GET /api/v1/release-notes/{id}", a.detail)
 	mux.HandleFunc("POST /api/v1/release-notes/{id}/read", a.markRead)

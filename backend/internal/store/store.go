@@ -20,6 +20,9 @@ var schema string
 //go:embed auth_schema.sql
 var authSchema string
 
+//go:embed release_notes_schema.sql
+var releaseNotesSchema string
+
 const nowSQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
 type Store struct{ db *sql.DB }
@@ -89,7 +92,7 @@ func initialize(ctx context.Context, db *sql.DB) error {
 	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return errors.New("cannot read SQLite schema version")
 	}
-	if version > 2 {
+	if version > 3 {
 		return fmt.Errorf("SQLite schema version %d is newer than this backend supports", version)
 	}
 	if version == 0 {
@@ -101,7 +104,12 @@ func initialize(ctx context.Context, db *sql.DB) error {
 		if _, err := tx.ExecContext(ctx, authSchema); err != nil {
 			return errors.New("cannot initialize local account schema")
 		}
-		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
+	}
+	if version < 3 {
+		if _, err := tx.ExecContext(ctx, releaseNotesSchema); err != nil {
+			return errors.New("cannot initialize release notes schema")
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
 			return errors.New("cannot save SQLite schema version")
 		}
 	}

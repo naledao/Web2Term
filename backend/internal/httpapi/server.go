@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"web2term/backend/internal/auth"
+	"web2term/backend/internal/releasenotes"
 	"web2term/backend/internal/store"
 )
 
@@ -33,19 +34,37 @@ type AuthService interface {
 }
 
 type Server struct {
-	devices DeviceStore
-	users   AuthService
-	hub     *hub
-	log     *slog.Logger
-	limits  *loginLimits
+	devices      DeviceStore
+	users        AuthService
+	hub          *hub
+	log          *slog.Logger
+	limits       *loginLimits
+	releaseNotes http.Handler
 }
 
-func New(devices DeviceStore, users AuthService, log *slog.Logger) *Server {
-	return &Server{devices: devices, users: users, hub: newHub(devices), log: log, limits: newLoginLimits()}
+type Option func(*Server)
+
+// Mount the release-note API on the same listener and use the caller's database.
+func WithReleaseNotes(database *store.Store, adminToken string) Option {
+	return func(s *Server) { s.releaseNotes = releasenotes.New(database, adminToken, s.log) }
+}
+
+func New(devices DeviceStore, users AuthService, log *slog.Logger, options ...Option) *Server {
+	s := &Server{devices: devices, users: users, hub: newHub(devices), log: log, limits: newLoginLimits()}
+	for _, option := range options {
+		option(s)
+	}
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	if s.releaseNotes != nil {
+		mux.Handle("/api/v1/release-notes", s.releaseNotes)
+		mux.Handle("/api/v1/release-notes/", s.releaseNotes)
+		mux.Handle("/api/v1/admin/release-notes", s.releaseNotes)
+		mux.Handle("/api/v1/admin/release-notes/", s.releaseNotes)
+	}
 	mux.HandleFunc("POST /api/user/login/code", s.loginCode)
 	mux.HandleFunc("POST /api/user/login", s.login)
 	mux.HandleFunc("GET /api/user/devices", s.listDevices)

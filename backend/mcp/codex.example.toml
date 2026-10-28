@@ -1,0 +1,7 @@
+# Merge this table into ~/.codex/config.toml. Use absolute paths on your machine.
+# The actual token belongs only in the private JSON file referenced by --config.
+[mcp_servers.web2term-release-notes]
+command = 'C:\codes\gpt-web-to-codex-terminal\backend\bin\web2term-release-notes-mcp.exe'
+args = ['--config', 'C:\Users\24196\.codex\mcp-configs\web2term-release-notes.json']
+startup_timeout_sec = 10
+tool_timeout_sec = 60

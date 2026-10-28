@@ -48,7 +48,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	api := httpapi.New(db, accounts, log)
+	api := httpapi.New(db, accounts, log, httpapi.WithReleaseNotes(db, cfg.ReleaseNotesAdminToken))
 	server := &http.Server{
 		Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 20 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 60 * time.Second,

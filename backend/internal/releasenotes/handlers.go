@@ -1,19 +1,11 @@
-package httpapi
+package releasenotes
 
 import (
 	"net/http"
 	"strconv"
 
-	"web2term/release-notes/internal/store"
+	"web2term/backend/internal/store"
 )
-
-func (a *API) health(w http.ResponseWriter, r *http.Request) {
-	if err := a.store.Ping(r.Context()); err != nil {
-		a.failure(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
 
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	machine, ok := machineID(w, r.URL.Query().Get("machineId"))
@@ -24,7 +16,7 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	page, err := a.store.List(r.Context(), machine, a.now().UnixMilli(), limit, offset)
+	page, err := a.store.ListReleaseNotes(r.Context(), machine, a.now().UnixMilli(), limit, offset)
 	if err != nil {
 		a.failure(w, r, err)
 		return
@@ -41,7 +33,7 @@ func (a *API) detail(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	note, err := a.store.Get(r.Context(), id, machine, a.now().UnixMilli())
+	note, err := a.store.GetReleaseNote(r.Context(), id, machine, a.now().UnixMilli())
 	if err != nil {
 		a.failure(w, r, err)
 		return
@@ -64,7 +56,7 @@ func (a *API) markRead(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	readAt, err := a.store.MarkRead(r.Context(), id, machine, a.now().UnixMilli())
+	readAt, err := a.store.MarkReleaseNoteRead(r.Context(), id, machine, a.now().UnixMilli())
 	if err != nil {
 		a.failure(w, r, err)
 		return
@@ -77,7 +69,7 @@ func (a *API) adminList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	page, err := a.store.ListAdmin(r.Context(), limit, offset)
+	page, err := a.store.ListAdminReleaseNotes(r.Context(), limit, offset)
 	if err != nil {
 		a.failure(w, r, err)
 		return
@@ -90,7 +82,7 @@ func (a *API) adminDetail(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	note, err := a.store.GetAdmin(r.Context(), id)
+	note, err := a.store.GetAdminReleaseNote(r.Context(), id)
 	if err != nil {
 		a.failure(w, r, err)
 		return
@@ -103,7 +95,7 @@ func (a *API) adminCreate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, 8*1024*1024, &input) {
 		return
 	}
-	note, err := a.store.Create(r.Context(), input, a.now().UnixMilli())
+	note, err := a.store.CreateReleaseNote(r.Context(), input, a.now().UnixMilli())
 	if err != nil {
 		a.failure(w, r, err)
 		return
@@ -121,7 +113,7 @@ func (a *API) adminUpdate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, 8*1024*1024, &input) {
 		return
 	}
-	note, err := a.store.Update(r.Context(), id, input, a.now().UnixMilli())
+	note, err := a.store.UpdateReleaseNote(r.Context(), id, input, a.now().UnixMilli())
 	if err != nil {
 		a.failure(w, r, err)
 		return
@@ -134,7 +126,7 @@ func (a *API) adminDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := a.store.Delete(r.Context(), id); err != nil {
+	if err := a.store.DeleteReleaseNote(r.Context(), id); err != nil {
 		a.failure(w, r, err)
 		return
 	}

@@ -1,3 +1,4 @@
+-- Schema 3: release notes and machine read state share the backend database.
 -- Times are Unix milliseconds supplied by the Go service.
 CREATE TABLE app_release_note (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,

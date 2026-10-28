@@ -1,0 +1,5 @@
+{
+  "baseUrl": "http://38.49.42.56:10088",
+  "adminToken": "REPLACE_WITH_YOUR_RELEASE_NOTES_ADMIN_TOKEN",
+  "timeoutSeconds": 20
+}

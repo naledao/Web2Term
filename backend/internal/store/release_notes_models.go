@@ -25,7 +25,7 @@ type ValidationError struct{ Message string }
 
 func (e *ValidationError) Error() string { return e.Message }
 
-// NoteInput describes a full replacement, not a partial patch.
+// NoteInput describes a full release-note replacement, not a partial patch.
 type NoteInput struct {
 	Version     string `json:"version"`
 	Title       string `json:"title"`

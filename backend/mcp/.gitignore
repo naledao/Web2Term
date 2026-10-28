@@ -1,0 +1,3 @@
+# Real configuration must live outside the repository. Ignore common accidental copies.
+config.json
+*.local.json

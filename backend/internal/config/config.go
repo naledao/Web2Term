@@ -11,6 +11,7 @@ import (
 
 type Config struct {
 	Addr, DBPath, JWTSecret string
+	ReleaseNotesAdminToken  string
 	SMTP                    SMTP
 }
 
@@ -22,7 +23,8 @@ func Load() (Config, error) {
 	c := Config{Addr: ":10088", DBPath: "data/web2term.db", SMTP: SMTP{Port: "465", Mode: "tls"}}
 	for name, target := range map[string]*string{
 		"WEB2TERM_ADDR": &c.Addr, "WEB2TERM_DB_PATH": &c.DBPath, "WEB2TERM_JWT_SECRET": &c.JWTSecret,
-		"SMTP_HOST": &c.SMTP.Host, "SMTP_PORT": &c.SMTP.Port, "SMTP_USERNAME": &c.SMTP.Username,
+		"RELEASE_NOTES_ADMIN_TOKEN": &c.ReleaseNotesAdminToken,
+		"SMTP_HOST":                 &c.SMTP.Host, "SMTP_PORT": &c.SMTP.Port, "SMTP_USERNAME": &c.SMTP.Username,
 		"SMTP_PASSWORD": &c.SMTP.Password, "SMTP_FROM": &c.SMTP.From, "SMTP_MODE": &c.SMTP.Mode,
 	} {
 		if value, ok := os.LookupEnv(name); ok {
@@ -49,6 +51,9 @@ func (c Config) Validate() error {
 	}
 	if len(c.JWTSecret) < 32 {
 		return errors.New("WEB2TERM_JWT_SECRET must contain at least 32 bytes of random secret data")
+	}
+	if strings.TrimSpace(c.ReleaseNotesAdminToken) != c.ReleaseNotesAdminToken {
+		return errors.New("RELEASE_NOTES_ADMIN_TOKEN must not contain leading or trailing whitespace")
 	}
 	if c.SMTP.Host == "" && c.SMTP.Username == "" && c.SMTP.Password == "" && c.SMTP.From == "" {
 		return nil

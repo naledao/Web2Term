@@ -1,13 +1,13 @@
-# Go + SQLite 版本更新说明服务设计
+# Go 后端版本更新说明模块设计
 
-独立 Go 服务已在 [`services/release-notes`](../../services/release-notes/README.md) 中实现。
-实际建表 SQL 为 [`001_initial.sql`](../../services/release-notes/internal/store/migrations/001_initial.sql)，由服务首次启动自动迁移。
-启动、接口、发布 HTML 及测试说明以服务目录的 README 为准；客户端接入尚未实现。
+版本更新说明已合并到 [`backend`](../../backend/README.md)，与登录、设备和 WebSocket 使用同一个 Go 进程及 `10088` 端口。
+实际建表 SQL 为 [`release_notes_schema.sql`](../../backend/internal/store/release_notes_schema.sql)，由后端数据库升级到版本 `3` 时自动迁移。
+接口、发布 HTML 及测试说明见 [更新说明 API](../../backend/docs/release-notes.md)；客户端接入尚未实现。
 
 ## 数据归属
 
 - Go 服务通过 HTTP API 对桌面客户端提供更新说明和阅读状态。
-- SQLite 文件保存在服务端，例如 `data/release-notes.db`；发布数据和阅读记录都保存在此文件中。
+- SQLite 使用后端统一的 `WEB2TERM_DB_PATH`（默认 `data/web2term.db`）；发布数据、阅读记录、账号和设备共用这个服务端文件。
 - 客户端通过 API 访问，由 Go 服务读写 SQLite。
 - `machine_id` 沿用客户端持久保存的 `localMachineId`，由服务校验并统一为小写 UUID。
 - 此 ID 标识客户端的本地应用数据实例；清空应用数据生成新 ID 后，会按新机器计算阅读状态。
@@ -64,4 +64,4 @@ DO UPDATE SET read_at = MAX(app_release_note_read.read_at, excluded.read_at);
 Go 若使用 `database/sql` 连接池，应通过所选 SQLite 驱动的连接配置或连接初始化机制应用这些设置。
 当前实现已将连接池限制为一个连接，写操作保持短事务。
 实际迁移 SQL 不包含连接设置和事务边界，由 Go 的存储层统一配置连接并开启迁移事务，失败时回滚。
-迁移版本由 `PRAGMA user_version` 保存，后续结构变化通过单独的版本化迁移处理。
+迁移版本由后端统一的 `PRAGMA user_version` 保存，后续结构变化通过单独的版本化迁移处理，不再维护独立服务的数据库版本。

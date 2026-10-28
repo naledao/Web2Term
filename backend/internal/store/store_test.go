@@ -158,7 +158,7 @@ func TestSchemaRejectsInvalidTerminalStateAndFutureVersion(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE user_device SET terminal_connection_status = 2"); err == nil {
 		t.Fatal("active terminal without its IDs must violate the schema constraint")
 	}
-	if _, err := s.db.Exec("PRAGMA user_version = 3"); err != nil {
+	if _, err := s.db.Exec("PRAGMA user_version = 4"); err != nil {
 		t.Fatal(err)
 	}
 	if err := initialize(ctx, s.db); err == nil {

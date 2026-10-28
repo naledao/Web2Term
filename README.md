@@ -363,7 +363,7 @@ src/
   shared/               类型、平台描述、提示词与工具协议
   renderer/src/         React 工作区、项目导航、对话视图与工具窗口
 agents/linux/           web2term Linux 小工具、systemd 自启与终端协议
-backend/                Go + SQLite 后端、账号接口与设备／终端消息路由（见 backend/README.md）
+backend/                Go + SQLite 后端、账号／设备／终端路由和版本更新说明（见 backend/README.md）
 website/                项目展示网站，独立于桌面客户端
 build/                  安装包资源与 macOS 安装说明
 docs/                   功能说明、协议补充与截图
@@ -573,7 +573,7 @@ cd agents/linux
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o dist/linux-amd64/web2term ./cmd/web2term
 ```
 
-The desktop uses Electron 44, React 19, TypeScript, `WebContentsView`, typed preload IPC, and SQLite. The Go tool uses WebSocket and PTYs. `backend/` is the Go + SQLite service for Web2Term authentication/device routing; see the [backend guide](backend/README.md) for configuration and migration. `website/` is the separate project website.
+The desktop uses Electron 44, React 19, TypeScript, `WebContentsView`, typed preload IPC, and SQLite. The Go tool uses WebSocket and PTYs. `backend/` is the Go + SQLite service for Web2Term authentication, device routing and release notes; see the [backend guide](backend/README.md) for configuration and migration. `website/` is the separate project website.
 
 Under this repository's [agent instructions](AGENTS.md), users run tests and real interactions; agents implement changes and inspect logs. Agents use `npm run build` for build validation and do not launch Electron to test real accounts. **Build passed, awaiting user testing** is the delivery standard; it does not establish that login, attachments, remote terminals, or systemd startup have passed acceptance.
 
