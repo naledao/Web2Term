@@ -4,13 +4,13 @@
 
 ## 配置后端请求地址
 
-默认后端地址为 `http://frp.kangnasi.xyz:8082`，首次使用可以直接执行 `web2term login`。需要使用其他后端时，通过 `web2term set server` 修改；已有自定义地址优先于默认地址。
+默认后端地址为 `https://web2term.kangnasi.xyz`，首次使用可以直接执行 `web2term login`。需要使用其他后端时，通过 `web2term set server` 修改；已有自定义地址优先于默认地址。
 
 ```text
 $ web2term set server
-当前后端请求地址：http://frp.kangnasi.xyz:8082
+当前后端请求地址：https://web2term.kangnasi.xyz
 直接回车保留当前地址；按 Ctrl+C 取消。
-请输入后端请求地址（默认 http://frp.kangnasi.xyz:8082）：
+请输入后端请求地址（默认 https://web2term.kangnasi.xyz）：
 已保留当前后端请求地址。
 ```
 
@@ -22,7 +22,7 @@ $ web2term set server
 
 ```json
 {
-  "server_url": "http://frp.kangnasi.xyz:8082"
+  "server_url": "https://web2term.kangnasi.xyz"
 }
 ```
 
@@ -37,7 +37,7 @@ Linux 配置路径为 `$XDG_CONFIG_HOME/web2term/config.json`，没有设置 `XD
 ```text
 $ web2term login
 诊断日志：/tmp/web2term-login-<时间>-<随机编号>.log
-登录后端：http://frp.kangnasi.xyz:8082
+登录后端：https://web2term.kangnasi.xyz
 按 Ctrl+C 取消。
 请输入登录邮箱：user@example.com
 正在发送登录验证码……

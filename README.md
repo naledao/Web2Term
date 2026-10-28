@@ -261,7 +261,7 @@ web2term run
 web2term status
 ```
 
-`set server` 在交互提示中接收地址，不把地址作为命令参数。当前代码的默认地址为 `http://frp.kangnasi.xyz:8082`；使用自建后端时，两端填写同一地址。地址必须包含 `http://` 或 `https://`，可包含端口和部署路径，例如 `https://example.com/backend`；不要追加 API 路径、WebSocket 路径、查询参数或 Token。`https://` 自动对应 `wss://`，部署路径保留。
+`set server` 在交互提示中接收地址，不把地址作为命令参数。默认地址为 `https://web2term.kangnasi.xyz`。桌面端默认开启“强制覆盖后端地址”，启动时会覆盖以前保存的地址；使用自建后端前，在设置中将此选项设为“否”并保存，再让两端填写同一地址。地址必须包含 `http://` 或 `https://`，可包含端口和部署路径，例如 `https://example.com/backend`；不要追加 API 路径、WebSocket 路径、查询参数或 Token。`https://` 自动对应 `wss://`，部署路径保留。
 
 `run` 启动独立后台进程后返回，不需要 `&` 或 `nohup`，关闭终端或断开启动它的 SSH 后仍继续运行。**只有 `status` 显示“设备已在线，服务端已确认心跳”，才表示设备已成功上线。** 重复 `run` 不会另开一份进程。
 
@@ -534,7 +534,7 @@ web2term run
 web2term status
 ```
 
-Enter the backend address at the interactive prompt. Both programs currently default to `http://frp.kangnasi.xyz:8082`; use the same backend and account on both sides. Custom HTTP/HTTPS base URLs may include a port and deployment path. Do not append API endpoints, WebSocket paths, query parameters, or credentials. The client connects to `/ws/desktop`, the device to `/ws/agent`; deployment paths are preserved.
+Enter the backend address at the interactive prompt. Both programs default to `https://web2term.kangnasi.xyz`. The desktop enables forced default-backend overrides on startup; turn off this option in Backend settings and save before using a custom server. Use the same backend and account on both sides. Custom HTTP/HTTPS base URLs may include a port and deployment path. Do not append API endpoints, WebSocket paths, query parameters, or credentials. The client connects to `/ws/desktop`, the device to `/ws/agent`; deployment paths are preserved.
 
 `run` starts an independent background process and returns, surviving shell or SSH disconnection. Confirm that `status` reports a heartbeat acknowledged by the server before selecting the device from **＋ → web2term**. The desktop's device settings also support renaming devices.
 

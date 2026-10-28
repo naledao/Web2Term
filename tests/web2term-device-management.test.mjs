@@ -22,7 +22,8 @@ function load(relative, dependencies = {}) {
   return exports
 }
 const url = load('../src/shared/backend-url.ts')
-const { BackendAuthService } = load('../src/main/backend-auth.ts', { '../shared/backend-url': url })
+const backendSettings = load('../src/main/backend-settings.ts', { '../shared/backend-url': url })
+const { BackendAuthService } = load('../src/main/backend-auth.ts', { '../shared/backend-url': url, './backend-settings': backendSettings })
 const { Web2termConnection } = load('../src/main/web2term-connection.ts', {
   '../shared/backend-url': url, ws: class {}, './web2term-terminals': { Web2termTerminals: class {} }
 })
@@ -32,6 +33,7 @@ const TOKEN = 'private-test-token'
 
 function service(request) {
   const settings = new Map([
+    ['forceDefaultBackendUrl', 'false'],
     ['backendUrl', 'https://example.invalid/deployment'],
     ['backendAuth', JSON.stringify({ backendUrl: 'https://example.invalid/deployment', accessToken: TOKEN,
       tokenType: 'Bearer', expiresAt: '2030-01-01T00:00:00.000Z',
@@ -45,10 +47,10 @@ function service(request) {
   return { auth, settings, logs }
 }
 
-test('desktop first use has the default backend while custom and explicitly cleared settings remain distinct', () => {
+test('desktop with forced overrides disabled uses its default only for first use and preserves custom or cleared addresses', () => {
   const { auth, settings } = service(async () => { throw new Error('no request expected') })
   settings.delete('backendUrl')
-  assert.equal(auth.getState().backendUrl, 'http://frp.kangnasi.xyz:8082')
+  assert.equal(auth.getState().backendUrl, 'https://web2term.kangnasi.xyz')
   assert.equal(auth.getState().status, 'signed-out') // Saved credentials belong to another backend.
   assert.equal(auth.getConnectionCredentials(), null)
   settings.set('backendUrl', 'https://example.invalid/deployment')

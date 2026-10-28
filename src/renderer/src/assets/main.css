@@ -3483,6 +3483,7 @@ body {
 .settings-card__icon svg { width:20px; height:20px; }
 .settings-backend-description { margin:0 0 24px; color:#667085; font-size:14px; line-height:1.6; }
 .settings-backend-field { display:grid; gap:10px; min-width:0; }
+.settings-backend-hint { margin:0 0 6px; color:#7b8799; font-size:12px; line-height:1.65; overflow-wrap:anywhere; }
 .settings-backend-field .settings-input { width:100%; min-width:0; }
 .settings-backend-hint { margin:0; color:#667085; font-size:13px; line-height:1.65; overflow-wrap:anywhere; }
 .settings-backend-actions { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:6px; }

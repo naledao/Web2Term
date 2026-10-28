@@ -520,11 +520,13 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [settingsLoadFailed, setSettingsLoadFailed] = useState(false)
   const [settingsError, setSettingsError] = useState('')
   const [backendUrlDraft, setBackendUrlDraft] = useState('')
+  const [forceDefaultBackendUrlDraft, setForceDefaultBackendUrlDraft] = useState(true)
   const [backendUrlError, setBackendUrlError] = useState('')
   const backendUrlInputRef = useRef<HTMLInputElement>(null)
   const backendLoginTriggerRef = useRef<HTMLButtonElement>(null)
   const [backendLoginOpen, setBackendLoginOpen] = useState(false)
   const [backendLoginBusy, setBackendLoginBusy] = useState(false)
+  const backendPolicyPending = settings !== null && forceDefaultBackendUrlDraft !== (settings.forceDefaultBackendUrl ?? true)
   const [deviceSettingsBusy, setDeviceSettingsBusy] = useState(false)
   const [mailSettingsBusy, setMailSettingsBusy] = useState(false)
   const settingsOperationBusy = deviceSettingsBusy || mailSettingsBusy
@@ -1852,6 +1854,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         if (cancelled) return
         setSettings(value)
         setBackendUrlDraft(value.backendUrl ?? '')
+        setForceDefaultBackendUrlDraft(value.forceDefaultBackendUrl ?? true)
         setProxyDrafts(value.embedProxy ?? {})
         setThemeDraft(value.theme)
         setSshProxyDraft(value.sshProxy)
@@ -2120,7 +2123,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     if (savingSettings || backendLoginBusy || settingsOperationBusy || settingsLoading || settingsLoadFailed || settings === null) return
     let backendUrl: string
     try {
-      backendUrl = normalizeBackendUrl(backendUrlDraft)
+      backendUrl = forceDefaultBackendUrlDraft ? DEFAULT_BACKEND_URL : normalizeBackendUrl(backendUrlDraft)
     } catch (error) {
       setBackendUrlError(error instanceof Error ? error.message : '后端地址无效，请检查后重试。')
       setSettingsSection('backend')
@@ -2139,6 +2142,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       const next = await window.api.updateSettings({
         theme: themeDraft,
         backendUrl,
+        forceDefaultBackendUrl: forceDefaultBackendUrlDraft,
         embedProxy: proxyDrafts,
         sshProxy: sshProxyDraft,
         updateProxy: updateProxyDraft,
@@ -2152,6 +2156,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       })
       setSettings(next)
       setBackendUrlDraft(next.backendUrl)
+      setForceDefaultBackendUrlDraft(next.forceDefaultBackendUrl)
       onThemeChange(next.theme)
       setThemeDraft(next.theme)
       setProxyDrafts(next.embedProxy ?? {})
@@ -2171,7 +2176,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     } finally {
       setSavingSettings(false)
     }
-  }, [onThemeChange, backendUrlDraft, savingSettings, backendLoginBusy, settingsOperationBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
+  }, [onThemeChange, backendUrlDraft, forceDefaultBackendUrlDraft, savingSettings, backendLoginBusy, settingsOperationBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
 
   /** Drag the shared sidebar's left edge to resize it. */
   const startPanelResize = useCallback(
@@ -3677,6 +3682,20 @@ ${record.command}`
                     <h2>后端服务</h2>
                   </div>
                   <div className="settings-backend-field">
+                    <label className="settings-proxy-row__label" htmlFor="web2term-force-default-backend">强制覆盖后端地址</label>
+                    <select id="web2term-force-default-backend" className="settings-input" value={forceDefaultBackendUrlDraft ? 'yes' : 'no'}
+                      disabled={settingsLoading || savingSettings || backendLoginBusy || settingsLoadFailed}
+                      aria-describedby="web2term-force-default-backend-hint"
+                      onChange={event => {
+                        const force = event.target.value === 'yes'
+                        setForceDefaultBackendUrlDraft(force)
+                        if (force) setBackendUrlDraft(DEFAULT_BACKEND_URL)
+                        setBackendUrlError(''); setBackendLoginOpen(false)
+                      }}>
+                      <option value="yes">是（默认）</option>
+                      <option value="no">否（使用自定义地址）</option>
+                    </select>
+                    <p id="web2term-force-default-backend-hint" className="settings-backend-hint">启用后，启动和保存设置时会将已保存的地址覆盖为 {DEFAULT_BACKEND_URL}。选择“否”可填写自定义地址。</p>
                     <label className="settings-proxy-row__label" htmlFor="web2term-backend-url">后端地址</label>
                     <input
                       ref={backendUrlInputRef}
@@ -3687,8 +3706,8 @@ ${record.command}`
                       autoComplete="off"
                       spellCheck={false}
                       placeholder={DEFAULT_BACKEND_URL}
-                      value={backendUrlDraft}
-                      disabled={settingsLoading || savingSettings || backendLoginBusy || settingsLoadFailed}
+                      value={forceDefaultBackendUrlDraft ? DEFAULT_BACKEND_URL : backendUrlDraft}
+                      disabled={forceDefaultBackendUrlDraft || settingsLoading || savingSettings || backendLoginBusy || settingsLoadFailed}
                       aria-invalid={Boolean(backendUrlError)}
                       aria-describedby={backendUrlError ? 'web2term-backend-error' : undefined}
                       onChange={(event) => { setBackendUrlDraft(event.target.value); setBackendUrlError(''); setBackendLoginOpen(false) }}
@@ -3698,13 +3717,13 @@ ${record.command}`
                       <button
                         type="button"
                         className="settings-outline-btn"
-                        disabled={settingsLoading || savingSettings || backendLoginBusy || settingsLoadFailed || !backendUrlDraft}
+                        disabled={forceDefaultBackendUrlDraft || settingsLoading || savingSettings || backendLoginBusy || settingsLoadFailed || !backendUrlDraft}
                         onClick={() => { setBackendUrlDraft(''); setBackendUrlError(''); setBackendLoginOpen(false); backendUrlInputRef.current?.focus() }}
                       >清空地址</button>
                       <button
                         type="button"
                         className="settings-outline-btn"
-                        disabled={settingsLoading || savingSettings || backendLoginBusy || settingsLoadFailed}
+                        disabled={backendPolicyPending || settingsLoading || savingSettings || backendLoginBusy || settingsLoadFailed}
                         aria-expanded={backendLoginOpen}
                         aria-controls={backendLoginOpen ? 'web2term-backend-login' : undefined}
                         ref={backendLoginTriggerRef}
@@ -3722,10 +3741,11 @@ ${record.command}`
                         }}
                       >登录</button>
                     </div>
+                    {backendPolicyPending ? <p className="settings-backend-hint" role="status">强制覆盖选项已修改，请先保存设置，再登录后端。</p> : null}
                     <BackendLoginForm
                       backendUrl={backendUrlDraft}
                       open={backendLoginOpen}
-                      disabled={settingsLoading || savingSettings || settingsLoadFailed}
+                      disabled={backendPolicyPending || settingsLoading || savingSettings || settingsLoadFailed}
                       onCancel={() => {
                         setBackendLoginOpen(false)
                         requestAnimationFrame(() => backendLoginTriggerRef.current?.focus())
@@ -3937,7 +3957,7 @@ ${record.command}`
             <div className="modal__foot settings-modal__foot">
               {settingsError ? <p className="settings-feedback settings-feedback--save" role="alert">{settingsError}</p> : null}
               <span className="panel__spacer" />
-              <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || settingsOperationBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setDefaultPlatformDraft(settings?.defaultPlatformId ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' || settingsSection === 'qqMail' ? '关闭' : '取消'}</button>
+              <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || settingsOperationBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setForceDefaultBackendUrlDraft(settings?.forceDefaultBackendUrl ?? true); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setDefaultPlatformDraft(settings?.defaultPlatformId ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' || settingsSection === 'qqMail' ? '关闭' : '取消'}</button>
               {settingsSection !== 'devices' && settingsSection !== 'qqMail' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || settingsOperationBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' || settingsSection === 'chat' ? '保存' : '保存并重新加载'}</button> : null}
             </div>
           </div>

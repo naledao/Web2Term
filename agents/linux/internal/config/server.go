@@ -14,7 +14,7 @@ import (
 )
 
 const serverKey = "server_url"
-const DefaultServerURL = "http://frp.kangnasi.xyz:8082"
+const DefaultServerURL = "https://web2term.kangnasi.xyz"
 
 // DefaultPath is independent of the directory from which web2term is invoked.
 // On Linux, UserConfigDir honors XDG_CONFIG_HOME and otherwise uses ~/.config.

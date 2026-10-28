@@ -101,6 +101,14 @@ import type {
  * changing a signature here fails the typecheck instead of breaking the UI.
  */
 const api: AppApi = {
+  listReleaseNotes: request => ipcRenderer.invoke(IpcChannels.releaseNotesList, request),
+  getReleaseNote: request => ipcRenderer.invoke(IpcChannels.releaseNotesDetail, request),
+  markReleaseNoteRead: request => ipcRenderer.invoke(IpcChannels.releaseNotesRead, request),
+  onReleaseNotesChanged: listener => {
+    const handler = (): void => listener()
+    ipcRenderer.on(IpcChannels.releaseNotesChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.releaseNotesChanged, handler)
+  },
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke(IpcChannels.getAppInfo),
   getGithubCliState: (): Promise<GithubCliState> => ipcRenderer.invoke(IpcChannels.githubCliGetState),
   openGithubCliInstall: (): Promise<void> => ipcRenderer.invoke(IpcChannels.githubCliOpenInstall),

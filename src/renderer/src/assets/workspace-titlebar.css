@@ -50,7 +50,7 @@
   font-size: 11px;
   line-height: 1;
   white-space: nowrap;
-  cursor: default;
+  cursor: pointer;
   opacity: 1;
   -webkit-app-region: no-drag;
 }

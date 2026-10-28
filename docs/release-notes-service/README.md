@@ -2,7 +2,7 @@
 
 版本更新说明已合并到 [`backend`](../../backend/README.md)，与登录、设备和 WebSocket 使用同一个 Go 进程及 `10088` 端口。
 实际建表 SQL 为 [`release_notes_schema.sql`](../../backend/internal/store/release_notes_schema.sql)，由后端数据库升级到版本 `3` 时自动迁移。
-接口、发布 HTML 及测试说明见 [更新说明 API](../../backend/docs/release-notes.md)；客户端接入尚未实现。
+接口、发布 HTML 及测试说明见 [更新说明 API](../../backend/docs/release-notes.md)；标题栏按钮接入见 [客户端更新说明](../client-release-notes.md)。
 
 ## 数据归属
 

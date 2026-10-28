@@ -3,7 +3,7 @@
 .workspace .app .toolbar .chat-view-switch button[aria-selected=true]{color:var(--accent);background:var(--accent-soft);box-shadow:inset 0 -2px var(--accent)}
 .workspace .app .toolbar .chat-view-switch button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .workspace[data-theme=dark] .app .toolbar .chat-view-switch button[aria-selected=true]{color:var(--accent)!important;background:var(--accent-soft)!important}
-.app--focus .terminal__row--toggle,.app--focus .terminal__details,.app--focus .terminal__stats>.terminal__count:first-child{display:none}
+.app--focus .terminal__details,.app--focus .terminal__stats>.terminal__count:first-child{display:none}
 .focus-chat{--fc-bg:#fff;--fc-text:#293449;--fc-muted:#8590a1;--fc-border:#e8edf5;--fc-soft:#f5f7fb;--fc-accent:#4e6cdd;--fc-danger:#ba5362;position:absolute;inset:0;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;border-radius:inherit;background:var(--fc-bg);color:var(--fc-text);user-select:text}
 .focus-chat[data-theme=dark]{--fc-bg:#0a0a0a;--fc-text:#e0e7f2;--fc-muted:#93a2b8;--fc-border:#262626;--fc-soft:#181818;--fc-accent:#9cafef;--fc-danger:#ff9caa}
 .focus-chat button{font:inherit;cursor:pointer;color:inherit}

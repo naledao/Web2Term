@@ -1,4 +1,5 @@
 import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult } from './emergency-stop'
+import type { ReleaseNoteDetail, ReleaseNoteRead, ReleaseNoteRequest, ReleaseNotesPage, ReleaseNotesPageRequest, ReleaseNotesResult } from './release-notes'
 import type { QqMailResult, QqMailSettings, QqMailSettingsDraft } from './qq-mail'
 import type { ToolboxInvocation } from './toolbox'
 import type { ComputerUsePreferences, ComputerUseCapability } from './computer-use'
@@ -23,6 +24,10 @@ import { MAX_READ_FILES } from './file-requests'
 export const IpcChannels = {
   toolboxInvoke: 'toolbox:invoke',
   getAppInfo: 'app:get-info',
+  releaseNotesList: 'release-notes:list',
+  releaseNotesDetail: 'release-notes:detail',
+  releaseNotesRead: 'release-notes:read',
+  releaseNotesChanged: 'release-notes:changed',
   githubCliGetState: 'github-cli:get-state',
   githubCliOpenInstall: 'github-cli:open-install',
   githubCliLogout: 'github-cli:logout',
@@ -468,8 +473,10 @@ export type AppTheme = 'light' | 'dark'
 export interface AppSettings extends ComputerUsePreferences {
   /** Overall appearance of the application chrome. */
   theme: AppTheme
-  /** web2term API base address. First use has a default; an explicit empty string clears it. */
+  /** Effective web2term API base address, controlled by forceDefaultBackendUrl. */
   backendUrl: string
+  /** Default true. Overwrite saved addresses with the built-in backend at startup and on save. */
+  forceDefaultBackendUrl: boolean
   /**
    * HTTP proxy for the EMBEDDED chat views, PER PLATFORM, keyed by `ChatPlatform['id']`.
    *
@@ -2239,6 +2246,10 @@ export interface NacosSaveResult extends NacosConnectionsState {
  * renderer consumes it, so the two can never drift apart.
  */
 export interface AppApi {
+  listReleaseNotes(request?: ReleaseNotesPageRequest): Promise<ReleaseNotesResult<ReleaseNotesPage>>
+  getReleaseNote(request: ReleaseNoteRequest): Promise<ReleaseNotesResult<ReleaseNoteDetail>>
+  markReleaseNoteRead(request: ReleaseNoteRequest): Promise<ReleaseNotesResult<ReleaseNoteRead>>
+  onReleaseNotesChanged(listener: () => void): () => void
   invokeToolbox(request: ToolboxInvocation): Promise<unknown>
   getAppInfo(): Promise<AppInfo>
   /** Check the local desktop's GitHub CLI installation and active github.com account. */

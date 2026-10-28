@@ -11,6 +11,7 @@ import Web2termDeviceDialog from './components/Web2termDeviceDialog'
 import ConfirmDialog from './components/ConfirmDialog'
 import NewSessionPopover from './components/NewSessionPopover'
 import Web2termWordmark from './components/Web2termWordmark'
+import ReleaseNotes from './components/ReleaseNotes'
 import './assets/workspace-empty.css'
 import './assets/workspace-brand.css'
 import './assets/workspace-updates.css'
@@ -79,6 +80,7 @@ export default function WorkspaceApp(): ReactElement {
   const [pendingDelete, setPendingDelete] = useState<ManagedSessionSummary | null>(null)
   const deleteSessionTrigger = useRef<HTMLButtonElement | null>(null)
   const [appVersion, setAppVersion] = useState('')
+  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
   const [updateNotice, setUpdateNotice] = useState<{ version: string } | null>(null)
   const updateNoticeAnchor = useRef<HTMLSpanElement>(null)
   const [updateDownloading, setUpdateDownloading] = useState(false)
@@ -317,7 +319,7 @@ export default function WorkspaceApp(): ReactElement {
 
   // Sidebar confirmations stay within the navigation and leave the native chat view visible.
   const workspaceModalOpen = transfersOpen || newSessionOpen || web2termDeviceDialogOpen || updateNotice !== null
-    || projectEditor !== null || movingSession !== null
+    || projectEditor !== null || movingSession !== null || releaseNotesOpen
   const newSessionProject = projects.find(project => project.id === newSessionProjectId)
 
   return (
@@ -326,7 +328,8 @@ export default function WorkspaceApp(): ReactElement {
       <header className="workspace__titlebar">
         <div className="workspace__titlebar-content">
           <span className="workspace__window-title"><img src={brandIcon} alt="" aria-hidden="true" />Web2Term</span>
-          <button type="button" className="workspace__release-notes-button" disabled title="版本更新说明（即将上线）">版本更新说明</button>
+          <ReleaseNotes open={releaseNotesOpen} theme={theme} appVersion={appVersion}
+            onOpen={() => { window.api.setEmbedVisible(false); setReleaseNotesOpen(true) }} onClose={() => setReleaseNotesOpen(false)} />
         </div>
       </header>
       <nav ref={navigationRef} className="workspace__nav">

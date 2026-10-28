@@ -1,4 +1,4 @@
-export const DEFAULT_BACKEND_URL = 'http://frp.kangnasi.xyz:8082'
+export const DEFAULT_BACKEND_URL = 'https://web2term.kangnasi.xyz'
 
 /** Validate an API base address without contacting the server. Empty clears it. */
 export function normalizeBackendUrl(value: unknown): string {

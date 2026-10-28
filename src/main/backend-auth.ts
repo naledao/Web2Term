@@ -2,7 +2,9 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { normalizeBackendUrl, readBackendUrl } from '../shared/backend-url'
+import { DEFAULT_BACKEND_URL, normalizeBackendUrl } from '../shared/backend-url'
+import { readBackendSettings, saveBackendSettings } from './backend-settings'
+import type { BackendSettings, BackendSettingsPatch } from './backend-settings'
 import type { BackendAuthResult, BackendAuthState, BackendLoginCodeDraft, BackendLoginDraft, BackendUser, Web2termDevice, Web2termDeviceRenameDraft } from '../shared/types'
 import type { ConversationStore } from './db'
 
@@ -169,7 +171,7 @@ export class BackendAuthService {
   }
 
   getState(): BackendAuthState {
-    const backendUrl = readBackendUrl(this.store.getSetting(URL_KEY))
+    const { backendUrl } = readBackendSettings(this.store)
     const signedOut: BackendAuthState = { backendUrl, status: 'signed-out', user: null, expiresAt: null }
     const secret = this.store.getSetting(AUTH_KEY)
     if (!secret) return signedOut
@@ -294,10 +296,26 @@ export class BackendAuthService {
 
   /** A login for one server must never be reused after changing servers. */
   setBackendUrl(backendUrl: string): void {
-    if (backendUrl === readBackendUrl(this.store.getSetting(URL_KEY))) return
-    this.store.setSettings({ [URL_KEY]: backendUrl, [AUTH_KEY]: '' })
-    this.generation++
-    this.dependencies.onLoginChanged?.()
+    this.updateBackendSettings({ backendUrl })
+  }
+
+  updateBackendSettings(patch: BackendSettingsPatch): BackendSettings {
+    const previous = readBackendSettings(this.store)
+    const next = saveBackendSettings(this.store, patch)
+    if (previous.backendUrl !== next.backendUrl || previous.forceDefaultBackendUrl !== next.forceDefaultBackendUrl) {
+      this.generation++
+      this.dependencies.onBackendUrlSaved(next.backendUrl)
+      if (previous.backendUrl !== next.backendUrl) this.dependencies.onLoginChanged?.()
+    }
+    return next
+  }
+
+  private allowedBackendUrl(value: unknown): string {
+    const backendUrl = requiredUrl(value)
+    if (readBackendSettings(this.store).forceDefaultBackendUrl && backendUrl !== DEFAULT_BACKEND_URL) {
+      throw new AuthError('已开启强制覆盖后端地址；使用自定义地址前，请先将此选项设为“否”并保存。', 'forced_backend')
+    }
+    return backendUrl
   }
 
   private async post(backendUrl: string, endpoint: string, body: Record<string, string>, expectedStatus: number): Promise<unknown> {
@@ -352,7 +370,7 @@ export class BackendAuthService {
 
   sendCode(draft: BackendLoginCodeDraft): Promise<BackendAuthResult<{ resendAfterSeconds: number }>> {
     return this.operation('send_code', async () => {
-      const backendUrl = requiredUrl(draft?.backendUrl)
+      const backendUrl = this.allowedBackendUrl(draft?.backendUrl)
       const email = emailAddress(draft?.email)
       await this.post(backendUrl, '/api/user/login/code', { email }, 204)
       return { resendAfterSeconds: 60 }
@@ -361,7 +379,7 @@ export class BackendAuthService {
 
   login(draft: BackendLoginDraft): Promise<BackendAuthResult<BackendAuthState>> {
     return this.operation('login', async () => {
-      const backendUrl = requiredUrl(draft?.backendUrl)
+      const backendUrl = this.allowedBackendUrl(draft?.backendUrl)
       const email = emailAddress(draft?.email)
       const code = typeof draft?.code === 'string' ? draft.code.trim() : ''
       if (!/^\d{6}$/u.test(code)) throw new AuthError('验证码必须是 6 位数字。', 'invalid_code')
@@ -381,6 +399,7 @@ export class BackendAuthService {
       if (generation !== this.generation || previousUrl !== (this.store.getSetting(URL_KEY) ?? '')) {
         throw new AuthError('后端地址已变更，请重新打开登录。', 'server_changed')
       }
+      this.allowedBackendUrl(backendUrl)
       let secret: string
       try { secret = this.dependencies.encrypt(JSON.stringify(saved)) } catch {
         throw new AuthError('无法加密保存登录信息，请检查系统凭据存储后重试。', 'encryption')
