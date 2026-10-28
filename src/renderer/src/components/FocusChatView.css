@@ -93,7 +93,15 @@
 .focus-smart-ui__status button,.focus-smart-ui__error button{padding:3px 6px;border:0;border-radius:4px;background:transparent;text-decoration:underline;text-underline-offset:3px}
 .focus-chat .wmde-markdown{background:transparent;color:var(--fc-text);font-size:15px;line-height:1.95}
 .focus-chat .wmde-markdown pre{background:var(--fc-soft);overflow:auto;max-width:100%}
-.focus-chat .wmde-markdown table{display:block;overflow:auto;max-width:100%}
+/* Tables follow ChatGPT's own look: full width, row rules only, no grid or zebra stripes,
+   last column pushed to the right. An explicit Markdown alignment is an inline style and still wins. */
+.focus-chat .wmde-markdown table{display:table;width:100%;max-width:100%;border-collapse:collapse;font-size:14px;line-height:1.6}
+.focus-chat .wmde-markdown table tr,.focus-chat .wmde-markdown table tr:nth-child(2n){background:transparent;border:0}
+.focus-chat .wmde-markdown table th,.focus-chat .wmde-markdown table td{padding:8px 12px 8px 0;border:0;border-bottom:1px solid var(--fc-border);text-align:left;vertical-align:top}
+.focus-chat .wmde-markdown table th{font-weight:600;border-bottom-color:color-mix(in srgb,var(--fc-text) 18%,var(--fc-bg))}
+.focus-chat .wmde-markdown table th:last-child,.focus-chat .wmde-markdown table td:last-child{padding-right:0;text-align:right}
+.focus-chat .wmde-markdown table th:only-child,.focus-chat .wmde-markdown table td:only-child{text-align:left}
+.focus-chat .wmde-markdown table tbody tr:last-child td{border-bottom:0}
 .focus-chat .wmde-markdown img{max-width:100%}
 .focus-process{margin:10px 0 17px;font-size:13px;color:var(--fc-muted)}
 .focus-process>summary{display:flex;align-items:center;gap:7px;cursor:pointer;list-style:none;padding:4px 0}
