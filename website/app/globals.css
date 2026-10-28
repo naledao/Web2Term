@@ -162,7 +162,6 @@ a { color: inherit; text-decoration: none; }
 .automation-card ul { display: grid; gap: 14px; margin: 24px 0; padding-left: 20px; color: var(--paper-muted); font-size: .87rem; line-height: 1.8; }
 .automation-card li::marker { color: var(--amber); }
 .automation-card--mail li::marker { color: var(--mint); }
-.automation-card > p.automation-card__scope { margin-bottom: 24px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--paper-dim); font-size: .8rem; }
 .automation-card > .text-link { align-self: flex-start; margin-top: auto; }
 .automation-example { margin-top: 28px; padding: 28px clamp(24px, 3.5vw, 44px); border-left: 2px solid var(--amber); background: rgba(244,181,68,.05); }
 .automation-example .section-mark { display: block; margin-bottom: 16px; }
@@ -297,8 +296,7 @@ a { color: inherit; text-decoration: none; }
 .computer-use__actions dd { margin: 0; color: var(--paper-muted); font-size: .85rem; line-height: 1.75; }
 .computer-use__stop { margin-top: 28px; }
 .computer-use__stop h3 { margin: 0; color: var(--amber); font-size: 1rem; font-weight: 600; }
-.computer-use__stop p, .computer-use__limit { margin: 10px 0 0; color: var(--paper-muted); font-size: .83rem; line-height: 1.8; }
-.computer-use__limit { margin-top: 20px; }
+.computer-use__stop p { margin: 10px 0 0; color: var(--paper-muted); font-size: .83rem; line-height: 1.8; }
 
 @media (max-width: 1200px) {
   .menu-toggle { display: block; }

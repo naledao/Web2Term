@@ -14,6 +14,7 @@ import Web2termWordmark from './components/Web2termWordmark'
 import './assets/workspace-empty.css'
 import './assets/workspace-brand.css'
 import './assets/workspace-updates.css'
+import './assets/workspace-titlebar.css'
 
 const INITIAL_WORKSPACE: WorkspaceState = {
   view: 'manager',
@@ -321,7 +322,13 @@ export default function WorkspaceApp(): ReactElement {
 
   return (
     <ToolWindowsProvider sessionIds={sessions.map((item) => item.id)}>
-    <div className={'workspace' + (navCollapsed ? ' workspace--nav-collapsed' : '')} data-theme={theme} style={{ '--nav-width': `${navWidth}px` } as CSSProperties}>
+    <div className={'workspace workspace--titlebar' + (navCollapsed ? ' workspace--nav-collapsed' : '')} data-theme={theme} style={{ '--nav-width': `${navWidth}px` } as CSSProperties}>
+      <header className="workspace__titlebar">
+        <div className="workspace__titlebar-content">
+          <span className="workspace__window-title"><img src={brandIcon} alt="" aria-hidden="true" />Web2Term</span>
+          <button type="button" className="workspace__release-notes-button" disabled title="版本更新说明（即将上线）">版本更新说明</button>
+        </div>
+      </header>
       <nav ref={navigationRef} className="workspace__nav">
         <div className="workspace__brand">
           <span className="workspace__brand-mark" aria-hidden="true"><img src={brandIcon} alt="" /></span>

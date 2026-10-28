@@ -16,7 +16,7 @@ function load(path, dependencies = {}) {
   }).outputText).runInNewContext({ exports, require: name => dependencies[name] ?? {}, URL, Buffer })
   return exports
 }
-const { parseFocusLayout } = load('../src/shared/focus-layout.ts')
+const { parseFocusLayout, validFocusLayoutUrl } = load('../src/shared/focus-layout.ts')
 const { cleanFocusAnswer } = load('../src/shared/focus-chat.ts')
 const { default: FocusLayout } = load('../src/renderer/src/components/FocusLayout.tsx', { react: React, 'react/jsx-runtime': jsxRuntime })
 const source = readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8')
@@ -90,7 +90,8 @@ function fixture() {
   const answer = new Element('div', {}, [new Element('h2', {}, ['一、整体产品形态']), dil, new Element('h2', {}, ['二、核心功能模块'])])
   const context = createContext({ PAGE: { focus: { smartUi: rules }, answerCharts: null }, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 },
     collapse: value => String(value || '').replace(/\s+/g, ' ').trim(), getComputedStyle: node => node.css,
-    replyRootOf: () => answer, messageIdOf: () => 'answer-layout', isVisibleElement: node => node.css.display !== 'none' })
+    replyRootOf: () => answer, messageIdOf: () => 'answer-layout', isVisibleElement: node => node.css.display !== 'none',
+    URL, location: { href: 'https://chatgpt.com/c/layout' } })
   context.smartUiCardsOf = () => []
   context.smartUiMarkdown = () => assert.fail('no radio card in this fixture')
   context.smartUiLayoutsOf = helper('smartUiLayoutsOf', context)
@@ -117,6 +118,211 @@ function stageList(tag = 'div') {
 function append(parent, ...children) {
   for (const child of children) { child.parentElement = parent; parent.childNodes.push(child) }
 }
+
+function websiteGallery() {
+  const images = [], cards = ['Linear', 'Raycast'].map(name => {
+    const image = new Element('img', { src: 'https://images.example.com/' + name.toLowerCase() + '-small.webp',
+      alt: name + ' 官网预览', onerror: 'steal()', srcset: 'do not copy' }, [],
+    { width: '450px', height: '337.5px', objectFit: 'cover' })
+    image.currentSrc = 'https://images.example.com/' + name.toLowerCase() + '.webp'
+    images.push(image)
+    const frame = box([image], { borderRadius: '20px', backgroundColor: 'rgb(244, 244, 244)', overflow: 'hidden' })
+    return box([frame, new Element('a', { href: 'https://' + name.toLowerCase() + '.app/' },
+      [new Element('strong', {}, [name + ' ↗'], { fontWeight: '600' })]), new Element('small', {}, [name + ' 的设计参考说明。'])],
+    { display: 'flex', flexDirection: 'column', rowGap: '8px' })
+  })
+  return { gallery: box(cards, { display: 'grid', gridTemplateColumns: '450px 450px', columnGap: '12px', rowGap: '16px' }), images }
+}
+
+test('website reference cards retain both previews, crop ratios, links and captions without absorbing prose or citations', () => {
+  const f = fixture(), { gallery } = websiteGallery()
+  f.dil.childNodes = []; f.answer.childNodes = [f.dil]
+  const citation = new Element('a', { href: 'https://linear.app/method' }, [
+    box([new Element('span', {}, ['The system for product development']), new Element('span', {}, ['+2'])], { display: 'flex' })])
+  append(f.dil, new Element('h2', {}, ['二、视觉 UI 设计方向']), new Element('p', {}, ['参考下面两个产品官网：']), gallery,
+    new Element('p', {}, ['两个案例优先展示产品价值。']), citation, new Element('h2', {}, ['三、下一步设计']))
+  const layouts = f.layouts({})
+  assert.equal(layouts.length, 1, 'a source link is not a standalone flex layout')
+  assert.equal(layouts[0].element, gallery)
+  const data = parseFocusLayout(JSON.stringify(layouts[0].data))
+  assert.ok(data)
+  assert.equal(data.kind, 'gallery')
+  const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+  assert.equal((html.match(/<img\b/g) ?? []).length, 2)
+  assert.match(html, /src="https:\/\/images.example.com\/linear.webp"/)
+  assert.match(html, /src="https:\/\/images.example.com\/raycast.webp"/)
+  assert.match(html, /aspect-ratio:1.3333 \/ 1/)
+  assert.match(html, /object-fit:cover/)
+  assert.match(html, /border-radius:20px/)
+  assert.match(html, /href="https:\/\/linear.app\/"[^>]*target="_blank"[^>]*rel="noopener noreferrer"/)
+  assert.equal((html.match(/referrerPolicy="no-referrer"/gi) ?? []).length, 2)
+  assert.match(html, /focus-layout--gallery/)
+  assert.match(html, /min-width:0/)
+  assert.match(html, /grid-template-columns:0.5fr 0.5fr/)
+  assert.match(html, /Linear 的设计参考说明。[\s\S]*Raycast 的设计参考说明。/)
+  assert.doesNotMatch(html, /onerror|srcset|steal\(\)|-small.webp/)
+  const markdown = f.markdown({})
+  assert.equal((markdown.match(/<!--focus-layout /g) ?? []).length, 1)
+  assert.match(markdown, /参考下面两个产品官网：\s+<!--focus-layout /)
+  assert.match(markdown, /两个案例优先展示产品价值。\s+\[The system for product development\+2\]\(https:\/\/linear.app\/method\)/)
+  assert.match(markdown, /## 三、下一步设计$/)
+})
+
+test('image discovery accepts image-only galleries and lazy images without mistaking image frames for progress', () => {
+  const f = fixture(), { gallery, images } = websiteGallery()
+  f.dil.childNodes = []; append(f.dil, gallery)
+  for (const card of gallery.children) card.childNodes = [card.childNodes[0]]
+  images[0].currentSrc = ''; images[0].attrs.src = ''
+  images[0].attrs['data-src'] = '/assets/linear-preview.webp'
+  const layouts = f.layouts({})
+  assert.equal(layouts.length, 1)
+  const data = parseFocusLayout(JSON.stringify(layouts[0].data))
+  assert.ok(data, 'image-only presentation trees must survive the no-text guard')
+  const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+  assert.equal((html.match(/<img\b/g) ?? []).length, 2)
+  assert.match(html, /src="https:\/\/chatgpt.com\/assets\/linear-preview.webp"/)
+  assert.doesNotMatch(html, /progressbar/)
+  const css = readFileSync(new URL('../src/renderer/src/components/FocusLayout.css', import.meta.url), 'utf8')
+  assert.match(css, /@container focus-gallery \(max-width:560px\)/)
+  assert.match(css, /grid-template-columns:minmax\(0,1fr\)!important/)
+  const renderer = readFileSync(new URL('../src/renderer/index.html', import.meta.url), 'utf8')
+  assert.match(renderer, /img-src 'self' data: blob: https:;/)
+  assert.match(renderer, /connect-src 'self' ws: wss: pdf-asset:;/)
+})
+
+test('image and card URL boundaries reject executable/local resources and excessive image trees', () => {
+  for (const url of ['javascript:alert(1)', 'file:///C:/private.png', 'data:image/svg+xml,<svg/>', 'blob:https://chatgpt.com/uuid',
+    'https://user:secret@example.com/a.png', 'https://example.com/\nimage.png', 'https://example.com/' + 'a'.repeat(4096)]) {
+    assert.equal(validFocusLayoutUrl(url, true), false, url)
+    const data = fixture().layouts({})[0].data
+    data.root = { tag: 'img', attrs: { src: url, alt: 'bad' } }
+    assert.equal(parseFocusLayout(JSON.stringify(data)), null)
+  }
+  assert.equal(validFocusLayoutUrl('http://example.com/a.png', true), false)
+  assert.equal(validFocusLayoutUrl('https://images.example.com/a.webp', true), true)
+  assert.equal(validFocusLayoutUrl('http://example.com/', false), true)
+  const f = fixture(), { gallery, images } = websiteGallery()
+  f.dil.childNodes = []; append(f.dil, gallery)
+  images[0].currentSrc = 'javascript:alert(1)'; images[0].attrs.src = 'file:///C:/private.png'
+  const layout = f.layouts({})[0].data
+  const html = renderToStaticMarkup(React.createElement(FocusLayout, { data: parseFocusLayout(JSON.stringify(layout)) }))
+  assert.equal((html.match(/<img\b/g) ?? []).length, 1)
+  assert.match(html, /Linear 官网预览/)
+  assert.doesNotMatch(html, /javascript:|file:|private.png/)
+  for (const root of [{ tag: 'img', attrs: { src: 'https://example.com/a.png', onerror: 'steal()' } },
+    { tag: 'a', attrs: { href: 'javascript:alert(1)' } }, { tag: 'img' },
+    { tag: 'img', attrs: { src: 'https://example.com/a.png' }, children: ['invalid'] },
+    { tag: 'div', style: { aspectRatio: 'url(https://example.com)' } },
+    { tag: 'div', children: Array.from({ length: 13 }, () => ({ tag: 'img', attrs: { src: 'https://example.com/a.png' } })) }]) {
+    assert.equal(parseFocusLayout(JSON.stringify({ ...layout, root })), null)
+  }
+})
+
+function memorySummary() {
+  const fill = box([], { height: '10px', width: '150.3px', backgroundColor: 'rgb(67, 134, 59)' })
+  // These dimensions come from a stylesheet, not element.style.
+  const track = box([fill], { height: '10px', width: '900px', borderRadius: '999px', backgroundColor: 'rgb(244, 244, 244)' })
+  const header = box([new Element('strong', {}, ['物理内存使用率'], { fontWeight: '600' }),
+    new Element('span', {}, ['16.7%'], { color: 'rgb(81, 157, 73)' })], { display: 'flex', justifyContent: 'space-between' })
+  const stats = box(['总内存', '已使用', '可用内存'].map((label, index) => box([
+    new Element('small', {}, [label], { color: 'rgb(120, 120, 120)' }),
+    new Element('strong', {}, [['957 MiB', '160 MiB', '634 MiB'][index]],
+      { fontWeight: '600', ...(index === 2 ? { color: 'rgb(81, 157, 73)' } : {}) })
+  ])), { display: 'grid', gridTemplateColumns: '300px 300px 300px', columnGap: '12px' })
+  const summary = box([header, track, stats], { display: 'flex', flexDirection: 'column', rowGap: '8px' })
+  return { summary, header, track, fill, stats }
+}
+
+test('an unbordered memory summary retains its stylesheet progress, green values and three-column statistics as one fluid block', () => {
+  const f = fixture(), { summary } = memorySummary()
+  f.dil.childNodes = []; f.answer.childNodes = [f.dil]
+  append(f.dil, new Element('p', {}, ['当前服务器内存状态良好，资源充足。']), summary,
+    new Element('table', {}, [new Element('tr', {}, [new Element('td', {}, ['空闲内存']), new Element('td', {}, ['366 MiB'])])]),
+    new Element('p', {}, ['结论：无需清理内存。']))
+  const layouts = f.layouts({})
+  assert.equal(layouts.length, 1)
+  assert.equal(layouts[0].element, summary, 'keep header/bar/statistics together and leave prose/table outside')
+  const data = parseFocusLayout(JSON.stringify(layouts[0].data))
+  assert.ok(data)
+  assert.equal(data.kind, 'metrics')
+  const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+  assert.match(html, /focus-layout--metrics/)
+  assert.match(html, /min-width:0/)
+  assert.doesNotMatch(html, /min-width:560/)
+  assert.match(html, /role="progressbar"[^>]*aria-valuenow="16.7"/)
+  assert.match(html, /width:16.7%;height:100%/)
+  assert.match(html, /height:10px/)
+  assert.match(html, /background-color:var\(--fl-success\)/)
+  assert.equal((html.match(/color:var\(--fl-success\)/g) ?? []).length, 3, 'the fill and both green values keep the same semantic color')
+  assert.match(html, /grid-template-columns:0.333fr 0.333fr 0.333fr/)
+  assert.match(html, /957 MiB[\s\S]*160 MiB[\s\S]*634 MiB/)
+  const markdown = f.markdown({})
+  assert.equal((markdown.match(/<!--focus-layout /g) ?? []).length, 1)
+  assert.match(markdown, /^当前服务器内存状态良好，资源充足。\s+<!--focus-layout /)
+  assert.match(markdown, /\| 空闲内存 \| 366 MiB \|[\s\S]*结论：无需清理内存。$/)
+})
+
+test('standalone progress is not dropped between separately rendered rows, including empty and full values', () => {
+  for (const ratio of [0, .167, 1]) {
+    const f = fixture(), { header, track, fill, stats } = memorySummary()
+    fill.css.width = 900 * ratio + 'px'
+    f.dil.childNodes = []
+    append(f.dil, new Element('p', {}, ['前面的说明。']), header, track, stats)
+    const layouts = f.layouts({})
+    const bar = layouts.find(layout => layout.element === track)
+    assert.ok(bar)
+    const data = parseFocusLayout(JSON.stringify(bar.data))
+    assert.ok(data, 'a textless progress tree is valid presentation data')
+    const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+    assert.match(html, new RegExp('aria-valuenow="' + ratio * 100 + '"'))
+    assert.ok(html.includes('width:' + ratio * 100 + '%'))
+    assert.equal(bar.fallback, '进度：' + ratio * 100 + '%')
+    assert.equal(layouts.length, 3)
+  }
+})
+
+test('ARIA/native progress uses source values and safely normalizes a translated indicator', () => {
+  for (const kind of ['aria', 'progress', 'meter', 'painted']) {
+    const f = fixture(), { track, fill } = memorySummary()
+    fill.css.width = '900px'; fill.css.transform = 'matrix(1, 0, 0, 1, -749.7, 0)'
+    if (kind === 'aria') Object.assign(track.attrs, { role: 'progressbar', 'aria-label': '内存占用', 'aria-valuenow': '33.4', 'aria-valuemin': '0', 'aria-valuemax': '200' })
+    if (kind === 'progress' || kind === 'meter') {
+      track.tagName = kind.toUpperCase()
+      Object.assign(track.attrs, { value: '.167', max: '1', 'aria-label': '内存占用' })
+    }
+    if (kind !== 'painted') fill.css.transform = 'matrix(1, 0, 0, 1, -10, 0)'
+    f.dil.childNodes = []; append(f.dil, track)
+    const data = parseFocusLayout(JSON.stringify(f.layouts({})[0].data))
+    const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+    assert.match(html, /aria-valuenow="16.7"/)
+    assert.match(html, /width:16.7%/)
+    assert.doesNotMatch(html, /transform|matrix\(/)
+    if (kind !== 'painted') assert.match(html, /aria-label="内存占用"/)
+  }
+})
+
+test('colored metric values keep success, warning and danger tones across the renderer boundary', () => {
+  const f = fixture(), { summary, header, track, fill } = memorySummary()
+  f.dil.childNodes = []; append(f.dil, summary)
+  for (const [color, token] of [['rgb(67, 134, 59)', 'success'], ['rgb(199, 145, 30)', 'warning'], ['rgb(199, 50, 50)', 'danger']]) {
+    header.children[1].css.color = color; fill.css.backgroundColor = color
+    track.css.backgroundColor = color.replace('rgb(', 'rgba(').replace(')', ', 0.12)')
+    const data = parseFocusLayout(JSON.stringify(f.layouts({})[0].data))
+    assert.ok(data)
+    const saved = JSON.stringify(data)
+    assert.ok(saved.includes('"color":"$' + token + '"'))
+    assert.ok(saved.includes('"backgroundColor":"$' + token + '"'))
+    assert.ok(saved.includes('"backgroundColor":"$' + token + 'Soft"'))
+    const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+    assert.ok(html.includes('var(--fl-' + token + '-soft)'))
+    assert.doesNotMatch(html, /\$success|\$warning|\$danger/)
+  }
+  header.children[1].css.color = 'color(srgb 0.26 0.53 0.23)'
+  fill.css.backgroundColor = 'color(srgb 0.26 0.53 0.23)'
+  const data = parseFocusLayout(JSON.stringify(f.layouts({})[0].data))
+  assert.match(JSON.stringify(data), /"color":"\$success"/)
+  assert.match(JSON.stringify(data), /"backgroundColor":"\$success"/)
+})
 
 test('native presentation extraction retains one complete dashboard with grid, sidebar, typography and SVG', () => {
   const f = fixture(), layouts = f.layouts({})
@@ -297,6 +503,8 @@ test('layout parser rejects executable tags, event attributes, remote references
   for (const change of [value => { value.root.tag = 'script' }, value => { value.root.tag = 'iframe' },
     value => { value.root.attrs = { onclick: 'alert(1)' } }, value => { value.root.style.position = 'fixed' },
     value => { value.root.style.backgroundColor = 'url(https://example.com/pixel)' }, value => { value.kind = 'unknown' },
+    value => { value.root.attrs = { role: 'button' } }, value => { value.root.attrs = { 'aria-valuenow': 'NaN' } },
+    value => { value.root.attrs = { 'aria-valuenow': '1000000001' } }, value => { value.root.style.overflow = 'scroll' },
     value => { value.root.children = [{ tag: 'svg', children: [{ tag: 'use', attrs: { href: 'https://example.com/a.svg' } }] }] },
     value => { let node = value.root; for (let i = 0; i < 26; i++) { node.children = [{ tag: 'div' }]; node = node.children[0] } }]) {
     const value = JSON.parse(JSON.stringify(base)); change(value)

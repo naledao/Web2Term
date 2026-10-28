@@ -10,13 +10,14 @@ export interface FocusLayoutData {
   sourceMessageId: string
   label: string
   width: number
-  /** Icon lists wrap with the transcript instead of keeping a desktop canvas width. */
-  kind?: 'list'
+  /** Lists, metric summaries and image cards wrap with the transcript. */
+  kind?: 'list' | 'metrics' | 'gallery'
   root: FocusLayoutNode
 }
 
 const tags = new Set(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'small',
-  'ul', 'ol', 'li', 'hr', 'br', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
+  'ul', 'ol', 'li', 'hr', 'br', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'img', 'figure', 'figcaption',
+  'svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
 const geometry = new Set(['svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
 const enums: Record<string, string[]> = {
   display: ['block', 'inline', 'inline-block', 'flex', 'inline-flex', 'grid', 'inline-grid', 'contents', 'table', 'table-row', 'table-cell'],
@@ -25,15 +26,21 @@ const enums: Record<string, string[]> = {
   alignSelf: ['auto', 'normal', 'stretch', 'start', 'end', 'flex-start', 'flex-end', 'center', 'baseline'],
   justifyContent: ['normal', 'start', 'end', 'flex-start', 'flex-end', 'center', 'space-between', 'space-around', 'space-evenly'],
   textAlign: ['left', 'right', 'center', 'start', 'end'], whiteSpace: ['normal', 'pre-wrap', 'pre-line', 'nowrap'],
-  fontStyle: ['normal', 'italic'], borderStyle: ['solid', 'dashed', 'dotted', 'none'], boxSizing: ['border-box']
+  fontStyle: ['normal', 'italic'], borderStyle: ['solid', 'dashed', 'dotted', 'none'], boxSizing: ['border-box'],
+  overflow: ['hidden'], objectFit: ['contain', 'cover', 'fill', 'none', 'scale-down']
 }
 const lengths = new Set(['width', 'height', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight', 'flexBasis',
   'gap', 'rowGap', 'columnGap', 'padding', 'margin', 'borderWidth', 'borderRadius', 'fontSize', 'lineHeight'])
-const tones = /^\$(?:text|muted|bg|soft|border|accent)$|^(?:transparent|currentColor|none)$/
+const tones = /^\$(?:text|muted|bg|soft|border|accent|success|warning|danger|accentSoft|successSoft|warningSoft|dangerSoft)$|^(?:transparent|currentColor|none)$/
 export function validFocusLayoutStyle(key: string, value: unknown): value is string {
   if (typeof value !== 'string' || value.length > 180) return false
   if (enums[key]) return enums[key].includes(value)
   if (['color', 'backgroundColor', 'borderColor'].includes(key)) return tones.test(value)
+  if (key === 'aspectRatio') {
+    const parts = value.split(/\s*\/\s*/)
+    return parts.length === 2 && parts.every(part => /^\d+(?:\.\d+)?$/.test(part) && Number(part) > 0 && Number(part) <= 10000) &&
+      Number(parts[0]) / Number(parts[1]) >= .05 && Number(parts[0]) / Number(parts[1]) <= 20
+  }
   if (['flexGrow', 'flexShrink', 'opacity'].includes(key)) return /^(?:\d|\d?\.\d+)$/.test(value) && Number(value) <= 9
   if (key === 'fontWeight') return /^(?:[1-9]00|normal|bold)$/.test(value)
   if (key === 'gridColumn' || key === 'gridRow') return /^(?:auto|[1-9]|span [1-8])(?: \/ (?:auto|[1-9]|span [1-8]))?$/.test(value)
@@ -46,8 +53,25 @@ export function validFocusLayoutStyle(key: string, value: unknown): value is str
   return false
 }
 
+/** Images are passive HTTPS resources; links may also point at ordinary HTTP pages. */
+export function validFocusLayoutUrl(value: unknown, image = false): value is string {
+  if (typeof value !== 'string' || value.length > 4096 || /[\s\u0000-\u001f\u007f]/.test(value)) return false
+  try {
+    const url = new URL(value)
+    return (image ? url.protocol === 'https:' : ['https:', 'http:'].includes(url.protocol)) && !!url.hostname && !url.username && !url.password
+  } catch { return false }
+}
+
 function validAttribute(tag: string, key: string, value: unknown): value is string {
-  if (!geometry.has(tag) || typeof value !== 'string' || value.length > 16000) return false
+  if (typeof value !== 'string' || value.length > 16000) return false
+  if (tag === 'img') return key === 'src' ? validFocusLayoutUrl(value, true) : key === 'alt' && value.length <= 500
+  if (tag === 'a') return key === 'href' && validFocusLayoutUrl(value)
+  if (tag === 'div') {
+    if (key === 'role') return value === 'progressbar'
+    if (key === 'aria-label') return value.length <= 500
+    if (['aria-valuemin', 'aria-valuemax', 'aria-valuenow'].includes(key)) return /^-?\d+(?:\.\d+)?$/.test(value) && Math.abs(Number(value)) <= 1e9
+  }
+  if (!geometry.has(tag)) return false
   if (key === 'd') return tag === 'path' && /^[MmZzLlHhVvCcSsQqTtAaEe0-9.,+\s-]*$/.test(value)
   if (key === 'viewBox') return tag === 'svg' && /^-?\d+(?:\.\d+)?(?:[ ,]+-?\d+(?:\.\d+)?){3}$/.test(value)
   if (key === 'fill' || key === 'stroke') return ['none', 'currentColor', 'transparent'].includes(value)
@@ -66,8 +90,8 @@ export function parseFocusLayout(json: string): FocusLayoutData | null {
     const item = JSON.parse(json) as FocusLayoutData
     if (!item || item.version !== 1 || typeof item.sourceMessageId !== 'string' || !/^[a-zA-Z0-9_:-]{1,160}$/.test(item.sourceMessageId) ||
       typeof item.label !== 'string' || item.label.length > 500 || !Number.isFinite(item.width) || item.width < 32 || item.width > 2000 ||
-      (item.kind !== undefined && item.kind !== 'list')) return null
-    let nodes = 0, chars = 0
+      (item.kind !== undefined && item.kind !== 'list' && item.kind !== 'metrics' && item.kind !== 'gallery')) return null
+    let nodes = 0, chars = 0, images = 0
     const read = (node: unknown, depth: number): string | FocusLayoutNode | null => {
       if (++nodes > 700 || depth > 24) return null
       if (typeof node === 'string') { chars += node.length; return node.length <= 10000 && chars <= 50000 ? node : null }
@@ -92,10 +116,11 @@ export function parseFocusLayout(json: string): FocusLayoutData | null {
         if (children.some(child => child === null)) return null
         result.children = children as Array<string | FocusLayoutNode>
       }
+      if (value.tag === 'img' && (++images > 12 || !result.attrs?.src || result.children?.length)) return null
       return result
     }
     const root = read(item.root, 0)
     return root && typeof root !== 'string' ? { version: 1, sourceMessageId: item.sourceMessageId, label: item.label, width: item.width,
-      ...(item.kind === 'list' ? { kind: 'list' as const } : {}), root } : null
+      ...(item.kind ? { kind: item.kind } : {}), root } : null
   } catch { return null }
 }

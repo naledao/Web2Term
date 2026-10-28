@@ -1,9 +1,8 @@
-name: Backend Deploy
+name: Build and deploy Go backend over SSH
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - 'backend/**'
       - '.github/workflows/backend-deploy.yml'
@@ -13,73 +12,85 @@ permissions:
   contents: read
 
 concurrency:
-  group: backend-deploy-main
+  group: backend-production
   cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
-    runs-on: [self-hosted, Linux, ARM64]
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - name: Show Java version
-        run: java -version
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
 
-      - name: Debug runner tracking env
-        run: env | grep -iE 'runner|tracking' | sort || true
-
-      - name: Patch application.yml to local addresses
+      - name: Build Linux amd64 binary
         working-directory: backend
-        run: |
-          sed -i 's/192\.168\.108\.26/127.0.0.1/g' src/main/resources/application.yml
-          grep -nE 'server-addr|jdbc:mysql' src/main/resources/application.yml
-
-      - name: Build backend jar
-        working-directory: backend
-        run: mvn -B -DskipTests clean package
-
-      - name: Deploy and restart backend
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
         run: |
           set -euo pipefail
-          DEPLOY_DIR=/root/apps/web2term-backend
-          mkdir -p "$DEPLOY_DIR"
-          cp backend/target/Web2TermBack-0.0.1-SNAPSHOT.jar "$DEPLOY_DIR/app.jar"
+          mkdir -p bin/deploy
+          go build -mod=readonly -trimpath -ldflags='-s -w' -o bin/deploy/web2term-backend ./cmd/server
+          cd bin/deploy
+          sha256sum web2term-backend > web2term-backend.sha256
+          printf '%s-%s-%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > release-id
+          tar -czf ../backend-deploy.tar.gz web2term-backend web2term-backend.sha256 release-id
 
-          if [ -f "$DEPLOY_DIR/app.pid" ]; then
-            OLD_PID="$(cat "$DEPLOY_DIR/app.pid" || true)"
-            if [ -n "${OLD_PID:-}" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-              echo "Stopping old process PID=$OLD_PID"
-              kill "$OLD_PID" 2>/dev/null || true
-              for i in $(seq 1 15); do
-                kill -0 "$OLD_PID" 2>/dev/null || break
-                sleep 1
-              done
-              kill -9 "$OLD_PID" 2>/dev/null || true
-            fi
-          fi
+      - name: Upload deployment bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: backend-deploy
+          path: backend/bin/backend-deploy.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
-          cd "$DEPLOY_DIR"
-          unset RUNNER_TRACKING_ID
-          setsid env -u RUNNER_TRACKING_ID nohup java -jar app.jar --server.port=8082 > app.log 2>&1 < /dev/null &
-          echo $! > app.pid
-          NEW_PID="$(cat app.pid)"
-          echo "Started PID=$NEW_PID"
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download deployment bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: backend-deploy
+          path: deploy
 
-          for i in $(seq 1 30); do
-            if ! kill -0 "$NEW_PID" 2>/dev/null; then
-              echo "ERROR: process exited"
-              tail -50 app.log
-              exit 1
-            fi
-            if ss -ltn 2>/dev/null | grep -q ':8082 '; then
-              echo "Port 8082 is ready"
-              tail -20 app.log
-              exit 0
-            fi
-            sleep 2
-          done
-
-          echo "ERROR: port 8082 not ready in time"
-          tail -50 app.log
-          exit 1
+      - name: Deploy over SSH
+        env:
+          DEPLOY_HOST: ${{ vars.BACKEND_SSH_HOST }}
+          DEPLOY_PORT: ${{ vars.BACKEND_SSH_PORT }}
+          DEPLOY_USER: ${{ vars.BACKEND_SSH_USER }}
+          DEPLOY_KEY: ${{ secrets.BACKEND_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.BACKEND_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_HOST:?Missing BACKEND_SSH_HOST variable}"
+          : "${DEPLOY_PORT:?Missing BACKEND_SSH_PORT variable}"
+          : "${DEPLOY_USER:?Missing BACKEND_SSH_USER variable}"
+          : "${DEPLOY_KEY:?Missing BACKEND_SSH_PRIVATE_KEY secret}"
+          : "${DEPLOY_KNOWN_HOSTS:?Missing BACKEND_SSH_KNOWN_HOSTS secret}"
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]
+          [[ "$DEPLOY_PORT" =~ ^[0-9]+$ ]]
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          ssh_dir="$(mktemp -d)"
+          trap 'rm -f -- "$ssh_dir/id_ed25519" "$ssh_dir/known_hosts"; rmdir -- "$ssh_dir"' EXIT
+          umask 077
+          printf '%s\n' "$DEPLOY_KEY" > "$ssh_dir/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          unset DEPLOY_KEY DEPLOY_KNOWN_HOSTS
+          ssh -T -p "$DEPLOY_PORT" -i "$ssh_dir/id_ed25519" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$ssh_dir/known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+            "$DEPLOY_USER@$DEPLOY_HOST" deploy < deploy/backend-deploy.tar.gz

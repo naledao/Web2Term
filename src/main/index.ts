@@ -770,6 +770,14 @@ async function applyEmbedProxy(proxies: Record<string, string>): Promise<void> {
   }
 }
 
+function managerTitleBarOverlay(theme: AppTheme): Electron.TitleBarOverlay {
+  return {
+    height: 32,
+    color: theme === 'dark' ? '#151a24' : '#f1f4f9',
+    symbolColor: theme === 'dark' ? '#e6edf6' : '#354156'
+  }
+}
+
 /**
  * Apply the app theme to Chromium itself, and to every embedded page.
  *
@@ -791,6 +799,9 @@ async function applyEmbedProxy(proxies: Record<string, string>): Promise<void> {
  */
 function applyAppTheme(theme: AppTheme): void {
   nativeTheme.themeSource = theme
+  if (process.platform !== 'darwin' && managerWindow && !managerWindow.isDestroyed()) {
+    managerWindow.setTitleBarOverlay(managerTitleBarOverlay(theme))
+  }
 
   console.info(
     `[theme] app theme is ${theme}; embedded pages now answer prefers-color-scheme: ${theme} ` +
@@ -1165,6 +1176,8 @@ function createManagerWindow(): void {
     minWidth: 1040,
     minHeight: 620,
     show: false,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: managerTitleBarOverlay(nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
     autoHideMenuBar: true,
     backgroundColor: '#0b0e14',
     icon: windowIconPath,

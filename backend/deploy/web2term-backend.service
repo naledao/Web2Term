@@ -1,0 +1,24 @@
+[Unit]
+Description=Web2Term standalone Go backend
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=web2term-backend
+Group=web2term-backend
+WorkingDirectory=/var/lib/web2term-backend
+EnvironmentFile=/etc/web2term-backend/backend.env
+ExecStart=/opt/web2term-backend/current/web2term-backend
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/web2term-backend
+
+[Install]
+WantedBy=multi-user.target

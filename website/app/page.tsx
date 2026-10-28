@@ -393,7 +393,6 @@ export default function Home() {
             <h3>随时通过晃动鼠标急停</h3>
             <p>控制期间快速左右或上下来回晃动鼠标数次，即可停止所有会话的自动操作与回传；也可点击「全局急停」。浮层显示急停状态 6 秒，解除急停后需重新提交或恢复任务。</p>
           </div>
-          <p className="computer-use__limit">拖拽与框选取决于目标应用，需根据操作后的界面确认结果。拖拽限于同一可见窗口；区域截图使用矩形坐标，尚无手动拉框截图入口。任务时限、步骤上限与结果回传间隔可在设置中调整。</p>
         </div>
       </section>
 
@@ -503,7 +502,6 @@ export default function Home() {
               <li>可暂停、恢复、编辑、删除或立即运行，查看下次时间与最近运行记录。</li>
               <li>计划在本机保存，关闭页签保留计划，重新启动客户端后恢复。</li>
             </ul>
-            <p className="automation-card__scope">应用需保持运行，选中原工作区、平台和对话，并恢复原主机与目录。忙碌、有草稿、断线或暂停时等待；错过多个周期时合并为最近一次。「已投递」表示任务消息已发送，执行结果在原对话中查看。</p>
             <a className="text-link" href={SCHEDULED_TASKS_GUIDE_URL} target="_blank" rel="noreferrer">查看定时任务说明 <ArrowIcon /></a>
           </article>
           <article className="automation-card automation-card--mail" aria-labelledby="mail-notifications-title">
@@ -515,7 +513,6 @@ export default function Home() {
               <li>AI 只提供标题和纯文本正文，读取已保存配置发信，授权码不会传给模型。</li>
               <li>结果回传原 AI 对话，终端保留提示；不需要开启 Computer Use。</li>
             </ul>
-            <p className="automation-card__scope">邮件从运行客户端的电脑发出。每次调用做去重，结果不确定时不自动重发。服务器接受邮件后，实际送达仍需查看收件箱及垃圾邮件箱；当前支持纯文本正文。</p>
             <a className="text-link" href={MAIL_NOTIFICATIONS_GUIDE_URL} target="_blank" rel="noreferrer">查看邮件通知说明 <ArrowIcon /></a>
           </article>
         </div>

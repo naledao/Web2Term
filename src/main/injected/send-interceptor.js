@@ -683,17 +683,79 @@
     return '\n\n<!--focus-ui ' + json + ' -->\n' + fallback + '\n\n'
   }
 
-  /** A bounded presentation tree, read from native DIL boxes, lists, grids and vector icons. */
+  /** A bounded presentation tree, read from native DIL boxes, images, lists and vector icons. */
   const smartUiLayoutsOf = node => {
     const rules = PAGE.focus?.smartUi, answer = rules ? replyRootOf(node) : null
     if (!answer) return []
     const roots = [...(answer.matches(rules.rootSelector) ? [answer] : []), ...answer.querySelectorAll(rules.rootSelector)]
     const allowed = new Set(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'small',
-      'ul', 'ol', 'li', 'hr', 'br', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
-    const ignored = new Set(['script', 'style', 'iframe', 'object', 'embed', 'img', 'video', 'audio', 'canvas', 'link', 'meta', 'foreignobject', 'use', 'animate', 'set'])
+      'ul', 'ol', 'li', 'hr', 'br', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'img', 'figure', 'figcaption',
+      'svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
+    const ignored = new Set(['script', 'style', 'iframe', 'object', 'embed', 'video', 'audio', 'canvas', 'link', 'meta', 'foreignobject', 'use', 'animate', 'set'])
+    const urlOf = (value, image = false) => {
+      if (typeof value !== 'string' || !value || value.length > 4096 || /[\s\u0000-\u001f\u007f]/.test(value)) return ''
+      try {
+        const url = new URL(value, location.href)
+        return (image ? url.protocol === 'https:' : ['https:', 'http:'].includes(url.protocol)) && url.hostname && !url.username && !url.password ? url.href : ''
+      } catch { return '' }
+    }
     const length = value => /^(?:0|auto|normal|none|\d+(?:\.\d+)?(?:px|%|rem|em))$/.test(value) && (!/^\d/.test(value) || parseFloat(value) <= 2000)
     const pixels = value => Number.parseFloat(value) || 0
-    const rgba = value => { const values = String(value).match(/[\d.]+/g)?.map(Number) || []; return { values, clear: value === 'transparent' || (values.length === 4 && values[3] === 0) } }
+    const rgba = value => {
+      const raw = String(value), values = raw.match(/-?(?:\d*\.)?\d+(?:e[+-]?\d+)?/gi)?.map(Number) || []
+      if (raw.startsWith('color(srgb ')) for (let index = 0; index < 3; index++) values[index] = Math.max(0, Math.min(1, values[index])) * 255
+      return { values, clear: value === 'transparent' || (values.length === 4 && values[3] === 0) }
+    }
+    const colorTone = (value, neutral, background = false) => {
+      const { values } = rgba(value), [r, g, b] = values
+      if (values.length < 3) return neutral
+      const max = Math.max(r, g, b), min = Math.min(r, g, b), delta = max - min
+      if (delta <= 25) return neutral
+      const hue = ((max === r ? (g - b) / delta : max === g ? (b - r) / delta + 2 : (r - g) / delta + 4) * 60 + 360) % 360
+      const tone = hue >= 70 && hue < 165 ? '$success' : hue >= 25 && hue < 70 ? '$warning' : hue < 25 || hue >= 345 ? '$danger' : '$accent'
+      return background && ((values[3] ?? 1) < .5 || (max + min) / 2 > 190) ? tone + 'Soft' : tone
+    }
+    const visibleChildren = element => [...element.children].filter(child => {
+      const css = getComputedStyle(child)
+      return css.display !== 'none' && !['hidden', 'collapse'].includes(css.visibility) && !child.hasAttribute('hidden')
+    })
+    // Progress can be an ARIA/native control or just two empty painted DIL boxes.
+    // Read its value/geometry, then rebuild a local track rather than replaying transforms.
+    const progressOf = element => {
+      const tag = element.tagName.toLowerCase()
+      if (!['div', 'span', 'progress', 'meter'].includes(tag)) return null
+      const semantic = ['progress', 'meter'].includes(tag) || ['progressbar', 'meter'].includes(element.getAttribute('role'))
+      if (!semantic && (element.children.length !== 1 || collapse(element.textContent) || element.querySelector('img, picture'))) return null
+      const css = getComputedStyle(element)
+      if (css.display === 'none' || ['hidden', 'collapse'].includes(css.visibility) || element.hasAttribute('hidden')) return null
+      const children = visibleChildren(element), fill = children.length === 1 ? children[0] : null
+      const fillCss = fill ? getComputedStyle(fill) : null, height = pixels(css.height), width = pixels(css.width)
+      if (!semantic && (height <= 2 || height > 24 || width < 32 ||
+        rgba(css.backgroundColor).clear || !fillCss || rgba(fillCss.backgroundColor).clear || pixels(fillCss.height) <= 0 ||
+        fill.querySelector('svg, input, button, textarea') || collapse(fill.textContent))) return null
+      const number = value => value !== null && /^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(value) && Math.abs(Number(value)) <= 1e9 ? Number(value) : null
+      const native = ['progress', 'meter'].includes(tag)
+      const min = number(element.getAttribute(native ? 'min' : 'aria-valuemin')) ?? 0
+      const max = number(element.getAttribute(native ? 'max' : 'aria-valuemax')) ?? (native ? 1 : 100)
+      const now = number(element.getAttribute(native ? 'value' : 'aria-valuenow'))
+      let measured = null
+      if (width > 0 && fillCss) {
+        if (!fillCss.transform || fillCss.transform === 'none') measured = pixels(fillCss.width) / width
+        else {
+          const matrix = /^matrix\(([^)]+)\)$/.exec(fillCss.transform)?.[1].split(',').map(Number)
+          if (matrix?.length === 6 && matrix.every(Number.isFinite) && matrix[0] === 1 && matrix[1] === 0 &&
+            matrix[2] === 0 && matrix[3] === 1 && matrix[4] <= 0 && matrix[5] === 0) measured = (pixels(fillCss.width) + matrix[4]) / width
+        }
+      }
+      const ratio = now !== null && max > min ? Math.max(0, Math.min(1, (now - min) / (max - min))) :
+        measured !== null && measured >= 0 && measured <= 1 ? measured : null
+      return { ratio, height: height > 0 && height <= 32 ? height + 'px' : '8px',
+        radius: length(css.borderRadius) ? css.borderRadius : '999px',
+        label: collapse(element.getAttribute('aria-label')).slice(0, 500),
+        tone: fillCss && !rgba(fillCss.backgroundColor).clear ? colorTone(fillCss.backgroundColor, '$muted') :
+          colorTone(css.accentColor, colorTone(css.color, '$accent')),
+        track: colorTone(css.backgroundColor, '$soft', true) }
+    }
     const separator = element => {
       if (element.tagName.toLowerCase() === 'hr') return true
       if (!['div', 'span'].includes(element.tagName.toLowerCase()) || collapse(element.textContent) || element.querySelector('svg, input, button')) return false
@@ -718,13 +780,14 @@
       return rows.length >= 2 && children.every(child => rows.includes(child) || separator(child))
     }
     const layoutGroup = element => {
-      if (!['div', 'section', 'article'].includes(element.tagName.toLowerCase()) || element.getAttribute('data-d-component') === 'Text') return false
+      if (!['div', 'section', 'article'].includes(element.tagName.toLowerCase()) || element.getAttribute('data-d-component') === 'Text' ||
+        element.closest('button, a')) return false
       const style = getComputedStyle(element)
       if (!style.display.includes('grid') && !(style.display === 'flex' && style.flexDirection.startsWith('row'))) return false
       return [...element.children].filter(child => {
         const css = getComputedStyle(child)
         return css.display !== 'none' && !['hidden', 'collapse'].includes(css.visibility) && !child.hasAttribute('hidden') &&
-          (collapse(child.textContent) || child.querySelector('svg, input'))
+          (collapse(child.textContent) || child.tagName.toLowerCase() === 'img' || child.querySelector('svg, input, img'))
       }).length >= 2
     }
     const geometry = { viewBox: 'viewBox', width: 'width', height: 'height', d: 'd', x: 'x', y: 'y', x1: 'x1', y1: 'y1', x2: 'x2', y2: 'y2',
@@ -735,8 +798,24 @@
       if (!sourceMessageId || sourceMessageId !== messageIdOf(node)) return []
       const candidates = [dil, ...dil.querySelectorAll('[data-d-component], ul, ol')]
       const lists = new Set(candidates.filter(iconList))
+      const galleries = new Set(candidates.filter(element => {
+        if (!layoutGroup(element)) return false
+        const children = visibleChildren(element)
+        return children.length >= 2 && children.length <= 6 && children.every(child =>
+          child.tagName.toLowerCase() === 'img' || child.querySelector('img'))
+      }))
+      const progress = new Map([dil, ...dil.querySelectorAll('div, span, progress, meter')]
+        .map(element => [element, progressOf(element)]).filter(([, value]) => value))
+      const metrics = new Set(candidates.filter(element => {
+        if (!['div', 'section', 'article'].includes(element.tagName.toLowerCase())) return false
+        const children = visibleChildren(element)
+        // Keep a header, bar and statistics together without absorbing surrounding prose.
+        return children.length === 3 && [...progress.keys()].some(bar => children[1] === bar || children[1].contains(bar)) &&
+          (layoutGroup(children[0]) || children[0].getAttribute('data-d-component') === 'Text' || /^H[1-6]$/.test(children[0].tagName)) &&
+          layoutGroup(children[2])
+      }))
       let boxes = [...new Set([...(dil.matches(rules.cardSelector) ? [dil] : []), ...dil.querySelectorAll(rules.cardSelector),
-        ...lists, ...candidates.filter(layoutGroup)])].filter(element =>
+        ...lists, ...metrics, ...progress.keys(), ...candidates.filter(layoutGroup)])].filter(element =>
         element.closest(rules.rootSelector) === dil && !element.closest(rules.groupSelector) && !element.querySelector(rules.groupSelector) &&
         !(PAGE.answerCharts && (element.matches(PAGE.answerCharts.rootSelector) || element.querySelector(PAGE.answerCharts.rootSelector))))
       boxes = boxes.filter(element => !boxes.some(parent => parent !== element && parent.contains(element)))
@@ -745,7 +824,7 @@
       return boxes.slice(0, 8).flatMap(element => {
         if (!isVisibleElement(element)) return []
         const base = getComputedStyle(element), baseColor = base.color
-        let count = 0, chars = 0, failed = false
+        let count = 0, chars = 0, images = 0, failed = false
         const read = (current, parent, depth) => {
           if (++count > 600 || depth > 22) { failed = true; return null }
           if (current.nodeType === Node.TEXT_NODE) {
@@ -759,10 +838,23 @@
           if (ignored.has(nativeTag)) return null
           const computed = getComputedStyle(current)
           if (computed.display === 'none' || ['hidden', 'collapse'].includes(computed.visibility) || current.hasAttribute('hidden')) return null
+          const bar = progress.get(current)
+          if (bar) {
+            const attrs = { role: 'progressbar', ...(bar.label ? { 'aria-label': bar.label } : {}),
+              ...(bar.ratio !== null ? { 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(bar.ratio * 10000) / 100) } : {}) }
+            return { tag: 'div', attrs, style: { display: 'block', width: '100%', height: bar.height, borderRadius: bar.radius,
+              overflow: 'hidden', backgroundColor: bar.track, flexShrink: '0' },
+            children: bar.ratio === null ? [] : [{ tag: 'div', style: { width: Math.round(bar.ratio * 10000) / 100 + '%',
+              height: '100%', borderRadius: bar.radius, backgroundColor: bar.tone } }] }
+          }
           const divider = separator(current)
-          const tag = allowed.has(nativeTag) ? nativeTag : nativeTag === 'a' || nativeTag === 'button' || nativeTag === 'input' || nativeTag === 'textarea' ? 'span' : 'div'
+          const href = nativeTag === 'a' ? urlOf(current.href || current.getAttribute('href')) : ''
+          const tag = nativeTag === 'a' && !href ? 'span' : allowed.has(nativeTag) ? nativeTag :
+            nativeTag === 'button' || nativeTag === 'input' || nativeTag === 'textarea' ? 'span' : 'div'
           const result = { tag }, style = {}, attrs = {}
           const put = (key, value) => { if (value) style[key] = value }
+          if (href) attrs.href = href
+          if (computed.overflow === 'hidden') put('overflow', 'hidden')
           if (['flex', 'inline-flex', 'grid', 'inline-grid', 'inline-block', 'contents', 'table', 'table-row', 'table-cell'].includes(computed.display)) put('display', computed.display)
           if (computed.display.includes('flex') || computed.display.includes('grid')) {
             for (const key of ['flexDirection', 'flexWrap', 'alignItems', 'justifyContent']) put(key, computed[key])
@@ -815,14 +907,33 @@
           if (['center', 'right', 'end'].includes(computed.textAlign)) put('textAlign', computed.textAlign)
           if (['pre-wrap', 'pre-line', 'nowrap'].includes(computed.whiteSpace)) put('whiteSpace', computed.whiteSpace)
           if (!parent || computed.color !== parent.color) {
-            const color = rgba(computed.color).values
-            put('color', computed.color === baseColor ? '$text' : color.length >= 3 && Math.max(...color.slice(0, 3)) - Math.min(...color.slice(0, 3)) > 25 ? '$accent' : '$muted')
+            put('color', colorTone(computed.color, computed.color === baseColor ? '$text' : '$muted'))
           }
           if (!rgba(computed.backgroundColor).clear) {
             const color = rgba(computed.backgroundColor).values
-            put('backgroundColor', divider ? '$border' : color.length >= 3 && (Math.min(...color.slice(0, 3)) > 248 || Math.max(...color.slice(0, 3)) < 12) ? '$bg' : '$soft')
+            put('backgroundColor', divider ? '$border' : colorTone(computed.backgroundColor,
+              color.length >= 3 && (Math.min(...color.slice(0, 3)) > 248 || Math.max(...color.slice(0, 3)) < 12) ? '$bg' : '$soft', true))
           }
           if (computed.opacity && Number(computed.opacity) < 1 && Number(computed.opacity) >= 0) put('opacity', computed.opacity)
+          if (nativeTag === 'img') {
+            const src = [current.currentSrc, current.src, current.getAttribute('src'), current.getAttribute('data-src')]
+              .map(value => urlOf(value, true)).find(Boolean)
+            const alt = String(current.getAttribute('alt') || '').slice(0, 500)
+            if (!src) {
+              chars += alt.length || 9
+              return { tag: 'span', children: [alt || '图片暂时无法显示'] }
+            }
+            if (++images > 12) { failed = true; return null }
+            const rect = current.getBoundingClientRect(), width = pixels(computed.width) || rect.width || current.naturalWidth,
+              height = pixels(computed.height) || rect.height || current.naturalHeight
+            // Absolute-positioned native images become normal-flow images with the same crop ratio.
+            Object.assign(style, { display: 'block', width: '100%', maxWidth: '100%', height: 'auto',
+              objectFit: ['contain', 'cover', 'fill', 'none', 'scale-down'].includes(computed.objectFit) ? computed.objectFit : 'cover' })
+            if (width > 0 && height > 0 && width / height >= .05 && width / height <= 20) {
+              put('aspectRatio', Math.round(width / height * 10000) / 10000 + ' / 1')
+            }
+            return { tag: 'img', attrs: { src, alt }, style }
+          }
           if (['svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'].includes(tag)) {
             for (const [name, key] of Object.entries(geometry)) {
               const value = current.getAttribute(name)
@@ -846,12 +957,17 @@
           return result
         }
         const root = read(element, null, 0)
-        if (!root || failed || chars === 0) return []
+        if (!root || failed || (chars === 0 && images === 0 && !progress.has(element))) return []
         const data = { version: 1, sourceMessageId, label: collapse(element.getAttribute('aria-label') ||
           element.querySelector('h1, h2, h3, h4, strong, b')?.textContent).slice(0, 500) || '智能界面布局',
-          width: Math.min(2000, Math.max(32, Math.round(element.getBoundingClientRect().width))), ...(lists.has(element) ? { kind: 'list' } : {}), root }
+          width: Math.min(2000, Math.max(32, Math.round(element.getBoundingClientRect().width))),
+          ...(lists.has(element) ? { kind: 'list' } : galleries.has(element) ? { kind: 'gallery' } :
+            metrics.has(element) || progress.has(element) ? { kind: 'metrics' } : {}), root }
         if (JSON.stringify(data).length > 180000) return []
-        return [{ element, data, fallback: String(element.innerText || '').trim().slice(0, 20000) }]
+        const bar = progress.get(element)
+        return [{ element, data, fallback: String(element.innerText || '').trim().slice(0, 20000) ||
+          (bar ? [bar.label || '进度', bar.ratio === null ? '' : Math.round(bar.ratio * 10000) / 100 + '%'].filter(Boolean).join('：') :
+            images ? [...element.querySelectorAll('img')].map(image => String(image.getAttribute('alt') || '图片预览').slice(0, 500)).join('\n') : '') }]
       })
     })
   }
@@ -1832,14 +1948,18 @@
   const focusModelSettingsOf = () => {
     const rules = PAGE.focus?.modelSettings
     if (!rules) { focusModelCache = null; return { model: null, effort: null, models: [], efforts: [] } }
-    // The first send binds the home draft to its new conversation. This is the
-    // only route transition allowed to inherit settings; other chats start fresh.
-    const firstSend = focusModelCache?.path === rules.newChatPath &&
-      (state.programmatic || state.awaitingReplySince !== 0 || fileSend?.submitted) &&
+    // A home send may pass through an interim /c/<id> before its final route.
+    // Carry the confirmed selection through that send's generation, not just
+    // the first hop. Explicit history navigation clears this in armBaseline.
+    const sending = state.programmatic || state.awaitingReplySince !== 0 || fileSend?.submitted
+    const firstSend = focusModelCache &&
+      (focusModelCache.path === rules.newChatPath || focusModelCache.firstSendGeneration === state.taskPromptGeneration) && sending &&
       new RegExp(rules.conversationPathPattern).test(location.pathname)
     if (!focusModelCache || (focusModelCache.path !== location.pathname && !firstSend)) {
       focusModelCache = { path: location.pathname, data: { model: null, effort: null, models: [], efforts: [] } }
     }
+    if (firstSend && focusModelCache.path !== location.pathname) focusModelCache.firstSendGeneration = state.taskPromptGeneration
+    if (!sending || focusModelCache.firstSendGeneration !== state.taskPromptGeneration) delete focusModelCache.firstSendGeneration
     focusModelCache.path = location.pathname
     const data = focusModelCache.data
     // React can replace or briefly remove the trigger while sending. A missing
@@ -4336,6 +4456,7 @@
    * creates the conversation, so that URL change must not land here.
    */
   const armBaseline = () => {
+    if (focusModelCache) delete focusModelCache.firstSendGeneration
     setReplyWaiting(0, 'history-baseline')
     state.lastCommandMessageId = null
     state.pendingQuestion = null
@@ -5321,6 +5442,7 @@
       // A freshly (re)loaded page has no message of ours outstanding, so nothing
       // it renders can be a reply to us.
       if (config.armBaseline === true) {
+        if (focusModelCache) delete focusModelCache.firstSendGeneration
         setReplyWaiting(0, 'configured-baseline')
         state.lastCommandMessageId = null
         state.pendingQuestion = null

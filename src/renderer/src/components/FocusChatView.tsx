@@ -595,8 +595,12 @@ export default function FocusChatView(props: Props): JSX.Element {
   useEffect(() => {
     if (owner.platformId !== 'chatgpt' || !visible || !ready || working || editingId || sendLock.current || modelReadAttempted.current) return
     modelReadAttempted.current = true
+    // A new conversation id remounts this view after the first send. Its page
+    // snapshot already carries the confirmed settings; do not reopen a hidden
+    // native menu as soon as the task finishes.
+    if (state?.modelSettings?.model) return
     void updateModelSettings('read')
-  }, [ownerKey, visible, ready, working, editingId, sending, updateModelSettings])
+  }, [ownerKey, visible, ready, working, editingId, sending, state?.modelSettings?.model, updateModelSettings])
   const changeMode = async (id: FocusComposerModeId, active: boolean): Promise<void> => {
     if (sendLock.current || working || editingId || !ready) return
     sendLock.current = true

@@ -31,6 +31,18 @@ function actual(name, context, method = false, path = pagePath) {
   const code = method ? '({' + node.getText(file) + '}).' + name : '(' + node.initializer.getText(file) + ')'
   return new Script(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText).runInContext(context)
 }
+function automaticRead(context) {
+  const path = '../src/renderer/src/components/FocusChatView.tsx'
+  const file = ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  function find(node) {
+    if (ts.isCallExpression(node) && node.expression.getText(file) === 'useEffect' &&
+      node.arguments[0]?.getText(file).includes('modelReadAttempted.current = true')) return node.arguments[0]
+    return ts.forEachChild(node, find)
+  }
+  const callback = find(file)
+  assert.ok(callback, 'automatic model-settings read effect')
+  return new Script('(' + callback.getText(file) + ')').runInContext(context)
+}
 function fixture() {
   let open = false, view = 'effort', model = 'GPT-6', effort = 'high', now = 0, step = 0
   let focused = true, owner = true, blocked = false, duplicates = false, range = '2', afterInput = null, hit = null
@@ -65,6 +77,7 @@ function fixture() {
   const context = createContext({ PAGE: CHATGPT_PAGE, location: { pathname: '/' }, Date: { now: () => now },
     focusModeChanging: null, focusModelCache: null, focusEditing: null, fileSend: null,
     state: { taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: false },
+    setReplyWaiting: since => { context.state.awaitingReplySince = since },
     getComposer: () => composer, findStopButton: () => null,
     queryAll: selectors => selectors[0] === rules.triggerSelector ? [trigger] : [],
     isVisibleElement: element => element?.isConnected && element.visible(), controlDisabled: () => blocked,
@@ -99,6 +112,7 @@ function fixture() {
       afterInput?.(hit)
     } }
   return { context, inputs, reports, composer, get trigger() { return trigger }, models, read: context.focusModelSettingsOf,
+    resetHistory: actual('armBaseline', context),
     change: async (kind, value = null) => { step = 0; return await api.updateModelSettings(kind, value, context.location.pathname, 'test-operation') },
     originalOpen() { open = true }, isOpen: () => open,
     replaceTrigger() { const previous = trigger; trigger = { ...previous, isConnected: true }; previous.isConnected = false },
@@ -158,6 +172,90 @@ test('the first text or attachment send retains settings when home becomes its n
     assert.equal(f.inputs.length, inputs)
     assert.equal(f.isOpen(), false)
   }
+})
+
+test('settings survive interim conversation ids and task completion without requiring another native click', async () => {
+  for (const sending of ['waiting', 'programmatic', 'attachment']) {
+    const f = fixture(), result = await f.change('read')
+    const expected = JSON.stringify(result.settings), inputs = f.inputs.length
+    if (sending === 'waiting') f.context.state.awaitingReplySince = 1
+    if (sending === 'programmatic') f.context.state.programmatic = true
+    if (sending === 'attachment') f.context.fileSend = { submitted: true }
+    f.failFocus()
+    f.showTrigger(false)
+    for (const path of ['/c/interim-id', '/c/final-id']) {
+      f.context.location.pathname = path
+      assert.equal(JSON.stringify(f.read()), expected, sending + ' at ' + path)
+    }
+    f.context.state.awaitingReplySince = 0
+    f.context.state.programmatic = false
+    f.context.fileSend = null
+    f.context.state.taskPromptGeneration++
+    f.replaceTrigger()
+    f.showTrigger(true)
+    assert.equal(JSON.stringify(f.read()), expected, sending + ' after task completion')
+    assert.equal(f.inputs.length, inputs)
+    const refresh = await f.change('read')
+    assert.equal(refresh.reason, 'native-input-failed')
+    assert.equal(JSON.stringify(refresh.settings), expected, 'a failed explicit refresh retains confirmed settings')
+  }
+})
+
+test('home-send inheritance ends at idle, a new task generation, or explicit history navigation', async () => {
+  for (const boundary of ['idle', 'generation', 'history']) {
+    const f = fixture()
+    await f.change('read')
+    f.context.state.awaitingReplySince = 1
+    f.context.location.pathname = '/c/created'
+    assert.equal(f.read().model, 'GPT-6')
+    if (boundary === 'idle') {
+      f.context.state.awaitingReplySince = 0
+      assert.equal(f.read().model, 'GPT-6')
+    }
+    if (boundary === 'generation') f.context.state.taskPromptGeneration++
+    if (boundary === 'history') f.resetHistory()
+    f.context.state.awaitingReplySince = 1
+    f.context.location.pathname = '/c/unrelated'
+    const switched = f.read()
+    assert.equal(switched.model, null, boundary)
+    assert.equal(switched.effort, null, boundary)
+    assert.equal(switched.models.length, 0, boundary)
+    assert.equal(switched.efforts.length, 0, boundary)
+  }
+})
+
+test('arming the same conversation history preserves its confirmed settings', async () => {
+  const f = fixture(), result = await f.change('read')
+  f.resetHistory()
+  assert.equal(JSON.stringify(f.read()), JSON.stringify(result.settings))
+})
+
+test('a remounted focus view keeps confirmed settings when its task becomes idle', async () => {
+  const f = fixture(), initial = await f.change('read'), reads = []
+  f.context.state.awaitingReplySince = 1
+  for (const path of ['/c/interim-id', '/c/final-id']) {
+    f.context.location.pathname = path
+    f.read()
+  }
+  const context = createContext({ owner: { platformId: 'chatgpt' }, visible: true, ready: true, working: true,
+    editingId: null, sendLock: { current: false }, modelReadAttempted: { current: false },
+    state: { modelSettings: f.read() }, updateModelSettings: kind => { reads.push(kind) } })
+  const effect = automaticRead(context)
+  effect()
+  assert.equal(context.modelReadAttempted.current, false, 'wait while the task is working')
+  f.context.state.awaitingReplySince = 0
+  f.context.state.taskPromptGeneration++
+  context.state.modelSettings = f.read()
+  context.working = false
+  effect()
+  assert.equal(context.modelReadAttempted.current, true)
+  assert.deepEqual(reads, [], 'task completion must not reopen the native menu')
+  assert.equal(JSON.stringify(context.state.modelSettings), JSON.stringify(initial.settings))
+  context.modelReadAttempted = { current: false }
+  context.state.modelSettings = { model: null, effort: null, models: [], efforts: [] }
+  effect()
+  effect()
+  assert.deepEqual(reads, ['read'], 'a different conversation without settings still reads once')
 })
 
 test('manual navigation and switching between conversations discard settings even if a reply is active', async () => {

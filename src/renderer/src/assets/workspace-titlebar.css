@@ -1,0 +1,67 @@
+.workspace.workspace--titlebar {
+  position: relative;
+  padding-top: 32px;
+}
+
+.workspace__titlebar {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 32px;
+  background: #f1f4f9;
+  color: #354156;
+  -webkit-app-region: drag;
+}
+
+/* Electron supplies the safe area beside the native window controls. */
+.workspace__titlebar-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: env(titlebar-area-width, calc(100% - 144px));
+  height: 100%;
+  margin-left: env(titlebar-area-x, 0px);
+  padding: 0 10px;
+}
+
+.workspace__window-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.workspace__window-title img {
+  width: 16px;
+  height: 16px;
+}
+
+.workspace__release-notes-button {
+  flex: none;
+  height: 23px;
+  margin-left: auto;
+  padding: 0 9px;
+  border: 1px solid #dce2f1;
+  border-radius: 5px;
+  background: #ffffffb3;
+  color: #6978af;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+  opacity: 1;
+  -webkit-app-region: no-drag;
+}
+
+.workspace[data-theme='dark'] .workspace__titlebar {
+  background: #151a24;
+  color: #e6edf6;
+}
+
+.workspace[data-theme='dark'] .workspace__release-notes-button {
+  border-color: #35405a;
+  background: #232b3b;
+  color: #b1bce5;
+}
