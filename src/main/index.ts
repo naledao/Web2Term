@@ -36,6 +36,8 @@ import { DEFAULT_BACKEND_URL } from '../shared/backend-url'
 import { resolveBackendSettingsPatch, saveBackendSettings } from './backend-settings'
 import { BackendAuthService } from './backend-auth'
 import { ReleaseNotesService } from './release-notes'
+import { DEFAULT_SOFTWARE_PROXY, normalizeSoftwareProxy, readSoftwareProxy } from '../shared/software-proxy'
+import { applySoftwareProxy, createSoftwareSocket, softwareFetch } from './software-network'
 import { QqMailService } from './qq-mail'
 import { verifyQqMailConnection, sendQqMailNotification } from './qq-mail-transport'
 import type { QqMailSettingsDraft, QqMailResult } from '../shared/qq-mail'
@@ -150,6 +152,7 @@ const SETTING_THEME = 'theme'
 const SETTING_EMBED_PROXY_LEGACY = 'embedProxy'
 const embedProxyKey = (platformId: string): string => `embedProxy:${platformId}`
 const SETTING_SSH_PROXY = 'sshProxy'
+const SETTING_SOFTWARE_PROXY = 'softwareProxy'
 const SETTING_UPDATE_PROXY = 'updateProxy'
 const SETTING_DEFAULT_PLATFORM = 'defaultPlatformId'
 const SETTING_DEFAULT_CHAT_VIEW = 'defaultChatView'
@@ -189,16 +192,17 @@ let backendAuth: BackendAuthService | null = null
 let qqMail: QqMailService | null = null
 let web2termConnection: Web2termConnection | null = null
 let localMachineId = ''
-let settings: AppSettings = { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: DEFAULT_BACKEND_URL, forceDefaultBackendUrl: true, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW }
+let settings: AppSettings = { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: DEFAULT_BACKEND_URL, forceDefaultBackendUrl: true, softwareProxy: DEFAULT_SOFTWARE_PROXY, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW }
 const runtimes = new Map<string, SessionRuntime>()
-const releaseNotes = new ReleaseNotesService(() => ({ backendUrl: settings.backendUrl, machineId: localMachineId }))
+const releaseNotes = new ReleaseNotesService(() => ({ backendUrl: settings.backendUrl, machineId: localMachineId }), softwareFetch)
+function invalidateReleaseNotes(): void {
+  releaseNotes.invalidate()
+  if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.releaseNotesChanged)
+}
 function setBackendUrlState(backendUrl: string): void {
   const changed = settings.backendUrl !== backendUrl
   settings = { ...settings, backendUrl }
-  if (changed) {
-    releaseNotes.invalidate()
-    if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.releaseNotesChanged)
-  }
+  if (changed) invalidateReleaseNotes()
 }
 // Installed: self-contained Windows-only extraResource outside app.asar. Development: `npm run build` output.
 const windowsHelper = new WindowsHelperManager({ packaged: app.isPackaged, executablePath: app.isPackaged
@@ -2037,7 +2041,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.qqMailVerify, (event, draft: QqMailSettingsDraft) => requireQqMailClient(event).verify(draft))
   ipcMain.handle(IpcChannels.qqMailRecipientSave, (event, recipientEmail: unknown) => updateQqMail(event, service => service.saveRecipient(recipientEmail)))
   ipcMain.handle(IpcChannels.qqMailRecipientClear, event => updateQqMail(event, service => service.clearRecipient()))
-  ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: '', forceDefaultBackendUrl: true, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW })
+  ipcMain.handle(IpcChannels.settingsGet, (event): AppSettings => isManagerEvent(event) ? { ...settings } : { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: '', forceDefaultBackendUrl: true, softwareProxy: '', embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW })
   const deniedReleaseNotes = { ok: false as const, source: '', message: '更新说明仅供主窗口访问。' }
   ipcMain.handle(IpcChannels.releaseNotesList, (event, request) => isManagerEvent(event) ? releaseNotes.list(request) : deniedReleaseNotes)
   ipcMain.handle(IpcChannels.releaseNotesDetail, (event, request) => isManagerEvent(event) ? releaseNotes.detail(request) : deniedReleaseNotes)
@@ -2048,6 +2052,13 @@ function registerIpcHandlers(): void {
     const computerUsePatch = parseComputerUsePreferencesPatch(patch)
     const backendPatch = { backendUrl: patch?.backendUrl, forceDefaultBackendUrl: patch?.forceDefaultBackendUrl }
     const backendPlan = resolveBackendSettingsPatch(store, backendPatch)
+    const softwareProxy = patch?.softwareProxy === undefined ? settings.softwareProxy : normalizeSoftwareProxy(patch.softwareProxy)
+    if (softwareProxy !== settings.softwareProxy) {
+      await applySoftwareProxy(softwareProxy)
+      store.setSetting(SETTING_SOFTWARE_PROXY, softwareProxy)
+      settings = { ...settings, softwareProxy }
+      invalidateReleaseNotes()
+    }
     if (patch?.theme === 'light' || patch?.theme === 'dark') {
       settings = { ...settings, theme: patch.theme }
       store.setSetting(SETTING_THEME, patch.theme)
@@ -2300,6 +2311,7 @@ if (!app.requestSingleInstanceLock()) {
       ...readComputerUsePreferences(conversationStore),
       theme: conversationStore.getSetting(SETTING_THEME) === 'dark' ? 'dark' : 'light',
       ...backendSettings,
+      softwareProxy: readSoftwareProxy(conversationStore.getSetting(SETTING_SOFTWARE_PROXY)),
       embedProxy: readEmbedProxies(conversationStore),
       sshProxy: conversationStore.getSetting(SETTING_SSH_PROXY) ?? '',
       updateProxy: conversationStore.getSetting(SETTING_UPDATE_PROXY) ?? '',
@@ -2311,7 +2323,9 @@ if (!app.requestSingleInstanceLock()) {
       defaultPlatformId: platformById(conversationStore.getSetting(SETTING_DEFAULT_PLATFORM) ?? '')?.id ?? DEFAULT_PLATFORM_ID,
       defaultChatView: readDefaultChatView(conversationStore.getSetting(SETTING_DEFAULT_CHAT_VIEW))
     }
+    await applySoftwareProxy(settings.softwareProxy)
     backendAuth = new BackendAuthService(conversationStore, {
+      request: softwareFetch,
       encrypt(value) {
         if (!safeStorage.isEncryptionAvailable()) throw new Error('Encryption unavailable')
         return safeStorage.encryptString(value).toString('base64')
@@ -2324,6 +2338,7 @@ if (!app.requestSingleInstanceLock()) {
       onLoginChanged: () => web2termConnection?.credentialsChanged()
     })
     web2termConnection = new Web2termConnection(conversationStore, backendAuth, {
+      createSocket: createSoftwareSocket,
       changed(state) {
         if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.web2termChanged, state)
         for (const runtime of runtimes.values()) queueMicrotask(() => runtime.web2term?.sync())

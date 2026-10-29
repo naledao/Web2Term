@@ -46,6 +46,7 @@ import type { IApi as FilemanagerApi, IEntity as FilemanagerEntity } from '@svar
 import type { CSSProperties, FormEvent, JSX, PointerEvent as ReactPointerEvent } from 'react'
 import { SESSION_COOKIE_NAME, isQuestionPayload, canEditTerminalNotes, terminalNotesOwnerKey } from '@shared/types'
 import { DEFAULT_BACKEND_URL, normalizeBackendUrl } from '@shared/backend-url'
+import { DEFAULT_SOFTWARE_PROXY, normalizeSoftwareProxy } from '@shared/software-proxy'
 import { sshWorkingDirectory } from '@shared/ssh-directory'
 import { isPdfPath } from '@shared/pdf-preview'
 import './components/CommandViewer.css'
@@ -640,6 +641,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     proxy: ''
   })
   const [sshProxyDraft, setSshProxyDraft] = useState('')
+  const [softwareProxyDraft, setSoftwareProxyDraft] = useState(DEFAULT_SOFTWARE_PROXY)
+  const [softwareProxyError, setSoftwareProxyError] = useState('')
+  const softwareProxyInputRef = useRef<HTMLInputElement>(null)
   const [updateProxyDraft, setUpdateProxyDraft] = useState('')
   const [defaultPlatformDraft, setDefaultPlatformDraft] = useState('')
   const [defaultChatViewDraft, setDefaultChatViewDraft] = useState<ChatView>(DEFAULT_CHAT_VIEW)
@@ -1859,6 +1863,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         setProxyDrafts(value.embedProxy ?? {})
         setThemeDraft(value.theme)
         setSshProxyDraft(value.sshProxy)
+        setSoftwareProxyDraft(value.softwareProxy ?? DEFAULT_SOFTWARE_PROXY)
+        setSoftwareProxyError('')
         setUpdateProxyDraft(value.updateProxy)
         setDefaultPlatformDraft(value.defaultPlatformId)
         setDefaultChatViewDraft(value.defaultChatView ?? DEFAULT_CHAT_VIEW)
@@ -2139,6 +2145,16 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     }
     setBackendUrlError('')
     setSettingsError('')
+    let softwareProxy: string
+    try {
+      softwareProxy = normalizeSoftwareProxy(softwareProxyDraft)
+    } catch (error) {
+      setSoftwareProxyError(error instanceof Error ? error.message : '软件代理地址无效，请检查后重试。')
+      setSettingsSection('proxy')
+      requestAnimationFrame(() => softwareProxyInputRef.current?.focus())
+      return
+    }
+    setSoftwareProxyError('')
     let avatarDataUrl = userAvatarDraft
     if (!userAvatarSourceDraft) avatarDataUrl = ''
     else if (userAvatarEditorRef.current) avatarDataUrl = userAvatarEditorRef.current.getImageScaledToCanvas().toDataURL('image/png')
@@ -2152,6 +2168,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         forceDefaultBackendUrl: forceDefaultBackendUrlDraft,
         embedProxy: proxyDrafts,
         sshProxy: sshProxyDraft,
+        softwareProxy,
         updateProxy: updateProxyDraft,
         defaultPlatformId: defaultPlatformDraft,
         defaultChatView: defaultChatViewDraft,
@@ -2168,6 +2185,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setThemeDraft(next.theme)
       setProxyDrafts(next.embedProxy ?? {})
       setSshProxyDraft(next.sshProxy)
+      setSoftwareProxyDraft(next.softwareProxy)
       setUpdateProxyDraft(next.updateProxy)
       setDefaultPlatformDraft(next.defaultPlatformId)
       setDefaultChatViewDraft(next.defaultChatView ?? DEFAULT_CHAT_VIEW)
@@ -2183,7 +2201,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     } finally {
       setSavingSettings(false)
     }
-  }, [onThemeChange, backendUrlDraft, forceDefaultBackendUrlDraft, savingSettings, backendLoginBusy, settingsOperationBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
+  }, [onThemeChange, backendUrlDraft, forceDefaultBackendUrlDraft, savingSettings, backendLoginBusy, settingsOperationBusy, settings, settingsLoading, settingsLoadFailed, proxyDrafts, sshProxyDraft, softwareProxyDraft, themeDraft, updateProxyDraft, defaultPlatformDraft, defaultChatViewDraft, userAvatarDraft, userAvatarSourceDraft, userAvatarPositionXDraft, userAvatarPositionYDraft, userAvatarScaleDraft])
 
   /** Drag the shared sidebar's left edge to resize it. */
   const startPanelResize = useCallback(
@@ -3810,6 +3828,22 @@ ${record.command}`
                     <h2>网络代理</h2>
                   </div>
 
+                  <div className="settings-software-proxy">
+                    <div className="settings-proxy-row">
+                      <label className="settings-proxy-row__label" htmlFor="settings-software-proxy">软件代理</label>
+                      <input id="settings-software-proxy" ref={softwareProxyInputRef} className="address__input settings-input"
+                        value={softwareProxyDraft} spellCheck={false} placeholder={DEFAULT_SOFTWARE_PROXY}
+                        aria-invalid={Boolean(softwareProxyError)} aria-describedby={`settings-software-proxy-hint${softwareProxyError ? ' settings-software-proxy-error' : ''}`}
+                        onChange={(event) => { setSoftwareProxyDraft(event.target.value); setSoftwareProxyError('') }} />
+                      <span className={`settings-state ${softwareProxyDraft.trim() ? 'settings-state--ok' : ''}`}><i />{softwareProxyDraft.trim() ? '已配置' : '直连'}</span>
+                      <button type="button" className="settings-copy" aria-label="复制软件代理" disabled={!softwareProxyDraft.trim()} onClick={() => void navigator.clipboard.writeText(softwareProxyDraft)}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V4H4v12h4" /></svg>
+                      </button>
+                    </div>
+                    <p id="settings-software-proxy-hint" className="settings-backend-hint">用于更新说明、后端登录、设备查询和连接。支持 HTTP / HTTPS，留空直连；保存后生效，已连接的设备在下次重连时使用新配置。</p>
+                    {softwareProxyError ? <p id="settings-software-proxy-error" className="settings-feedback" role="alert">{softwareProxyError}</p> : null}
+                  </div>
+
                   {/*
                     One row per platform, generated from the descriptor list rather than written
                     out three times — a fourth site then needs no change here at all.
@@ -3977,7 +4011,7 @@ ${record.command}`
             <div className="modal__foot settings-modal__foot">
               {settingsError ? <p className="settings-feedback settings-feedback--save" role="alert">{settingsError}</p> : null}
               <span className="panel__spacer" />
-              <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || settingsOperationBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setForceDefaultBackendUrlDraft(settings?.forceDefaultBackendUrl ?? true); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setDefaultPlatformDraft(settings?.defaultPlatformId ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' || settingsSection === 'qqMail' ? '关闭' : '取消'}</button>
+              <button type="button" className="settings-cancel-btn" disabled={savingSettings || backendLoginBusy || settingsOperationBusy} onClick={() => { setBackendUrlDraft(settings?.backendUrl ?? ''); setForceDefaultBackendUrlDraft(settings?.forceDefaultBackendUrl ?? true); setBackendUrlError(''); setProxyDrafts(settings?.embedProxy ?? {}); setSshProxyDraft(settings?.sshProxy ?? ''); setSoftwareProxyDraft(settings?.softwareProxy ?? DEFAULT_SOFTWARE_PROXY); setSoftwareProxyError(''); setUpdateProxyDraft(settings?.updateProxy ?? ''); setDefaultPlatformDraft(settings?.defaultPlatformId ?? ''); setThemeDraft(settings?.theme ?? 'light'); setSettingsOpen(false) }}>{settingsSection === 'devices' || settingsSection === 'qqMail' ? '关闭' : '取消'}</button>
               {settingsSection !== 'devices' && settingsSection !== 'qqMail' ? <button type="button" className="settings-save-btn" disabled={savingSettings || backendLoginBusy || settingsOperationBusy || settingsLoading || settingsLoadFailed || settings === null} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : settingsLoading ? '读取设置中…' : settingsSection === 'backend' || settingsSection === 'chat' ? '保存' : '保存并重新加载'}</button> : null}
             </div>
           </div>

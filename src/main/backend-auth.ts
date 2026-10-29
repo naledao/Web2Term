@@ -156,7 +156,7 @@ function networkFailure(error: unknown): AuthError {
   return new AuthError('无法连接后端，请检查地址、网络和 TLS 证书后重试。', 'network')
 }
 
-/** Requests run outside Chromium; the renderer receives no access token. */
+/** Requests run in the main process; the renderer receives no access token. */
 export class BackendAuthService {
   private readonly request: typeof fetch
   private readonly now: () => number

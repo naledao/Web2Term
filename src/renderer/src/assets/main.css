@@ -3525,6 +3525,9 @@ body {
 .workspace[data-theme='dark'] .settings-feedback { color:#ffb4a9; }
 .workspace[data-theme='dark'] .settings-backend-field .settings-input[aria-invalid='true'] { border-color:#ffb4a9 !important; }
 .settings-proxy-row { display:grid; grid-template-columns: 136px minmax(0,1fr) 80px 40px; align-items:center; gap:12px; min-height:56px; }
+.settings-software-proxy { display:grid; gap:8px; margin-bottom:20px; }
+.settings-software-proxy .settings-proxy-row { margin-bottom:0; }
+.settings-software-proxy .settings-copy { display:grid; place-items:center; }
 .settings-avatar-row { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:42px; margin-top:4px; padding-top:4px; border-top:1px solid #edf0f5; }
 .settings-avatar-control { display:grid; justify-items:center; gap:6px; }
 .settings-avatar-preview-img { width:64px; height:64px; object-fit:cover; border-radius:50%; }

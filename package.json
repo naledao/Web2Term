@@ -46,6 +46,7 @@
     "@uiw/react-md-editor": "^4.1.2",
     "cron-parser": "^5.10.2",
     "electron-updater": "^6.8.9",
+    "https-proxy-agent": "^7.0.6",
     "ioredis": "^5.11.1",
     "katex": "^0.19.1",
     "mysql2": "^3.24.5",

@@ -485,6 +485,8 @@ export interface AppSettings extends ComputerUsePreferences {
   backendUrl: string
   /** Default true. Overwrite saved addresses with the built-in backend at startup and on save. */
   forceDefaultBackendUrl: boolean
+  /** Software backend HTTP/WebSocket proxy. Defaults to localhost:7897; empty means direct. */
+  softwareProxy: string
   /**
    * HTTP proxy for the EMBEDDED chat views, PER PLATFORM, keyed by `ChatPlatform['id']`.
    *
