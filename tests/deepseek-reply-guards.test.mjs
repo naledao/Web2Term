@@ -8,6 +8,11 @@ import { Script } from 'node:vm'
 import ts from 'typescript'
 
 const interceptorSource = readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8')
+// Test-only access to confirmed-send reporting. The shipped script has no test hook.
+const fixtureHook = 'window[STATE_KEY] = {'
+assert.equal(interceptorSource.split(fixtureHook).length, 2)
+const instrumentedInterceptor = interceptorSource.replace(fixtureHook,
+  'window.__replyGuardFixture = { report, setReplyWaiting, state };\n' + fixtureHook)
 const platformSource = readFileSync(new URL('../src/shared/platforms.ts', import.meta.url), 'utf8')
 const platformExports = {}
 new Script(ts.transpileModule(platformSource, {
@@ -123,7 +128,7 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
   class FakeDate extends Date {
     static now() { return now }
   }
-  new Script(interceptorSource).runInNewContext({
+  new Script(instrumentedInterceptor).runInNewContext({
     window, document, Date: FakeDate,
     location: { pathname: '/a/chat/s/offline-fixture' },
     Element: ElementFixture,
@@ -148,6 +153,17 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
   controller.configure({ enabled: true, page })
   return {
     controller, events,
+    confirmSend() {
+      window.__replyGuardFixture.state.taskActive = true
+      window.__replyGuardFixture.state.replyActionDetected = false
+      window.__replyGuardFixture.setReplyWaiting(++now, 'user-sent')
+      window.__replyGuardFixture.report({ event: 'user-message', text: '启动这个项目' })
+      return events.filter(event => event.event === 'user-message').at(-1).submissionId
+    },
+    confirmResult() {
+      window.__replyGuardFixture.state.replyActionDetected = false
+      window.__replyGuardFixture.setReplyWaiting(++now, 'result-sent')
+    },
     continues: () => events.filter((event) => event.event === 'continue-generation'),
     commands: () => events.filter((event) => event.event === 'command'),
     cover(element) { cover = element },
@@ -423,6 +439,83 @@ const dsmlTurn = (key, lines) => element('div', { 'data-virtual-list-item-key': 
   element('div', { class: 'ds-assistant-message-main-content' }, lines.map((line) => element('p', {}, line)))
 ])
 
+const stubSends = (app) => {
+  const sent = []
+  app.controller.sendRaw = async (text) => { sent.push(text); return 'ok' }
+  return sent
+}
+const dsmlCall = (tool, parameters, marker = ' | | DSML | | ', tag = 'invoke', wrapper = 'calls') => [
+  '<' + marker + wrapper + '>',
+  '<' + marker + tag + ' name="' + tool + '">',
+  ...parameters.map(([name, string, value]) => '<' + marker + 'parameter name="' + name + '" string="' + string + '">' + value + '</' + marker + 'parameter>'),
+  '</' + marker + tag + '>',
+  '</' + marker + wrapper + '>'
+]
+const dsmlPromptRead = (...args) => dsmlCall('read_tool_prompt', ...args)
+
+test('a live DSML tool-prompt read reaches the existing definition reader once and stays out of focus prose', () => {
+  for (const marker of [' | | DSML | | ', '｜DSML｜', '｜｜DSML｜｜']) {
+    for (const tag of ['invoke', 'invocation']) {
+      for (const wrapper of ['calls', 'function_calls']) {
+        const app = fixture([userTurn('1')])
+        const sourceSubmissionId = app.confirmSend()
+        app.replaceNodes([userTurn('1'), dsmlTurn('2', [
+          '服务已启动。验证一下首页响应。',
+          ...dsmlPromptRead([['tools', 'false', '["background_task","read_files"]']], marker, tag, wrapper)
+        ])])
+        app.scan()
+        app.tick(250)
+        app.scan()
+        const reads = app.events.filter(event => event.event === 'tool-prompt-read')
+        assert.equal(reads.length, 1, `${marker} ${tag} ${wrapper}`)
+        assert.deepEqual(JSON.parse(reads[0].rawJson), { type: 'read_tool_prompt', tools: ['background_task', 'read_files'] })
+        assert.equal(reads[0].sourceSubmissionId, sourceSubmissionId)
+        assert.equal(reads[0].pagePath, '/a/chat/s/offline-fixture')
+        assert.equal(reads[0].live, true)
+        assert.equal(app.controller.status().awaitingReplySince, 0)
+        assert.equal(app.controller.focusSnapshot().reply.answer, '')
+        assert.equal(app.events.some(event => ['command', 'read-files', 'question', 'assistant-message', 'task-finished', 'parse-failed'].includes(event.event)), false)
+      }
+    }
+  }
+})
+
+test('malformed DSML tool-prompt parameters still reach the reader for its format correction', () => {
+  for (const [parameters, expected] of [
+    [[], { type: 'read_tool_prompt' }],
+    [[['tools', 'false', '[]']], { type: 'read_tool_prompt', tools: [] }],
+    [[['tools', 'false', '["unknown_tool"]']], { type: 'read_tool_prompt', tools: ['unknown_tool'] }],
+    [[['tools', 'true', '["background_task"]']], { type: 'read_tool_prompt', tools: '["background_task"]' }]
+  ]) {
+    const app = fixture([userTurn('1')])
+    app.confirmSend()
+    app.replaceNodes([userTurn('1'), dsmlTurn('2', dsmlPromptRead(parameters))])
+    app.scan()
+    app.tick(250)
+    const reads = app.events.filter(event => event.event === 'tool-prompt-read')
+    assert.equal(reads.length, 1)
+    assert.deepEqual(JSON.parse(reads[0].rawJson), expected)
+    assert.equal(app.events.some(event => ['command', 'read-files', 'assistant-message', 'task-finished'].includes(event.event)), false)
+  }
+})
+
+test('DSML tool-prompt reads in history or with automatic execution disabled do not request definitions', () => {
+  const reply = () => dsmlTurn('2', dsmlPromptRead([['tools', 'false', '["background_task"]']]))
+  const history = fixture([userTurn('1'), reply()])
+  history.scan()
+  history.tick(250)
+  assert.equal(history.events.some(event => event.event === 'tool-prompt-read'), false)
+  assert.equal(history.controller.focusSnapshot().reply.answer, '')
+
+  const disabled = fixture([userTurn('1')])
+  disabled.confirmSend()
+  disabled.controller.configure({ enabled: false })
+  disabled.replaceNodes([userTurn('1'), reply()])
+  disabled.scan()
+  disabled.tick(250)
+  assert.equal(disabled.events.some(event => event.event === 'tool-prompt-read'), false)
+})
+
 test('a DSML read_files call from the DeepSeek page becomes a read_files request', () => {
   const app = fixture([userTurn('1'), dsmlTurn('2', [
     '< | | DSML | | calls>',
@@ -438,6 +531,106 @@ test('a DSML read_files call from the DeepSeek page becomes a read_files request
   assert.deepEqual(reads[0].files, [{ path: 'C:\Users\ksdy\qq_typed3.png' }])
   assert.equal(reads[0].description, '查看第三次粘贴后的QQ窗口截图')
   assert.equal(app.events.some((event) => event.event === 'parse-failed'), false)
+})
+
+const backgroundLogPaths = [
+  String.raw`C:\Users\24196\AppData\Local\Temp\w2t-background-job\stdout.log`,
+  String.raw`C:\Users\24196\AppData\Local\Temp\w2t-background-job\stderr.log`
+]
+
+test('DSML read_files accepts the native paths list and a missing description without changing Windows paths', () => {
+  for (const marker of [' | | DSML | | ', '｜DSML｜']) {
+    for (const field of ['paths', 'files']) {
+      const app = fixture([userTurn('1')])
+      app.confirmSend()
+      // Match the screenshot's unescaped Windows path strings, including the JSON-looking array.
+      const raw = field === 'paths' ? '[' + backgroundLogPaths.map(path => '"' + path + '"').join(',') + ']'
+        : JSON.stringify(backgroundLogPaths.map(path => ({ path })))
+      app.replaceNodes([userTurn('1'), dsmlTurn('2', dsmlCall('read_files', [[field, 'false', raw]], marker))])
+      app.scan()
+      app.scan()
+      const reads = app.events.filter(event => event.event === 'read-files')
+      assert.equal(reads.length, 1, marker + field)
+      assert.deepEqual(reads[0].files, backgroundLogPaths.map(path => ({ path })))
+      assert.equal(reads[0].description, '读取指定文件')
+      assert.equal(reads[0].live, true)
+      assert.equal(app.controller.focusSnapshot().reply.answer, '')
+      assert.equal(app.events.some(event => ['command', 'parse-failed', 'assistant-message', 'task-finished'].includes(event.event)), false)
+    }
+  }
+})
+
+test('invalid or ambiguous DSML file lists retain file validation and produce one recoverable failure', () => {
+  const invalid = [
+    [['paths', 'false', '[]']],
+    [['paths', 'false', JSON.stringify(['a.log', 'b.log', 'c.log', 'd.log'])]],
+    [['paths', 'false', JSON.stringify([null])]],
+    [['paths', 'false', JSON.stringify(['   '])]],
+    [['paths', 'false', JSON.stringify(['a\u0000.log'])]],
+    [['paths', 'false', JSON.stringify(['a'.repeat(4097)])]],
+    [['paths', 'false', '["a.log"]'], ['files', 'false', '[{"path":"b.log"}]']],
+    [['files', 'false', '[{"path":"a.log"}]'], ['description', 'true', '']]
+  ]
+  for (const parameters of invalid) {
+    const app = fixture([userTurn('1')])
+    app.confirmSend()
+    app.replaceNodes([userTurn('1'), dsmlTurn('2', dsmlCall('read_files', parameters))])
+    app.scan()
+    app.scan()
+    const failures = app.events.filter(event => event.event === 'parse-failed')
+    assert.equal(failures.length, 1)
+    assert.equal(failures[0].reason, 'invalid-read-files')
+    assert.equal(failures[0].parseErrorCode, 'invalid-read-files')
+    assert.equal(failures[0].live, true)
+    assert.equal(failures[0].parseFailureToken, app.controller.status().failedCommand.token)
+    assert.equal(app.controller.status().awaitingReplySince, 0)
+    assert.equal(app.events.some(event => ['read-files', 'command', 'assistant-message', 'task-finished'].includes(event.event)), false)
+  }
+})
+
+test('invalid file requests get a file-specific correction and a corrected reply can continue normally', async () => {
+  const app = fixture([userTurn('1')])
+  app.confirmSend()
+  app.replaceNodes([userTurn('1'), proseTurn('2', '{"type":"read_files","paths":["stdout.log"]}')])
+  app.scan()
+  const failure = app.controller.status().failedCommand
+  const sent = stubSends(app)
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true), 'ok')
+  assert.equal(sent.length, 1)
+  assert.match(sent[0], /^【文件读取请求格式错误：未执行】/)
+  assert.match(sent[0], /"files":\[\{"path":/)
+  assert.match(sent[0], /"description":/)
+  assert.match(sent[0], /不要重新执行已完成的命令/)
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true), 'stale')
+  app.confirmResult()
+  app.replaceNodes([userTurn('1'), proseTurn('3', JSON.stringify({ type: 'read_files', files: [{ path: 'stdout.log' }], description: '检查后台任务输出' }))])
+  app.scan()
+  assert.equal(app.events.filter(event => event.event === 'read-files').length, 1)
+  assert.equal(app.controller.status().failedCommand, null)
+  assert.equal(app.controller.status().commandRecoveryUsed, false)
+})
+
+test('file format recovery respects the automatic retry budget and inactive history', async () => {
+  const app = fixture([userTurn('1')])
+  app.confirmSend()
+  app.replaceNodes([userTurn('1'), dsmlTurn('2', dsmlCall('read_files', [['paths', 'false', '[]']]))])
+  app.scan()
+  const sent = stubSends(app)
+  let failure = app.controller.status().failedCommand
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, false), 'busy')
+  assert.deepEqual(sent, [])
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true), 'ok')
+  app.confirmResult()
+  app.replaceNodes([userTurn('1'), dsmlTurn('3', dsmlCall('read_files', [['files', 'false', '[]']]))])
+  app.scan()
+  failure = app.controller.status().failedCommand
+  assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true), 'limit')
+  assert.equal(sent.length, 1)
+
+  const history = fixture([userTurn('1'), dsmlTurn('2', dsmlCall('read_files', [['paths', 'false', '[]']]))])
+  history.scan()
+  assert.equal(history.controller.status().failedCommand, null)
+  assert.equal(history.events.find(event => event.event === 'parse-failed').live, false)
 })
 
 test('a canonical DSML command call runs as a command with its typed parameters', () => {
@@ -472,11 +665,6 @@ const stoppedTurn = (key) => element('div', { 'data-virtual-list-item-key': key 
   element('div', { class: 'ds-think-header' }, [element('span', {}, '已停止')]),
   element('div', { class: 'ds-think-content' }, 'Actually, let me just try press_key with Ctrl+F to see if it works.')
 ])
-const stubSends = (app) => {
-  const sent = []
-  app.controller.sendRaw = async (text) => { sent.push(text); return 'ok' }
-  return sent
-}
 // The first scan only marks the turn; the settle timer rescans it.
 const settleStopped = (app) => { app.advance(4000); app.tick(4000); app.tick(800) }
 

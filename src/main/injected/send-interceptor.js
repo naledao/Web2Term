@@ -436,7 +436,7 @@
   const DSML_WRAPPER = new RegExp(`(?:${DSML_OPEN}|${DSML_CLOSE})\\w*calls\\s*>`, 'g')
   const DSML_INVOKE_START = new RegExp(`${DSML_OPEN}(?:invoke|invocation)\\s+name\\s*=`)
   const DSML_COMPUTER_START = new RegExp(`${DSML_OPEN}(?:invoke|invocation)\\s+name\\s*=\\s*"\\s*computer\\s*"`)
-  const DSML_TOOLS = ['read_files', 'questions', 'question']
+  const DSML_TOOLS = ['read_files', 'questions', 'question', 'read_tool_prompt']
   const looksLikeJsonEnvelope = (text) => /^(?:```(?:json)?\s*)?(?:\{|\[)/i.test(String(text || '').trimStart())
   const looksLikeDsmlToolCall = (text) => DSML_INVOKE_START.test(String(text || ''))
   const looksLikeDsmlComputerCall = (text) => !looksLikeJsonEnvelope(text) && DSML_COMPUTER_START.test(String(text || ''))
@@ -458,6 +458,15 @@
       const string = /string\s*=\s*"(true|false)"/.exec(attributes)?.[1]
       const json = string === 'true' ? null : string === 'false' || /^[[{]/.test(raw) ? dsmlJson(raw) : null
       params[key.trim()] = json ? json.value : raw
+    }
+    if (tool === 'read_files') {
+      // Native DSML sometimes uses paths:string[] without the JSON contract's description.
+      // Adapt only an unambiguous list; the normal file validator still enforces every limit.
+      if (!('files' in params) && Array.isArray(params.paths) && params.paths.every(path => typeof path === 'string')) {
+        params.files = params.paths.map(path => ({ path }))
+        delete params.paths
+      }
+      if (!('description' in params)) params.description = '读取指定文件'
     }
     if (DSML_TOOLS.includes(tool)) return { type: tool, ...params }
     // The command tool has no `type`; its discriminator is a leading `command` field.
@@ -3723,7 +3732,7 @@
     state.lastUnparsedMessageId = messageId
     const live = state.enabled && state.awaitingReplySince !== 0 && !state.replyActionDetected
     const attempts = balancedObjects(input.text)
-    const issue = commandParseIssue || { parseErrorCode: 'invalid-json', parseErrorField: '', parseErrorOffset: 0 }
+    const issue = input.issue || commandParseIssue || { parseErrorCode: 'invalid-json', parseErrorField: '', parseErrorOffset: 0 }
     const failure = { messageId, token: ++commandFailureSerial, generation: state.taskPromptGeneration,
       path: location.pathname, ...issue, status: state.commandRecoveryUsed ? 'failed' : 'pending' }
     if (live) {
@@ -3744,6 +3753,8 @@
       let request
       try { request = JSON.parse(candidates[i]) } catch (_) { continue }
       if (!request || request.type !== 'read_files' || 'command' in request || 'questions' in request) continue
+      // DSML's paths alias is removed only when it supplied the sole valid path list.
+      if ('paths' in request) return null
       if (!Array.isArray(request.files) || request.files.length < 1 || request.files.length > 3) return null
       if (typeof request.description !== 'string' || !request.description.trim() || request.description.length > 2000) return null
       const files = []
@@ -4248,14 +4259,15 @@
     if (looksLikeReadFilesReply(text)) {
       const parsed = extractReadFiles(text)
       if (!parsed) {
-        if (state.lastUnparsedMessageId !== messageId) {
-          state.lastUnparsedMessageId = messageId
-          report({ event: 'parse-failed', reason: 'invalid-read-files', text: text.slice(0, 2000) })
-        }
+        commandParseFailed(node, messageId, { text, source: 'rendered', issue: {
+          reason: 'invalid-read-files', parseErrorCode: 'invalid-read-files', parseErrorField: 'files', parseErrorOffset: 0
+        } })
         return
       }
       state.lastCommandMessageId = messageId
       state.replyActionDetected = state.enabled
+      state.failedCommand = null
+      state.commandRecoveryUsed = false
       if (state.enabled) report({ event: 'read-files', messageId, ...parsed, live: state.awaitingReplySince !== 0,
         ...(state.awaitingReplySince !== 0 ? legacyTaskSource(node) : {}) })
       return
@@ -5991,9 +6003,15 @@
       const labels = { 'invalid-background': 'background 必须为布尔值 true 或 false',
         'duplicate-field': '存在重复字段', 'invalid-command': 'command 字段无效',
         'invalid-json': 'JSON 格式或字符串转义无效' }
-      const text = ['【指令格式错误：未执行】', labels[failure.parseErrorCode] || '指令格式无效',
-        '本条请求没有启动进程。请仅重新提交最后一条请求的完整合法 JSON，保留原命令意图和 background 执行属性。',
-        '使用 json 代码块，Windows 路径中的反斜杠必须正确转义。不要改为前台执行，不要报告任务完成。'].join('\n')
+      const text = failure.parseErrorCode === 'invalid-read-files'
+        ? ['【文件读取请求格式错误：未执行】',
+          '本条请求没有读取或上传文件。请保留原来要读取的路径，单独输出一个完整的 json 代码块：',
+          '{"type":"read_files","files":[{"path":"文件的完整路径"}],"description":"说明读取目的"}',
+          '使用 files 数组，不要使用 paths；一次读取 1–3 个文件，每项包含非空 path，description 为非空字符串。Windows 路径中的反斜杠必须正确转义。',
+          '只修正这次文件读取请求，不要重新执行已完成的命令或重新启动后台任务，不要报告任务完成。'].join('\n')
+        : ['【指令格式错误：未执行】', labels[failure.parseErrorCode] || '指令格式无效',
+          '本条请求没有启动进程。请仅重新提交最后一条请求的完整合法 JSON，保留原命令意图和 background 执行属性。',
+          '使用 json 代码块，Windows 路径中的反斜杠必须正确转义。不要改为前台执行，不要报告任务完成。'].join('\n')
       failure.sending = true
       state.commandRecoveryUsed = true
       // Consume exactly this failed reply so a DOM redraw cannot resubmit it.

@@ -2,7 +2,9 @@
 .workspace__release-notes-button:hover, .workspace__release-notes-button[aria-expanded='true'] { border-color: #8e9bce; background: #fff; }
 .workspace__release-notes-button:focus-visible { outline: 2px solid #7b8ec8; outline-offset: 2px; }
 .release-notes-badge { min-width: 16px; padding: 2px 4px; border-radius: 9px; background: #d54c63; color: #fff; font-size: 10px; text-align: center; }
-.app-popover.release-notes-panel { width: min(860px, calc(100vw - 24px)); height: min(600px, calc(100dvh - 64px)); min-height: 240px; background: #fff !important; color: #283448; border: 1px solid #dce3ef; -webkit-app-region: no-drag; }
+/* Match the shared dark popover reset so it cannot override the panel width. */
+.app-popover.release-notes-panel,
+.workspace[data-theme='dark'] .app-popover.release-notes-panel { width: min(860px, calc(100vw - 24px)); height: min(600px, calc(100dvh - 64px)); min-height: 240px; background: #fff !important; color: #283448; border: 1px solid #dce3ef; -webkit-app-region: no-drag; }
 .release-notes-panel button { font: inherit; cursor: pointer; }
 .release-notes-panel button:disabled { cursor: default; opacity: .55; }
 .release-notes-panel button:focus-visible { outline: 2px solid #8095d0; outline-offset: -2px; }
