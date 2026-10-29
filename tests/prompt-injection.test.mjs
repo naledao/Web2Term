@@ -101,6 +101,8 @@ test('one violation resends the reply contract, a second one or a used-up budget
   const reminder = planInjection(noteInjectionViolation(ledger), prefix(), 'chatgpt')
   assert.equal(reminder.mode, 'reminder')
   assert.ok(reminder.prefix.startsWith('【约定提醒】') && reminder.prefix.includes('【需要执行时】') && reminder.prefix.includes('"command"'))
+  const completion = splitPromptSections(prefix()).find(section => section.heading === '【任务完成】')
+  assert.ok(completion && reminder.prefix.includes(completion.text), 'the reminder retains the full completion contract, including when not to finish')
   assert.equal(sent(noteInjectionViolation(ledger), reminder).violations, 0, 'the reminder clears the violation')
 
   assert.equal(planInjection(noteInjectionViolation(noteInjectionViolation(ledger)), prefix(), 'chatgpt').reason, 'violations')

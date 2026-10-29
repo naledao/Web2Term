@@ -1,12 +1,13 @@
 .workspace.workspace--titlebar {
+  --workspace-titlebar-height: 32px;
   position: relative;
-  padding-top: 32px;
+  padding-top: var(--workspace-titlebar-height);
 }
 
 .workspace__titlebar {
   position: absolute;
   inset: 0 0 auto;
-  height: 32px;
+  height: var(--workspace-titlebar-height);
   background: #f1f4f9;
   color: #354156;
   -webkit-app-region: drag;

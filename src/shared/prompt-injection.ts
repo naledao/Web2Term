@@ -56,7 +56,7 @@ export interface PromptSection {
 const SEPARATOR = '\n\n'
 
 /** Sections that carry the reply contract the app parses. */
-const REMINDER_HEADINGS = ['【角色】', '【任务路由】', '【工作协议】', '【需要执行时】']
+const REMINDER_HEADINGS = ['【角色】', '【任务路由】', '【工作协议】', '【需要执行时】', '【任务完成】']
 
 const ANCHOR = '【终端助手】本对话此前注入的约定继续有效。'
 
