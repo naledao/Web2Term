@@ -15,7 +15,7 @@ interface ExpectedEdit {
 type ObserveRequest = (details: OnBeforeRequestListenerDetails) => void
 const observers = new WeakMap<Session, Map<number, ObserveRequest>>()
 const MAX_BODY = 512 * 1024
-const normalize = (text: string): string => text.replace(/[\u0000\u0001]/g, '').replace(/\s+/g, ' ').trim()
+const normalize = (text: string): string => text.replace(/[\u0000\u0001\u2063]/g, '').replace(/\s+/g, ' ').trim()
 
 /** The measured text-only native request. Compare in memory; return metadata only. */
 export function summarizeFocusEditRequest(details: Pick<OnBeforeRequestListenerDetails, 'method' | 'url' | 'uploadData'>,
@@ -37,9 +37,9 @@ export function summarizeFocusEditRequest(details: Pick<OnBeforeRequestListenerD
     !Array.isArray(message.content.parts) || message.content.parts.length !== 1 || typeof message.content.parts[0] !== 'string' ||
     typeof message.id !== 'string' || !/^[a-zA-Z0-9_:-]{1,160}$/.test(message.id)) return unavailable('request-schema-unavailable')
   const actual = message.content.parts[0]
-  const at = actual.lastIndexOf('\u0000\u0001')
+  const at = Math.max(actual.lastIndexOf('\u2063\u2063'), actual.lastIndexOf('\u0000\u0001'))
   const human = at < 0 ? null : normalize(actual.slice(at + 2))
-  // Chromium can remove the sentinel's control characters from contenteditable text.
+  // An editor can remove the invisible separator or legacy control characters.
   // In that case require the entire payload to match, rather than a suffix of old text.
   const matches = (text: string): boolean => human !== null ? human === normalize(text) :
     normalize(actual) === normalize(text) || (!!expected.prefix && normalize(actual) === normalize(expected.prefix + text))

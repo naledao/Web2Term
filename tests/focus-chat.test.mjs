@@ -75,6 +75,7 @@ test('valid corrected commands clear recovery notices while retaining the unexec
 })
 
 test('hides only an explicit injected prefix and preserves genuine user wording', () => {
+  assert.equal(shared.cleanFocusUserText('SYSTEM\u2063\u2063真正的问题\n第二行'), '真正的问题\n第二行')
   assert.equal(shared.cleanFocusUserText('SYSTEM\u0000\u0001真正的问题\n第二行'), '真正的问题\n第二行')
   assert.equal(shared.cleanFocusUserText('上一条命令执行结果是什么意思？'), '上一条命令执行结果是什么意思？')
   assert.equal(shared.cleanFocusAnswer('【任务完成】\n**完成**'), '**完成**')

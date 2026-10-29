@@ -7,11 +7,11 @@ export const TOOL_PROMPT_NAMES: readonly ToolPromptName[] = Object.freeze(['read
 
 /** Injected instead of the full definitions; the model reads a definition only when it needs it. */
 export const TOOL_PROMPT_SUMMARIES: Readonly<Record<ToolPromptName, string>> = Object.freeze({
-  read_files: '把当前终端所在机器上的文件作为附件上传到当前会话，用于查看源码、图片和文档的原始内容。',
-  background_task: '在当前终端启动非交互后台任务或常驻服务（开发服务器、长时间构建等），软件负责登记、监控并自动回传结果。',
-  scheduled_task: '用户要求周期性执行任务时，按固定间隔或 Cron 创建定时计划。',
-  send_email: '需要通知用户时，向用户已配置的邮箱发送一封纯文本邮件。',
-  computer: '发现、观察和操作本机桌面业务应用；命令、文件和后台任务继续使用对应工具。'
+  read_files: '将当前终端对应机器上的文件完整上传为当前会话附件，供查看源码、图片和文档。',
+  background_task: '在当前终端对应机器启动非交互后台任务或常驻服务，自动回传就绪或结束结果。',
+  scheduled_task: '按用户要求创建周期计划，到期向绑定的 AI 对话提交任务；创建时不立即执行。',
+  send_email: '需要邮件通知时，向已配置的收件邮箱发送一封纯文本邮件。',
+  computer: '发现、观察并操作本机桌面应用；命令、文件和后台任务使用对应工具。'
 })
 
 export interface ReadToolPromptRequest {

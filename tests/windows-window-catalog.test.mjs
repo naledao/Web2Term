@@ -238,9 +238,9 @@ test('an old context cannot erase the current task references and a superseded r
 
 test('focus_window is advertised only after the helper declares its registered action', () => {
   const f = fixture()
-  assert.doesNotMatch(computer.computerUseCapabilityPrompt(f.context.capability(), id('cu_')), /"action":"focus_window"/)
+  assert.doesNotMatch(computer.computerUseCapabilityPrompt(f.context.capability(), id('cu_')), /^focus_window：/m)
   f.state.actions.push('focus_window')
-  assert.match(computer.computerUseCapabilityPrompt(f.context.capability(), id('cu_')), /"action":"focus_window"/)
+  assert.match(computer.computerUseCapabilityPrompt(f.context.capability(), id('cu_')), /^focus_window：/m)
   f.unregister(); assert.equal(f.tool.definitions().length, 0)
 })
 

@@ -716,7 +716,8 @@ export const CHATGPT_PAGE: PageAdapter = {
     // reasoning slider 0..2, and the trigger's selected effort even when closed.
     modelSettings: {
       newChatPath: '/', conversationPathPattern: '^/(?:g/[^/?#]+/)?c/[^/?#]+/?$',
-      triggerSelector: 'button[data-codex-intelligence-trigger][aria-label="选择 ChatGPT 模型"]',
+      // User probe 2026-10-29T06-21: the legacy data-codex-intelligence-trigger is gone.
+      triggerSelector: 'button[aria-label="选择 ChatGPT 模型"][aria-haspopup="menu"][data-selected-reasoning-effort]',
       modelSelector: '[role="menuitemradio"]', viewToggleSelector: '[data-model-picker-view-toggle]',
       effortAttribute: 'data-selected-reasoning-effort', sliderSelector: '[data-reasoning-slider]',
       sliderRootSelector: '[data-model-picker-power-slider] [data-orientation="horizontal"]',

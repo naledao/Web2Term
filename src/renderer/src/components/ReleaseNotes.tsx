@@ -9,6 +9,32 @@ interface Catalog { items: ReleaseNoteSummary[]; total: number; offset: number; 
 interface Detail { note: ReleaseNoteDetail; source: string }
 const EMPTY: Catalog = { items: [], total: 0, offset: 0, source: '' }
 const published = (value: number): string => new Date(value).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+const compareReleaseNotes = (left: ReleaseNoteSummary, right: ReleaseNoteSummary): number => {
+  const parse = (version: string): RegExpExecArray | null => /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/i.exec(version.trim())
+  const a = parse(left.version), b = parse(right.version)
+  if (!a || !b) return a ? -1 : b ? 1 : right.version.localeCompare(left.version, 'en', { numeric: true })
+  for (let index = 1; index <= 3; index++) {
+    const x = BigInt(a[index]), y = BigInt(b[index])
+    if (x !== y) return x > y ? -1 : 1
+  }
+  if (a[4] === b[4]) return 0
+  if (!a[4]) return -1
+  if (!b[4]) return 1
+  const preA = a[4].split('.'), preB = b[4].split('.')
+  for (let index = 0; index < Math.max(preA.length, preB.length); index++) {
+    const x = preA[index], y = preB[index]
+    if (x === undefined) return 1
+    if (y === undefined) return -1
+    if (x === y) continue
+    const numericA = /^\d+$/.test(x), numericB = /^\d+$/.test(y)
+    if (numericA && numericB) {
+      const numberA = BigInt(x), numberB = BigInt(y)
+      if (numberA !== numberB) return numberA > numberB ? -1 : 1
+    } else if (numericA !== numericB) return numericA ? 1 : -1
+    else return x > y ? -1 : 1
+  }
+  return 0
+}
 
 export default function ReleaseNotes({ open, onOpen, onClose, theme, appVersion }: {
   open: boolean; onOpen(): void; onClose(): void; theme: AppTheme; appVersion: string
@@ -85,9 +111,9 @@ export default function ReleaseNotes({ open, onOpen, onClose, theme, appVersion 
       const items = page.items.map(item => {
         const readAt = confirmedReads.current.get(`${result.source}:${item.id}`)
         return readAt === undefined ? item : { ...item, isRead: true, readAt }
-      })
+      }).sort(compareReleaseNotes)
       setCatalog(previous => ({ items: append && previous.source === result.source
-        ? [...previous.items, ...items.filter(item => !previous.items.some(old => old.id === item.id))] : items,
+        ? [...previous.items, ...items.filter(item => !previous.items.some(old => old.id === item.id))].sort(compareReleaseNotes) : items,
         total: page.total, offset: page.offset + page.items.length, source: result.source }))
       if (!append && items[0]) void select(items[0], result.source)
     } catch { if (alive.current && revision === listRequest.current && generation === epoch.current) setListError('读取版本列表失败，请重试。') }

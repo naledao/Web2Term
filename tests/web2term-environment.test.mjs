@@ -100,7 +100,7 @@ test('web2term on a Windows desktop uses the remote Linux report and updates eve
   assert.equal(runtime.environmentScope.hostId, 'web2term:fixture')
   assert.equal(prompts.size, platforms.CHAT_PLATFORMS.length)
   for (const parts of prompts.values()) {
-    assert.ok(parts.basePrompt.includes('你是 Linux / POSIX 终端助手'))
+    assert.ok(parts.basePrompt.includes('当前使用 Linux / POSIX Shell'))
     assert.ok(parts.basePrompt.includes('Ubuntu 26.04.1 LTS'))
     assert.ok(parts.basePrompt.includes('/usr/bin/bash'))
     assert.ok(parts.basePrompt.includes('/home/fixture'))
@@ -122,7 +122,21 @@ test('web2term results never inherit local macOS defaults either', async () => {
   assert.equal(info.remoteName, 'Private device name')
   assert.equal(info.shellPath, '/usr/bin/bash')
   assert.equal(runtime.environmentScope.scope, 'ssh')
-  for (const parts of prompts.values()) assert.ok(parts.basePrompt.includes('你是 Linux / POSIX 终端助手'))
+  for (const parts of prompts.values()) assert.ok(parts.basePrompt.includes('当前使用 Linux / POSIX Shell'))
+})
+
+test('remote search capability replaces a previously available desktop tool and legacy reports stay unknown', async () => {
+  for (const transport of ['ssh', 'web2term']) {
+    for (const status of ['missing', 'available', 'unknown']) {
+      const f = fixture({ transport, output: REPORT + (status === 'unknown' ? '' : `|RG=${status}`) })
+      f.runtime.environment.ripgrep = 'available'
+      assert.equal((await f.runtime.probeEnvironment()).ripgrep, status)
+      for (const parts of f.prompts.values()) {
+        assert.ok(parts.basePrompt.includes('【文件定位与内容搜索】'))
+        assert.equal(parts.basePrompt.includes('rg 已就绪'), status === 'available')
+      }
+    }
+  }
 })
 
 test('SSH and local Windows/macOS probes keep their existing parsers and prompt dialects', async () => {
@@ -133,11 +147,11 @@ test('SSH and local Windows/macOS probes keep their existing parsers and prompt 
     architecture: '64-bit', powerShellVersion: '5.1', workingDirectory: 'C:\\Users\\desktop' }) })
   assert.equal((await windows.runtime.probeEnvironment()).kind, 'windows')
   assert.equal(windows.runtime.environmentScope.scope, 'local')
-  for (const parts of windows.prompts.values()) assert.ok(parts.basePrompt.includes('直接写 PowerShell'))
+  for (const parts of windows.prompts.values()) assert.ok(parts.basePrompt.includes('直接在当前 PowerShell 会话执行'))
   const mac = fixture({ transport: 'local', desktop: 'darwin', output: 'OSCAP=macOS|OSVER=15.0|ARCH=arm64|SHELLP=/bin/zsh|SHELLV=5.9|CWD64=L1VzZXJzL2Rlc2t0b3A=' })
   assert.equal((await mac.runtime.probeEnvironment()).osCaption, 'macOS')
   assert.equal(mac.runtime.environment.workingDirectory, '/Users/desktop')
-  for (const parts of mac.prompts.values()) assert.ok(parts.basePrompt.includes('你是 macOS 终端助手'))
+  for (const parts of mac.prompts.values()) assert.ok(parts.basePrompt.includes('当前使用 macOS Shell'))
 })
 
 test('closed web2term sessions do not probe or fall back to the local desktop', async () => {

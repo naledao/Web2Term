@@ -2452,10 +2452,10 @@
    * be split. The boundary is only knowable where the text is COMPOSED, so it is recorded
    * there rather than re-derived later.
    *
-   * The characters are control codes: they cannot be typed into ChatGPT's composer and
-   * do not survive a copy-paste, so a real message cannot contain one by accident.
+   * Use default-ignorable Unicode separators. The former NUL/SOH pair rendered as two
+   * missing-glyph squares in the original page; readers still accept it for old messages.
    */
-  const USER_TEXT_SENTINEL = '\u0000\u0001'
+  const USER_TEXT_SENTINEL = '\u2063\u2063'
 
   /**
    * True once composing this draft has failed.
@@ -2481,7 +2481,7 @@
    */
   const userTextOf = (composed) => {
     const text = String(composed || '')
-    const at = text.lastIndexOf(USER_TEXT_SENTINEL)
+    const at = Math.max(text.lastIndexOf(USER_TEXT_SENTINEL), text.lastIndexOf('\u0000\u0001'))
     if (at === -1) return text
     return text.slice(at + USER_TEXT_SENTINEL.length)
   }
@@ -2894,7 +2894,7 @@
     const draft = readComposer(element)
     // A failed submit can leave our full draft in the editor. Reuse it on a user retry,
     // while still confirming the send and recording only the user's words.
-    const prefixedDraft = !!state.prefix && hasPrefix(element) && draft.includes(USER_TEXT_SENTINEL)
+    const prefixedDraft = !!state.prefix && hasPrefix(element) && (draft.includes(USER_TEXT_SENTINEL) || draft.includes('\u0000\u0001'))
     const text = userTextOf(draft)
     const draftHasImage = hasDraftImageAttachment()
 

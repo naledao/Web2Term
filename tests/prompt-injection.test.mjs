@@ -89,7 +89,8 @@ test('a different machine resends its machine sections but not the shared reply 
   const plan = planInjection(ledger, prefix(windows), 'chatgpt')
   assert.ok(['delta', 'full'].includes(plan.mode))
   if (plan.mode === 'delta') {
-    assert.ok(plan.changed.includes('【角色】') && plan.changed.includes('【执行环境】'))
+    assert.ok(plan.changed.includes('【执行环境】'))
+    assert.ok(!plan.changed.includes('【角色】') && !plan.prefix.includes('【角色】'))
     assert.ok(!plan.changed.includes('【工作协议】') && !plan.prefix.includes('【工作协议】'))
   } else assert.equal(plan.reason, 'mostly-changed')
   const rewritten = planInjection(ledger, prefix(windows, tools.replace('读取文件', '读取任意文件'.repeat(2000))), 'chatgpt')

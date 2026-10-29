@@ -2,11 +2,13 @@ import { spawn, spawnSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
+import { dirname } from 'node:path'
 import { statSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { DETECT_COMMAND, LOCAL_POSIX_DETECT_COMMAND } from './environment'
 import { buildPosixWrapper, localPosixShellPath } from './posix-shell'
 import { WINDOWS_PATH_REFRESH_SCRIPT } from './shell-path'
+import { bundledRipgrepPath, withRipgrepPath } from './bundled-ripgrep'
 import type { EnvironmentKind } from '../shared/types'
 
 /**
@@ -479,11 +481,12 @@ export class ConversationShell implements ExecutionShell {
       this.decode = this.kind === 'windows' ? createDecoder() : (chunk) => decoder.write(chunk)
 
       const windows = this.kind === 'windows'
+      const ripgrep = bundledRipgrepPath()
       const executable = windows ? resolvePowerShell() : localPosixShellPath()
       const args = windows
         ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
             Buffer.from(buildWrapper(this.sessionToken), 'utf16le').toString('base64')]
-        : ['-l', '-c', buildPosixWrapper(this.sessionToken), 'web2term', this.currentCwd]
+        : ['-l', '-c', buildPosixWrapper(this.sessionToken, process.platform, ripgrep ? dirname(ripgrep) : ''), 'web2term', this.currentCwd]
 
       let child: ChildProcess
       try {
@@ -499,7 +502,7 @@ export class ConversationShell implements ExecutionShell {
             detached: !windows,
             stdio: ['pipe', 'pipe', 'pipe'],
             env: {
-              ...process.env,
+              ...withRipgrepPath(process.env, ripgrep),
               ...(!windows ? { SHELL: executable } : {}),
               // External programs are a different story from PowerShell itself:
               // this is the only lever that makes common runtimes emit UTF-8

@@ -3281,7 +3281,7 @@ ${record.command}`
             if (questionBusy) { details.cancel(); return }
             setQuestionMinimized(true)
           }}>
-            <Dialog.Portal container={appContainer}>
+            <Dialog.Portal container={questionFloats ? appContainer.closest<HTMLElement>('.workspace') ?? appContainer : appContainer}>
               <Dialog.Popup
                 className={'modal modal--question' + (questionFloats ? ' modal--question-centered' : '')}
                 aria-label="需要你的回答"

@@ -19,7 +19,8 @@ export const DETECT_COMMAND = [
   'architecture = [string]$os.OSArchitecture;',
   'powerShellVersion = $PSVersionTable.PSVersion.ToString();',
   'powerShellEdition = [string]$PSVersionTable.PSEdition;',
-  'workingDirectory = (Get-Location).Path',
+  'workingDirectory = (Get-Location).Path;',
+  "ripgrep = $(if (Get-Command rg -CommandType Application -ErrorAction Ignore) { 'available' } else { 'missing' })",
   '} | ConvertTo-Json -Compress'
 ].join(' ')
 
@@ -42,13 +43,14 @@ export function nodeFallback(): EnvironmentInfo {
 
 /** Run visibly in the local shell; macOS has sw_vers, not /etc/os-release. */
 export const LOCAL_POSIX_DETECT_COMMAND = [
-  "printf 'OSCAP=%s|OSVER=%s|BUILD=%s|ARCH=%s|SHELLP=%s|SHELLV=%s|CWD64=%s\\n'",
+  "printf 'OSCAP=%s|OSVER=%s|BUILD=%s|ARCH=%s|SHELLP=%s|SHELLV=%s|CWD64=%s|RG=%s\\n'",
   ...(process.platform === 'darwin'
     ? ['"$(/usr/bin/sw_vers -productName)"', '"$(/usr/bin/sw_vers -productVersion)"', '"$(/usr/bin/sw_vers -buildVersion)"']
     : ['"$(uname -s)"', '"$(uname -r)"', "''"]),
   '"$(uname -m)"', '"$SHELL"', '"${ZSH_VERSION:-${BASH_VERSION:-}}"',
   // A directory may contain | or newlines, the delimiters of the report.
-  '"$(printf \'%s\' "$PWD" | /usr/bin/base64 | /usr/bin/tr -d \'\\r\\n\')"'
+  '"$(printf \'%s\' "$PWD" | /usr/bin/base64 | /usr/bin/tr -d \'\\r\\n\')"',
+  '"$(if command -v rg >/dev/null 2>&1; then printf available; else printf missing; fi)"'
 ].join(' ')
 
 export function parseLocalPosixEnvironment(raw: string): EnvironmentInfo {
@@ -64,6 +66,7 @@ export function parseLocalPosixEnvironment(raw: string): EnvironmentInfo {
     shellPath: fields.SHELLP || base.shellPath,
     shellVersion: fields.SHELLV || '',
     workingDirectory: fields.CWD64 ? Buffer.from(fields.CWD64, 'base64').toString('utf8') : base.workingDirectory,
+    ripgrep: ripgrepAvailability(fields.RG),
     detected: Boolean(fields.OSCAP && fields.OSVER)
   }
 }
@@ -84,7 +87,8 @@ export const REMOTE_DETECT_COMMAND = [
   '|ARCH=$(uname -m)',
   '|SHELLP=${SHELL:-/bin/sh}',
   '|SHELLV=$("${SHELL:-/bin/sh}" --version 2>/dev/null | head -n 1)',
-  '|CWD=$PWD"'
+  '|CWD=$PWD',
+  '|RG=$(if command -v rg >/dev/null 2>&1; then printf available; else printf missing; fi)"'
 ].join('')
 
 /**
@@ -145,6 +149,7 @@ export function parseRemoteEnvironment(
     shellPath: fields.SHELLP || '',
     shellVersion: fields.SHELLV || '',
     workingDirectory: fields.CWD || '',
+    ripgrep: ripgrepAvailability(fields.RG),
     detected: Boolean(fields.OSCAP || fields.OSVER)
   }
 }
@@ -170,7 +175,8 @@ function parseReport(raw: string): Partial<EnvironmentInfo> | null {
           architecture: pick('architecture'),
           powerShellVersion: pick('powerShellVersion'),
           powerShellEdition: pick('powerShellEdition'),
-          workingDirectory: pick('workingDirectory')
+          workingDirectory: pick('workingDirectory'),
+          ripgrep: ripgrepAvailability(parsed.ripgrep)
         }
       }
     } catch {
@@ -178,6 +184,10 @@ function parseReport(raw: string): Partial<EnvironmentInfo> | null {
     }
   }
   return null
+}
+
+function ripgrepAvailability(value: unknown): NonNullable<EnvironmentInfo['ripgrep']> {
+  return value === 'available' || value === 'missing' ? value : 'unknown'
 }
 
 /**

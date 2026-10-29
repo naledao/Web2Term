@@ -8,11 +8,13 @@ export function localPosixShellPath(platform = process.platform): string {
  * base64 line. eval runs in this shell so variables, functions and cwd survive;
  * commands read /dev/null so they cannot consume the next protocol message.
  */
-export function buildPosixWrapper(token: string, platform = process.platform): string {
+export function buildPosixWrapper(token: string, platform = process.platform, toolDirectory = ''): string {
   const decodeFlag = platform === 'darwin' ? '-D' : '-d'
   return [
     // Keep stderr ahead of the completion marker in the same pipe.
     'exec 2>&1',
+    // Login profiles can replace PATH. Restore our tool directory after they finish.
+    ...(toolDirectory ? [`export PATH='${toolDirectory.replace(/'/g, `'\\''`)}':"$PATH"`] : []),
     // Login profiles may cd; the selected directory still owns this session.
     'if [ "$#" -gt 0 ]; then cd -- "$1" || exit 1; fi',
     '__ct_seq=0',

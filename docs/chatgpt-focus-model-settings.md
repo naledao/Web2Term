@@ -77,6 +77,22 @@ ChatGPT 的模型选项来自当前网页菜单；DeepSeek 仍使用用户指定
 新增用户运行用例覆盖：输入框先就绪而触发器迟到、只读快照不派发输入、初始化恢复、恢复次数上限、
 未知输入结果不重试、已确认设置不重复读取、隐藏页面的加载/导航处理，以及新布尔字段的边界校验。
 
+## 2026-10-29：模型按钮已移除旧属性
+
+用户运行的 `chatgpt-model-settings-2026-10-29T06-21-36-018Z-45080.log` 明确了本次持续等待的原因：
+
+- 第 4 行：模型按钮已经启用，仍有 `aria-label="选择 ChatGPT 模型"`、`aria-haspopup="menu"` 和
+  `data-selected-reasoning-effort="high"`，但完整的 `dataNames` 中没有 `data-codex-intelligence-trigger`。
+- 第 5 行：按钮的 `aria-controls` 和菜单的 `aria-labelledby` 仍双向关联，隐藏轨道保留模型单选项。
+- 第 9 行：模型列表为 `GPT-6`、`GPT-5.6 Sol`，沿用 `role="menuitemradio"` 与 `aria-checked`。
+- 第 15、19、24 行：强度属性依次为 `medium`、`none`、关闭菜单后的 `none`；第 21 行滑杆范围仍是 `0..2`。
+
+旧选择器强制要求已经移除的 `data-codex-intelligence-trigger`，导致输入框就绪后仍一直返回
+`modelSettingsReady: false`，人工刷新也只能得到 `control-missing`。
+现改为按本次实测的按钮标签、菜单语义和强度属性定位，继续要求唯一、可见且可用的按钮，并保留菜单双向关联核对。
+回归夹具按按钮实际属性匹配选择器，覆盖旧属性缺失时的首次读取；不再直接放行任意已配置选择器。
+构建通过，等待用户测试。
+
 ## 用户验收
 
 智能体只完成静态检查和 `npm run build`，不执行测试、启动 Electron 或访问真实页面。

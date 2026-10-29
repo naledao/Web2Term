@@ -4903,9 +4903,11 @@ body {
   pointer-events: none;
 }
 
-/* App-rendered chat views have room for a centered dialog; native pages keep it in the sidebar. */
+/* Centered questions mount under the workspace, outside the clipped session content. */
 .modal--question-centered {
+  position: fixed;
   inset: 0;
+  z-index: 1300;
   align-items: center;
   justify-content: center;
   width: auto;
@@ -4913,6 +4915,7 @@ body {
   padding: 24px;
   background: rgba(15, 23, 42, .32);
   pointer-events: auto;
+  -webkit-app-region: no-drag;
 }
 
 .question-modal {

@@ -29,6 +29,7 @@ function arrow(name, context) {
   assert.ok(node?.initializer)
   return new Script('(' + node.initializer.getText(file) + ')').runInContext(context)
 }
+const USER_TEXT_SENTINEL = arrow('USER_TEXT_SENTINEL', createContext({}))
 function fixture() {
   const composer = { draft: '' }, calls = [], reports = []
   const context = createContext({
@@ -36,7 +37,7 @@ function fixture() {
     location: { pathname: '/a/chat/s/one', href: 'https://chat.deepseek.com/a/chat/s/one' },
     state: { enabled: true, promptInjectionEnabled: true, prefix: 'SYSTEM\n\n', taskPromptInjected: false,
       injectedCount: 0, taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: null },
-    USER_TEXT_SENTINEL: '\u0000\u0001', SEND_TIMEOUT_MS: 6000, SEND_BUTTON_GRACE_MS: 500,
+    USER_TEXT_SENTINEL, SEND_TIMEOUT_MS: 6000, SEND_BUTTON_GRACE_MS: 500,
     fileSend: null, computerResultToken: null, userTurns: () => [], focusEditing: null, focusEditExcludedIds: new Set(), focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
     getComposer: () => composer, collapse: text => String(text).replace(/\s+/g, ' ').trim(),
     readComposer: node => node.draft, findStopButton: () => null,
@@ -83,12 +84,23 @@ test('a new ChatGPT composer can be ready before its model trigger without reque
   assert.equal(f.reports.length, 0)
 })
 
+test('the user-text boundary uses invisible separators and still reads legacy messages without changing user wording', () => {
+  const f = fixture(), read = arrow('userTextOf', f.context)
+  const text = '把【已完成】加到文档里\n  保留缩进和第二行'
+  assert.equal(USER_TEXT_SENTINEL, '\u2063\u2063')
+  for (const marker of [USER_TEXT_SENTINEL, '\u0000\u0001']) {
+    assert.equal(read('【角色】提示词\n【工具】说明\n' + marker + text), text)
+  }
+  assert.equal(read(text), text)
+})
+
 test('app composer preserves multiline input and waits for confirmed user-send outcome', async () => {
   const f = fixture()
   let resolved = false
   const pending = f.send('第一行\r\n第二行', '/a/chat/s/one').then(value => { resolved = true; return value })
   assert.equal(resolved, false)
-  assert.equal(f.composer.draft, 'SYSTEM\n\n\u0000\u0001第一行\n第二行')
+  assert.equal(f.composer.draft, 'SYSTEM\n\n' + USER_TEXT_SENTINEL + '第一行\n第二行')
+  assert.doesNotMatch(f.composer.draft, /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/)
   assert.equal(f.calls.length, 1)
   assert.equal(f.calls[0][2], false, 'must use the human-send path, not sendRaw')
   assert.equal(f.reports[0].event, 'injected')
@@ -108,7 +120,7 @@ test('a scheduled send includes system and tool prompts when the conversation ha
   f.context.state.prefix = 'SYSTEM\n\nTOOLS\n\n'
   const send = method('sendScheduledUser', f.context)
   const pending = send.call({ sendUser: f.send }, '检查 GPU 温度', '/a/chat/s/one', 'run-first', false)
-  assert.equal(f.calls[0][0], 'SYSTEM\n\nTOOLS\n\n\u0000\u0001检查 GPU 温度')
+  assert.equal(f.calls[0][0], 'SYSTEM\n\nTOOLS\n\n' + USER_TEXT_SENTINEL + '检查 GPU 温度')
   assert.equal(f.calls[0].at(-1).promptInjected, true)
   assert.equal(f.context.state.taskPromptInjected, false, 'preparing a send is not a confirmed injection')
   f.calls[0][3]('stuck')
@@ -383,7 +395,7 @@ test('file message prepares a user prompt once, including attachment-only messag
   for (const text of ['两行问题\n第二行', '']) {
     const f = uploadFixture(text)
     assert.equal(f.api.prepare('owned-file'), true)
-    assert.equal(f.composer.draft, 'SYSTEM\n\n\u0000\u0001' + text)
+    assert.equal(f.composer.draft, 'SYSTEM\n\n' + USER_TEXT_SENTINEL + text)
     assert.equal(f.api.prepare('owned-file'), false)
     assert.equal(f.context.state.injectedCount, 1)
     assert.equal(f.reports.some(report => report.event === 'user-message'), false, 'not reported before confirmation')

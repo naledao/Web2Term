@@ -72,7 +72,7 @@ test('registered application actions are published only when also provided by th
   const f = fixture()
   assert.deepEqual(plain(f.tool.definitions().map(definition => definition.action)), ['list_apps', 'launch_app', 'open'])
   const description = computer.computerUseCapabilityPrompt(f.context.capability(), identity('cu_'))
-  assert.match(description, /list_apps/); assert.match(description, /无需用户预选/)
+  assert.match(description, /list_apps/); assert.match(description, /发现本机应用及真实启动引用/)
   assert.doesNotMatch(description, /"action":"launch_app"|"action":"click"/)
   f.state.actions = []; assert.equal(f.context.capability().available, false)
   f.unregister(); assert.equal(f.tool.definitions().length, 0); f.service.dispose()
@@ -358,9 +358,9 @@ function imageFixture(patch = {}) {
 }
 test('open is advertised only with the live helper action and unregisters with its siblings', () => {
   const f = fixture()
-  assert.doesNotMatch(computer.computerUseCapabilityPrompt(f.context.capability(), identity('cu_')), /"action":"open"/)
+  assert.doesNotMatch(computer.computerUseCapabilityPrompt(f.context.capability(), identity('cu_')), /^open：/m)
   f.state.actions.push('open')
-  assert.match(computer.computerUseCapabilityPrompt(f.context.capability(), identity('cu_')), /"action":"open"/)
+  assert.match(computer.computerUseCapabilityPrompt(f.context.capability(), identity('cu_')), /^open：/m)
   f.unregister(); assert.equal(f.tool.definitions().length, 0)
 })
 

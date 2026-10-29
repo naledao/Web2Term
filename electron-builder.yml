@@ -23,17 +23,22 @@ files:
   - '!out/windows-helper/**'
   - '!out/windows-helper-package/**'
   - '!out/windows-helper-offline-feed/**'
+  - '!out/ripgrep/**'
+  - '!node_modules/@vscode/ripgrep-universal/**'
 
 asar: true
 extraResources:
   - from: build/icon.png
     to: tray-icon.png
+  # Only the target executable and its notices ship; all other architectures stay in the build tree.
+  - from: out/ripgrep/${os}-${arch}
+    to: ripgrep
 # ssh2's native accelerators (cpu-features/nan) are OPTIONAL and were never built
 # 鈥?npm's allow-scripts gate skips them, and the pure-JS path is what runs. So
 # there is nothing to rebuild.
 npmRebuild: false
-# Fails a Windows package whose helper is missing, framework-dependent, or on another protocol version.
-afterPack: ./build/verify-windows-helper-package.cjs
+# Checks bundled ripgrep on every platform and keeps the Windows helper completeness check.
+afterPack: ./build/verify-package-resources.cjs
 
 win:
   icon: build/icon.ico

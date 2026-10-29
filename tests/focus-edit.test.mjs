@@ -17,6 +17,7 @@ function helper(name, context) {
   assert.ok(node, name)
   return new Script('(' + node.getText(ast) + ')').runInContext(context)
 }
+const USER_TEXT_SENTINEL = helper('USER_TEXT_SENTINEL', createContext({}))
 function method(name, context) {
   const findMethod = node => ts.isMethodDeclaration(node) && node.name.getText(ast) === name ? node : ts.forEachChild(node, findMethod)
   const node = findMethod(ast)
@@ -53,7 +54,7 @@ function fixture() {
   const composer = { innerText: '' }
   const context = createContext({
     PAGE, state, Promise, Date: { now: () => now }, location: { pathname: '/c/one' },
-    USER_TEXT_SENTINEL: '\u0000\u0001', SEND_TIMEOUT_MS: 1000, fileSend: null, focusEditing: null,
+    USER_TEXT_SENTINEL, SEND_TIMEOUT_MS: 1000, fileSend: null, focusEditing: null,
     focusEditExcludedIds: new Set(), focusReplyBaseline: 'reply-3', focusBaselinePosition: null, focusReplyPosition: 'reply-3',
     draftRejected: false, getComposer: () => composer, findStopButton: () => null,
     collapse: text => String(text || '').replace(/\s+/g, ' ').trim(), normalizeLineEndings: text => text.replace(/\r\n?/g, '\n'),
@@ -104,7 +105,7 @@ test('native form is scoped to the selected reply, submitted once, and acknowled
   assert.equal(await f.edit(request, '/c/one', diagnostic), 'ok')
   assert.deepEqual(f.calls, ['edit', 'send'])
   assert.deepEqual(f.groups().map(group => group.id), ['user-1', 'user-new'])
-  assert.equal(f.editor.innerText, 'SYSTEM\n\u0000\u0001新的第二轮\n换行')
+  assert.equal(f.editor.innerText, 'SYSTEM\n' + USER_TEXT_SENTINEL + '新的第二轮\n换行')
   assert.equal(f.reports.filter(item => item.event === 'user-message').length, 1)
   assert.equal(f.reports.find(item => item.event === 'user-message').focusEditToken, 'test-edit')
   assert.equal(f.state.taskPromptInjected, true)
@@ -172,7 +173,7 @@ function networkRequest(text, changes = {}) {
 
 test('actual native request body distinguishes the edit from the original without logging text', () => {
   const summarize = requestExports.summarizeFocusEditRequest
-  for (const prefix of ['', 'SYSTEM\n', 'SYSTEM\n\u0000\u0001']) {
+  for (const prefix of ['', 'SYSTEM\n', 'SYSTEM\n' + USER_TEXT_SENTINEL, 'SYSTEM\n\u0000\u0001']) {
     const next = summarize(networkRequest(prefix + expectedRequest.text), expectedRequest)
     assert.equal(next.requestTextMatches, true)
     assert.equal(next.requestOriginalMatches, false)

@@ -843,6 +843,8 @@ export interface EnvironmentInfo {
   remoteTarget: string
   /** False when detection failed; the descriptive fields are then placeholders. */
   detected: boolean
+  /** Capability of this terminal's machine, never inherited from the desktop by a remote target. */
+  ripgrep?: 'available' | 'missing' | 'unknown'
   /**
    * Free-form text the user attached to THIS machine.
    *
@@ -867,6 +869,7 @@ export const FALLBACK_ENVIRONMENT: EnvironmentInfo = {
   remoteName: '',
   remoteTarget: '',
   detected: false,
+  ripgrep: 'unknown',
   extraNotes: ''
 }
 
@@ -877,37 +880,37 @@ export const FALLBACK_ENVIRONMENT: EnvironmentInfo = {
  * copies of it would eventually drift — at which point one dialect silently stops
  * round-tripping and the model looks like it is ignoring instructions.
  *
- * NOTE: the JSON example is deliberately VALID (`"description":""`). The app
- * parses the model's replies, so a malformed example would be copied verbatim and
- * break parsing.
+ * Keep the JSON example valid and executable: malformed JSON or placeholder
+ * commands may be copied verbatim into replies that the app parses and executes.
  *
  * Inserted verbatim into the composer, so the user sees it in the input box.
  */
 const OUTPUT_FORMAT_SECTION = [
   '【工作协议】',
-  '需要终端操作时，按“目标→一条命令→真实结果→下一步”循环；每轮只推进一个可验证步骤，等结果再继续，不猜结果、不重复成功命令。',
+  '需要终端操作时，依据实际结果推进；相关只读检查可合并，依赖结果的步骤等回传后再执行。不臆测结果，不无故重跑。',
   '',
   '【需要执行时】',
-  '只输出一个 JSON 代码块，外面不要有文字：',
+  '仅输出一个 JSON 代码块，命令按实际任务填写。示例：',
   '```json',
-  '{"command":"...","description":"...","timeout_seconds":120}',
+  '{"command":"pwd","description":"查看当前目录","timeout_seconds":30}',
   '```',
-  'command 是当前 shell 可直接执行的一条命令；有依赖的动作在其中用 shell 连接符。description 用中文一句话说明目的，不要只复制命令；timeout_seconds 为按工作量估算的 1–1800 整数。',
-    'JSON 必须合法：双引号、反斜杠、换行正确转义；命令中的 _、$、* 原样保留。',
+  'command 按当前 shell 编写；description 用中文简述目的；timeout_seconds 按预计耗时填写，为 1–1800 秒整数。',
+  '字符串中的双引号、反斜杠和换行按 JSON 转义，不做 Markdown 转义。',
   '',
   '【执行方式】',
-  '执行前判断任务的耗时和运行方式：预计超过 2 分钟、持续输出、等待外部事件，或需要脱离当前终端继续运行的非交互任务，使用 background_task 工具创建后台任务；短时、一次性命令直接执行。必须依赖 stdin/TTY 的明确交互任务保留前台执行。',
-  '后台任务由软件监控：常驻服务就绪后回传启动成功，一次性任务结束后回传结果；不要自行发送命令轮询。具体约定见 background_task 工具说明。',
+  '短时命令直接执行；长时任务、常驻服务或需脱离终端运行时，优先使用当前可用的 background_task。',
+  '创建后等待软件自动回传，不自行轮询或重复启动；调用及结果约定见工具说明。',
+  '必须后台运行但工具不可用时，先询问用户。',
   '',
   '【读取结果】',
-  '【上一条命令执行结果】对应你上一条请求执行的命令，回传消息不重复命令正文；以回传的结果、输出、当前目录和退出码为真实状态。',
-  '【历史指令重新执行结果】表示用户主动在当前终端重跑了一条历史命令，消息会包含本次执行的命令正文；请根据这次回传的结果继续处理。',
-  '结果为成功且退出码为 0 时继续；失败、超时、中断或断线先诊断并给最小修正。退出码未知不要视为成功，空输出不等于失败。',
+  '以回传的状态、输出、退出码和目录为准；历史重跑以消息中的命令为准。',
+  '按工具语义判断退出码；rg 返回 1 仅表示未命中，2 表示错误，勿因通用失败标签重复执行。',
+  '空输出不代表失败，退出码未知不判成功；超时、中断或断线先核实状态，勿盲目重跑。',
   '',
   '【任务完成】',
-  '完成标记适用于所有任务类型，不以是否执行终端命令或调用工具为条件。目标满足且完成必要验证后，最终回复第一行必须单独写【任务完成】，随后用中文给出结果、验证情况和必要说明，不输出工具调用 JSON。',
-  '问答、解释、翻译、写作、总结、规划、分析等纯对话请求，完整回答当前请求即完成；同样先写【任务完成】，再给出正常回答，无需为此额外执行命令或调用工具。',
-  '尚需用户澄清、继续执行步骤或等待工具/后台结果时，不输出【任务完成】；遵循对应的提问或工具协议继续。'
+  '所有任务在目标满足且完成必要验证后，回复首行单独写【任务完成】，随后用中文给出结果及必要验证说明，不混入工具调用。',
+  '纯对话完整回答即完成，无需额外执行命令或调用工具。',
+  '仍需澄清、执行或等待必要结果时，不输出完成标记。'
 ].join('\n')
 
 /**
@@ -916,61 +919,45 @@ const OUTPUT_FORMAT_SECTION = [
  */
 export const backgroundTaskToolPrompt = [
   '【工具：background_task】',
-  '在当前终端启动非交互后台任务（无 stdin/TTY）。command 直接写实际命令，软件负责启动、登记、日志和监控；不再用 Start-Process、nohup 或末尾 & 脱离进程，不手动登记。',
+  '在当前机器和目录启动独立非交互进程（无 stdin/TTY），软件负责启动、登记、日志和监控。command 写工作命令，勿自行后台化或登记；不依赖前台临时变量/函数，POSIX 用 sh 语法。',
   '',
+  '仅输出一个 JSON 代码块，示例命令按实际任务填写：',
   '```json',
-  '{"command":"实际命令","description":"任务名","background":true,"background_kind":"service","readiness":{"type":"auto"},"timeout_seconds":30}',
+  '{"command":"npm run dev","description":"启动开发服务","background":true,"background_kind":"service","readiness":{"type":"auto"},"timeout_seconds":30}',
   '```',
   '',
-  'background_kind：一次性任务用 "job"，常驻服务必须用 "service"。',
-  '',
-  'service 的 readiness 默认 auto（ASP.NET Core/Vite）；tcp 配实际 port，http 配已有健康接口 url（目标机回环地址），不得臆造。',
-  '',
-  'readiness.timeout_seconds 默认 120 秒，超时保留进程；外层 timeout_seconds 只限启动，最多 30 秒，服务运行不限时。',
-  '',
-  '创建仅确认登记，之后等自动回传，勿轮询、sleep、读日志等待或重复启动。job 等【后台任务执行结果】；service 收到【后台服务已就绪】后继续原任务，不等退出。未确认就绪时按回传日志诊断；是否【任务完成】仍取决于用户目标。'
+  'background_kind：一次性任务用 "job"，常驻服务用 "service"；readiness 仅用于 service。',
+  'service 的 readiness 默认 auto（ASP.NET Core/Vite）；tcp 填实际 port，http 填已有健康接口 url（目标机回环地址），勿臆造。',
+  '外层 timeout_seconds 只限启动，最多 30 秒；readiness.timeout_seconds 为 10–600 秒整数，默认 120 秒，超时保留进程。任务运行不限时。',
+  '创建不代表完成。job 等【后台任务执行结果】；service 等【后台服务已就绪】后继续原任务。不轮询等待或重复启动，异常按回传诊断。'
+].join('\n')
+
+/** Share the role across shells; environment and routing have their own sections. */
+const ROLE_SECTION = [
+  '【角色】',
+  '你是终端助手，协助用户完成当前任务；具体处理方式遵循【任务路由】。'
 ].join('\n')
 
 /** Keep terminal mode from turning every kind of request into a shell command. */
 const TASK_ROUTING_SECTION = [
   '【任务路由】',
-  '终端只处理本机/远程机器、项目文件、进程、依赖、构建、测试、Git、SSH，或用户明确要求执行的命令。',
-  '互联网/时效查询、问答、解释、翻译、写作、总结、规划、分析：优先网页搜索、内置工具或技能，不启动 PowerShell、bash、grep、curl、Invoke-WebRequest 等终端搜索。',
-  '“搜索一下”未指明本机内容时按资料搜索；明确本机/项目才用终端。需查资料后改本机时先查资料再操作；无对应工具就说明限制。非终端路线直接调用工具或用中文回答，不输出 command JSON；纯对话请求回答完毕也须遵守【任务完成】约定。'
+  '无需外部信息或机器操作时直接回答；需外部或最新资料时，优先使用可用的搜索、工具或技能，不用终端代替资料搜索。',
+  '操作当前机器、项目或执行用户指定命令时，按需使用终端。',
+  '搜索对象结合上下文判断，关键范围不清再询问；需资料支撑的操作先查证。',
+  '所需工具不可用时说明限制；无需终端操作时不输出 command JSON。'
 ].join('\n')
 
-/**
- * Shared by both dialects: when the model should stop and ask instead of acting.
- *
- * It rides on the mechanism the output section already established — answer in
- * plain text with no JSON, and the loop stops and hands control back to the user.
- *
- * One section rather than one per case, because these are instances of a single
- * rule, and a model that has the rule generalises to cases nobody wrote down. The
- * two named here are the common ones and the expensive ones to get wrong: an
- * underspecified task (guessing burns a round trip, usually more) and a tool that
- * is not installed (installing unasked changes the user's machine).
- *
- * It lives in its own labelled section rather than being tacked onto 【工作协议】
- * because the model has to act on it, and a rule buried at the end of a long
- * section about something else is a rule that gets skimmed past.
- *
- * The "look it up first" line is not decoration. Framed as a bare permission, this
- * reads as "ask whenever anything is unknown" — and a model that asks about things
- * it could have checked itself is worse than one that never asks, because the loop
- * exists precisely to save the user that round trip.
- */
+/** Shared clarification rules; the questions JSON pauses the task until answers return. */
 const ASK_USER_SECTION = [
   '【判断与确认】',
-  '目标明确且可逆时直接推进；先只读核实路径、文件、版本和状态。',
-  '目标含糊、缺少用户信息、方案会改变结果或工具未安装时，暂停并询问；不擅自安装或选差方案。',
-  '询问时只输出一个 JSON 代码块，外面不要有文字：',
+  '目标明确且在授权范围内时直接推进；能自行核实的信息先核实。',
+  '仅为影响目标的关键缺失信息、范围不明或超出授权的操作提问；已回答或已授权的事项不重复确认。',
+  '提问时只输出一个 JSON 代码块，不混入命令或其他调用：',
   '```json',
-  '{"type":"questions","questions":[{"question":"需要用户回答的问题","options":["选项A","选项B"],"placeholder":"可选提示"}]}',
+  '{"type":"questions","questions":[{"question":"需要确认的问题","options":["选项A","选项B"]}]}',
   '```',
-  'questions 为 1~20 项；question 必填，options（最多 8 个短字符串，可省略）会显示为可点选项，placeholder 可省略。每题界面依次为题干、选项、自定义答案输入框。软件逐页收集回答，按题号合并后一次发回。',
-  'question 支持 Markdown。需要用户手动执行命令时，在 question 内用对应语言的代码块给出完整命令，保留所有换行和缩进；JSON 字符串中的换行写成 \\n。',
-  '删除、覆盖、格式化、改权限、发布、发消息、付费等不可逆动作，范围不明先询问；目标明确的代码修改、构建、测试可直接做。用户回答会发回并恢复循环。'
+  'questions 为 1–20 项；question 必填，options 最多 8 个短字符串，可省略；placeholder 可选。',
+  'question 支持 Markdown；需用户执行命令时给出完整代码块，保留换行和缩进，JSON 中换行写 \\n。'
 ].join('\n')
 
 export interface FileReadingPlatform {
@@ -990,25 +977,16 @@ export function fileReadingPlatform(platformId: string): FileReadingPlatform | n
 /** Tool descriptions live alongside the system prompt, with a separate preview. */
 export const readFilesToolPrompt = [
   '【工具：read_files】',
-  '将当前终端对应机器上的文件，作为完整附件上传到当前会话。支持文本、源码、图片及文档；保留文件原始内容，不修改源文件。',
+  '将当前终端对应机器上的完整原文件上传为当前会话附件，供读取源码、图片和文档；不截取、转码或修改源文件。',
   '',
-  `调用格式：单个 JSON 代码块。type 固定为 read_files，files 为 1–${MAX_READ_FILES} 个文件对象的数组，description 为非空说明字符串；与 command、questions 互斥。`,
-  '',
+  '调用时仅输出一个 JSON 代码块，不混入其他调用。示例路径按实际任务填写：',
   '```json',
-  '{',
-  '  "type": "read_files",',
-  '  "files": [{"path": "path/to/file"}],',
-  '  "description": "上传文件供分析"',
-  '}',
+  '{"type":"read_files","files":[{"path":"README.md"}],"description":"读取项目说明"}',
   '```',
   '',
-  '文件参数：',
+  `files 为 1–${MAX_READ_FILES} 项，每项仅含 path；支持绝对路径或相对当前终端工作目录的路径，SSH 会话读取远端文件。description 用中文简述目的，不能为空。`,
   '',
-  '- path：必填文件路径；支持绝对路径或相对当前终端工作目录的路径。本机会话对应本机文件，SSH 会话对应绑定主机的文件。',
-  '',
-  '返回：文件将以附件形式发送到当前会话。',
-  '',
-  `限制：每次 1–${MAX_READ_FILES} 个非空普通文件，单个最多 20 MiB，附件合计最多 25 MiB。超出数量上限时需分次调用。`
+  '每批仅支持非空普通文件：单个最多 20 MiB，合计最多 25 MiB；同名文件分批，文件类型以当前平台支持为准。'
 ].join('\n')
 
 /** Only expose tools that the selected platform can execute. */
@@ -1038,32 +1016,21 @@ function buildWindowsPrompt(env: EnvironmentInfo): string {
   // machine that has pwsh installed.
   const major = Number.parseInt(env.powerShellVersion.split('.')[0] ?? '', 10)
   const knownVersion = Number.isFinite(major)
-  const supportsChaining = knownVersion ? major >= 7 : /^pwsh/i.test(executable)
   const isWindowsPowerShell51 =
     major === 5 ||
     env.powerShellEdition.trim().toLowerCase() === 'desktop' ||
     (!knownVersion && !/^pwsh/i.test(executable))
 
-  const chainingRule = supportsChaining
-    ? '支持 &&、|| 和 ;。'
-    : 'PowerShell 5.1 不支持 &&/||；顺序用 ;，按成功继续用 if ($?)。'
-
-  const fileIoIntro = isWindowsPowerShell51
-    ? '【文件读写】PowerShell 5.1 的 Get-Content/Set-Content/Out-File 默认是系统代码页（GBK），会把无 BOM UTF-8 静默读写成乱码。'
-    : `【文件读写】${shell} 也必须显式使用 UTF-8（无 BOM）。`
-  const fileIoWholeFileRule = isWindowsPowerShell51
-    ? '不要用 Get-Content ... | Set-Content/Out-File 改整文件，也不要用 -Encoding utf8（会加 BOM 和额外行尾）。'
-    : '不要用 Get-Content ... | Set-Content/Out-File 改整文件，以免改变换行、编码或 BOM。'
   const fileIoSection = [
-    fileIoIntro,
-    '读：$s = [IO.File]::ReadAllText($p, [Text.UTF8Encoding]::new($false))；写：$s = $s.Replace($old, $new); [IO.File]::WriteAllText($p, $s, [Text.UTF8Encoding]::new($false))。',
-    fileIoWholeFileRule,
-    "新文件用 [IO.File]::WriteAllText；多行内容用 $src = @' ... '@，引号、$、反引号原样保留。"
+    '【文件读写】',
+    '按原编码读写，保留 BOM、换行及末尾换行；新文件遵循项目和运行环境约定。',
+    ...(isWindowsPowerShell51 ? [
+      'PowerShell 5.1 不依赖默认编码；无 BOM UTF-8 写入用 [IO.File]::WriteAllText($p,$s,[Text.UTF8Encoding]::new($false))。'
+    ] : [])
   ]
 
   return [
-    '【角色】',
-    '你是 PowerShell 终端助手；仅终端路线每轮输出一条命令。',
+    ROLE_SECTION,
     '',
     TASK_ROUTING_SECTION,
     '',
@@ -1072,23 +1039,20 @@ function buildWindowsPrompt(env: EnvironmentInfo): string {
     ASK_USER_SECTION,
     '',
     '【执行环境】',
-    `- 操作系统：${osName}${osDetail === '' ? '' : `（${osDetail}）`}`,
-    `- Shell：${shell}；持久会话。`,
-    ...(env.workingDirectory.trim() === '' ? [] : [`- 起始目录：${env.workingDirectory.trim()}`]),
-    '- 变量、函数、模块、pushd、当前目录跨命令保留；用变量传递中间结果，不要落盘。',
-    '- 不要用 exit（会结束会话）；stdin 为空，勿用交互命令。',
+    `- 系统：${osName}${osDetail === '' ? '' : `（${osDetail}）`}`,
+    `- Shell：${shell}；持久、非交互。`,
+    ...(env.workingDirectory.trim() === '' ? [] : [`- 当前目录：${env.workingDirectory.trim()}（以最近执行结果为准）`]),
+    '- 同一会话内变量和目录跨命令保留；会话重建后重新核实。',
+    '- 勿用 exit；无法非交互执行的操作交由用户。',
     '',
     '【命令规范】',
-    '直接写 PowerShell，不要包 powershell -Command。',
-    chainingRule,
-    '语法符号用半角 ASCII；中文可写但不能用全角标点。',
-    '管道末尾不要 Format-Table/List/Wide（会等完整输入而触发无输出超时）；让对象直接输出或 Select-Object。全仓搜索排除 node_modules/.git/out。',
-    'PowerShell 和 JSON 是两层语法：PowerShell 中反斜杠加双引号 (\\") 不是转义，但 command 字符串里的字面双引号仍必须做 JSON 转义；PowerShell 内优先用反引号、单引号或 here-string，不要用 [char]39 拼接。字面匹配前把 CRLF 归一化为 LF。',
+    '直接在当前 PowerShell 会话执行，勿套 powershell/pwsh -Command。',
+    '语法标点用半角；PowerShell 优先用单引号，转义用反引号；JSON 单独转义。',
+    '输出所需字段；大结果避免 Format-Table -AutoSize。',
+    '查询 WMI 信息用 Get-CimInstance，不用 wmic。',
+    ...(isWindowsPowerShell51 ? ['不支持 &&/||；顺序用 ;，成功后继续用 if ($?)。'] : []),
     '',
-    ...fileIoSection,
-    '',
-    '【优先使用】',
-    '- 系统/硬件用 Get-CimInstance，不用 wmic；结构化数据用 ConvertTo-Json/ConvertFrom-Json。'
+    ...fileIoSection
   ].join('\n')
 }
 
@@ -1114,8 +1078,7 @@ function buildPosixPrompt(env: EnvironmentInfo): string {
   const isRoot = /^(root|\/root)/.test(env.workingDirectory.trim())
 
   return [
-    '【角色】',
-    `你是 ${mac ? 'macOS' : 'Linux / POSIX'} 终端助手；仅终端路线每轮输出一条命令。`,
+    ROLE_SECTION,
     '',
     TASK_ROUTING_SECTION,
     '',
@@ -1138,22 +1101,22 @@ function buildPosixPrompt(env: EnvironmentInfo): string {
      * What the model actually needs is the dialect it may write in, and
      * "Linux + bash + this directory" answers that completely.
      */
-    `- 操作系统：${osName}${osDetail === '' ? '' : `（${osDetail}）`}`,
-    `- Shell：${shell}；持久会话。`,
-    ...(env.workingDirectory.trim() === '' ? [] : [`- 起始目录：${env.workingDirectory.trim()}`]),
+    `- 系统：${osName}${osDetail === '' ? '' : `（${osDetail}）`}`,
+    `- Shell：${shell}；持久、非交互。`,
+    ...(env.workingDirectory.trim() === '' ? [] : [`- 当前目录：${env.workingDirectory.trim()}（以最近执行结果为准）`]),
     `- 当前用户：${isRoot ? 'root（有完整权限，但仍要谨慎）' : '普通用户'}`,
-    '- 变量、函数、当前目录跨命令保留；用变量传递中间结果，不要落盘。',
-    '- 不要用 exit（会结束会话）；stdin 为空，勿用交互命令。sudo 要密码时停下让用户手动执行。',
+    '- 同一会话内变量和目录跨命令保留；会话重建后重新核实。',
+    '- 勿用 exit；无法非交互执行的操作交由用户。',
     '',
     '【命令规范】',
     '直接写命令，不要包 zsh -c/bash -c/sh -c；可用 &&、||、;。语法符号半角，中文不能代替语法标点。',
-    '路径用正斜杠，保留原始大小写，空格路径加引号。避免 sort/uniq/column -t/tac 等收齐输入的管道；全仓搜索排除 node_modules/.git/out。',
+    '路径用正斜杠，保留原始大小写，空格路径加引号。避免 sort/uniq/column -t/tac 等收齐输入的管道。',
     '',
     '【编码】',
     '文件一律按 UTF-8 处理，不依赖 terminal locale。',
     '',
     '【优先使用】',
-    `- 这是 ${mac ? 'macOS' : osName}，禁用 PowerShell/cmd 语法（Get-ChildItem、Get-CimInstance、$env:、dir /s、Remove-Item）；用 ls/cat/grep/find/sed/awk。`,
+    `- 这是 ${mac ? 'macOS' : osName}，禁用 PowerShell/cmd 语法（Get-ChildItem、Get-CimInstance、$env:、dir /s、Remove-Item）；用当前系统工具，文件搜索遵循下方搜索规范。`,
     ...(mac ? [
       '- 使用 macOS 自带的 BSD 工具参数；不要假定有 GNU sed/grep/date/readlink，禁用 apt-get、yum、systemctl 等 Linux 专用命令。',
       '- 包管理先用 command -v brew 确认 Homebrew 可用；Apple Silicon 常见目录 /opt/homebrew，Intel 常见目录 /usr/local。不要假定 jq/python3 已安装。',
@@ -1162,16 +1125,28 @@ function buildPosixPrompt(env: EnvironmentInfo): string {
   ].join('\n')
 }
 
-/**
- * Build the system prompt for whichever machine the terminal is currently driving.
- *
- * It is rebuilt whenever that answer changes — at startup, after the working
- * directory moves, and when an SSH session takes over or releases the terminal.
- * Platform capabilities precede the user's notes, which remain the final section.
- */
+/** Inline search policy shared by every shell; availability belongs to the execution target. */
+export function fileSearchPrompt(env: EnvironmentInfo): string {
+  const status = env.ripgrep ?? 'unknown'
+  const heading = '【文件定位与内容搜索】'
+  const usage = status === 'missing'
+    ? ['当前终端无 rg，使用限定范围的系统搜索；安装前询问。']
+    : [
+      status === 'available' ? 'rg 已就绪。' : '首次搜索先确认 rg 是否可用，可用时按下述规则执行。',
+      "文件定位优先 rg --files -g '模式'；内容搜索优先 rg -n -F -- '文本' 路径。"
+    ]
+  return [
+    heading,
+    ...usage,
+    '先限定目录和类型，默认排除 node_modules/.git/out；结果过多再缩小范围，隐藏或忽略文件按需包含。'
+  ].join('\n')
+}
+
+/** Rebuilt after machine/directory changes; the user's notes remain the final section. */
 export function buildTerminalPrompt(env: EnvironmentInfo, toolPrompt = ''): string {
   return [
     env.kind === 'posix' ? buildPosixPrompt(env) : buildWindowsPrompt(env),
+    '', fileSearchPrompt(env),
     ...(toolPrompt.trim() === '' ? [] : ['', toolPrompt.trim()]),
     ...notesSection(env.extraNotes)
   ].join('\n')

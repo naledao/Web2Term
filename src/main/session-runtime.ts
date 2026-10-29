@@ -750,7 +750,11 @@ export class SessionRuntime {
         this.runner.refreshTerminal(message)
         this.options.onSummaryChanged()
       }
-      this.web2term.onReady = () => { void this.probeEnvironment() }
+      this.web2term.onReady = () => {
+        this.environment = { ...this.environment, ripgrep: 'unknown' }
+        this.refreshDirectoryNotes(true)
+        void this.probeEnvironment()
+      }
     }
 
     this.runner.restoreMode(options.initialMode)
@@ -772,10 +776,11 @@ export class SessionRuntime {
       if (resetting && next === null && state.attached) return
       this.sshTerminalResetting = false
       if (next !== this.remoteShell) {
-        const previous = this.remoteShell
         this.remoteShell = next
-        this.refreshDirectoryNotes()
-        if (previous === null || next === null || resetting) void this.probeEnvironment()
+        // Do not carry local/previous-host search capabilities across a target switch.
+        this.environment = { ...this.environment, ripgrep: 'unknown' }
+        this.refreshDirectoryNotes(true)
+        void this.probeEnvironment()
       } else if (next === null && state.status === 'error') {
         this.refreshDirectoryNotes()
         void this.probeEnvironment()

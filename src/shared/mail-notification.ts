@@ -31,13 +31,14 @@ export function parseMailNotificationRequest(value: unknown): MailNotificationRe
 
 export const mailNotificationToolPrompt = [
   '【工具：send_email】',
-  '需要向用户发送邮件通知时调用。发件邮箱、SMTP 授权信息和默认收件邮箱由软件读取已保存配置，你只提供标题 subject 和纯文本正文 body。',
-  '单独输出一个 JSON 代码块，每次调用发送一封邮件，不要与命令或其他工具混在同一条回复中。',
+  '向已配置的收件邮箱发送一封纯文本通知，收发配置由软件读取。只传 type、subject、body，不支持自定义收发地址、附件、HTML 或 SMTP 参数。',
+  '',
+  '仅输出一个 JSON 代码块，标题和正文按实际任务填写：',
   '```json',
-  '{"type":"send_email","subject":"任务完成通知","body":"任务已完成。这里填写结果、需要注意的事项和后续操作。"}',
+  '{"type":"send_email","subject":"任务通知","body":"通知内容第一行。\\n通知内容第二行。"}',
   '```',
-  'subject 为 1–200 个字符，不能换行；body 为 1–20000 个字符，可用 \\n 换行。两项均不能为空。不接受收件人、发件人、附件、HTML 或 SMTP 参数。',
-  '发送后等待 email_result。status=sent 表示 SMTP 服务器已接受邮件，不代表已送达收件箱；简短告知用户结果，不要重复调用。',
-  'status=failed 表示未能完成发送，按 message 说明原因；配置缺失时请用户进入「设置 → 邮件通知」配置。status=unknown 表示无法确认是否已发送，先提醒用户检查邮箱；不要自行重发。只有用户明确要求重发时才发起新的调用。',
-  '不要通过终端命令读取邮箱授权码或自行编写 SMTP 发信脚本。'
+  '',
+  'subject 为 1–200 字符且不能换行；body 为 1–20000 字符，换行按 JSON 写成 \\n；均不能仅含空白。',
+  '等待 email_result，按 status 和 message 告知结果：sent 表示 SMTP 已接受，送达以收件邮箱为准；failed 为发送失败；unknown 为发送结果不确定，先请用户检查邮箱；cancelled 为调用已取消。',
+  '勿因未收到回执或结果不确定重复发送；重发须有用户明确要求。配置缺失或失效时引导至「设置 → 邮件通知」，勿读取授权码或自行编写发信脚本。'
 ].join('\n')

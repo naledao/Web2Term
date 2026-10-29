@@ -57,7 +57,8 @@ function fixture() {
     getBoundingClientRect() { return { left: box[0], top: box[1], width: box[2], height: box[3], right: box[0] + box[2], bottom: box[1] + box[3] } }
   })
   let trigger = node('High', { id: 'native-trigger' }, [10, 10, 160, 32], () => triggerVisible)
-  trigger.getAttribute = key => ({ 'aria-expanded': String(open), 'aria-controls': open ? 'native-menu' : null,
+  trigger.getAttribute = key => ({ 'aria-label': '选择 ChatGPT 模型', 'aria-haspopup': 'menu',
+    'aria-expanded': String(open), 'aria-controls': open ? 'native-menu' : null,
     [rules.effortAttribute]: effortPresent ? effort : null })[key] ?? null
   const models = ['GPT-6', 'GPT-5.6 Sol'].map((text, i) => {
     const item = node(text, {}, [10, 80 + i * 35, 240, 30], () => open && view === 'model')
@@ -79,7 +80,10 @@ function fixture() {
     state: { taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: false },
     setReplyWaiting: since => { context.state.awaitingReplySince = since },
     getComposer: () => composer, findStopButton: () => null,
-    queryAll: selectors => selectors[0] === rules.triggerSelector ? [trigger] : [],
+    // Match the measured button's attributes, including the absence of legacy markers.
+    queryAll: selectors => selectors.some(selector => selector.replace(/\[[^\]]+\]/g, '') === 'button' &&
+      [...selector.matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)].every(([, name, value]) =>
+        value === undefined ? trigger.getAttribute(name) !== null : trigger.getAttribute(name) === value)) ? [trigger] : [],
     isVisibleElement: element => element?.isConnected && element.visible(), controlDisabled: () => blocked,
     collapse: value => String(value || '').replace(/\s+/g, ' ').trim(),
     innerWidth: 1000, innerHeight: 800, getComputedStyle: () => ({ direction: 'ltr' }),
@@ -121,8 +125,10 @@ function fixture() {
     differentRange() { range = '3' }, afterInput(callback) { afterInput = callback } }
 }
 
-test('initial read discovers hidden model radios without selecting anything and closes its own popup', async () => {
+test('the measured trigger without the legacy marker reads settings and closes its own popup without selecting anything', async () => {
   const f = fixture()
+  assert.equal(f.trigger.getAttribute('data-codex-intelligence-trigger'), null)
+  assert.equal(f.context.queryAll(['button[data-codex-intelligence-trigger][aria-label="选择 ChatGPT 模型"]']).length, 0)
   assert.equal(f.read().model, null)
   const result = await f.change('read')
   assert.equal(result.outcome, 'ok')

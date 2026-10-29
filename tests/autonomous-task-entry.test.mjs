@@ -258,20 +258,23 @@ test('actual page-report and session handlers create goals only for current conf
 test('the actual native-composer interceptor preserves multiline requirements when injecting its prefix', () => {
   const source = ts.createSourceFile('send-interceptor.js', readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8'),
     ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS)
-  let interceptNode
+  let interceptNode, sentinelNode
   function visit(node) {
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'intercept') interceptNode = node.initializer
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'USER_TEXT_SENTINEL') sentinelNode = node.initializer
     ts.forEachChild(node, visit)
   }
   visit(source)
   assert.ok(interceptNode)
+  assert.ok(sentinelNode)
+  const sentinel = new Script('(' + sentinelNode.getText(source) + ')').runInNewContext({})
   const original = '目标：整理报表\n必要条件：\n  保留  两列原始数据\n预期产物：D:\\结果.xlsx\n'
   let draft = original, submitted
   const element = {}
   const context = {
     state: { enabled: true, promptInjectionEnabled: true, prefix: 'SYSTEM\n', taskPromptGeneration: 1,
       taskPromptInjected: false, programmatic: false, injectedCount: 0 },
-    draftRejected: false, USER_TEXT_SENTINEL: '\u0000\u0001', SEND_ATTEMPT_BUDGET_MS: 1000, SEND_BUTTON_GRACE_MS: 100,
+    draftRejected: false, USER_TEXT_SENTINEL: sentinel, SEND_ATTEMPT_BUDGET_MS: 1000, SEND_BUTTON_GRACE_MS: 100,
     getComposer: () => element, noteUserSend() {}, hasPrefix: () => false,
     readComposer: () => draft, collapse: value => String(value).replace(/\s+/g, ' ').trim(), userTextOf: value => value,
     hasDraftImageAttachment: () => false, beginUserImageCapture: () => 'attachment-token',
@@ -280,5 +283,6 @@ test('the actual native-composer interceptor preserves multiline requirements wh
   }
   const intercept = new Script('(' + interceptNode.getText(source) + ')').runInNewContext(context)
   assert.equal(intercept({ target: element, preventDefault() {}, stopImmediatePropagation() {} }), true)
-  assert.equal(submitted, 'SYSTEM\n\u0000\u0001' + original)
+  assert.equal(submitted, 'SYSTEM\n' + sentinel + original)
+  assert.doesNotMatch(submitted, /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/)
 })

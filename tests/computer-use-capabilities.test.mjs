@@ -15,7 +15,7 @@ const compile = source => ts.transpileModule(source, {
 function load(relative, dependencies = {}) {
   const exports = {}
   new Script(compile(readFileSync(new URL(relative, import.meta.url), 'utf8')), { filename: relative })
-    .runInNewContext({ exports, require(name) { if (Object.hasOwn(progressVmModules, name)) return progressVmModules[name];
+    .runInNewContext({ exports, structuredClone, require(name) { if (Object.hasOwn(progressVmModules, name)) return progressVmModules[name];
       assert.ok(Object.hasOwn(dependencies, name), `Unexpected runtime dependency: ${name}`)
       return dependencies[name]
     } })
@@ -31,6 +31,64 @@ const toolPrompts = load('../src/shared/tool-prompts.ts', { './types': types })
 const enabled = { computerUseEnabled: true, desktopControlEnabled: true }
 const local = { sessionId: 'task-session', platformId: 'deepseek', hostPlatform: 'win32', hostArch: 'x64', connection: 'local' }
 const resolve = (preferences = enabled, context = {}) => capability.resolveComputerUseCapability(preferences, { ...local, ...context })
+
+test('discovery examples pass the real protocol with the supplied token and no guessed resource references', () => {
+  const { LIST_WINDOWS_DEFINITION } = load('../src/shared/windows-desktop.ts')
+  const { LIST_APPS_DEFINITION, OPEN_RESOURCE_DEFINITION } = load('../src/shared/windows-apps.ts')
+  const examples = prompt => [...prompt.matchAll(/```json\n([\s\S]*?)\n```/g)].map(match => JSON.parse(match[1]))
+  for (const definitions of [[LIST_APPS_DEFINITION, LIST_WINDOWS_DEFINITION], [LIST_APPS_DEFINITION]]) {
+    const current = capability.resolveComputerUseCapability(enabled, local, definitions)
+    for (const digit of ['a', 'b']) {
+      const token = 'cu_' + digit.repeat(32)
+      const requests = examples(capability.computerUseCapabilityPrompt(current, token))
+      assert.equal(requests.length, 1)
+      const request = requests[0]
+      assert.equal(request.action, definitions.length === 2 ? 'list_windows' : 'list_apps')
+      assert.equal(request.step_token, token)
+      assert.deepEqual(Object.keys(request).sort(), ['action', 'description', 'step_token', 'type', 'version'])
+      assert.equal(protocol.computerUseProtocol.check(JSON.stringify(request), current.actionDefinitions).ok, true)
+    }
+    for (const token of [undefined, null, '', 'cu_invalid'])
+      assert.deepEqual(examples(capability.computerUseCapabilityPrompt(current, token)), [])
+    const unavailable = capability.resolveComputerUseCapability(enabled, { ...local, connection: 'ssh' }, definitions)
+    assert.deepEqual(examples(capability.computerUseCapabilityPrompt(unavailable, 'cu_' + 'a'.repeat(32))), [])
+  }
+  const requiresQuery = { ...LIST_WINDOWS_DEFINITION,
+    parameters: LIST_WINDOWS_DEFINITION.parameters.map(parameter => parameter.name === 'query' ? { ...parameter, required: true } : parameter) }
+  for (const definition of [OPEN_RESOURCE_DEFINITION, requiresQuery]) {
+    const current = capability.resolveComputerUseCapability(enabled, local, [definition])
+    assert.equal(current.available, true)
+    assert.deepEqual(examples(capability.computerUseCapabilityPrompt(current, 'cu_' + 'a'.repeat(32))), [])
+  }
+})
+
+test('published action parameters retain conditional requirements, nested evidence and distinct same-name meanings', () => {
+  const controls = load('../src/shared/windows-controls.ts')
+  const { WAIT_FOR_DEFINITION } = load('../src/shared/windows-wait.ts', { './windows-controls': controls })
+  const { OBSERVE_DEFINITION } = load('../src/shared/windows-observation.ts')
+  const { DRAG_DEFINITION } = load('../src/shared/windows-drag.ts')
+  const { TYPE_TEXT_DEFINITION } = load('../src/shared/windows-type-text.ts')
+  const { COMPLETE_TASK_ACTION } = load('../src/shared/task-completion.ts')
+  const { OPEN_RESOURCE_DEFINITION } = load('../src/shared/windows-apps.ts')
+  const definitions = [WAIT_FOR_DEFINITION, OBSERVE_DEFINITION, DRAG_DEFINITION, TYPE_TEXT_DEFINITION, COMPLETE_TASK_ACTION, OPEN_RESOURCE_DEFINITION]
+  const current = capability.resolveComputerUseCapability(enabled, local, definitions)
+  assert.equal(current.actionDefinitions.length, definitions.length)
+  const prompt = capability.computerUseCapabilityPrompt(current)
+  const action = name => prompt.split('\n').find(line => line.startsWith(name + '：'))
+  assert.match(action('observe'), /window／controls 必填，region 可选，与 monitor_id 互斥/)
+  assert.match(action('wait_for'), /background_ready／background_finished 必填/)
+  assert.match(action('wait_for'), /selector:object=.*name.*role/)
+  assert.match(action('drag'), /path!:array=.*2—33 个仅含整数 x\/y/)
+  assert.match(action('type_text'), /仅 replace 允许空串清空/)
+  assert.ok(action('complete_task').includes('{input_id,checks:[{criterion,evidence_ids,status,assessment}]}'))
+  assert.ok(action('complete_task').includes('[{evidence_id,label}]'))
+  assert.match(action('complete_task'), /可选/)
+  assert.doesNotMatch(prompt, /不能只写完成文字|不可逆决定时/)
+  for (const name of ['observe', 'open']) {
+    const description = definitions.find(definition => definition.action === name).parameters.find(parameter => parameter.name === 'target').description
+    assert.ok(action(name).includes(description), 'target retains the meaning for ' + name)
+  }
+})
 
 test('saved intent never advertises a desktop driver or actions before they are implemented', () => {
   const state = resolve()

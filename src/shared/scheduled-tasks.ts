@@ -69,10 +69,16 @@ export function scheduleLabel(schedule: TaskSchedule): string {
 }
 export const scheduledTaskToolPrompt = [
   '【工具：scheduled_task】',
-  '用户要求周期性执行任务时，创建定时计划。只提供周期 schedule 和自然语言任务 prompt；会话、平台、主机和目录由软件绑定。创建时不立即执行。',
+  '仅在用户要求周期执行时创建计划，到期向绑定的 AI 对话提交 prompt。会话、平台、主机和目录由软件绑定，创建时不立即执行。',
+  '',
+  '仅输出一个 JSON 代码块：',
   '```json',
   '{"type":"scheduled_task","schedule":{"kind":"interval","minutes":30},"prompt":"检查当前项目的后台服务状态，发现异常时分析原因。"}',
   '```',
-  '固定间隔 minutes 为至少 1 的整数；日历周期使用 {"kind":"cron","expression":"0 9 * * 1-5","timeZone":"Asia/Shanghai"}，expression 为五段 Cron。不要自行编写等待或调度脚本。',
-  '软件确认已保存并返回任务编号、周期和下次时间后，简短确认；不要重复创建。应用需保持运行；原会话忙碌、未选中、存在草稿或已暂停时排队，错过多次合并一次。可在「定时任务」页管理计划。'
+  '',
+  '只传 type、schedule、prompt；prompt 为非空自然语言任务，最多 16000 字符，写清每次需要完成的事。',
+  '固定间隔：minutes 为 1–5256000 的整数，首次在保存满一个周期后触发。',
+  '日历周期：schedule 用 {"kind":"cron","expression":"0 9 * * 1-5","timeZone":"Asia/Shanghai"}；expression 为五段 Cron，不含秒或 H，timeZone 按实际任务填写有效的 IANA 时区。',
+  '应用须运行，选中绑定会话并恢复原执行环境后投递；忙碌、草稿或暂停时排队，错过多次合并一次。',
+  '收到软件保存回执后简短确认，不重复创建；勿编写等待或调度脚本。计划管理见「定时任务」页。'
 ].join('\n')

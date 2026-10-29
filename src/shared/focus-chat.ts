@@ -253,7 +253,7 @@ export function cleanFocusAnswer(text: string): string {
   return questions.map((item, index) => `${index + 1}. ${item.question.trim()}`).join('\n')
 }
 export function cleanFocusUserText(text: string): string {
-  const marker = '\u0000\u0001'
-  const index = text.lastIndexOf(marker)
+  const marker = '\u2063\u2063'
+  const index = Math.max(text.lastIndexOf(marker), text.lastIndexOf('\u0000\u0001'))
   return index < 0 ? text : text.slice(index + marker.length)
 }

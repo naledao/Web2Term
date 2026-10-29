@@ -270,34 +270,20 @@ const COMPUTER_ACTION_SUMMARIES: Readonly<Record<string, string>> = {
   focus_window: '恢复并激活已确认的业务窗口，核对前台和焦点；不发送输入。',
   observe: '读取桌面、窗口、区域截图或控件树；只读，不激活、不输入。',
   validate_observation: '只读复核最新观察中的控件或图像定位；不执行输入，也不授予输入许可。',
-  click: '点击最新观察中的控件或原 PNG 像素点；点击后看新观察。',
-  type_text: '向最新观察中已确认焦点的可写控件输入文字；输入后核对新观察。',
-  press_key: '在已确认的前台业务窗口发送一次按键或组合键；之后看新观察。',
-  scroll: '在最新观察中的控件或图像落点滚动一次；之后看新观察。',
-  drag: '在同一业务窗口的最新截图内执行有界拖拽；之后看新观察。',
+  click: '点击最新观察中的控件或上传 PNG 像素点。',
+  type_text: '向最新观察中已确认焦点的可写控件输入文字。',
+  press_key: '在已确认的前台业务窗口发送一次按键或组合键。',
+  scroll: '在最新观察中的控件或图像落点滚动一次。',
+  drag: '在同一业务窗口的最新截图内执行有界拖拽。',
   wait_for: '有界等待已存在的后台任务或桌面条件；不启动、停止、点击或输入。',
-  complete_task: '核对全部用户要求和实际证据并交付任务；不能只写完成文字。'
-}
-
-const COMPUTER_PARAMETER_SUMMARIES: Readonly<Record<string, string>> = {
-  target: '目标：desktop/window/region/controls', window_id: '真实窗口编号', monitor_id: '真实显示器编号',
-  observation_id: '最新 observe 编号', element_id: '同一观察中的控件编号', x: '原 PNG 像素 x', y: '原 PNG 像素 y',
-  width: 'region 宽度', height: 'region 高度', max_dimension: '截图最长边', include_controls: '是否附带控件树',
-  max_depth: '控件树深度', max_elements: '控件数量上限', include_selection: '是否读取焦点选区',
-  query: '标题/进程/路径筛选词', pid: '进程筛选', include_hidden: '是否包含隐藏窗口', limit: '结果数量上限',
-  cursor: '上一页 next_cursor', refresh: '是否重新采集', register_path: '已确认的绝对 exe 路径',
-  app_id: 'list_apps 返回的应用编号', launch_reference_id: '应用启动引用', restore: '是否恢复窗口',
-  wait_ms: '有界等待毫秒数', button: 'left/right/middle', click_count: '点击次数 1/2', method: 'auto/mouse',
-  text: '要输入或查找的文字', mode: 'insert/replace', key: '一个按键或组合键', direction: 'up/down/left/right',
-  amount: '滚轮刻度 1-10', path: '原 PNG 像素轨迹', duration_ms: '拖拽时长毫秒', condition: '等待条件',
-  background_id: '真实后台任务编号', observation: '结束后 controls/window 观察', selector: '控件 name/role 条件',
-  kind: 'file/directory/url', summary: '完成摘要', requirements: '逐项要求、检查和证据', artifacts: '文件证据及标签',
-  no_artifact_reason: '无文件交付原因', superseded_backgrounds: '已替代的后台任务', unconfirmed: '未确认事项'
+  complete_task: '可选的逐项证据核对与产物交付。'
 }
 
 function compactParameter(parameter: ComputerUseParameter): string {
   const name = `${parameter.name}${parameter.required ? '!' : ''}:${parameter.type}`
-  const summary = COMPUTER_PARAMETER_SUMMARIES[parameter.name] ?? parameter.description.split(/[。！？]/, 1)[0].slice(0, 80)
+  // Names such as target/text/window_id have different meanings per action. Keep
+  // registered conditions and nested structures rather than truncating their contract.
+  const summary = parameter.description
   const limits = [
     ...(parameter.enum ? [`{${parameter.enum.join('|')}}`] : []),
     ...(parameter.minimum !== undefined ? [`≥${parameter.minimum}`] : []),
@@ -314,6 +300,21 @@ function compactAction(definition: ComputerUseActionDefinition): string {
   const parameters = definition.parameters.map(compactParameter).join('; ')
   const locator = definition.locatorAlternatives ? `；定位二选一：${definition.locatorAlternatives.map(group => group.join('+')).join(' 或 ')}` : ''
   return `${definition.action}：${summary}${parameters ? ` 参数：${parameters}` : ''}${locator}`
+}
+
+/** A copyable example must use a real current token and a no-input discovery action. */
+function computerDiscoveryExample(capability: ComputerUseCapability, stepToken?: string | null): string[] {
+  if (!stepToken || !/^cu_[a-f0-9]{32}$/.test(stepToken)) return []
+  for (const action of ['list_windows', 'list_apps']) {
+    const definition = capability.actionDefinitions.find(item => item.action === action)
+    if (!definition || !computerUseParametersMatch(definition, {})) continue
+    const request: ComputerUseWireRequest = {
+      type: 'computer', version: COMPUTER_USE_PROTOCOL_VERSION, action, step_token: stepToken,
+      description: action === 'list_windows' ? '查看可操作窗口' : '查找可用应用'
+    }
+    return ['调用示例（按实际目标选择动作，使用最新令牌）：', '```json', JSON.stringify(request), '```']
+  }
+  return []
 }
 
 /**
@@ -345,7 +346,7 @@ export function computerUseCapabilityPrompt(capability: ComputerUseCapability, s
   if (!capability.computerUseEnabled && !capability.desktopControlEnabled) return ''
   return [
     '【工具能力：computer use】',
-    '用于发现、观察和操作本机业务应用；命令、文件和后台任务继续使用对应工具。无需先提交计划，每次只推进一个可验证步骤。',
+    '用于发现、观察和操作本机桌面应用；命令、文件和后台任务使用对应工具。',
     `computer use：${capability.computerUseEnabled ? '已启用' : '已关闭'}；桌面控制：${capability.desktopControlEnabled ? '已允许' : '已关闭'}。`,
     ...(pausedByInput ? [
       '【computer use 暂停后继续】',
@@ -357,23 +358,25 @@ export function computerUseCapabilityPrompt(capability: ComputerUseCapability, s
       '当前没有可调用的 computer 桌面动作。不要输出 computer 工具请求，不要声称已观察或操作桌面。继续使用实际提供的现有工具。'
     ] : [
       '【computer 当前可调用动作与参数】',
+      '参数标记 ! 表示必填；同时遵守各动作的条件必填、范围和互斥规则。',
       ...capability.actionDefinitions.map(compactAction),
       ...(capability.desktopPointClickEnabled === true && capability.actions.includes('click') ? [
         '【桌面坐标点击：用户已开启】',
-        '仅业务窗口外可用：先 observe target=desktop/region，再用同一 observation_id 的 x/y click；业务窗口内优先使用 window/controls 观察。点击后看新观察。'
+        '仅业务窗口外可用：先 observe target=desktop/region，再用同一 observation_id 的 x/y click；业务窗口内优先使用 window/controls 观察。'
       ] : []),
       '【computer 规则】',
-      '先发现/激活/observe，再输入；输入必须引用当前任务最新观察。窗口、焦点、布局或观察失效后重新发现/observe。',
-      '每轮只发一个 JSON 请求，参数放顶层；不得混入 command、read_files 或 questions。只用当前 step_token；无令牌时等待 computer_result。',
-      '每个 computer 请求必须带顶层 description：1–160 字的单行简短中文，说明本步准备操作的具体对象、动作及目的。仅用于向用户展示，不是执行参数；不要包含思考过程、敏感输入原文，也不要把尚未执行的操作描述成已完成。',
-      '操作后根据新观察继续；unknown、可能已生效或结果未确认时先核对，禁止盲目重试。ok 不代表业务目标完成。',
-      'human_paused 表示 computer use 已因用户键鼠操作暂停，停止发起 computer 请求，等待用户发新消息；human_input/external_input 后重新观察。需要用户信息或不可逆决定时使用现有 questions 协议。',
-      '任务结束时以“【任务完成】”开头回复，客户端收到该标记即结束任务并提示用户；可选用 complete_task 核对并交付详细结果。',
+      '输入前确认目标窗口与焦点，使用当前任务最新有效观察；窗口、焦点或布局变化后重新观察。引用来自真实回传，坐标依据实际上传 PNG。',
+      '操作后依据新观察继续；execution=not_executed 表示未执行，executed 表示执行器已返回，unknown 表示结果未确认。可能已生效时先核对，不盲目重试；ok 不代表业务目标完成。',
+      'human_paused 时停止 computer 调用并等待用户新消息；恢复后先重新观察并核对上一步。human_input/external_input 后重新观察。',
+      '澄清与授权遵循【判断与确认】，完成回复遵循【任务完成】；complete_task 用于可选的详细核对和产物交付。',
       '【computer 调用格式】',
-      `用一个 json 代码块输出单个 JSON 对象，顶层必须包含 type="computer"、version=${COMPUTER_USE_PROTOCOL_VERSION}、action、step_token 和 description；action 使用当前可调用动作名，动作参数按上方定义放在同一顶层。`,
+      `每次仅输出一个 JSON 代码块，包含 type="computer"、version=${COMPUTER_USE_PROTOCOL_VERSION}、action、step_token、description；action 使用当前可调用动作名，动作参数放同一顶层，不混入其他调用。`,
+      'description 为 1–160 字单行中文，说明本步对象、动作和目的，不含思考过程、敏感原文或尚未执行的完成断言。',
+      'step_token 使用最新状态或 computer_result.next_step_token，等待结果后再继续，不复用旧令牌；无令牌时等待结果。',
       ...(stepToken === null ? ['当前步骤正在处理或令牌尚未就绪，等待 computer_result 返回 next_step_token 后再发起下一请求。']
         : stepToken ? [`当前 step_token：${stepToken}`] : []),
-      '返回结果包含 type/version/action/ok/execution/code/message/data。execution=not_executed 表示未执行，executed 表示执行器已返回，unknown 表示可能已生效但未确认；协议错误按结果修正请求，不重放未知动作。'
+      ...computerDiscoveryExample(capability, stepToken),
+      '按 code/message/data 核对结果；未执行的协议或参数错误按回传修正，不重放未知动作。'
     ])
   ].join('\n')
 }

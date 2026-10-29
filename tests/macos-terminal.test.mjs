@@ -64,7 +64,7 @@ test('Mac startup and environment reports describe a local zsh, including before
   assert.equal(info.workingDirectory, directory)
   assert.equal(info.remoteTarget, '')
   const prompt = buildTerminalPrompt(info)
-  assert.match(prompt, /你是 macOS 终端助手/)
+  assert.match(prompt, /当前使用 macOS Shell/)
   assert.match(prompt, /BSD/)
   assert.match(prompt, /Homebrew/)
   assert.doesNotMatch(prompt, /你是 Linux|你是 PowerShell|包管理按发行版/)
@@ -162,7 +162,7 @@ test('a new model command replaces a busy LOCAL zsh without waiting for an SSH r
 })
 
 test('Windows and remote Linux prompt dialects remain available', () => {
-  assert.match(buildTerminalPrompt(FALLBACK_ENVIRONMENT), /你是 PowerShell 终端助手/)
+  assert.match(buildTerminalPrompt(FALLBACK_ENVIRONMENT), /当前使用 PowerShell 执行命令/)
   const linux = buildTerminalPrompt({ ...FALLBACK_ENVIRONMENT, kind: 'posix', osCaption: 'Ubuntu', shellPath: '/bin/bash' })
   assert.match(linux, /包管理按发行版/)
   assert.doesNotMatch(linux, /Homebrew|你是 macOS/)

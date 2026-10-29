@@ -134,6 +134,7 @@ function renderer(api) {
     setDetail(value) { ctx.detail = typeof value === 'function' ? value(ctx.detail) : value },
     setCatalog(value) { ctx.catalog = typeof value === 'function' ? value(ctx.catalog) : value }
   })
+  ctx.compareReleaseNotes = actual('compareReleaseNotes', ctx)
   return { ctx, markRead: actual('markRead', ctx), loadPage: actual('loadPage', ctx), selectNote: actual('select', ctx) }
 }
 
