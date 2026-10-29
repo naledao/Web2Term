@@ -255,13 +255,15 @@ test('actual page-report and session handlers create goals only for current conf
   assert.equal(store.autonomousTaskGeneration('session-A'), 1)
 }))
 
-test('the actual native-composer interceptor preserves multiline requirements when injecting its prefix', () => {
+test('the native composer isolates multiline goals for first sends, follow-ups, retries and disabled injection', () => {
   const source = ts.createSourceFile('send-interceptor.js', readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8'),
     ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS)
   let interceptNode, sentinelNode
+  const helpers = new Map()
   function visit(node) {
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'intercept') interceptNode = node.initializer
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'USER_TEXT_SENTINEL') sentinelNode = node.initializer
+    if (ts.isVariableDeclaration(node) && ['userPromptInjection', 'reportUserInjection', 'userTextOf'].includes(node.name.getText(source))) helpers.set(node.name.getText(source), node.initializer)
     ts.forEachChild(node, visit)
   }
   visit(source)
@@ -269,20 +271,32 @@ test('the actual native-composer interceptor preserves multiline requirements wh
   assert.ok(sentinelNode)
   const sentinel = new Script('(' + sentinelNode.getText(source) + ')').runInNewContext({})
   const original = '目标：整理报表\n必要条件：\n  保留  两列原始数据\n预期产物：D:\\结果.xlsx\n'
-  let draft = original, submitted
-  const element = {}
-  const context = {
-    state: { enabled: true, promptInjectionEnabled: true, prefix: 'SYSTEM\n', taskPromptGeneration: 1,
-      taskPromptInjected: false, programmatic: false, injectedCount: 0 },
-    draftRejected: false, USER_TEXT_SENTINEL: sentinel, SEND_ATTEMPT_BUDGET_MS: 1000, SEND_BUTTON_GRACE_MS: 100,
-    getComposer: () => element, noteUserSend() {}, hasPrefix: () => false,
-    readComposer: () => draft, collapse: value => String(value).replace(/\s+/g, ' ').trim(), userTextOf: value => value,
-    hasDraftImageAttachment: () => false, beginUserImageCapture: () => 'attachment-token',
-    insertText: (_, text) => { draft = text; return true }, report() {}, setTimeout: fn => { fn(); return 1 },
-    submitWithRetry: text => { submitted = text }
+  for (const mode of ['first', 'follow-up', 'retry', 'legacy-retry', 'off', 'off-retry', 'empty']) {
+    let draft = mode.includes('retry') ? 'SYSTEM\n' + (mode === 'legacy-retry' ? '\u0000\u0001' : sentinel) + original : mode === 'empty' ? '' : original
+    let submitted, sendContext
+    const reports = [], element = {}
+    const context = {
+      state: { enabled: true, promptInjectionEnabled: !mode.startsWith('off'), prefix: 'SYSTEM\n', taskPromptGeneration: 1,
+        replyProtocolPrefix: 'SHORT\n\n', replyProtocolVersion: 1, prefixIncludesReplyProtocol: true, replyProtocolFullLength: 6,
+        taskPromptInjected: mode === 'follow-up', programmatic: false, injectedCount: 0 },
+      draftRejected: false, USER_TEXT_SENTINEL: sentinel, SEND_ATTEMPT_BUDGET_MS: 1000, SEND_BUTTON_GRACE_MS: 100,
+      getComposer: () => element, noteUserSend() {},
+      readComposer: () => draft, collapse: value => String(value).replace(/\s+/g, ' ').trim(),
+      hasDraftImageAttachment: () => false, beginUserImageCapture: () => 'attachment-token',
+      insertText: (_, text) => { draft = text; return true }, report: event => reports.push(event), setTimeout: fn => { fn(); return 1 },
+      submitWithRetry: (text, ...args) => { submitted = text; sendContext = args.at(-1) }
+    }
+    for (const [name, node] of helpers) context[name] = new Script('(' + node.getText(source) + ')').runInNewContext(context)
+    const intercept = new Script('(' + interceptNode.getText(source) + ')').runInNewContext(context)
+    assert.equal(intercept({ target: element, preventDefault() {}, stopImmediatePropagation() {} }), mode !== 'empty', mode)
+    if (mode === 'empty') { assert.equal(submitted, undefined); continue }
+    const expectedPrefix = mode.startsWith('off') ? '' : mode === 'follow-up' ? 'SHORT\n\n' : 'SYSTEM\n'
+    assert.equal(submitted, expectedPrefix ? expectedPrefix + sentinel + original : original, mode)
+    assert.equal(draft, submitted, 'the real composer contents match the submitted payload')
+    assert.equal(context.userTextOf(submitted), original, mode)
+    assert.equal(sendContext.promptInjected, !mode.startsWith('off') && mode !== 'follow-up', mode)
+    assert.equal(context.state.taskPromptGeneration, 1)
+    assert.doesNotMatch(submitted, /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/)
+    if (mode === 'follow-up') assert.equal(reports[0].replyProtocolKind, 'short')
   }
-  const intercept = new Script('(' + interceptNode.getText(source) + ')').runInNewContext(context)
-  assert.equal(intercept({ target: element, preventDefault() {}, stopImmediatePropagation() {} }), true)
-  assert.equal(submitted, 'SYSTEM\n' + sentinel + original)
-  assert.doesNotMatch(submitted, /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/)
 })

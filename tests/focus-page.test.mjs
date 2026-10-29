@@ -36,6 +36,7 @@ function fixture() {
     Date, URL, Promise, Node: { DOCUMENT_POSITION_FOLLOWING: 4 },
     location: { pathname: '/a/chat/s/one', href: 'https://chat.deepseek.com/a/chat/s/one' },
     state: { enabled: true, promptInjectionEnabled: true, prefix: 'SYSTEM\n\n', taskPromptInjected: false,
+      replyProtocolPrefix: 'SHORT\n\n', replyProtocolVersion: 1, prefixIncludesReplyProtocol: true, replyProtocolFullLength: 6,
       injectedCount: 0, taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: null },
     USER_TEXT_SENTINEL, SEND_TIMEOUT_MS: 6000, SEND_BUTTON_GRACE_MS: 500,
     fileSend: null, computerResultToken: null, userTurns: () => [], focusEditing: null, focusEditExcludedIds: new Set(), focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
@@ -54,7 +55,7 @@ function fixture() {
     extractCommand: () => null, PAGE: DEEPSEEK_PAGE,
     queryAll: () => [], isVisibleElement: () => true, focusSendFailureOf: () => null
   })
-  for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'focusRowPosition', 'focusReplyAnchor', 'conversationPromptInHistory']) context[name] = arrow(name, context)
+  for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'focusRowPosition', 'focusReplyAnchor', 'conversationPromptInHistory', 'userPromptInjection', 'reportUserInjection']) context[name] = arrow(name, context)
   return { context, composer, calls, reports, send: method('sendUser', context), snapshot: method('focusSnapshot', context) }
 }
 
@@ -110,7 +111,10 @@ test('app composer preserves multiline input and waits for confirmed user-send o
   f.context.state.taskPromptInjected = true
   f.composer.draft = ''
   const next = f.send('继续', '/a/chat/s/one')
-  assert.equal(f.calls[1][0], '继续')
+  assert.equal(f.calls[1][0], 'SHORT\n\n' + USER_TEXT_SENTINEL + '继续')
+  assert.equal(f.calls[1].at(-1).promptInjected, false, 'the short reminder must not commit another environment plan')
+  assert.equal(f.calls[1].at(-1).replyProtocolKind, 'short')
+  assert.equal(f.context.state.taskPromptGeneration, 1, 'reminding does not create a new task boundary')
   f.calls[1][3]('stuck')
   assert.equal(await next, 'stuck')
 })
@@ -130,16 +134,19 @@ test('a scheduled send includes system and tool prompts when the conversation ha
 })
 
 test('scheduled sends reuse conversation prompts after a task reset or page reload, including older rendered history', async () => {
-  for (const evidence of ['persisted', 'current-task', 'history']) {
+  for (const evidence of ['persisted', 'current-task', 'history', 'current-history']) {
     const f = fixture()
     if (evidence === 'current-task') f.context.state.taskPromptInjected = true
     if (evidence === 'history') f.context.userTurns = () => [{ textContent: '【角色】你是 PowerShell 终端助手。\n【工作协议】\n【执行环境】\n【工具：scheduled_task】' }]
+    if (evidence === 'current-history') f.context.userTurns = () => [{ textContent: '【角色】协助用户完成当前目标。\n【任务完成】\n【工作协议】\n【执行环境】\n【工具目录】' }]
     const send = method('sendScheduledUser', f.context)
     const pending = send.call({ sendUser: f.send }, '检查 GPU 温度', '/a/chat/s/one', 'run-next', evidence === 'persisted')
-    assert.equal(f.calls[0][0], '检查 GPU 温度', evidence)
+    assert.equal(f.calls[0][0], 'SHORT\n\n' + USER_TEXT_SENTINEL + '检查 GPU 温度', evidence)
     assert.equal(f.calls[0].at(-1).promptInjected, false, evidence)
     assert.equal(f.calls[0].at(-1).conversationPromptInjected, true, evidence)
-    assert.equal(f.reports.length, 0, 'reusing a prompt must not report another injection')
+    assert.equal(f.reports.length, 1)
+    assert.equal(f.reports[0].promptInjected, false, 'only the per-user contract was injected')
+    assert.equal(f.reports[0].replyProtocolKind, 'short')
     f.calls[0][3]('ok'); assert.equal(await pending, 'ok')
     assert.equal(f.context.computerResultToken, null)
   }
@@ -152,6 +159,29 @@ test('a tool mention or a system-only history message does not suppress the firs
   const pending = method('sendScheduledUser', f.context).call({ sendUser: f.send }, '新任务', '/a/chat/s/one', 'run-a')
   assert.equal(f.calls[0].at(-1).promptInjected, true)
   f.calls[0][3]('ok'); assert.equal(await pending, 'ok')
+})
+
+test('the injection switch disables both full and short contracts without changing user wording', async () => {
+  for (const taskPromptInjected of [false, true]) {
+    const f = fixture()
+    Object.assign(f.context.state, { promptInjectionEnabled: false, taskPromptInjected })
+    const pending = f.send('把【任务完成】写进文档\n  第二行', '/a/chat/s/one')
+    assert.equal(f.calls[0][0], '把【任务完成】写进文档\n  第二行')
+    assert.equal(f.calls[0].at(-1).promptInjected, false)
+    assert.equal(f.calls[0].at(-1).replyProtocolKind, undefined)
+    assert.equal(f.reports.length, 0)
+    f.calls[0][3]('ok'); assert.equal(await pending, 'ok')
+  }
+})
+
+test('a clarification keeps its original pending question and receives only the per-user reminder', () => {
+  const f = fixture()
+  Object.assign(f.context.state, { taskPromptInjected: true, pendingQuestion: { messageId: 'question-a' } })
+  const injection = f.context.userPromptInjection()
+  assert.equal(injection.prefix, 'SHORT\n\n')
+  assert.equal(injection.metadata.promptInjected, false)
+  assert.equal(f.context.state.pendingQuestion.messageId, 'question-a')
+  assert.equal(f.context.state.taskPromptGeneration, 1)
 })
 
 test('preserves native drafts, pending questions and uploads without attempting a send', async () => {
@@ -406,6 +436,15 @@ test('file message prepares a user prompt once, including attachment-only messag
   assert.equal(plain.composer.draft, '')
 })
 
+test('an attachment in an open task carries the short contract before its user-text boundary', () => {
+  const f = uploadFixture('附件问题\n  保留缩进')
+  f.context.state.taskPromptInjected = true
+  assert.equal(f.api.prepare('owned-file'), true)
+  assert.equal(f.composer.draft, 'SHORT\n\n' + USER_TEXT_SENTINEL + '附件问题\n  保留缩进')
+  assert.equal(f.context.fileSend.focus.promptInjected, false)
+  assert.equal(f.context.fileSend.focus.injection.metadata.replyProtocolKind, 'short')
+})
+
 test('upload cannot borrow another draft, task generation or route', () => {
   const f = uploadFixture()
   f.composer.draft = '用户后来修改的内容'
@@ -428,7 +467,7 @@ test('confirmed attachment upload reports one human message and never sent-raw',
     draftRejected: true
   })
   Object.assign(f.context.fileSend, { submitted: true, baselineUser: {}, caption: 'SYSTEM\u0000\u0001阅读附件' })
-  Object.assign(f.context.fileSend.focus, { promptInjected: true, attachmentToken: 'img:owned' })
+  Object.assign(f.context.fileSend.focus, { promptInjected: true, attachmentToken: 'img:owned', injection: f.context.userPromptInjection() })
   f.context.state.awaitingReplySince = 1
   const status = arrow('fileSendStatus', f.context)
   assert.equal(status('owned-file').status, 'sent')

@@ -86,11 +86,12 @@ export function hashText(text: string): string {
   return (hash >>> 0).toString(16).padStart(8, '0')
 }
 
-/** A line that is only a 【heading】 starts a section; inline 【markers】 stay in their section. */
+/** Standalone headings split sections, except inside fenced examples or tool payloads. */
 export function splitPromptSections(prompt: string): PromptSection[] {
   const sections: PromptSection[] = []
   const seen = new Map<string, number>()
   let current: { heading: string; lines: string[] } = { heading: '', lines: [] }
+  let fence: { char: string; length: number } | null = null
   const flush = () => {
     const text = current.lines.join('\n').trim()
     if (text === '') return
@@ -99,6 +100,17 @@ export function splitPromptSections(prompt: string): PromptSection[] {
     sections.push({ key: count === 1 ? current.heading : `${current.heading}#${count}`, heading: current.heading, text })
   }
   for (const line of prompt.split('\n')) {
+    const boundary = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    if (fence) {
+      current.lines.push(line)
+      if (boundary && boundary[1][0] === fence.char && boundary[1].length >= fence.length && boundary[2].trim() === '') fence = null
+      continue
+    }
+    if (boundary) {
+      fence = { char: boundary[1][0], length: boundary[1].length }
+      current.lines.push(line)
+      continue
+    }
     if (/^【[^】\n]{1,40}】$/.test(line.trim())) {
       flush()
       current = { heading: line.trim(), lines: [line] }

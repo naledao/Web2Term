@@ -50,6 +50,8 @@ function fixture() {
   groups = [group('user-1', '第一轮'), group('user-2', '第二轮'), group('user-3', '第三轮')]
   const replies = groups.map((item, index) => ({ id: 'reply-' + (index + 1), closest: () => item }))
   const state = { enabled: true, promptInjectionEnabled: true, taskPromptInjected: false, prefix: 'SYSTEM\n',
+    injectedCount: 0,
+    replyProtocolPrefix: 'SHORT\n\n', replyProtocolVersion: 1, prefixIncludesReplyProtocol: true, replyProtocolFullLength: 6,
     taskPromptGeneration: 4, programmatic: false, awaitingReplySince: 0, pendingQuestion: null }
   const composer = { innerText: '' }
   const context = createContext({
@@ -84,6 +86,8 @@ function fixture() {
     scheduleScrollToBottom() {}, scheduleCheck() { scanCount++ }
   })
   context.userTextOf = helper('userTextOf', context)
+  context.userPromptInjection = helper('userPromptInjection', context)
+  context.reportUserInjection = helper('reportUserInjection', context)
   context.noteEditSubmission = method('noteEditSubmission', context)
   return { context, state, composer, calls, reports, editor, groups: () => groups, scanCount: () => scanCount,
     stall() { stalled = true },
@@ -99,6 +103,18 @@ function fixture() {
     }, edit: helper('editFocusUser', context) }
 }
 const request = { text: '新的第二轮\n换行', originalText: '第二轮', replyMessageId: 'reply-2', token: 'test-edit' }
+
+test('editing within an open task carries a short contract while recording only the edited user text', async () => {
+  const f = fixture()
+  f.state.taskPromptInjected = true
+  assert.equal(await f.edit(request, '/c/one', {}), 'ok')
+  assert.equal(f.editor.innerText, 'SHORT\n\n' + USER_TEXT_SENTINEL + request.text)
+  assert.equal(f.reports.find(item => item.event === 'user-message').text, request.text)
+  const sent = f.reports.find(item => item.event === 'sent')
+  assert.equal(sent.promptInjected, false)
+  assert.equal(sent.replyProtocolKind, 'short')
+  assert.equal(f.state.taskPromptGeneration, 4)
+})
 
 test('native form is scoped to the selected reply, submitted once, and acknowledged by a new user id', async () => {
   const f = fixture(), diagnostic = {}

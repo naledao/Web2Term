@@ -33,7 +33,8 @@ import type { FocusUiAction, FocusUiRecovery } from '../shared/focus-smart-ui'
 import { parseReadFilesRequest } from '../shared/file-requests'
 import type { FileSendOutcome } from '../shared/file-requests'
 import type { PreparedFileResult, PreparedAttachment } from './file-access'
-import { FALLBACK_ENVIRONMENT, buildTerminalPromptParts, fileReadingPlatform, isConversationId } from '../shared/types'
+import { FALLBACK_ENVIRONMENT, buildTerminalPromptParts, fileReadingPlatform, isConversationId,
+  REPLY_PROTOCOL_VERSION, REPLY_PROTOCOL_SECTION, REPLY_PROTOCOL_REMINDER, withReplyProtocol } from '../shared/types'
 import type { ChatPlatform } from '../shared/platforms'
 import type {
   AppTheme,
@@ -1304,6 +1305,10 @@ export class ChatGptEmbed {
       computerProtocol: this.computerUseProtocolContext,
       sendBlock: this.sendBlock,
       prefix,
+      replyProtocolPrefix: REPLY_PROTOCOL_REMINDER,
+      replyProtocolVersion: REPLY_PROTOCOL_VERSION,
+      prefixIncludesReplyProtocol: prefix.includes(REPLY_PROTOCOL_SECTION),
+      replyProtocolFullLength: REPLY_PROTOCOL_SECTION.length,
       taskPromptInjected: this.taskPromptInjected,
       toolPromptRevision: this.toolPromptRevision,
       taskPromptGeneration: this.taskPromptGeneration,
@@ -1329,7 +1334,10 @@ export class ChatGptEmbed {
   /** The prefix for the next task start in the conversation at `url`; the full prompt when nothing plans. */
   private planPrefix(url: string): string {
     this.injectionPlan = this.handlers.planInjection?.(this.interceptor.prefix, conversationIdOf(this.platform, url)) ?? null
-    return this.injectionPlan ? this.injectionPlan.prefix : this.interceptor.prefix
+    const prefix = withReplyProtocol(this.injectionPlan ? this.injectionPlan.prefix : this.interceptor.prefix)
+    // Commit the actual prefix (including a short contract on deltas/anchors), not an estimate.
+    if (this.injectionPlan) this.injectionPlan = { ...this.injectionPlan, prefix }
+    return prefix
   }
 
   /** The conversation's ledger changed: reconfigure the page only when its next prefix differs. */
@@ -2107,14 +2115,19 @@ export class ChatGptEmbed {
         )
         break
       case 'injected':
+        if (payload.taskPromptGeneration !== undefined && payload.taskPromptGeneration !== this.taskPromptGeneration) break
         this.interceptor.injectedCount += 1
-        this.injectedPrefixLength = Number.isSafeInteger(payload.prefixLength) ? payload.prefixLength! : null
+        if (payload.promptInjected !== false) this.injectedPrefixLength = Number.isSafeInteger(payload.prefixLength) ? payload.prefixLength! : null
         /*
          * Log which prompt the PAGE actually holds, and compare it with what main thinks it
          * pushed. The two can diverge because the prefix lives per view: a view created before
          * the environment probe, or reconfigured while it had no live contents, keeps the
          * generic fallback — and the only visible symptom is messages going out un-prefixed.
          */
+        if (payload.promptInjected === false) {
+          console.info(`[embed:${this.platform.id}] reply contract injected chars=${payload.prefixLength ?? '?'}`)
+          break
+        }
         console.info(
           `[embed:${this.platform.id}] injected #${this.interceptor.injectedCount} ` +
             `page-prompt=${payload.prefixLength ?? '?'} main-prompt=${this.pushedPrefix?.length ?? this.interceptor.prefix.length} ` +
@@ -2194,6 +2207,10 @@ export class ChatGptEmbed {
         break
       case 'sent':
         if (payload.taskPromptGeneration !== this.taskPromptGeneration) break
+        if (payload.promptInjected === false && payload.replyProtocolKind === 'short' &&
+          payload.replyProtocolVersion === REPLY_PROTOCOL_VERSION && payload.replyProtocolLength === REPLY_PROTOCOL_REMINDER.length) {
+          this.handlers.onContextTraffic?.(REPLY_PROTOCOL_REMINDER.length)
+        }
         if (payload.promptInjected === true) this.taskPromptInjected = true
         if (payload.promptInjected === true || payload.conversationPromptInjected === true) {
           const contents = this.liveContents()
@@ -2509,7 +2526,10 @@ export class ChatGptEmbed {
     writePromptDiagnostic(this.platform.id, payload, {
       taskPromptInjected: this.taskPromptInjected,
       taskPromptGeneration: this.taskPromptGeneration,
-      injectionMode
+      injectionMode,
+      taskActive: this.interceptor.enabled && this.interceptor.promptInjectionEnabled &&
+        this.interceptor.taskStartedAt !== null && this.interceptor.taskFinishedAt === null,
+      currentPage: payload.computerPageEpoch === this.computerPageEpoch
     })
     this.handlers.onInterceptor(this.getInterceptorStatus())
   }

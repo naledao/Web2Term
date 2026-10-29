@@ -18,18 +18,23 @@ const reasons = [
 export function writePromptDiagnostic(
   platformId: ChatPlatform['id'],
   payload: InterceptorPageEvent,
-  mainState: { taskPromptInjected: boolean; taskPromptGeneration: number; injectionMode?: string | null }
+  mainState: { taskPromptInjected: boolean; taskPromptGeneration: number; injectionMode?: string | null; taskActive?: boolean; currentPage?: boolean }
 ): string | null {
-  if (!['chatgpt', 'deepseek', 'claude', 'gemini'].includes(platformId) || !events.includes(payload.event)) return null
-  const details: Record<string, string | number | boolean | null> = { event: payload.event }
+  const missingCompletion = payload.event === 'task-finished' && payload.completed === false && payload.live === true &&
+    payload.taskPromptGeneration === mainState.taskPromptGeneration && mainState.taskActive === true && mainState.currentPage === true
+  if (!['chatgpt', 'deepseek', 'claude', 'gemini'].includes(platformId) || (!events.includes(payload.event) && !missingCompletion)) return null
+  // Observation only: settled prose is not proof that the user's goal has been fulfilled.
+  const details: Record<string, string | number | boolean | null> = { event: missingCompletion ? 'reply-without-completion' : payload.event }
+  if (missingCompletion) { details.completed = false; details.taskActive = true }
   if (payload.event === 'send-observed') {
     details.reason = reasons.includes(payload.reason ?? '') ? payload.reason! : 'unknown'
     if (payload.trigger === 'enter' || payload.trigger === 'click') details.trigger = payload.trigger
   }
-  for (const key of ['count', 'prefixLength', 'taskPromptGeneration', 'composerTextLength', 'attempts', 'attempt', 'toolbarCount'] as const) {
+  for (const key of ['count', 'prefixLength', 'replyProtocolVersion', 'replyProtocolLength', 'taskPromptGeneration', 'composerTextLength', 'attempts', 'attempt', 'toolbarCount'] as const) {
     const value = payload[key]
     if (Number.isSafeInteger(value) && Number(value) >= 0) details[key] = Number(value)
   }
+  if (payload.replyProtocolKind === 'full' || payload.replyProtocolKind === 'short') details.replyProtocolKind = payload.replyProtocolKind
   for (const key of [
     'enabled', 'promptInjectionEnabled', 'programmatic', 'promptInjected', 'conversationPromptInjected', 'taskPromptInjected', 'composerFound',
     'targetMatchesComposer', 'defaultPrevented', 'isComposing', 'sendButtonFound',

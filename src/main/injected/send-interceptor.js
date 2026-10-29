@@ -149,6 +149,10 @@
     enabled: false,
     promptInjectionEnabled: true,
     prefix: '',
+    replyProtocolPrefix: '',
+    replyProtocolVersion: 0,
+    prefixIncludesReplyProtocol: false,
+    replyProtocolFullLength: 0,
     injectedCount: 0,
     /** True while WE are driving the composer; suppresses prefixing/interception. */
     programmatic: false,
@@ -1857,11 +1861,24 @@
    * Composer plumbing
    * ------------------------------------------------------------------ */
 
-  /** True when the prefix is already sitting in the composer. */
-  const hasPrefix = (element) => {
-    if (!state.prefix) return true
-    const head = collapse(state.prefix).slice(0, 40)
-    return collapse(readComposer(element)).startsWith(head)
+  /** Every human turn carries the reply contract; task/environment plans still send once. */
+  const userPromptInjection = (conversationPromptInjected = false) => {
+    const active = state.enabled && state.promptInjectionEnabled
+    const promptInjected = active && !state.taskPromptInjected && !conversationPromptInjected
+    const prefix = active ? (promptInjected ? state.prefix : state.replyProtocolPrefix) : ''
+    const full = promptInjected && state.prefixIncludesReplyProtocol
+    return { prefix, metadata: { promptInjected, ...(prefix && state.replyProtocolVersion ? {
+      replyProtocolVersion: state.replyProtocolVersion,
+      replyProtocolKind: full ? 'full' : 'short',
+      replyProtocolLength: full ? state.replyProtocolFullLength : state.replyProtocolPrefix.length
+    } : {}) } }
+  }
+
+  const reportUserInjection = (injection, generation = state.taskPromptGeneration) => {
+    if (!injection.prefix) return
+    state.injectedCount++
+    report({ event: 'injected', count: state.injectedCount, prefixLength: injection.prefix.length,
+      taskPromptGeneration: generation, ...injection.metadata })
   }
 
   /**
@@ -2267,6 +2284,9 @@
             : {
                 event: 'sent', text: userTextOf(text).slice(0, 400),
                 promptInjected: sendContext.promptInjected,
+                replyProtocolVersion: sendContext.replyProtocolVersion,
+                replyProtocolKind: sendContext.replyProtocolKind,
+                replyProtocolLength: sendContext.replyProtocolLength,
                 conversationPromptInjected: sendContext.conversationPromptInjected === true,
                 taskPromptGeneration: sendContext.taskPromptGeneration
               }
@@ -2490,8 +2510,8 @@
   // turns, requiring both the system protocol and tool declarations as evidence.
   const conversationPromptInHistory = () => userTurns().some(node => {
     const text = node.textContent || node.innerText || ''
-    return text.includes('【角色】') && text.includes('终端助手') && text.includes('【工作协议】') &&
-      text.includes('【执行环境】') && text.includes('【工具：')
+    return text.includes('【角色】') && (text.includes('终端助手') || text.includes('【任务完成】')) && text.includes('【工作协议】') &&
+      text.includes('【执行环境】') && (text.includes('【工具：') || text.includes('【工具目录】'))
   })
 
   /** Forward one explicit focus action to the live native component, once. */
@@ -2687,9 +2707,9 @@
     let editor = null, submitted = false, confirmed = false
     focusEditing = token
     state.programmatic = true
-    const shouldInject = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected
+    const injection = userPromptInjection()
     const text = normalizeLineEndings(request.text)
-    const payload = shouldInject ? state.prefix + USER_TEXT_SENTINEL + text : text
+    const payload = injection.prefix ? injection.prefix + USER_TEXT_SENTINEL + text : text
     const oldReplies = queryAllAssistant().map(messageIdOf).filter(Boolean)
     try {
       diagnostic.stage = 'open'
@@ -2773,16 +2793,14 @@
           state.commandRecoveryUsed = false
           state.lastCommandMessageId = null
           draftRejected = false
-          if (shouldInject) {
+          if (injection.metadata.promptInjected) {
             state.taskPromptInjected = true
-            state.injectedCount++
-            report({ event: 'injected', count: state.injectedCount, prefixLength: state.prefix.length,
-              taskPromptGeneration: token.generation, prefixHead: collapse(state.prefix).slice(0, 220) })
           }
+          reportUserInjection(injection, token.generation)
           report({ event: 'user-message', text, focusEditToken: request.token })
           setReplyWaiting(Date.now(), 'user-edited')
           state.taskActive = true
-          report({ event: 'sent', text: text.slice(0, 400), promptInjected: shouldInject, taskPromptGeneration: token.generation })
+          report({ event: 'sent', text: text.slice(0, 400), ...injection.metadata, taskPromptGeneration: token.generation })
           scheduleScrollToBottom()
           confirmed = true
           return finish('ok', 'new-user-confirmed')
@@ -2892,9 +2910,7 @@
       return false
     }
     const draft = readComposer(element)
-    // A failed submit can leave our full draft in the editor. Reuse it on a user retry,
-    // while still confirming the send and recording only the user's words.
-    const prefixedDraft = !!state.prefix && hasPrefix(element) && (draft.includes(USER_TEXT_SENTINEL) || draft.includes('\u0000\u0001'))
+    // Strip any prefix left by a failed submit before composing the current plan once.
     const text = userTextOf(draft)
     const draftHasImage = hasDraftImageAttachment()
 
@@ -2927,15 +2943,23 @@
     event.stopImmediatePropagation()
     state.programmatic = true
 
+    const injection = userPromptInjection()
     const sendContext = {
       taskPromptGeneration: state.taskPromptGeneration,
-      promptInjected: prefixedDraft || (state.promptInjectionEnabled && !state.taskPromptInjected)
+      ...injection.metadata
     }
-    if (!state.promptInjectionEnabled || state.taskPromptInjected || prefixedDraft) {
+    if (!injection.prefix) {
       // Skipping the prefix must still capture images, publish the user turn and arm
       // the next reply. Synthetic Enter/click events bypass this handler above.
+      if (draft !== text && (!insertText(element, text) || collapse(readComposer(element)) !== collapse(text))) {
+        state.programmatic = false
+        discardUserImageCapture(attachmentToken)
+        report({ event: 'inject-failed' })
+        showSendBlockNotice('未能清除上次发送留下的提示词，请保留正文后重试。', 6000)
+        return true
+      }
       submitWithRetry(
-        draft, 0, false, null,
+        text, 0, false, null,
         Date.now() + SEND_ATTEMPT_BUDGET_MS, 0,
         Date.now() + SEND_BUTTON_GRACE_MS, attachmentToken, sendContext
       )
@@ -2953,7 +2977,7 @@
      *
      * Composing first and writing once makes both mechanisms behave the same way.
      */
-    const composed = state.prefix + USER_TEXT_SENTINEL + text
+    const composed = injection.prefix + USER_TEXT_SENTINEL + text
     const wrote = insertText(element, composed)
 
     /*
@@ -2988,33 +3012,13 @@
         0,
         Date.now() + SEND_BUTTON_GRACE_MS,
         attachmentToken,
-        { ...sendContext, promptInjected: false }
+        { taskPromptGeneration: sendContext.taskPromptGeneration, promptInjected: false }
       )
       return true
     }
 
     draftRejected = false
-    state.injectedCount += 1
-    /*
-     * The prefix is reported alongside the count, not just the fact of injection.
-     *
-     * The prompt is stored PER VIEW in the main process, so "this page was configured with the
-     * wrong (generic fallback) prompt" is a real failure mode — and from the outside it looks
-     * exactly like terminal mode being off. Sending the length and the opening words makes the
-     * question answerable from the log instead of by reading the composer and guessing.
-     */
-    report({
-      event: 'injected',
-      count: state.injectedCount,
-      prefixLength: state.prefix.length,
-      taskPromptGeneration: state.taskPromptGeneration,
-      /*
-       * A LONG head, because the opening of the prompt is boilerplate that both the probed
-       * prompt and the generic fallback share — the machine-specific lines come later. A short
-       * prefix would report "MATCH" while the page was in fact describing the wrong machine.
-       */
-      prefixHead: collapse(state.prefix).slice(0, 220)
-    })
+    reportUserInjection(injection)
     setTimeout(
       () =>
         submitWithRetry(
@@ -4363,6 +4367,7 @@
           }
           report({ event: 'assistant-message', messageId, text: markdown })
           report({ event: 'task-finished', messageId, completed, live: true,
+            taskPromptGeneration: completion.generation, pagePath: completion.path,
             ...completionSource, computerPageEpoch })
         }, 250)
       }
@@ -5044,7 +5049,7 @@
           report({ event: 'user-message', text: focus.text, focusFiles, focusSendToken: token, attachmentToken: focus.attachmentToken,
             submissionKind: focus.submissionKind })
           report({ event: 'sent', text: focus.text.slice(0, 400), promptInjected: focus.promptInjected,
-            taskPromptGeneration: focus.generation })
+            ...focus.injection.metadata, taskPromptGeneration: focus.generation })
         } else report({ event: 'sent-raw', text: computer ? '[computer observation attachment]' : '[read_files attachments]',
           attachmentKind: computer ? 'computer' : 'files' })
         if (state.enabled && state.awaitingReplySince !== 0) scheduleCheck()
@@ -5147,17 +5152,14 @@
       const composer = getComposer()
       if (!composer || !composerMatches(composer, '')) return false
       const focus = fileSend.focus
-      focus.promptInjected = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected
+      focus.injection = userPromptInjection()
+      focus.promptInjected = focus.injection.metadata.promptInjected
       if (focus.promptInjected && !state.prefix) return false
-      fileSend.caption = focus.promptInjected ? state.prefix + USER_TEXT_SENTINEL + focus.text : focus.text
+      fileSend.caption = focus.injection.prefix ? focus.injection.prefix + USER_TEXT_SENTINEL + focus.text : focus.text
       fileSend.captionComposer = composer
       if (fileSend.caption && !insertText(composer, fileSend.caption)) { fileSend.edited = true; return false }
       focus.prepared = true
-      if (focus.promptInjected) {
-        state.injectedCount++
-        report({ event: 'injected', count: state.injectedCount, prefixLength: state.prefix.length,
-          taskPromptGeneration: state.taskPromptGeneration, prefixHead: collapse(state.prefix).slice(0, 220) })
-      }
+      reportUserInjection(focus.injection)
       return true
     },
     openFileChooser(token) {
@@ -5422,6 +5424,10 @@
       }
       if (typeof config.promptInjectionEnabled === 'boolean') state.promptInjectionEnabled = config.promptInjectionEnabled
       if (typeof config.prefix === 'string') state.prefix = config.prefix
+      if (typeof config.replyProtocolPrefix === 'string') state.replyProtocolPrefix = config.replyProtocolPrefix
+      if (Number.isSafeInteger(config.replyProtocolVersion) && config.replyProtocolVersion > 0) state.replyProtocolVersion = config.replyProtocolVersion
+      if (typeof config.prefixIncludesReplyProtocol === 'boolean') state.prefixIncludesReplyProtocol = config.prefixIncludesReplyProtocol
+      if (Number.isSafeInteger(config.replyProtocolFullLength) && config.replyProtocolFullLength > 0) state.replyProtocolFullLength = config.replyProtocolFullLength
       // Restore main's snapshot after a full reload, or accept a NEW task boundary.
       // Reconfiguring the same task (environment probe, mode toggle) must not undo a
       // prompt send that the page has confirmed before main receives its report.
@@ -5480,6 +5486,7 @@
         enabled: state.enabled,
         promptInjectionEnabled: state.promptInjectionEnabled,
         prefixLength: state.prefix.length,
+        replyProtocolVersion: state.replyProtocolVersion,
         taskPromptInjected: state.taskPromptInjected,
         taskPromptGeneration: state.taskPromptGeneration
       })
@@ -5639,21 +5646,17 @@
       })
       if (hasDraftImageAttachment()) return busy('image-draft')
       const conversationPromptInjected = !!options?.scheduledRunId && options.conversationPromptInjected === true
-      const shouldInject = state.enabled && state.promptInjectionEnabled && !state.taskPromptInjected && !conversationPromptInjected
-      if (shouldInject && !state.prefix) return Promise.resolve('unavailable')
-      const payload = shouldInject ? state.prefix + USER_TEXT_SENTINEL + normalizeLineEndings(text) : normalizeLineEndings(text)
-      const sendContext = { taskPromptGeneration: state.taskPromptGeneration, promptInjected: shouldInject, conversationPromptInjected,
+      const injection = userPromptInjection(conversationPromptInjected)
+      if (injection.metadata.promptInjected && !state.prefix) return Promise.resolve('unavailable')
+      const payload = injection.prefix ? injection.prefix + USER_TEXT_SENTINEL + normalizeLineEndings(text) : normalizeLineEndings(text)
+      const sendContext = { taskPromptGeneration: state.taskPromptGeneration, ...injection.metadata, conversationPromptInjected,
         ...(options?.scheduledRunId ? { scheduledRunId: options.scheduledRunId, computerResultToken: options.computerResultToken, path: expectedPath } : {}) }
       state.programmatic = true
       if (!insertText(element, payload) || !composerMatches(element, payload)) {
         state.programmatic = false
         return Promise.resolve('insert-failed')
       }
-      if (shouldInject) {
-        state.injectedCount++
-        report({ event: 'injected', count: state.injectedCount, prefixLength: state.prefix.length,
-          taskPromptGeneration: state.taskPromptGeneration, prefixHead: collapse(state.prefix).slice(0, 220) })
-      }
+      reportUserInjection(injection)
       return new Promise(resolve => submitWithRetry(
         payload, 0, false, resolve, Date.now() + SEND_TIMEOUT_MS, 0,
         Date.now() + SEND_BUTTON_GRACE_MS, null, sendContext
@@ -6152,15 +6155,21 @@
         source.pageEpoch !== computerPageEpoch || source.pagePath !== location.pathname || source.taskPromptGeneration !== state.taskPromptGeneration)) return 'stale'
       const ownedDraft = state.answerDraft?.messageId === messageId ? state.answerDraft.text : null
       const taskPromptGeneration = state.taskPromptGeneration
-      const outcome = await window[STATE_KEY].sendRaw(answer, ownedDraft, { generation: taskPromptGeneration, path: location.pathname, question: { messageId, source } })
+      // Keep the question's raw delivery/ownership flow, adding only the per-user contract.
+      // sendRaw already accounts for the complete payload's context length, so do not emit a second sent event.
+      const injection = userPromptInjection(true)
+      const text = normalizeLineEndings(answer)
+      const payload = injection.prefix ? injection.prefix + USER_TEXT_SENTINEL + text : text
+      const outcome = await window[STATE_KEY].sendRaw(payload, ownedDraft, { generation: taskPromptGeneration, path: location.pathname, question: { messageId, source } })
       if (outcome === 'ok') {
+        reportUserInjection(injection, taskPromptGeneration)
         report({ event: 'user-message', text: answer, submissionKind: 'clarification', taskPromptGeneration,
           answeredQuestionId: messageId, questionSource: source })
       } else if (outcome === 'stuck' || outcome === 'insert-failed') {
         // A retry may replace only the text that this submission left in the composer.
         const element = getComposer()
-        if (element && composerMatches(element, normalizeLineEndings(answer))) {
-          state.answerDraft = { messageId, text: normalizeLineEndings(answer) }
+        if (element && composerMatches(element, payload)) {
+          state.answerDraft = { messageId, text: payload }
         }
       }
       return outcome

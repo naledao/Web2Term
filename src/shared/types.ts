@@ -885,7 +885,45 @@ export const FALLBACK_ENVIRONMENT: EnvironmentInfo = {
  *
  * Inserted verbatim into the composer, so the user sees it in the input box.
  */
+/** Versioned once here: previews, full injection and per-user reminders share this contract. */
+export const REPLY_PROTOCOL_VERSION = 1
+export const REPLY_PROTOCOL_SECTION = [
+  '【任务完成】',
+  '软件通过回复格式识别下一步。是否使用工具，只决定处理方式，不改变任务结束格式。',
+  '1. 当前目标已满足且必要结果已核对：回复第一行必须单独、原样写【任务完成】，从下一行开始用中文给出答案或交付结果及必要的核对说明。',
+  '2. 还需要工具结果才能完成：按当前工具说明输出对应请求，等待回传后继续处理。',
+  '3. 缺少影响目标的关键用户信息或授权：按 questions 格式提问，得到回答后继续原任务。',
+  '4. 正在等待必要结果，或操作结果尚未确认：保持任务未完成，按真实状态继续核实。',
+  '普通问答、解释、翻译、总结、写作和检索回答，完整答复当前请求时，也必须使用第1种格式；无需为此调用工具。',
+  '工具请求或 questions 所在回复不混入完成标记。最终回答直接呈现用户需要的内容；除非用户询问，不解释本协议。',
+  '',
+  '完成格式示例（只说明格式，不代表当前任务已取得这些结果）：',
+  '```text',
+  '用户：把 good morning 翻译成中文。',
+  '助手：',
+  '【任务完成】',
+  '早上好。',
+  '```',
+  '```text',
+  '用户：列出当前目录的文件。',
+  '前提：已执行目录查询，软件实际回传 README.md 和 package.json。',
+  '助手：',
+  '【任务完成】',
+  '当前目录有 README.md 和 package.json。',
+  '```'
+].join('\n')
+
+/** Carried before the user-text boundary on every later human send; never on tool results. */
+export const REPLY_PROTOCOL_REMINDER = '【回复约定】目标已满足时，首行原样写【任务完成】，下一行给出答案；普通问答也适用。还需工具、用户回答或必要结果时，按对应协议继续，不标记完成。\n\n'
+
+/** Environment/tool plans stay selective; the reply contract is present on every user turn. */
+export function withReplyProtocol(prefix: string): string {
+  return prefix.includes(REPLY_PROTOCOL_SECTION) ? prefix : prefix + REPLY_PROTOCOL_REMINDER
+}
+
 const OUTPUT_FORMAT_SECTION = [
+  REPLY_PROTOCOL_SECTION,
+  '',
   '【工作协议】',
   '需要终端操作时，依据实际结果推进；相关只读检查可合并，依赖结果的步骤等回传后再执行。不臆测结果，不无故重跑。',
   '',
@@ -905,12 +943,7 @@ const OUTPUT_FORMAT_SECTION = [
   '【读取结果】',
   '以回传的状态、输出、退出码和目录为准；历史重跑以消息中的命令为准。',
   '按工具语义判断退出码；rg 返回 1 仅表示未命中，2 表示错误，勿因通用失败标签重复执行。',
-  '空输出不代表失败，退出码未知不判成功；超时、中断或断线先核实状态，勿盲目重跑。',
-  '',
-  '【任务完成】',
-  '所有任务在目标满足且完成必要验证后，回复首行单独写【任务完成】，随后用中文给出结果及必要验证说明，不混入工具调用。',
-  '纯对话完整回答即完成，无需额外执行命令或调用工具。',
-  '仍需澄清、执行或等待必要结果时，不输出完成标记。'
+  '空输出不代表失败，退出码未知不判成功；超时、中断或断线先核实状态，勿盲目重跑。'
 ].join('\n')
 
 /**
@@ -935,7 +968,7 @@ export const backgroundTaskToolPrompt = [
 /** Share the role across shells; environment and routing have their own sections. */
 const ROLE_SECTION = [
   '【角色】',
-  '你是终端助手，协助用户完成当前任务；具体处理方式遵循【任务路由】。'
+  '协助用户完成当前目标。按需直接回答、查询资料或使用当前可用工具；以实际结果为依据推进，具体处理方式遵循【任务路由】。'
 ].join('\n')
 
 /** Keep terminal mode from turning every kind of request into a shell command. */
@@ -1342,6 +1375,10 @@ export interface InterceptorPageEvent {
   enabled?: boolean
   promptInjectionEnabled?: boolean
   prefixLength?: number
+  /** Version and size of the reply contract actually carried by this human send. */
+  replyProtocolVersion?: number
+  replyProtocolKind?: 'full' | 'short'
+  replyProtocolLength?: number
   /** Present on `sent`: this confirmed user message carried the task's prompt. */
   promptInjected?: boolean
   /** A scheduled send reused the system/tool prefix already present in this conversation. */

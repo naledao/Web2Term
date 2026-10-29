@@ -707,8 +707,15 @@ test('a settled model completion reaches main with the old generation and finish
 test('discussion, negation and restored history do not declare completion', () => {
   for (const text of ['任务完成后再保存文件。', '任务尚未完成。', '还没有任务完成的证据。']) {
     const page = pageFixture()
-    page.confirm(); page.replace([turn('2', text)]); page.settle()
+    page.confirm(); page.helpers.state.taskActive = true; page.replace([turn('2', text)]); page.settle()
     assert.equal(page.events.some(e => e.event === 'task-finished' && e.completed === true), false)
+    const event = page.events.find(e => e.event === 'task-finished')
+    assert.ok(event)
+    assert.equal(event.completed, false)
+    assert.equal(event.taskPromptGeneration, 3, 'a missing marker retains its live owner for diagnostics')
+    assert.equal(event.pagePath, '/a/chat/s/chat-A')
+    assert.equal(page.controller.status().taskPromptGeneration, 3, 'settled prose does not advance the task')
+    assert.equal(page.controller.status().taskActive, true)
   }
   const page = pageFixture([turn('2', '【任务完成】历史任务')])
   page.settle()

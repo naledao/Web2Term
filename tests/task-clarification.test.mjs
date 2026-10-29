@@ -202,22 +202,55 @@ test('actual runtime question handling clears queued work, cancels only live dis
 function nativeQuestionApi(overrides = {}) {
   const source = ts.createSourceFile('page.js', readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
   let method
-  const visit = node => { if (ts.isMethodDeclaration(node) && node.name?.getText(source) === 'answerQuestion') method = node.getText(source); ts.forEachChild(node, visit) }; visit(source)
-  const events = [], calls = [], state = { pendingQuestion: { ...questionFor(), taskSource: { sourceSubmissionId: 'user:goal:1', taskPromptGeneration: 3, pagePath: '/a/chat/s/chat-a', pageEpoch: 'document-a' } }, taskPromptGeneration: 3 }
+  const helpers = new Map()
+  const visit = node => {
+    if (ts.isMethodDeclaration(node) && node.name?.getText(source) === 'answerQuestion') method = node.getText(source)
+    if (ts.isVariableDeclaration(node) && ['userPromptInjection', 'reportUserInjection', 'USER_TEXT_SENTINEL'].includes(node.name.getText(source))) helpers.set(node.name.getText(source), node.initializer.getText(source))
+    ts.forEachChild(node, visit)
+  }; visit(source)
+  const events = [], calls = [], state = { enabled: true, promptInjectionEnabled: true, replyProtocolPrefix: 'SHORT\n\n', replyProtocolVersion: 1,
+    injectedCount: 0, taskPromptInjected: true,
+    pendingQuestion: { ...questionFor(), taskSource: { sourceSubmissionId: 'user:goal:1', taskPromptGeneration: 3, pagePath: '/a/chat/s/chat-a', pageEpoch: 'document-a' } }, taskPromptGeneration: 3 }
   const window = { synthetic: { async sendRaw(...args) { calls.push(args); state.pendingQuestion = null; return 'ok' } } }
-  const api = new Script(`({${method}})`).runInNewContext({ state, window, STATE_KEY: 'synthetic', computerPageEpoch: 'document-a', location: { pathname: '/a/chat/s/chat-a' },
-    report: event => events.push(event), ...overrides })
-  return { api, state, events, calls }
+  const helperSource = [...helpers].map(([name, value]) => `const ${name} = ${value};`).join('\n')
+  const api = new Script(`${helperSource}\n({${method}})`).runInNewContext({ state, window, STATE_KEY: 'synthetic', computerPageEpoch: 'document-a', location: { pathname: '/a/chat/s/chat-a' },
+    normalizeLineEndings: value => value.replace(/\r\n?/g, '\n'), report: event => events.push(event), ...overrides })
+  return { api, state, events, calls, window }
 }
 
 test('actual page answer code captures provenance before the sender clears the pending question', async () => {
   const f = nativeQuestionApi(), source = f.state.pendingQuestion.taskSource
   assert.equal(await f.api.answerQuestion('question:a', '不发送', source), 'ok')
-  assert.equal(f.events[0].answeredQuestionId, 'question:a'); assert.deepEqual(plain(f.events[0].questionSource), source)
+  const message = f.events.find(event => event.event === 'user-message')
+  assert.equal(message.answeredQuestionId, 'question:a'); assert.deepEqual(plain(message.questionSource), source)
+  assert.equal(message.text, '不发送')
+  assert.equal(f.calls[0][0], 'SHORT\n\n\u2063\u2063不发送')
+  assert.equal(f.events.find(event => event.event === 'injected').promptInjected, false)
   assert.equal(f.calls[0][2].generation, 3); assert.equal(f.calls[0][2].path, source.pagePath)
   const stale = nativeQuestionApi()
   assert.equal(await stale.api.answerQuestion('question:a', '允许', { ...source, pageEpoch: 'old' }), 'stale')
   assert.equal(stale.calls.length, 0)
+})
+
+test('question replies honor the injection switch and retain only their own failed prefixed draft for retry', async () => {
+  const off = nativeQuestionApi()
+  off.state.promptInjectionEnabled = false
+  assert.equal(await off.api.answerQuestion('question:a', '只保存本地'), 'ok')
+  assert.equal(off.calls[0][0], '只保存本地')
+  assert.equal(off.events.some(event => event.event === 'injected'), false)
+
+  const composer = { text: '' }
+  const f = nativeQuestionApi({ getComposer: () => composer, composerMatches: (node, text) => node.text === text })
+  f.window.synthetic.sendRaw = async text => { composer.text = text; return 'stuck' }
+  assert.equal(await f.api.answerQuestion('question:a', '两行回答\n  第二行'), 'stuck')
+  assert.equal(f.state.answerDraft.text, 'SHORT\n\n\u2063\u2063两行回答\n  第二行')
+  assert.equal(f.state.pendingQuestion.messageId, 'question:a')
+  assert.equal(f.events.length, 0, 'uncertain delivery cannot resolve the question or confirm the reminder')
+  let retryDraft
+  f.window.synthetic.sendRaw = async (_text, owned) => { retryDraft = owned; return 'ok' }
+  assert.equal(await f.api.answerQuestion('question:a', '修改后的回答'), 'ok')
+  assert.equal(retryDraft, 'SHORT\n\n\u2063\u2063两行回答\n  第二行')
+  assert.equal(f.events.find(event => event.event === 'user-message').text, '修改后的回答')
 })
 
 test('actual main bridge binds live questions, excludes history/replay and preserves a newer question on a late answer', () => {

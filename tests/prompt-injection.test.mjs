@@ -24,11 +24,11 @@ function load(path, dependencies = {}) {
   })
   return exports
 }
-function methods(path, name, names) {
+function methods(path, name, names, globals = {}) {
   const ast = ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
   const declaration = ast.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === name)
   const body = names.map(name => declaration.members.find(node => node.name?.getText(ast) === name).getText(ast)).join('\n')
-  return new Script(compile(`class Subject { ${body} }; Subject`)).runInNewContext({ structuredClone })
+  return new Script(compile(`class Subject { ${body} }; Subject`)).runInNewContext({ structuredClone, ...globals })
 }
 
 const injection = load('../src/shared/prompt-injection.ts')
@@ -42,6 +42,14 @@ const { ConversationTools } = load('../src/main/conversation-tools.ts', {
 })
 const Store = methods('../src/main/db.ts', 'ConversationStore', ['getSetting', 'setSetting', 'setSettings'])
 const { planInjection, commitInjection, addInjectionTraffic, noteInjectionViolation, parseInjectionLedger, splitPromptSections } = injection
+const EmbedPrefix = methods('../src/main/embed.ts', 'ChatGptEmbed', ['planPrefix'], {
+  withReplyProtocol: types.withReplyProtocol, conversationIdOf: () => 'chat-a'
+})
+const EmbedReports = methods('../src/main/embed.ts', 'ChatGptEmbed', ['handlePageReport'], {
+  REPLY_PROTOCOL_VERSION: types.REPLY_PROTOCOL_VERSION, REPLY_PROTOCOL_REMINDER: types.REPLY_PROTOCOL_REMINDER,
+  INTERCEPTOR_LOG_TAG: '[cmd-terminal] ', conversationIdOf: () => 'chat-a',
+  console: { info() {}, warn() {} }, writeReplyDiagnostic() {}, writePromptDiagnostic() {}
+})
 
 const linux = { ...types.FALLBACK_ENVIRONMENT, kind: 'posix', osCaption: 'Ubuntu 24.04', shellPath: '/bin/bash', workingDirectory: '/srv/app', detected: true }
 const tools = '【工具目录】\n以下只列出当前对话可用工具的摘要，不含调用格式：\n- read_files：读取文件。'
@@ -55,6 +63,73 @@ test('the real prompt splits into its headed sections and keeps inline markers i
   for (const heading of ['【角色】', '【任务路由】', '【工作协议】', '【需要执行时】', '【执行环境】', '【工具目录】']) assert.ok(keys.includes(heading), heading)
   assert.ok(!keys.includes('【上一条命令执行结果】'), 'an inline marker does not start a section')
   assert.equal(new Set(keys).size, keys.length, 'repeated headings get distinct keys')
+  const completion = sections.filter(section => section.heading === '【任务完成】')
+  assert.equal(completion.length, 1, 'standalone markers inside examples are not section headings')
+  assert.equal(completion[0].text, types.REPLY_PROTOCOL_SECTION)
+  assert.ok(completion[0].text.includes('【任务完成】\n早上好。'))
+  assert.ok(completion[0].text.includes('【任务完成】\n当前目录有 README.md 和 package.json。'))
+})
+
+test('fenced examples keep headings through nested, shorter and mismatched fence lines', () => {
+  for (const fence of ['````', '~~~~']) {
+    const text = ['【任务完成】', fence + 'text', '【角色】', fence.slice(0, 3), '【任务完成】',
+      fence[0] === '`' ? '~~~~' : '````', '【工具目录】', fence + ' extra', '【等待】', fence,
+      '【执行环境】', 'current', '【执行环境】', 'other'].join('\n')
+    const sections = splitPromptSections(text)
+    assert.deepEqual(plain(sections.map(section => section.key)), ['【任务完成】', '【执行环境】', '【执行环境】#2'])
+    assert.ok(sections[0].text.includes('【等待】'))
+  }
+})
+
+test('the actual embed plan carries one reply contract and commits its exact transmitted size', () => {
+  const first = planInjection(null, prefix(), 'deepseek'), ledger = sent(null, first)
+  const plans = [first, planInjection(ledger, prefix(), 'deepseek'),
+    planInjection(ledger, prefix(linux, tools + '\n- send_email：发送邮件。'), 'deepseek'),
+    planInjection(noteInjectionViolation(ledger), prefix(), 'deepseek')]
+  assert.deepEqual(plans.map(plan => plan.mode), ['full', 'none', 'delta', 'reminder'])
+  for (const plan of plans) {
+    const embed = Object.assign(new EmbedPrefix(), { platform: { id: 'deepseek' }, interceptor: { prefix: prefix() },
+      handlers: { planInjection: () => plan } })
+    const actual = embed.planPrefix('unused')
+    assert.equal(embed.injectionPlan.prefix, actual)
+    const full = actual.includes(types.REPLY_PROTOCOL_SECTION)
+    assert.equal(actual.includes(types.REPLY_PROTOCOL_REMINDER), !full)
+    assert.equal(actual.split(full ? types.REPLY_PROTOCOL_SECTION : types.REPLY_PROTOCOL_REMINDER).length, 2)
+    if (plan.mode !== 'full') {
+      assert.equal(sent(ledger, embed.injectionPlan).charsSinceFull - ledger.charsSinceFull, actual.length)
+    }
+    if (plan.mode === 'delta') assert.ok(actual.includes('send_email') && !actual.includes('【执行环境】'))
+  }
+})
+
+test('confirmed short reminders count context once while planned prefixes commit their own full size', () => {
+  const traffic = [], committed = []
+  const ledger = sent(null, planInjection(null, prefix(), 'deepseek'))
+  const plan = planInjection(ledger, prefix(), 'deepseek')
+  const actual = { ...plan, prefix: types.withReplyProtocol(plan.prefix) }
+  const embed = Object.assign(new EmbedReports(), {
+    platform: { id: 'deepseek' }, taskPromptGeneration: 1, taskPromptInjected: true,
+    injectionPlan: actual, pushedPrefix: actual.prefix,
+    interceptor: { enabled: true, promptInjectionEnabled: true, injectedCount: 0, taskStartedAt: 100, taskFinishedAt: null },
+    liveContents: () => ({ getURL: () => 'https://chat.deepseek.com/a/chat/s/chat-a' }),
+    getInterceptorStatus: () => ({}), handlers: {
+      onContextTraffic: chars => traffic.push(chars), onInjectionSent: (_id, plan) => committed.push(plan),
+      onPromptInjected() {}, onInterceptor() {}
+    }
+  })
+  const report = payload => embed.handlePageReport('[cmd-terminal] ' + JSON.stringify({ taskPromptGeneration: 1, ...payload }))
+  const reminder = { promptInjected: false, replyProtocolKind: 'short', replyProtocolVersion: types.REPLY_PROTOCOL_VERSION,
+    replyProtocolLength: types.REPLY_PROTOCOL_REMINDER.length }
+  report({ event: 'injected', prefixLength: types.REPLY_PROTOCOL_REMINDER.length, ...reminder })
+  report({ event: 'sent', ...reminder })
+  assert.deepEqual(traffic, [types.REPLY_PROTOCOL_REMINDER.length])
+  assert.equal(committed.length, 0)
+  assert.equal(embed.taskPromptGeneration, 1)
+  report({ event: 'injected', prefixLength: actual.prefix.length, ...reminder, promptInjected: true })
+  report({ event: 'sent', ...reminder, promptInjected: true })
+  assert.equal(committed[0].prefix, actual.prefix)
+  assert.equal(sent(ledger, committed[0]).charsSinceFull - ledger.charsSinceFull, actual.prefix.length)
+  assert.deepEqual(traffic, [types.REPLY_PROTOCOL_REMINDER.length], 'the planned prefix already includes its short contract')
 })
 
 test('a new conversation gets the full prompt, an unchanged one only the anchor, and the anchor commits no sections', () => {
