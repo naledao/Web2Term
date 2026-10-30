@@ -374,6 +374,10 @@ tools/diag/             用户驱动的诊断工具与说明
 
 当前 SSH 接受未知 host key，尚未提供 `known_hosts` 校验界面。模型网页适配依赖第三方 DOM、登录与网络策略；Google 登录另有 User-Agent 兼容处理，策略变化时可能需要更新适配或导入登录态。命令按会话和消息记录去重，恢复历史记录不代表应再次执行历史命令。
 
+### 友情链接
+
+- [LINUX DO — 新的理想型社区](https://linux.do/)
+
 ### 许可证
 
 MIT
@@ -578,6 +582,10 @@ The desktop uses Electron 44, React 19, TypeScript, `WebContentsView`, typed pre
 Under this repository's [agent instructions](AGENTS.md), users run tests and real interactions; agents implement changes and inspect logs. Agents use `npm run build` for build validation and do not launch Electron to test real accounts. **Build passed, awaiting user testing** is the delivery standard; it does not establish that login, attachments, remote terminals, or systemd startup have passed acceptance.
 
 SSH currently accepts unknown host keys without a `known_hosts` verification UI. Website adapters depend on third-party DOM and authentication behavior; Google login includes a User-Agent compatibility workaround. Locally persisted data and logs may contain paths, conversation content, or credentials and should be handled accordingly.
+
+### Friendly links
+
+- [LINUX DO](https://linux.do/)
 
 ### License
 

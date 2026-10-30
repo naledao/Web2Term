@@ -180,9 +180,6 @@ export default function WorkspaceApp(): ReactElement {
       if (noticedVersion.current === status.version) return
       noticedVersion.current = status.version
       setUpdateNotice({ version: status.version })
-      /* Hide the native chat view at once: it paints above the DOM, so the
-       * dialog would otherwise be covered the moment the session view shows. */
-      window.api.setEmbedVisible(false)
     }
     void window.api.getUpdateStatus().then(notice)
     const off = window.api.onUpdateChanged(notice)
@@ -317,8 +314,8 @@ export default function WorkspaceApp(): ReactElement {
     void window.api.installUpdate()
   }
 
-  // Sidebar confirmations stay within the navigation and leave the native chat view visible.
-  const workspaceModalOpen = transfersOpen || newSessionOpen || web2termDeviceDialogOpen || updateNotice !== null
+  // Sidebar confirmations and the corner update notice leave the chat and tool windows usable.
+  const workspaceModalOpen = transfersOpen || newSessionOpen || web2termDeviceDialogOpen
     || projectEditor !== null || movingSession !== null || releaseNotesOpen
   const newSessionProject = projects.find(project => project.id === newSessionProjectId)
 

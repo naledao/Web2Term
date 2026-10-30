@@ -33,15 +33,29 @@ function navigationAction(name) {
   return action
 }
 
+function updateNoticeHandler() {
+  let handler
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'notice') handler = node.initializer
+    ts.forEachChild(node, visit)
+  }
+  visit(component)
+  assert.ok(handler)
+  return handler
+}
+
 function fixture() {
   const visibilityCalls = []
   const context = {
     transfersOpen: false, newSessionOpen: false, web2termDeviceDialogOpen: false,
-    updateNotice: null, projectEditor: null, movingSession: null,
+    updateNotice: null, projectEditor: null, movingSession: null, releaseNotesOpen: false,
+    noticedVersion: { current: '' }, updateLive: null,
     pendingDelete: null, pendingProjectDelete: null,
     deleteSessionTrigger: { current: null }, removeProjectTrigger: { current: null },
     setPendingDelete(value) { context.pendingDelete = value },
     setPendingProjectDelete(value) { context.pendingProjectDelete = value },
+    setUpdateNotice(value) { context.updateNotice = value },
+    setUpdateLive(value) { context.updateLive = value },
     setNavigationError() {},
     window: { api: { setEmbedVisible(value) { visibilityCalls.push(value) } } }
   }
@@ -67,10 +81,31 @@ for (const [action, state, trigger] of [
   })
 }
 
+test('update notices and download progress leave the native chat and tool windows usable', () => {
+  const app = fixture()
+  const notice = evaluate(updateNoticeHandler(), app.context)
+  for (const [phase, percent] of [['available', 0], ['downloading', 35], ['downloaded', 100]]) {
+    notice({ phase, version: '0.1.201', percent })
+    assert.equal(app.context.updateNotice.version, '0.1.201')
+    assert.equal(app.context.updateLive.phase, phase)
+    assert.equal(app.context.updateLive.percent, percent)
+    assert.deepEqual(app.visibilityCalls, [], `${phase} must not hide the native chat`)
+    assert.equal(app.blocked(), false, `${phase} must not block the chat or tool windows`)
+  }
+
+  app.context.updateNotice = null
+  notice({ phase: 'available', version: '0.1.201', percent: 0 })
+  assert.equal(app.context.updateNotice, null, 'a dismissed version must not reopen on the next check')
+  notice({ phase: 'available', version: '0.1.202', percent: 0 })
+  assert.equal(app.context.updateNotice.version, '0.1.202')
+  assert.deepEqual(app.visibilityCalls, [])
+  assert.equal(app.blocked(), false)
+})
+
 test('workspace surfaces that overlap the native chat still hide it', () => {
   for (const [name, value] of [
     ['transfersOpen', true], ['newSessionOpen', true], ['web2termDeviceDialogOpen', true],
-    ['updateNotice', {}], ['projectEditor', {}], ['movingSession', {}]
+    ['projectEditor', {}], ['movingSession', {}], ['releaseNotesOpen', true]
   ]) {
     const app = fixture()
     app.context.pendingDelete = { id: 'chat' }
