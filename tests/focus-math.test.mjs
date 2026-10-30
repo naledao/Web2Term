@@ -60,10 +60,16 @@ const extract = new Script('(' + initializer(page, 'readReplyMarkdown') + ')').r
 // Use the actual focus component and its actual plugin options. The preview wrapper
 // is replaced by its underlying ReactMarkdown to avoid loading CSS in Node.
 const exports = {}
+const codeExports = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/renderer/src/components/FocusCodeBlock.tsx', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX }
+}).outputText).runInNewContext({ exports: codeExports, require })
 const declarations = ['RICH_BLOCK', 'CHART_MARKER', 'mathRemarkPlugins', 'mathRehypePlugins', 'Markdown']
-new Script(ts.transpileModule(declarations.map(name => `const ${name} = ${initializer(view, name)};`).join('\n') + '\nexports.Markdown = Markdown;', {
+const normalizeMath = view.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'normalizeMathDelimiters').getText(view)
+new Script(ts.transpileModule(normalizeMath + '\n' + declarations.map(name => `const ${name} = ${initializer(view, name)};`).join('\n') + '\nexports.Markdown = Markdown;', {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX }
 }).outputText).runInNewContext({ exports, require, memo: React.memo, remarkMath, rehypeKatex,
+  FocusCodeBlock: codeExports.default,
   cleanFocusAnswer: value => value,
   MDEditor: { Markdown: ({ source, wrapperElement, ...props }) => React.createElement('div', wrapperElement, React.createElement(ReactMarkdown, props, source)) },
   parseFocusChart: JSON.parse, FocusChart: () => React.createElement('figure', null, 'chart')

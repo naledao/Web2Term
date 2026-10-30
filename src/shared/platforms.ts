@@ -851,8 +851,12 @@ export const DEEPSEEK_PAGE: PageAdapter = {
     reasoningSelectors: ['.ds-think-content']
   },
   // Virtual row keys (numeric or opaque) are used only across this one send.
+  // Read each message inside the virtual row: a row containing both the user
+  // message and its reply must not have the user's files classified as assistant content.
+  fileUserTurnSelector: '[class~="ds-message"]',
+  fileTurnPositionSelector: '[data-virtual-list-item-key]',
   fileTurnPositionAttr: 'data-virtual-list-item-key',
-  fileAssistantSelectors: ['.ds-think-content'],
+  fileAssistantSelectors: ['.ds-think-content', '.ds-assistant-message-main-content'],
   fileImagesMayUseNames: true,
   /*
    * From the earlier DOM capture, where the composer was empty and the control read

@@ -696,6 +696,9 @@
     return '\n\n<!--focus-ui ' + json + ' -->\n' + fallback + '\n\n'
   }
 
+  // Reuse copies across focus polling; weak keys release them with their native image elements.
+  const focusLayoutImageCopies = new WeakMap()
+
   /** A bounded presentation tree, read from native DIL boxes, images, lists and vector icons. */
   const smartUiLayoutsOf = node => {
     const rules = PAGE.focus?.smartUi, answer = rules ? replyRootOf(node) : null
@@ -705,12 +708,63 @@
       'ul', 'ol', 'li', 'hr', 'br', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'img', 'figure', 'figcaption',
       'svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
     const ignored = new Set(['script', 'style', 'iframe', 'object', 'embed', 'video', 'audio', 'canvas', 'link', 'meta', 'foreignobject', 'use', 'animate', 'set'])
+    const inlineImageOf = (value, limit) => {
+      if (typeof value !== 'string' || value.length > limit) return ''
+      const parts = /^data:image\/(png|jpe?g|gif|webp|avif|bmp|svg\+xml)((?:;charset=utf-8|;utf8)?)(;base64)?,([\s\S]+)$/i.exec(value)
+      if (!parts) return ''
+      if (parts[3]) return /^[A-Za-z0-9+/]+={0,2}$/.test(parts[4]) && parts[4].length % 4 !== 1 ? value : ''
+      if (parts[1].toLowerCase() !== 'svg+xml') return ''
+      try {
+        const svg = decodeURIComponent(parts[4])
+        if (!/^\s*(?:<\?xml[^>]*>\s*)?<svg[\s/>]/i.test(svg) || /<!DOCTYPE|<!ENTITY/i.test(svg)) return ''
+        const src = 'data:image/svg+xml,' + encodeURIComponent(svg)
+        return src.length <= limit ? src : ''
+      } catch { return '' }
+    }
     const urlOf = (value, image = false) => {
       if (typeof value !== 'string' || !value || value.length > 4096 || /[\s\u0000-\u001f\u007f]/.test(value)) return ''
       try {
         const url = new URL(value, location.href)
         return (image ? url.protocol === 'https:' : ['https:', 'http:'].includes(url.protocol)) && url.hostname && !url.username && !url.password ? url.href : ''
       } catch { return '' }
+    }
+    const imageOf = (image, limit) => {
+      const candidates = [image.currentSrc, image.src, image.getAttribute('src'), image.getAttribute('data-src')]
+      const origin = new URL(location.href).origin
+      for (const source of candidates) {
+        if (typeof source !== 'string' || !source) continue
+        const inline = inlineImageOf(source, limit)
+        if (inline) return inline
+        const remote = urlOf(source, true)
+        let temporary = false
+        try { const url = new URL(source); temporary = url.protocol === 'blob:' && url.origin === origin } catch {}
+        const oversized = /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp|svg\+xml)[;,]/i.test(source)
+        if (!remote && !temporary && !oversized) continue
+        // Copy only decoded native pixels. No fetch, navigation or access to another session is needed.
+        const width = image.naturalWidth, height = image.naturalHeight
+        if (image.complete && width > 0 && height > 0 && limit >= 1024) {
+          const saved = focusLayoutImageCopies.get(image)
+          if (saved?.source === source && saved.width === width && saved.height === height && saved.limit === limit) return saved.value || remote
+          let value = ''
+          try {
+            const canvas = document.createElement('canvas')
+            for (const edge of [1600, 1024, 640]) {
+              const scale = Math.min(1, edge / width, edge / height)
+              canvas.width = Math.max(1, Math.round(width * scale)); canvas.height = Math.max(1, Math.round(height * scale))
+              const context = canvas.getContext('2d')
+              if (!context) break
+              context.drawImage(image, 0, 0, canvas.width, canvas.height)
+              value = inlineImageOf(canvas.toDataURL('image/png'), limit)
+              if (!value) value = inlineImageOf(canvas.toDataURL('image/webp', .85), limit)
+              if (value) break
+            }
+          } catch { /* Tainted remote images keep their validated HTTPS source. */ }
+          focusLayoutImageCopies.set(image, { source, width, height, limit, value })
+          if (value) return value
+        }
+        if (remote) return remote
+      }
+      return ''
     }
     const length = value => /^(?:0|auto|normal|none|\d+(?:\.\d+)?(?:px|%|rem|em))$/.test(value) && (!/^\d/.test(value) || parseFloat(value) <= 2000)
     const pixels = value => Number.parseFloat(value) || 0
@@ -837,7 +891,7 @@
       return boxes.slice(0, 8).flatMap(element => {
         if (!isVisibleElement(element)) return []
         const base = getComputedStyle(element), baseColor = base.color
-        let count = 0, chars = 0, images = 0, failed = false
+        let count = 0, chars = 0, images = 0, imageChars = 0, failed = false
         const read = (current, parent, depth) => {
           if (++count > 600 || depth > 22) { failed = true; return null }
           if (current.nodeType === Node.TEXT_NODE) {
@@ -929,14 +983,14 @@
           }
           if (computed.opacity && Number(computed.opacity) < 1 && Number(computed.opacity) >= 0) put('opacity', computed.opacity)
           if (nativeTag === 'img') {
-            const src = [current.currentSrc, current.src, current.getAttribute('src'), current.getAttribute('data-src')]
-              .map(value => urlOf(value, true)).find(Boolean)
+            const src = imageOf(current, Math.min(131072, 140000 - imageChars))
             const alt = String(current.getAttribute('alt') || '').slice(0, 500)
             if (!src) {
               chars += alt.length || 9
               return { tag: 'span', children: [alt || '图片暂时无法显示'] }
             }
             if (++images > 12) { failed = true; return null }
+            if (/^data:/i.test(src)) imageChars += src.length
             const rect = current.getBoundingClientRect(), width = pixels(computed.width) || rect.width || current.naturalWidth,
               height = pixels(computed.height) || rect.height || current.naturalHeight
             // Absolute-positioned native images become normal-flow images with the same crop ratio.
@@ -993,6 +1047,65 @@
     if (!root) return ''
     const smartCards = PAGE.focus?.smartUi ? smartUiCardsOf(node) : []
     const layouts = PAGE.focus?.smartUi ? smartUiLayoutsOf(node) : []
+    const codeCards = new Map()
+    const codeMarkdown = []
+    const languageAliases = { 'c++': 'cpp', 'c#': 'csharp', cs: 'csharp', js: 'javascript', ts: 'typescript',
+      py: 'python', sh: 'bash', shell: 'bash', 'shell script': 'bash', ps1: 'powershell',
+      yml: 'yaml', md: 'markdown', 'plain text': 'text', plaintext: 'text', txt: 'text' }
+    const languages = new Set(('java javascript typescript jsx tsx python c cpp csharp go rust ruby php kotlin swift scala groovy ' +
+      'sql json xml html css scss bash powershell yaml markdown dockerfile text diff ini toml properties ' +
+      'r lua perl objective-c dart graphql makefile nginx apache console').split(' '))
+    const languageOf = (value, explicit = false) => {
+      const text = String(value || '').trim().toLowerCase()
+      const language = languageAliases[text] || text
+      return languages.has(language) || explicit && /^[a-z][\w+-]{0,39}$/.test(language) ? language : ''
+    }
+    const codeLanguage = (element) => {
+      if (!element) return ''
+      const declared = element.getAttribute('data-language') || element.getAttribute('data-lang')
+      const classes = String(element.getAttribute('class') || element.className || '')
+      return languageOf(declared, true) || languageOf(classes.match(/(?:^|\s)(?:language-|lang-)([\w+-]+)/i)?.[1], true)
+    }
+    // Only a compact header beside one <pre> is treated as code chrome. Normal prose
+    // mentioning a language remains part of the answer, and toolbar button text is excluded.
+    const headerText = (current) => {
+      if (current.nodeType === Node.TEXT_NODE) return String(current.nodeValue || '')
+      if (current.nodeType !== Node.ELEMENT_NODE || /^(button|svg|script|style)$/i.test(current.tagName) ||
+        current.getAttribute('role') === 'button' || current.getAttribute('aria-hidden') === 'true') return ''
+      return [...current.childNodes].map(headerText).join('')
+    }
+    const pres = [...(root.tagName?.toLowerCase() === 'pre' ? [root] : []), ...(root.querySelectorAll?.('pre') || [])]
+      .filter(element => element.tagName?.toLowerCase() === 'pre')
+    for (const pre of pres) {
+      const code = pre.querySelector('code') || pre
+      let language = codeLanguage(code) || codeLanguage(pre)
+      let card = pre
+      let parent = pre === root ? null : pre.parentElement
+      for (let depth = 0; parent && depth < 4; depth++, parent = parent.parentElement) {
+        if (parent.querySelectorAll('pre').length !== 1) break
+        const headers = [...parent.children].filter(child => child !== pre && ![...child.querySelectorAll('pre')].includes(pre))
+        const labels = headers.map(child => headerText(child).trim()).filter(Boolean)
+        const headerLanguage = labels.map(label => languageOf(label)).find(Boolean)
+        const controls = headers.some(child => child.querySelector('button, [role="button"]'))
+        if (headerLanguage && controls && labels.every(label => languageOf(label))) {
+          language = language || headerLanguage
+          card = parent
+          break
+        }
+        language = language || codeLanguage(parent)
+        if (parent === root) break
+      }
+      codeCards.set(card, { code, language })
+    }
+    const renderCode = (code, language) => {
+      const raw = String(code.textContent || '').replace(/\r\n?/g, '\n').replace(/\n$/, '')
+      let length = 3
+      for (const match of raw.matchAll(/`{3,}/g)) length = Math.max(length, match[0].length + 1)
+      const fence = '`'.repeat(length)
+      const index = codeMarkdown.push(`${fence}${language}\n${raw}\n${fence}`) - 1
+      // Protect literal code from the prose whitespace normalisation below.
+      return `\n\n\u0000focus-code:${index}\u0000\n\n`
+    }
 
     const render = (current, depth = 0, strongContext = false) => {
       if (!current) return ''
@@ -1000,6 +1113,8 @@
       if (current.nodeType !== Node.ELEMENT_NODE) return ''
 
       const element = current
+      const codeCard = codeCards.get(element)
+      if (codeCard) return renderCode(codeCard.code, codeCard.language)
       const smart = smartCards.find(card => card.element === element)
       if (smart) return smartUiMarkdown(smart.data)
       const layout = layouts.find(item => item.element === element)
@@ -1043,11 +1158,7 @@
       if (tag === 'hr') return '\n\n---\n\n'
       if (tag === 'pre') {
         const code = element.querySelector('code')
-        const raw = String((code || element).textContent || '').replace(/\n$/, '')
-        const languageClass = String(code?.className || '')
-        const languageMatch = languageClass.match(/(?:language-|lang-)([\w+-]+)/)
-        const language = languageMatch ? languageMatch[1] : ''
-        return `\n\n\`\`\`${language}\n${raw}\n\`\`\`\n\n`
+        return renderCode(code || element, codeLanguage(code) || codeLanguage(element))
       }
       if (tag === 'code') return `\`${String(element.textContent || '').replace(/\`/g, '\\`')}\``
       if (tag === 'strong' || tag === 'b') return emphasis(children())
@@ -1098,6 +1209,8 @@
       .replace(/[ \t]+\n/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim()
+      .replace(/(^|\n)([ \t]*)\u0000focus-code:(\d+)\u0000/g, (_, before, indent, index) =>
+        before + indent + codeMarkdown[Number(index)].replace(/\n/g, '\n' + indent))
   }
   /** True when this turn is an ASSISTANT one, decided by structure rather than by class. */
   const isAssistantTurn = (node) => {

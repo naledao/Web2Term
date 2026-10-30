@@ -53,9 +53,24 @@ export function validFocusLayoutStyle(key: string, value: unknown): value is str
   return false
 }
 
-/** Images are passive HTTPS resources; links may also point at ordinary HTTP pages. */
+/** Inline images stay in an img context, with a bounded payload and explicit image MIME types. */
+function validInlineImage(value: string): boolean {
+  if (value.length > 131072) return false
+  const parts = /^data:image\/(png|jpe?g|gif|webp|avif|bmp|svg\+xml)((?:;charset=utf-8|;utf8)?)(;base64)?,([\s\S]+)$/i.exec(value)
+  if (!parts) return false
+  if (parts[3]) return /^[A-Za-z0-9+/]+={0,2}$/.test(parts[4]) && parts[4].length % 4 !== 1
+  if (parts[1].toLowerCase() !== 'svg+xml') return false
+  try {
+    const svg = decodeURIComponent(parts[4])
+    return /^\s*(?:<\?xml[^>]*>\s*)?<svg[\s/>]/i.test(svg) && !/<!DOCTYPE|<!ENTITY/i.test(svg)
+  } catch { return false }
+}
+
+/** Images allow HTTPS and bounded inline image data; links remain ordinary HTTP(S) pages. */
 export function validFocusLayoutUrl(value: unknown, image = false): value is string {
-  if (typeof value !== 'string' || value.length > 4096 || /[\s\u0000-\u001f\u007f]/.test(value)) return false
+  if (typeof value !== 'string') return false
+  if (image && /^data:/i.test(value)) return validInlineImage(value)
+  if (value.length > 4096 || /[\s\u0000-\u001f\u007f]/.test(value)) return false
   try {
     const url = new URL(value)
     return (image ? url.protocol === 'https:' : ['https:', 'http:'].includes(url.protocol)) && !!url.hostname && !url.username && !url.password
@@ -63,8 +78,9 @@ export function validFocusLayoutUrl(value: unknown, image = false): value is str
 }
 
 function validAttribute(tag: string, key: string, value: unknown): value is string {
-  if (typeof value !== 'string' || value.length > 16000) return false
+  if (typeof value !== 'string') return false
   if (tag === 'img') return key === 'src' ? validFocusLayoutUrl(value, true) : key === 'alt' && value.length <= 500
+  if (value.length > 16000) return false
   if (tag === 'a') return key === 'href' && validFocusLayoutUrl(value)
   if (tag === 'div') {
     if (key === 'role') return value === 'progressbar'

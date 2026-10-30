@@ -10,6 +10,7 @@ import type { FocusChartData } from './FocusChart'
 import FocusSmartUi, { FocusSmartUiContext } from './FocusSmartUi'
 import FocusLayout from './FocusLayout'
 import FocusComposerModes from './FocusComposerModes'
+import FocusCodeBlock from './FocusCodeBlock'
 import FocusModelSettings from './FocusModelSettings'
 import { parseFocusLayout } from '@shared/focus-layout'
 import type { FocusLayoutData } from '@shared/focus-layout'
@@ -196,10 +197,10 @@ const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: 
     blocks.push(source.slice(last, match.index), block)
     last = match.index + match[0].length
   }
-  if (!blocks.length) return <MDEditor.Markdown source={source} skipHtml remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} />
+  if (!blocks.length) return <MDEditor.Markdown source={source} skipHtml disableCopy components={{ pre: FocusCodeBlock }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} />
   blocks.push(source.slice(last))
   return <>{blocks.map((block, index) => typeof block === 'string'
-    ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /> : null
+    ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml disableCopy components={{ pre: FocusCodeBlock }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /> : null
     : block.kind === 'chart' ? <FocusChart key={index} data={block.data} /> : block.kind === 'layout'
       ? <FocusLayout key={index} data={block.data} /> : <FocusSmartUi key={index} data={block.data} />)}</>
 })

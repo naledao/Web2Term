@@ -68,6 +68,7 @@ class ElementFixture {
     const excluded = [...selector.matchAll(/:not\(([^()]*)\)/g)].map((match) => match[1])
     if (excluded.some((part) => this.matches(part))) return false
     selector = selector.replace(/:not\([^()]*\)/g, '')
+    selector = selector.replace(/(\[[^\]]*\])|\.([a-zA-Z_][\w-]*)/g, (all, attribute, name) => attribute || '[class~="' + name + '"]')
     if (selector === '*') return true
     const tag = /^[a-z][\w-]*/i.exec(selector)?.[0] || ''
     if (tag && this.tagName.toLowerCase() !== tag.toLowerCase()) return false
@@ -92,6 +93,13 @@ class ElementFixture {
     return null
   }
   contains(node) { return this === node || this.descendants().includes(node) }
+  compareDocumentPosition(other) {
+    if (this === other) return 0
+    let root = this
+    while (root.parentElement) root = root.parentElement
+    const nodes = [root, ...root.descendants()]
+    return nodes.indexOf(this) < nodes.indexOf(other) ? 4 : 2
+  }
 }
 
 const element = (tag, attributes, content) => new ElementFixture(tag, attributes, content)
@@ -111,7 +119,7 @@ function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div'
   const input = element('input', { type: 'file', multiple: '', accept: inputAccept })
   const root = element('form', {}, [cards, composer, add, send, input])
   const body = element('body', {}, [root])
-  const listeners = new Map()
+  const listeners = new Map(), reports = []
   const document = {
     body, activeElement: composer,
     createRange: () => ({ selectNodeContents() {} }),
@@ -132,14 +140,16 @@ function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div'
     Event: class { constructor(type) { this.type = type } },
     MutationObserver: class { observe() {} },
     getComputedStyle: () => ({ visibility: 'visible' }),
-    setTimeout: () => 1, clearTimeout() {}, console: { log() {} }
+    setTimeout: () => 1, clearTimeout() {}, console: { log(line) {
+      if (line.startsWith('[cmd-terminal] ')) reports.push(JSON.parse(line.slice('[cmd-terminal] '.length)))
+    } }
   })
   const controller = window.__cmdTerminalInterceptor
   controller.configure({ enabled: true, page: { ...platformExports.CHATGPT_PAGE, ...pageOverrides } })
   assert.equal(controller.beginFileSend(token, files), 'ok')
   controller.fileSelectionApplied(token)
   return {
-    controller, composer, cards, send, root, body,
+    controller, composer, cards, send, root, body, reports,
     render(names, attributes = []) {
       cards.replaceChildren(...names.map((name, index) => element('div', { 'data-fixture-card': '' }, [
         element('span', attributes[index] || {}, name)
@@ -212,6 +222,62 @@ test('DeepSeek textarea uploads Markdown before inserting its caption and acknow
   assert.equal(app.submit(), true)
   assert.equal(app.status().status, 'sent')
   assert.equal(app.send.clicks, 1)
+})
+
+test('DeepSeek confirms a focus upload when user and assistant messages share a virtual row', () => {
+  const file = { fileName: 'screen.png', mimeType: 'image/png', sizeBytes: 40991 }
+  for (const key of ['0', '-2', 'message-pair']) {
+    const app = fixture([file], { ...platformExports.DEEPSEEK_PAGE, sendButtonSelectors: ['button[aria-label="发送"]'] }, 'textarea')
+    // Start the actual focus path so confirmation must report the original user text and owned token.
+    app.controller.releaseFileSend(token)
+    app.controller.configure({ prefix: 'SYSTEM\n\n' })
+    const text = '请帮我检查图片中的配置管理用途。'
+    assert.equal(app.controller.beginFocusFileSend(token, [file], text, '/c/offline-fixture'), 'ok')
+    app.controller.fileSelectionApplied(token)
+    app.render([file.fileName])
+    assert.equal(app.controller.prepareFocusFileSendCaption(token), true)
+    app.send.onClick = () => {
+      const caption = app.composer.value
+      app.composer.replaceChildren()
+      const cards = [...app.cards.childNodes]
+      app.cards.replaceChildren()
+      const user = element('div', { class: 'ds-message' }, [...cards, element('p', {}, caption)])
+      const assistant = element('div', { class: 'ds-message' }, [element('div', { class: 'ds-think-content' }, '正在思考…')])
+      app.body.replaceChildren(element('div', { 'data-virtual-list-item-key': key }, [user, assistant]), app.root)
+    }
+    assert.equal(app.submit(), true)
+    assert.equal(app.status().status, 'sent', key)
+    assert.equal(app.status().status, 'sent', 'polling the same acknowledgement is idempotent')
+    assert.equal(app.send.clicks, 1)
+    const confirmed = app.reports.filter(report => report.event === 'user-message')
+    assert.equal(confirmed.length, 1)
+    assert.equal(confirmed[0].text, text)
+    assert.equal(confirmed[0].focusSendToken, token)
+    assert.equal(confirmed[0].focusFiles[0].fileName, file.fileName)
+  }
+})
+
+test('DeepSeek ignores old user messages and a new assistant quoting the caption and filename', () => {
+  const file = { fileName: 'screen.png', mimeType: 'image/png', sizeBytes: 40991 }
+  const app = fixture([file], { ...platformExports.DEEPSEEK_PAGE, sendButtonSelectors: ['button[aria-label="发送"]'] }, 'textarea')
+  app.render([file.fileName])
+  const caption = '请分析这张配置图片。'
+  assert.equal(app.controller.prepareFileSendCaption(token, caption), true)
+  const oldUser = element('div', { class: 'ds-message' }, [file.fileName, caption])
+  const oldAnswer = element('div', { class: 'ds-message' }, [element('div', { class: 'ds-assistant-message-main-content' }, '之前的回复')])
+  app.body.replaceChildren(element('div', { 'data-virtual-list-item-key': '4' }, [oldUser, oldAnswer]), app.root)
+  app.send.onClick = () => {
+    app.composer.replaceChildren(); app.cards.replaceChildren()
+    const answer = element('div', { class: 'ds-message' }, [
+      element('div', { class: 'ds-assistant-message-main-content' }, [file.fileName, caption])])
+    app.body.replaceChildren(element('div', { 'data-virtual-list-item-key': '4' }, [oldUser, oldAnswer]),
+      element('div', { 'data-virtual-list-item-key': '6' }, [answer]), app.root)
+  }
+  assert.equal(app.submit(), true)
+  const status = app.status()
+  assert.equal(status.status, 'confirming')
+  assert.equal(status.userTurnCount, 1)
+  assert.equal(status.newTurnSeen, false)
 })
 
 test('DeepSeek accepts and acknowledges a JSONC text alias through an extension-restricted input', () => {

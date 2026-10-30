@@ -92,6 +92,7 @@ function fixture() {
     collapse: value => String(value || '').replace(/\s+/g, ' ').trim(), getComputedStyle: node => node.css,
     replyRootOf: () => answer, messageIdOf: () => 'answer-layout', isVisibleElement: node => node.css.display !== 'none',
     URL, location: { href: 'https://chatgpt.com/c/layout' } })
+  context.focusLayoutImageCopies = helper('focusLayoutImageCopies', context)
   context.smartUiCardsOf = () => []
   context.smartUiMarkdown = () => assert.fail('no radio card in this fixture')
   context.smartUiLayoutsOf = helper('smartUiLayoutsOf', context)
@@ -190,8 +191,111 @@ test('image discovery accepts image-only galleries and lazy images without mista
   assert.match(renderer, /connect-src 'self' ws: wss: pdf-asset:;/)
 })
 
+function diagramFixture(src) {
+  const f = fixture(), image = new Element('img', { src, alt: 'Quartz 的整体架构' }, [], { width: '900px', height: '1000px' })
+  image.currentSrc = src
+  f.dil.childNodes = []; f.answer.childNodes = [f.dil]
+  const frame = new Element('div', { 'data-d-component': 'Box', 'data-d-has-border': '' }, [image])
+  append(f.dil, new Element('h2', {}, ['一、Quartz 的整体架构']), frame, new Element('h2', {}, ['二、Quartz 的执行流程']))
+  return { ...f, image }
+}
+
+const diagramSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1000"><rect fill="#eee" width="900" height="1000"/><text x="10" y="30">Scheduler 调度器</text></svg>'
+const pngData = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aBe8AAAAASUVORK5CYII='
+
+test('native inline SVG and raster diagrams survive extraction, marker parsing and img rendering', () => {
+  for (const src of ['data:image/svg+xml,' + encodeURIComponent(diagramSvg), 'data:image/svg+xml;utf8,' + diagramSvg,
+    'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(diagramSvg),
+    'data:image/svg+xml;base64,' + Buffer.from(diagramSvg).toString('base64'), pngData,
+    // This passes the dedicated image boundary instead of the 16 KB attribute limit.
+    'data:image/png;base64,' + 'AAAA'.repeat(5000)]) {
+    const f = diagramFixture(src), layouts = f.layouts({})
+    assert.equal(layouts.length, 1)
+    const json = f.markdown({}).match(/<!--focus-layout (\{[^\n]*\}) -->/)[1]
+    const data = parseFocusLayout(json)
+    assert.ok(data)
+    const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+    assert.match(html, /<img\b[^>]*src="data:image\//)
+    assert.match(html, /alt="Quartz 的整体架构"/)
+    assert.doesNotMatch(html, /图片暂时无法显示|<svg\b|<text\b/)
+    if (src.includes('svg+xml') && !src.includes(';base64')) {
+      const saved = data.root.children.find(node => node.tag === 'img').attrs.src
+      assert.equal(decodeURIComponent(saved.slice(saved.indexOf(',') + 1)), diagramSvg)
+      assert.ok(saved.includes('%23eee'), 'encode SVG colors instead of treating # as a URL fragment')
+    }
+    assert.match(f.markdown({}), /^## 一、Quartz 的整体架构\s+<!--focus-layout [\s\S]+## 二、Quartz 的执行流程$/)
+  }
+})
+
+function nativeCanvas(f, encode = () => pngData) {
+  const calls = [], sizes = []
+  f.context.document = { createElement: tag => {
+    assert.equal(tag, 'canvas')
+    return { width: 0, height: 0, getContext: type => {
+      assert.equal(type, '2d')
+      return { drawImage: (...args) => calls.push(args) }
+    }, toDataURL(type, quality) { sizes.push([this.width, this.height, type]); return encode(type, quality) } }
+  } }
+  return { calls, sizes }
+}
+
+test('native blob diagrams are copied once after loading and refreshed when their source changes', () => {
+  const f = diagramFixture('blob:https://chatgpt.com/diagram-one'), canvas = nativeCanvas(f)
+  Object.assign(f.image, { complete: false, naturalWidth: 1800, naturalHeight: 2000 })
+  assert.match(JSON.stringify(f.layouts({})[0].data), /Quartz 的整体架构/)
+  assert.equal(canvas.calls.length, 0, 'wait for decoded pixels without caching an incomplete image')
+  f.image.complete = true
+  let data = parseFocusLayout(JSON.stringify(f.layouts({})[0].data))
+  assert.ok(data)
+  let html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+  assert.ok(html.includes('src="' + pngData + '"'))
+  assert.equal(canvas.calls.length, 1)
+  assert.equal(canvas.calls[0][0], f.image)
+  assert.deepEqual(canvas.sizes[0], [1440, 1600, 'image/png'])
+  f.markdown({}); f.layouts({})
+  assert.equal(canvas.calls.length, 1, 'polling reuses the copy')
+  f.image.currentSrc = f.image.attrs.src = 'blob:https://chatgpt.com/diagram-two'
+  data = parseFocusLayout(JSON.stringify(f.layouts({})[0].data))
+  html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+  assert.ok(html.includes('src="' + pngData + '"'))
+  assert.equal(canvas.calls.length, 2)
+  assert.doesNotMatch(html, /blob:|图片暂时无法显示/)
+})
+
+test('decoded HTTPS images use native pixels when available and retain HTTPS if canvas access is denied', () => {
+  const f = diagramFixture('https://chatgpt.com/backend-api/files/diagram')
+  Object.assign(f.image, { complete: true, naturalWidth: 900, naturalHeight: 1000 })
+  const canvas = nativeCanvas(f)
+  assert.match(JSON.stringify(f.layouts({})[0].data), /data:image\/png;base64/)
+  assert.equal(canvas.calls.length, 1)
+  const g = diagramFixture('https://images.example.com/private.png')
+  Object.assign(g.image, { complete: true, naturalWidth: 900, naturalHeight: 1000 })
+  const denied = nativeCanvas(g, () => { throw new Error('SecurityError') })
+  assert.match(JSON.stringify(g.layouts({})[0].data), /https:\/\/images.example.com\/private.png/)
+  g.layouts({})
+  assert.equal(denied.calls.length, 1, 'do not retry a tainted image on every poll')
+})
+
+test('temporary image copies downsize oversized data without dropping surrounding layout content', () => {
+  const f = diagramFixture('blob:https://chatgpt.com/large-diagram')
+  Object.assign(f.image, { complete: true, naturalWidth: 3600, naturalHeight: 4000 })
+  let attempts = 0
+  const canvas = nativeCanvas(f, () => ++attempts < 3 ? 'data:image/png;base64,' + 'AAAA'.repeat(40000) : pngData)
+  const data = parseFocusLayout(JSON.stringify(f.layouts({})[0].data))
+  assert.ok(data)
+  assert.deepEqual(canvas.sizes.map(size => size.slice(0, 2)), [[1440, 1600], [1440, 1600], [922, 1024]])
+  assert.match(JSON.stringify(data), /data:image\/png;base64/)
+  const unavailable = diagramFixture('blob:https://other.example/diagram')
+  Object.assign(unavailable.image, { complete: true, naturalWidth: 900, naturalHeight: 1000 })
+  const untouched = nativeCanvas(unavailable)
+  assert.doesNotMatch(JSON.stringify(unavailable.layouts({})[0].data), /blob:/)
+  assert.equal(untouched.calls.length, 0)
+})
+
 test('image and card URL boundaries reject executable/local resources and excessive image trees', () => {
-  for (const url of ['javascript:alert(1)', 'file:///C:/private.png', 'data:image/svg+xml,<svg/>', 'blob:https://chatgpt.com/uuid',
+  for (const url of ['javascript:alert(1)', 'file:///C:/private.png', 'data:text/html,<svg/>', 'blob:https://chatgpt.com/uuid',
+    'data:image/svg+xml,' + encodeURIComponent('<!DOCTYPE svg><svg/>'), 'data:image/svg+xml,%ZZ',
+    'data:image/png,not-base64', 'data:image/png;base64,!!!!', 'data:image/png;base64,' + 'AAAA'.repeat(32768),
     'https://user:secret@example.com/a.png', 'https://example.com/\nimage.png', 'https://example.com/' + 'a'.repeat(4096)]) {
     assert.equal(validFocusLayoutUrl(url, true), false, url)
     const data = fixture().layouts({})[0].data
@@ -200,6 +304,7 @@ test('image and card URL boundaries reject executable/local resources and excess
   }
   assert.equal(validFocusLayoutUrl('http://example.com/a.png', true), false)
   assert.equal(validFocusLayoutUrl('https://images.example.com/a.webp', true), true)
+  assert.equal(validFocusLayoutUrl(pngData, false), false, 'inline images do not become clickable data links')
   assert.equal(validFocusLayoutUrl('http://example.com/', false), true)
   const f = fixture(), { gallery, images } = websiteGallery()
   f.dil.childNodes = []; append(f.dil, gallery)
