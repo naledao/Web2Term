@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { parseScheduledTaskRequest, scheduleLabel } from '../shared/scheduled-tasks'
-import type { ScheduledTask, ScheduledTaskAction, ScheduledTaskDraft, ScheduledTaskRequest, ScheduledTaskRun, ScheduledTaskTarget } from '../shared/scheduled-tasks'
+import type { ScheduledTask, ScheduledTaskAction, ScheduledTaskDraft, ScheduledTaskManagementRequest, ScheduledTaskRequest, ScheduledTaskRun, ScheduledTaskTarget } from '../shared/scheduled-tasks'
 import type { ConversationToolsOwner } from '../shared/conversation-tools'
 import { dueScheduledTime, nextScheduledTime } from './scheduled-task-time'
 import { ScheduledTaskStore } from './scheduled-task-store'
@@ -77,7 +77,7 @@ export class ScheduledTasks {
         target: { ...target }, sourceKey, receiptSubmissionId, enabled: true, deleted: false, revision: 1, nextRunAt, createdAt: now, updatedAt: now }
       this.store.save(task)
       if (receipt) this.store.insertRun(task, now, now, 'receipt', 'receipt', [
-        '【定时任务已创建】', `任务编号：${task.id}`, `周期：${scheduleLabel(task.schedule)}`,
+        '【定时任务已创建】', `任务编号：${task.id}`, `版本：${task.revision}`, `周期：${scheduleLabel(task.schedule)}`,
         `下次触发：${new Date(task.nextRunAt).toISOString()}`, `任务：${task.prompt}`,
         '计划已保存，本次不立即执行。请简短确认并按原任务流程结束本次创建任务，等待软件到期提交新任务，不要重复创建。'
       ].join('\n'))
@@ -85,6 +85,56 @@ export class ScheduledTasks {
     })
     this.deps.changed(owner.sessionId); this.wake()
     return task
+  }
+  /** Apply a model operation and its replay marker atomically; receipts do not depend on a live plan. */
+  manage(owner: ConversationToolsOwner, request: ScheduledTaskManagementRequest, sourceKey: string): string | null {
+    if (this.store.toolResult(sourceKey) !== undefined) return null
+    const now = this.now()
+    let changedId: string | null = null
+    const details = (task: ScheduledTask) => ({ id: task.id, revision: task.revision, enabled: task.enabled,
+      schedule: task.schedule, prompt: task.prompt, nextRunAt: new Date(task.nextRunAt).toISOString() })
+    let text: string
+    try {
+      text = this.store.transaction(() => {
+        let result: string
+        if (!owner.conversationId) throw new Error('请先在当前 AI 对话发送一条消息。')
+        if (request.action === 'list') {
+          const tasks = this.store.tasks(owner.sessionId).filter(task => task.owner.platformId === owner.platformId && task.owner.conversationId === owner.conversationId)
+          const page = tasks.slice(request.offset, request.offset + 10)
+          result = '【定时任务列表】\n' + JSON.stringify({ total: tasks.length,
+            tasks: page.map(task => ({ ...details(task), prompt: task.prompt.slice(0, 1000), promptTruncated: task.prompt.length > 1000 })),
+            nextOffset: request.offset + page.length < tasks.length ? request.offset + page.length : null })
+        } else {
+          const task = this.owned(owner.sessionId, request.id)
+          if (task.owner.platformId !== owner.platformId || task.owner.conversationId !== owner.conversationId) throw new Error('只能管理当前 AI 平台和对话的定时任务。')
+          if (request.action === 'get') result = '【定时任务详情】\n' + JSON.stringify(details(task))
+          else {
+            if (request.revision !== task.revision) throw new Error('计划已被修改，请重新查询最新 id 和 revision 后再操作。')
+            if (request.action === 'update') {
+              const input = parseScheduledTaskRequest({ type: 'scheduled_task', schedule: request.schedule ?? task.schedule, prompt: request.prompt ?? task.prompt })
+              if (!input) throw new Error('周期或任务描述无效。')
+              const next = { ...task, ...input, revision: task.revision + 1, nextRunAt: nextScheduledTime(input.schedule, now), updatedAt: now }
+              this.store.cancelPending(task.id, '计划已修改，旧投递已取消。')
+              this.store.save(next)
+              result = '【定时任务已修改】\n' + JSON.stringify(details(next)) + '\n原任务编号、执行主机与目录保留，没有创建新计划。请简短确认。'
+            } else {
+              this.store.cancelPending(task.id, '计划已删除。')
+              this.store.save({ ...task, enabled: false, deleted: true, updatedAt: now })
+              result = `【定时任务已删除】\n任务编号：${task.id}\n已停止后续周期投递；已经发出的消息或正在执行的工作不会自动撤销。请简短确认。`
+            }
+            changedId = task.id
+          }
+        }
+        this.store.saveToolResult(sourceKey, owner.sessionId, now, result)
+        return result
+      })
+    } catch (error) {
+      changedId = null
+      text = '【定时任务操作未完成】\n' + (error instanceof Error ? error.message : '参数无效。') + '\n没有修改或删除计划；请查询当前状态后重试。'
+      this.store.saveToolResult(sourceKey, owner.sessionId, now, text)
+    }
+    if (changedId) { this.abort(changedId); this.deps.changed(owner.sessionId); this.wake() }
+    return text
   }
   edit(sessionId: string, draft: ScheduledTaskDraft): ScheduledTask {
     const task = this.owned(sessionId, draft.id!)

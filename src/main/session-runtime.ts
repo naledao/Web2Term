@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type { ScheduledTasks } from './scheduled-tasks'
 import { sameScheduledTarget } from './scheduled-task-target'
 import type { ScheduledDelivery } from './scheduled-tasks'
-import { parseScheduledTaskRequest, scheduledTaskToolPrompt } from '../shared/scheduled-tasks'
+import { parseScheduledTaskToolRequest, scheduledTaskToolPrompt } from '../shared/scheduled-tasks'
+import { ScheduledTaskTools } from './scheduled-task-tools'
 import type { ScheduledTask, ScheduledTaskDraft, ScheduledTaskRun, ScheduledTaskTarget, ScheduledToolCall } from '../shared/scheduled-tasks'
 import { computerOverlaySnapshot, ComputerOverlayLifetime } from '../shared/computer-overlay'
 import type { ComputerOverlaySnapshot } from '../shared/computer-overlay'
@@ -352,7 +353,7 @@ export class SessionRuntime {
     current: (task, owner) => this.backgroundNotificationCurrent(task, owner),
     canSend: (owner, task) => {
       if (this.disposed || this.activePlatformId !== owner.platformId || !this.runner.canSendAutomaticResult()) return false
-      if (this.focusSending || this.mailNotifications?.busy || this.toolPromptReads?.busy || this.runner.hasInFlightWork()) return false
+      if (this.focusSending || this.mailNotifications?.busy || this.toolPromptReads?.busy || this.scheduledTaskTools?.busy || this.runner.hasInFlightWork()) return false
       if (task.taskContext && (!this.active || !this.getComputerUseCapability(owner.platformId).scopeSupported ||
         !['waiting-model', 'responded'].includes(this.taskCoordinator.current(owner.platformId)?.progress?.phase ?? ''))) return false
       const embed = this.embeds.get(owner.platformId)?.embed
@@ -474,6 +475,18 @@ export class SessionRuntime {
     current: call => this.toolPromptReadCurrent(call),
     lookup: name => this.fullToolPrompt(name, this.activePlatformId),
     send: (text, call, signal, current) => this.embed.sendTaskResult(text, call.conversationId, signal, current),
+    note: message => this.runner.refreshTerminal(message)
+  })
+  private readonly scheduledTaskTools = new ScheduledTaskTools({
+    current: call => !!call.sourceSubmissionId && this.toolPreferences().scheduledTasksEnabled &&
+      this.toolPromptReadCurrent({ ...call, sourceSubmissionId: call.sourceSubmissionId }),
+    send: async (text, call, signal, current) => {
+      if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork() || this.mailNotifications?.busy ||
+        this.toolPromptReads?.busy || this.backgroundTaskResults.isSending) return 'busy'
+      this.focusSending = true
+      try { return await this.embed.sendTaskResult(text, call.conversationId, signal, current) }
+      finally { this.focusSending = false; this.options.scheduledTasks?.wake() }
+    },
     note: message => this.runner.refreshTerminal(message)
   })
   private scheduledSendAbort: AbortController | null = null
@@ -984,7 +997,7 @@ export class SessionRuntime {
         // A due plan starts a fresh goal. It never resumes a stopped goal or releases human control.
         if (scheduledCurrent && controlsCurrent) this.taskEnded = false
         if (submission) {
-          if (this.lastSubmissions.get(platform.id) !== submission.id) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel() }
+          if (this.lastSubmissions.get(platform.id) !== submission.id) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel() }
           this.lastSubmissions.set(platform.id, submission.id)
         }
         if (controlsCurrent && record().conversationId === null) this.conversationTools.submitted(platform.id)
@@ -1099,7 +1112,7 @@ export class SessionRuntime {
       },
       onInterceptor: (status) => {
         this.mailNotifications?.reconcile()
-        this.toolPromptReads?.reconcile()
+        this.toolPromptReads?.reconcile(); this.scheduledTaskTools?.reconcile()
         this.captureGoal(status.lastSentText)
         if (!this.disposed) this.options.onPendingQuestionsChanged(this.id, platform.id, status.pendingQuestion?.questions.length ?? 0)
         const taskRunning = status.taskStartedAt !== null && status.taskFinishedAt === null
@@ -1276,7 +1289,7 @@ export class SessionRuntime {
   }
 
   setActive(active: boolean): void {
-    if (!active) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel() }
+    if (!active) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel() }
     if (!active) this.scheduledSendAbort?.abort()
     if (this.active && !active) this.interruptTaskControl(this.activePlatformId)
     this.active = active
@@ -1828,7 +1841,7 @@ export class SessionRuntime {
   }
   private stopAutomation(reason: TaskStopReason, allPlatforms: boolean): Promise<InterceptorStatus> {
     this.mailNotifications?.cancel()
-    this.toolPromptReads?.cancel()
+    this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel()
     this.taskEnded = true
     this.scheduledSendAbort?.abort()
     this.focusUploadAbort?.abort(); this.legacyToolSend?.abort.abort()
@@ -2338,7 +2351,7 @@ export class SessionRuntime {
   /** Control-page handover revokes authority; switching a business window never calls this. */
   private interruptTaskControl(platformId: string): void {
     this.mailNotifications?.cancel()
-    this.toolPromptReads?.cancel()
+    this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel()
     this.scheduledSendAbort?.abort()
     const task = this.taskCoordinator.current(platformId)
     this.stopAutonomousTask(platformId, 'interrupted')
@@ -2485,18 +2498,20 @@ export class SessionRuntime {
       : null
     if (ignored || !scheduledTasks) { this.runner.refreshTerminal('定时任务请求未处理：' + ignored); return }
     const refuse = (message: string): void => {
-      this.runner.refreshTerminal('定时任务未创建：' + message)
+      this.runner.refreshTerminal('定时任务操作未完成：' + message)
       const owner = this.toolsOwner(), epoch = this.embed.getComputerUsePageEpoch()
-      void this.embed.sendTaskResult('【定时任务未创建】\n' + message,
+      void this.embed.sendTaskResult('【定时任务操作未完成】\n' + message,
         call.conversationId, new AbortController().signal, () => !this.disposed && this.active && sameConversationToolsOwner(owner, this.toolsOwner()) &&
           epoch === this.embed.getComputerUsePageEpoch() && this.lastSubmissions.get(owner.platformId) === call.sourceSubmissionId).catch(() => {})
     }
     if (!this.toolPreferences().scheduledTasksEnabled) { refuse('当前对话已关闭定时任务工具，不要再输出 scheduled_task 请求。'); return }
     try {
-      const request = parseScheduledTaskRequest(JSON.parse(call.rawJson))
-      if (!request) throw new Error('周期或任务描述无效。schedule 使用固定分钟间隔或五段 Cron；prompt 为非空自然语言任务。')
-      scheduledTasks.create({ ...this.toolsOwner(), conversationId: call.conversationId }, this.scheduledTarget(), request,
-        JSON.stringify(['model', this.id, this.activePlatformId, call.conversationId, call.sourceSubmissionId, call.messageId]), true, call.sourceSubmissionId)
+      const request = parseScheduledTaskToolRequest(JSON.parse(call.rawJson))
+      if (!request) throw new Error('定时任务参数无效。请读取 scheduled_task 工具说明，使用创建格式或 list、get、update、delete 操作；修改和删除须提供真实 id 和 revision。')
+      const owner = { ...this.toolsOwner(), conversationId: call.conversationId }
+      const sourceKey = JSON.stringify(['model', this.id, this.activePlatformId, call.conversationId, call.sourceSubmissionId, call.messageId])
+      if ('action' in request) this.scheduledTaskTools.receive(call, () => scheduledTasks.manage(owner, request, sourceKey))
+      else scheduledTasks.create(owner, this.scheduledTarget(), request, sourceKey, true, call.sourceSubmissionId)
     } catch (error) {
       refuse((error instanceof Error ? error.message : '参数无效。') + '\n请修正参数后重新提交。')
     }
@@ -2513,7 +2528,7 @@ export class SessionRuntime {
       const current = this.scheduledTarget()
       if (!sameScheduledTarget(current, task.target)) return '等待恢复计划绑定的执行主机和工作目录。'
     } catch (error) { return error instanceof Error ? error.message : '执行目标不可用。' }
-    if (this.focusSending || this.focusRevision || this.stoppingTask || this.mailNotifications?.busy || this.toolPromptReads?.busy || this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending) return '等待当前发送或工具执行结束。'
+    if (this.focusSending || this.focusRevision || this.stoppingTask || this.mailNotifications?.busy || this.toolPromptReads?.busy || this.scheduledTaskTools?.busy || this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending) return '等待当前发送或工具执行结束。'
     const status = this.embed.getInterceptorStatus()
     if (!status.enabled || !status.installed || !status.promptInjectionEnabled) return '等待启用原对话的终端模式和提示词注入。'
     if (status.pendingQuestion || this.taskCoordinator.waitingForUser(task.owner.platformId)) return '等待用户回答原任务的问题。'
@@ -2589,6 +2604,7 @@ export class SessionRuntime {
     if (this.disposed || !request || !sameConversationToolsOwner(request, this.toolsOwner())) throw new Error('当前对话已变化，工具设置未保存。')
     this.conversationTools.update(request.platformId, request.conversationId, request.patch)
     if (request.patch.scheduledTasksEnabled === false) this.scheduledSendAbort?.abort()
+    if (request.patch.scheduledTasksEnabled === false) this.scheduledTaskTools?.cancel()
     if (request.patch.mailNotificationsEnabled === false) this.mailNotifications?.cancel()
     this.refreshComputerUseCapabilities(request)
     return this.getConversationTools()
@@ -2796,7 +2812,7 @@ export class SessionRuntime {
   }
 
   setPaused(paused: boolean): AutomationState {
-    if (paused) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel() }
+    if (paused) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel() }
     if (paused) this.scheduledSendAbort?.abort()
     const state = this.runner.setPaused(paused)
     this.taskCoordinator.setPaused(paused)
@@ -3627,7 +3643,7 @@ export class SessionRuntime {
 
   dispose(): void {
     this.mailNotifications?.cancel()
-    this.toolPromptReads?.cancel()
+    this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel()
     this.scheduledSendAbort?.abort()
     if (this.disposed) return
     this.disposed = true

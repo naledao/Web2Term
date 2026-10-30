@@ -9,7 +9,7 @@ export const TOOL_PROMPT_NAMES: readonly ToolPromptName[] = Object.freeze(['read
 export const TOOL_PROMPT_SUMMARIES: Readonly<Record<ToolPromptName, string>> = Object.freeze({
   read_files: '将当前终端对应机器上的文件完整上传为当前会话附件，供查看源码、图片和文档。',
   background_task: '在当前终端对应机器启动非交互后台任务或常驻服务，自动回传就绪或结束结果。',
-  scheduled_task: '按用户要求创建周期计划，到期向绑定的 AI 对话提交任务；创建时不立即执行。',
+  scheduled_task: '按用户要求创建、查询、修改和删除当前对话的周期计划，到期向绑定的 AI 对话提交任务；创建时不立即执行。',
   send_email: '需要邮件通知时，向已配置的收件邮箱发送一封纯文本邮件。',
   computer: '发现、观察并操作本机桌面应用；命令、文件和后台任务使用对应工具。'
 })

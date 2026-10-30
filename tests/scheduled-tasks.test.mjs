@@ -26,7 +26,9 @@ const storage = load('../src/main/scheduled-task-store.ts')
 const { ScheduledTasks } = load('../src/main/scheduled-tasks.ts', {
   '../shared/scheduled-tasks': shared, './scheduled-task-time': time, './scheduled-task-store': storage
 })
+const { ScheduledTaskTools } = load('../src/main/scheduled-task-tools.ts')
 const plain = value => JSON.parse(JSON.stringify(value))
+const settleTools = () => new Promise(resolve => setImmediate(resolve))
 const owner = { sessionId: 'workspace-a', platformId: 'deepseek', conversationId: 'chat-a' }
 const target = { machineId: 'machine-a', transport: 'local', key: 'machine-a', cwd: 'C:\\project', label: '本机' }
 const request = { type: 'scheduled_task', schedule: { kind: 'interval', minutes: 30 }, prompt: '检查服务状态。' }
@@ -63,6 +65,119 @@ test('the request accepts only two business fields and rejects unknown context, 
     { ...request, schedule: { kind: 'cron', expression: 'H * * * *', timeZone: 'Asia/Shanghai' } },
     { ...request, schedule: { kind: 'cron', expression: '0 9 * * *', timeZone: 'invalid/zone' } } ])
     assert.equal(shared.parseScheduledTaskRequest(bad), null)
+})
+
+test('the model tool keeps legacy creation and validates management actions and partial updates', () => {
+  assert.deepEqual(plain(shared.parseScheduledTaskToolRequest(request)), request)
+  assert.deepEqual(plain(shared.parseScheduledTaskToolRequest({ ...request, action: 'create' })), request)
+  for (const input of [
+    { type: 'scheduled_task', action: 'list' },
+    { type: 'scheduled_task', action: 'list', offset: 10 },
+    { type: 'scheduled_task', action: 'get', id: 'task-a' },
+    { type: 'scheduled_task', action: 'update', id: 'task-a', revision: 1, prompt: '新的完整描述' },
+    { type: 'scheduled_task', action: 'update', id: 'task-a', revision: 1, schedule: request.schedule },
+    { type: 'scheduled_task', action: 'delete', id: 'task-a', revision: 1 }
+  ]) assert.ok(shared.parseScheduledTaskToolRequest(input))
+  for (const input of [
+    { action: 'unknown' }, { action: {} }, { action: 'list', owner }, { action: 'list', offset: -1 }, { action: 'list', offset: null },
+    { action: 'get', id: '' }, { action: 'get', id: '../task' }, { action: 'delete', id: 'task-a' },
+    { action: 'delete', id: 'task-a', revision: 0 }, { action: 'delete', id: 'task-a', revision: 1, prompt: 'extra' },
+    { action: 'update', id: 'task-a', revision: 1 }, { action: 'update', id: 'task-a', revision: 1, prompt: ' ' },
+    { action: 'update', id: 'task-a', revision: 1, prompt: 'x'.repeat(16001) },
+    { action: 'update', id: 'task-a', revision: 1, schedule: { kind: 'interval', minutes: 0 } },
+    { action: 'update', id: 'task-a', revision: 1, prompt: 'new', target },
+    { action: 'create', ...request, owner }
+  ]) assert.equal(shared.parseScheduledTaskToolRequest({ type: 'scheduled_task', ...input }), null, JSON.stringify(input).slice(0, 150))
+})
+
+test('model management lists only the original conversation and returns complete details on demand', t => {
+  const f = fixture(t)
+  const longPrompt = 'A'.repeat(16000)
+  const task = f.create('source-long', { ...request, prompt: longPrompt })
+  for (let i = 0; i < 11; i++) f.create('source-' + i)
+  f.scheduler.create({ ...owner, conversationId: 'other-chat' }, target, request, 'other-chat')
+  f.scheduler.create({ ...owner, platformId: 'chatgpt' }, target, request, 'other-platform')
+  f.scheduler.create({ ...owner, sessionId: 'workspace-b' }, target, request, 'other-workspace')
+  const list = offset => JSON.parse(f.scheduler.manage(owner, { type: 'scheduled_task', action: 'list', offset }, 'list-' + offset).split('\n')[1])
+  const first = list(0), second = list(10)
+  assert.equal(first.total, 12); assert.equal(first.tasks.length, 10); assert.equal(first.nextOffset, 10)
+  assert.equal(second.tasks.length, 2); assert.equal(second.nextOffset, null)
+  const all = [...first.tasks, ...second.tasks]
+  const summary = all.find(item => item.id === task.id)
+  assert.equal(summary.prompt.length, 1000); assert.equal(summary.promptTruncated, true)
+  const detail = JSON.parse(f.scheduler.manage(owner, { type: 'scheduled_task', action: 'get', id: task.id }, 'get-long').split('\n')[1])
+  assert.equal(detail.prompt, longPrompt); assert.equal(detail.revision, 1)
+})
+
+test('model edits retain identity, binding and unspecified fields while cancelling old queued occurrences', async t => {
+  const f = fixture(t), task = f.create()
+  f.setReason('busy'); f.scheduler.start(); await f.tick(begin + 30 * minute)
+  const updated = f.scheduler.manage(owner, { type: 'scheduled_task', action: 'update', id: task.id, revision: 1, prompt: '检查新增 Star 用户并发送邮件。' }, 'update-a')
+  assert.match(updated, /定时任务已修改/)
+  let stored = f.store.get(task.id)
+  assert.equal(stored.id, task.id); assert.equal(stored.revision, 2)
+  assert.deepEqual(plain(stored.schedule), request.schedule)
+  assert.deepEqual(plain(stored.owner), owner); assert.deepEqual(plain(stored.target), target)
+  assert.equal(f.snapshot().tasks.length, 1); assert.equal(f.snapshot().runs[0].status, 'cancelled')
+  assert.equal(stored.nextRunAt, begin + 60 * minute)
+  assert.equal(f.scheduler.manage(owner, { type: 'scheduled_task', action: 'update', id: task.id, revision: 1, prompt: 'duplicate' }, 'update-a'), null)
+  assert.equal(f.store.get(task.id).revision, 2)
+  f.scheduler.act(owner.sessionId, task.id, 'pause')
+  const prompt = stored.prompt
+  f.scheduler.manage(owner, { type: 'scheduled_task', action: 'update', id: task.id, revision: 2, schedule: { kind: 'interval', minutes: 6 } }, 'update-b')
+  stored = f.store.get(task.id)
+  assert.equal(stored.prompt, prompt); assert.equal(stored.enabled, false); assert.equal(stored.revision, 3)
+  assert.equal(stored.nextRunAt, begin + 36 * minute)
+})
+
+test('model management rejects stale versions, deleted ids and other conversations without mutating plans', t => {
+  const f = fixture(t), task = f.create()
+  const operation = { type: 'scheduled_task', action: 'delete', id: task.id, revision: 1 }
+  for (const foreign of [{ ...owner, sessionId: 'other' }, { ...owner, platformId: 'chatgpt' }, { ...owner, conversationId: 'other' }]) {
+    assert.match(f.scheduler.manage(foreign, operation, JSON.stringify(foreign)), /操作未完成/)
+    assert.equal(f.store.get(task.id).deleted, false)
+  }
+  f.scheduler.edit(owner.sessionId, { owner, id: task.id, revision: 1, requestId: 'ui-edit', ...request, prompt: 'UI 已修改' })
+  assert.match(f.scheduler.manage(owner, operation, 'stale-delete'), /重新查询/)
+  assert.equal(f.store.get(task.id).deleted, false)
+  assert.equal(f.store.get(task.id).prompt, 'UI 已修改')
+  const text = f.scheduler.manage(owner, { ...operation, revision: 2 }, 'delete-a')
+  assert.match(text, /定时任务已删除/); assert.equal(f.snapshot().tasks.length, 0)
+  assert.equal(f.store.get(task.id).deleted, true)
+  assert.equal(f.scheduler.manage(owner, { ...operation, revision: 2 }, 'delete-a'), null)
+  assert.match(f.scheduler.manage(owner, { type: 'scheduled_task', action: 'update', id: task.id, revision: 2, prompt: 'restore' }, 'resurrect'), /操作未完成/)
+  const restored = new ScheduledTasks(new storage.ScheduledTaskStore(f.db), { ready: () => null, send: async () => ({ outcome: 'ok' }), changed() {} })
+  assert.equal(restored.manage(owner, operation, 'delete-a'), null, 'replay markers survive scheduler reconstruction')
+  assert.equal(f.store.bySource('source-a').deleted, true)
+  f.store.removeSession(owner.sessionId)
+  assert.equal(f.store.toolResult('delete-a'), undefined)
+})
+
+test('invalid schedules and receipt persistence failures cannot partially apply model edits', async t => {
+  const f = fixture(t), task = f.create()
+  f.setReason('busy'); f.scheduler.start(); await f.tick(begin + 30 * minute)
+  const update = { type: 'scheduled_task', action: 'update', id: task.id, revision: 1, prompt: 'changed' }
+  assert.match(f.scheduler.manage(owner, { ...update, schedule: { kind: 'cron', expression: '80 9 * * *', timeZone: 'Asia/Shanghai' } }, 'bad-cron'), /操作未完成/)
+  assert.equal(f.store.get(task.id).revision, 1)
+  f.db.exec("CREATE TRIGGER refuse_tool_result BEFORE INSERT ON scheduled_task_tool_results BEGIN SELECT RAISE(FAIL, 'synthetic result failure'); END")
+  assert.throws(() => f.scheduler.manage(owner, update, 'failed-write'), /synthetic result failure/)
+  assert.equal(f.store.get(task.id).prompt, request.prompt)
+  assert.equal(f.store.get(task.id).revision, 1)
+  assert.equal(f.snapshot().runs[0].status, 'pending')
+})
+
+test('deleting a plan cancels queued work and aborts an in-flight submission without recreating it', async t => {
+  const f = fixture(t), task = f.create()
+  let finish
+  f.outcomes.push(() => new Promise(resolve => { finish = resolve }))
+  f.scheduler.start()
+  const running = f.tick(begin + 30 * minute)
+  await Promise.resolve()
+  assert.match(f.scheduler.manage(owner, { type: 'scheduled_task', action: 'delete', id: task.id, revision: 1 }, 'delete-running'), /已删除/)
+  assert.equal(f.signals[0].aborted, true)
+  finish({ outcome: 'unknown' }); await running
+  await f.tick(begin + 90 * minute)
+  assert.equal(f.sends.length, 1); assert.equal(f.store.get(task.id).deleted, true)
 })
 
 test('fixed intervals retain their planned anchor across late wakeups; calendar rules retain their timezone', () => {
@@ -334,7 +449,7 @@ test('a confirmed scheduled goal starts a fresh task without releasing human con
 
 test('model-created plans take their owner from the live app and reject stale epochs, sources and injected owner fields', () => {
   const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['receiveScheduledTask'], {
-    parseScheduledTaskRequest: shared.parseScheduledTaskRequest, sameConversationToolsOwner: (a, b) => JSON.stringify(a) === JSON.stringify(b)
+    parseScheduledTaskToolRequest: shared.parseScheduledTaskToolRequest, sameConversationToolsOwner: (a, b) => JSON.stringify(a) === JSON.stringify(b)
   })
   const calls = [], errors = [], notes = []
   let scheduledTasksEnabled = true
@@ -355,12 +470,102 @@ test('model-created plans take their owner from the live app and reject stale ep
   assert.deepEqual(notes, ['定时任务请求未处理：原对话已切换。', '定时任务请求未处理：该请求不属于最新一次发送。'])
   subject.receiveScheduledTask({ ...call, rawJson: JSON.stringify({ ...request, owner: { sessionId: 'wrong' } }) })
   assert.equal(calls.length, 1); assert.equal(errors.length, 1)
-  assert.match(errors[0], /^【定时任务未创建】\n周期或任务描述无效/)
+  assert.match(errors[0], /^【定时任务操作未完成】\n定时任务参数无效/)
   scheduledTasksEnabled = false
   subject.receiveScheduledTask(call)
   assert.equal(calls.length, 1); assert.equal(errors.length, 2)
   assert.match(errors[1], /已关闭定时任务工具/)
-  assert.match(notes.at(-1), /^定时任务未创建：当前对话已关闭定时任务工具/)
+  assert.match(notes.at(-1), /^定时任务操作未完成：当前对话已关闭定时任务工具/)
+})
+
+test('live model requests query, update and delete the saved plan and deliver deletion receipts independently', async t => {
+  const f = fixture(t), task = f.create(), replies = [], notes = []
+  const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['receiveScheduledTask', 'toolPromptReadCurrent'], {
+    parseScheduledTaskToolRequest: shared.parseScheduledTaskToolRequest,
+    sameConversationToolsOwner: (a, b) => JSON.stringify(a) === JSON.stringify(b), taskPausedByInput: () => false
+  })
+  let humanControl = false, enabled = true
+  const subject = Object.assign(new Runtime(), { id: owner.sessionId, active: true, disposed: false, taskEnded: false, activePlatformId: owner.platformId,
+    options: { scheduledTasks: f.scheduler, desktopCoordinator: { getState: () => ({ humanControl }) } },
+    lastSubmissions: new Map([[owner.platformId, 'user:first']]),
+    embed: { getComputerUsePageEpoch: () => 'epoch-a', getState: () => ({ conversationId: owner.conversationId }),
+      getInterceptorStatus: () => ({ enabled: true }), async sendTaskResult(text) { replies.push(text); return 'ok' } },
+    runner: { getAutomation: () => ({ paused: false }), refreshTerminal: note => notes.push(note) },
+    taskCoordinator: { latest: () => null, waitingForUser: () => false },
+    toolPreferences: () => ({ scheduledTasksEnabled: enabled }), toolsOwner: () => owner,
+    scheduledTarget() { throw new Error('management must not capture a new execution target') }
+  })
+  subject.scheduledTaskTools = new ScheduledTaskTools({
+    current: call => enabled && subject.toolPromptReadCurrent(call),
+    send: async (text, call, signal, current) => current() && !signal.aborted ? subject.embed.sendTaskResult(text) : 'cancelled',
+    note: text => notes.push(text)
+  })
+  t.after(() => subject.scheduledTaskTools.cancel())
+  let messageNumber = 0
+  const call = action => ({ messageId: 'reply-' + ++messageNumber, rawJson: JSON.stringify({ type: 'scheduled_task', ...action }),
+    conversationId: owner.conversationId, pageEpoch: 'epoch-a', sourceSubmissionId: 'user:first' })
+  for (const action of [{ action: 'list' }, { action: 'get', id: task.id },
+    { action: 'update', id: task.id, revision: 1, prompt: '在原任务追加新增用户和北京时间。' },
+    { action: 'delete', id: task.id, revision: 2 }]) {
+    subject.receiveScheduledTask(call(action))
+    await settleTools()
+  }
+  assert.equal(replies.length, 4)
+  assert.match(replies[0], /定时任务列表/); assert.match(replies[1], /定时任务详情/)
+  assert.match(replies[2], /定时任务已修改/); assert.match(replies[3], /定时任务已删除/)
+  assert.equal(f.store.get(task.id).deleted, true); assert.equal(f.snapshot().tasks.length, 0)
+  const other = f.create('other-source')
+  humanControl = true
+  subject.receiveScheduledTask(call({ action: 'update', id: other.id, revision: 1, prompt: 'blocked' }))
+  assert.equal(f.store.get(other.id).revision, 1)
+  humanControl = false
+  subject.receiveScheduledTask({ ...call({ action: 'delete', id: other.id, revision: 1 }), sourceSubmissionId: 'old-source' })
+  subject.receiveScheduledTask({ ...call({ action: 'delete', id: other.id, revision: 1 }), pageEpoch: 'old-epoch' })
+  assert.equal(f.store.get(other.id).deleted, false)
+  assert.equal(replies.length, 4)
+})
+
+test('management result delivery retries busy pages without repeating changes and never retries uncertain sends', async t => {
+  const f = fixture(t), task = f.create(), sends = [], timers = [], outcomes = ['busy', 'ok'], notes = []
+  let current = true, executions = 0
+  const tools = new ScheduledTaskTools({ current: () => current,
+    async send(text, _call, signal, guard) { sends.push({ text, signal, guard }); return outcomes.shift() ?? 'ok' },
+    note: text => notes.push(text), schedule(callback) { const timer = { callback, unref() {} }; timers.push(timer); return timer },
+    cancel(timer) { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1) }
+  })
+  t.after(() => tools.cancel())
+  const call = { messageId: 'delete-a', rawJson: '', conversationId: owner.conversationId, pageEpoch: 'a', sourceSubmissionId: 'first' }
+  const execute = () => { executions++; return f.scheduler.manage(owner, { type: 'scheduled_task', action: 'delete', id: task.id, revision: 1 }, 'delete-a') }
+  tools.receive(call, execute)
+  await settleTools()
+  assert.equal(f.store.get(task.id).deleted, true); assert.equal(tools.busy, true)
+  tools.receive(call, execute); assert.equal(executions, 1)
+  timers.shift().callback(); await settleTools()
+  assert.equal(sends.length, 2); assert.equal(executions, 1); assert.equal(tools.busy, false)
+  assert.match(sends[1].text, /已删除/)
+  tools.receive(call, execute); assert.equal(sends.length, 2, 'durable duplicates do not resend receipts')
+  outcomes.push('unknown')
+  tools.receive({ ...call, messageId: 'list-a' }, () => 'query result')
+  await settleTools()
+  assert.equal(tools.busy, false); assert.equal(timers.length, 0)
+  assert.match(notes.at(-1), /不会自动重复变更/)
+  outcomes.push('busy')
+  tools.receive({ ...call, messageId: 'list-b' }, () => 'query result')
+  await settleTools()
+  const pending = sends.at(-1)
+  current = false; tools.reconcile()
+  assert.equal(pending.signal.aborted, true); assert.equal(pending.guard(), false); assert.equal(timers.length, 0)
+  assert.equal(tools.busy, false)
+  tools.receive(call, () => { throw new Error('stale calls must not execute') })
+})
+
+test('the focus view describes scheduled management actions without exposing transport JSON', () => {
+  const focus = load('../src/shared/focus-chat.ts')
+  for (const [action, label] of [['create', '创建'], ['list', '查询'], ['get', '查询'], ['update', '修改'], ['delete', '删除']]) {
+    assert.equal(focus.cleanFocusAnswer('```json\n' + JSON.stringify({ type: 'scheduled_task', action }) + '\n```'), `正在${label}定时任务`)
+  }
+  assert.equal(focus.cleanFocusAnswer(JSON.stringify(request)), '正在创建定时任务')
+  assert.equal(focus.cleanFocusAnswer('{"type":"scheduled_task","action":"upd'), '')
 })
 
 test('a plan requested after the user answers a question carries that answer as its source, like other tools', () => {

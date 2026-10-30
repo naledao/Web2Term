@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
+import { ContextMenu } from '@base-ui/react/context-menu'
 import { Popover } from '@base-ui/react/popover'
 import { GITHUB_CLONE_STAGES, initialGithubCloneProgress } from '@shared/github'
 import type { GithubCloneProgress, GithubLogoutResult, GithubRepository } from '@shared/github'
@@ -34,6 +35,7 @@ export default function GithubRepositoryList(props: Props): JSX.Element {
 function RepositoryList({ sessionId, account, visible, snapshot, loading, error, loggingOut, accountMessage, filters, onFiltersChange, onRefresh, onLogout }: Props): JSX.Element {
   const [limit, setLimit] = useState(50)
   const [logoutAccount, setLogoutAccount] = useState<string | null>(null)
+  const [contextRepository, setContextRepository] = useState<string | null>(null)
   const [cloning, setCloning] = useState<string | null>(null)
   const [cloneProgress, setCloneProgress] = useState<GithubCloneProgress | null>(null)
   const stopCloneProgress = useRef<(() => void) | null>(null)
@@ -51,13 +53,28 @@ function RepositoryList({ sessionId, account, visible, snapshot, loading, error,
   const filtered = !!filters.query.trim() || filters.ownership !== 'all' || filters.visibility !== 'all'
   useEffect(() => {
     setLimit(50)
+    setContextRepository(null)
     if (viewport.current) viewport.current.scrollTop = 0
   }, [filters.query, filters.ownership, filters.visibility, filters.sort])
-  useEffect(() => { setLogoutAccount(null) }, [account, visible])
+  useEffect(() => { setLogoutAccount(null); setContextRepository(null) }, [account, visible])
   useEffect(() => {
     mounted.current = true
     return () => { mounted.current = false; stopCloneProgress.current?.(); stopCloneProgress.current = null }
   }, [])
+  const copyRepositoryLink = async (repository: GithubRepository): Promise<void> => {
+    if (!visible || loggingOut) return
+    const source = cloneOwner
+    try {
+      await navigator.clipboard.writeText(repository.url)
+      if (mounted.current && currentOwner.current === source) {
+        notify({ type: 'success', title: '仓库链接已复制', description: repository.url })
+      }
+    } catch {
+      if (mounted.current && currentOwner.current === source) {
+        notify({ type: 'error', title: '复制仓库链接失败', description: '请重试，或打开仓库后从浏览器地址栏复制。' })
+      }
+    }
+  }
   const cloneRepository = async (repository: GithubRepository): Promise<void> => {
     if (clonePending.current || loggingOut) return
     clonePending.current = true
@@ -157,7 +174,23 @@ function RepositoryList({ sessionId, account, visible, snapshot, loading, error,
         {repositories.slice(0, limit).map(repository => <li className="github-repository-list__item" key={repository.id}>
           <div className="github-repository-list__title">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 19.5V5a2 2 0 0 1 2-2h14v18H6a2 2 0 0 1 0-4h14M8 7h8M8 11h5" /></svg>
-            <a href={repository.url} target="_blank" rel="noreferrer" title={`在浏览器中打开 ${repository.fullName}`}>{repository.fullName}</a>
+            <ContextMenu.Root open={visible && !loggingOut && contextRepository === repository.id}
+              disabled={!visible || loggingOut} onOpenChange={open => setContextRepository(current => open ? repository.id : current === repository.id ? null : current)}>
+              <ContextMenu.Trigger render={<a href={repository.url} target="_blank" rel="noreferrer" />}
+                title={`在浏览器中打开 ${repository.fullName}（右键可复制仓库链接）`}>{repository.fullName}</ContextMenu.Trigger>
+              <ContextMenu.Portal container={container} className="github-repository-menu__portal">
+                <ContextMenu.Positioner collisionPadding={8} collisionBoundary={container.current ?? undefined}
+                  collisionAvoidance={{ side: 'shift', align: 'shift', fallbackAxisSide: 'none' }} className="github-repository-menu__positioner">
+                  <ContextMenu.Popup className="github-repository-menu__popup" aria-label={`${repository.fullName} 仓库操作`}
+                    finalFocus={() => visible && !loggingOut}>
+                    <ContextMenu.Item className="github-repository-menu__item" onClick={() => void copyRepositoryLink(repository)}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m10 13 4-4M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M13 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" /></svg>
+                      复制仓库链接
+                    </ContextMenu.Item>
+                  </ContextMenu.Popup>
+                </ContextMenu.Positioner>
+              </ContextMenu.Portal>
+            </ContextMenu.Root>
             <span className="github-repository-list__visibility">{VISIBILITY[repository.visibility]}</span>
             <button type="button" className="github-repository-list__clone" disabled={!!cloning || loggingOut}
               data-cloning={cloning === repository.fullName}

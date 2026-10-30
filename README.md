@@ -162,7 +162,7 @@ SSH 两个 Shell 的环境变量和交互状态不共享，应用会尝试从交
 {"type":"scheduled_task","schedule":{"kind":"interval","minutes":30},"prompt":"检查当前项目的后台服务状态，发现异常时分析原因。"}
 ```
 
-管理页可暂停、恢复、编辑、删除、立即运行和查看最近运行记录。计划与每次投递记录保存在本机，关闭页签保留计划，重启客户端后恢复。
+可以直接让 AI 查询、修改或删除当前对话的已有计划，例如“把刚才的任务改为每 6 分钟检查一次，并在邮件里列出新增用户”。AI 查询真实任务编号和版本后修改原计划，不需要删除重建。管理页可暂停、恢复、编辑、删除、立即运行和查看最近运行记录。计划与每次投递记录保存在本机，关闭页签保留计划，重启客户端后恢复。
 
 - **客户端需保持运行。** 退出或休眠期间无法准时投递；重新启动或唤醒后，错过的多个周期合并为最近一次。
 - **投递绑定原工作区、平台、对话、执行主机和目录。** 回到原上下文并启用终端模式、提示词注入及定时任务工具后才可投递；断线、忙碌、未发送草稿、暂停或全局急停时等待。
@@ -492,7 +492,7 @@ Open **＋ → 定时任务** to save a schedule and a natural-language task, or
 {"type":"scheduled_task","schedule":{"kind":"interval","minutes":30},"prompt":"Check the project's background services and investigate any failures."}
 ```
 
-The management tab supports pause/resume, editing, deletion, running immediately, and recent delivery records. Plans and delivery history persist locally across client restarts.
+The AI can list, inspect, update, and delete existing plans in the current conversation. It uses the saved plan ID and revision to update the original plan without recreating it. The management tab supports pause/resume, editing, deletion, running immediately, and recent delivery records. Plans and delivery history persist locally across client restarts.
 
 - Keep the client running. After exit or sleep, missed occurrences merge into the latest one when the client resumes.
 - Delivery requires the original workspace, model platform, conversation, execution machine, and directory. Terminal mode, prompt injection, and the scheduled-task tool must be enabled. Busy pages, drafts, disconnections, pauses, and emergency stops hold delivery.

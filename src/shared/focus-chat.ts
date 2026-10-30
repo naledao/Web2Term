@@ -246,6 +246,13 @@ export function cleanFocusAnswer(text: string): string {
     const tools = Array.isArray(value.tools) ? value.tools.filter((name): name is string => typeof name === 'string' && /^[a-z_]{1,40}$/.test(name)) : []
     return tools.length ? `正在读取工具说明：${tools.join('、')}` : ''
   }
+  if (value.type === 'scheduled_task') {
+    if (value.action === undefined || value.action === 'create') return '正在创建定时任务'
+    if (value.action === 'list' || value.action === 'get') return '正在查询定时任务'
+    if (value.action === 'update') return '正在修改定时任务'
+    if (value.action === 'delete') return '正在删除定时任务'
+    return ''
+  }
   if (value.type !== 'question' && value.type !== 'questions') return answer
   const questions = value.type === 'questions' ? value.questions : [{ question: value.question }]
   if (!Array.isArray(questions) || questions.length < 1 || questions.length > 20 ||

@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS scheduled_task_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_run_queue ON scheduled_task_runs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_scheduled_run_task ON scheduled_task_runs(task_id, created_at);
+CREATE TABLE IF NOT EXISTS scheduled_task_tool_results (
+  source_key TEXT PRIMARY KEY, session_id TEXT NOT NULL, created_at INTEGER NOT NULL, text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tool_session ON scheduled_task_tool_results(session_id);
 `
 
 export class ScheduledTaskStore {
@@ -33,6 +37,15 @@ export class ScheduledTaskStore {
   }
   get(id: string): ScheduledTask | undefined { return this.taskRows('SELECT payload FROM scheduled_tasks WHERE id = ?', id)[0] }
   bySource(key: string): ScheduledTask | undefined { return this.taskRows('SELECT payload FROM scheduled_tasks WHERE source_key = ?', key)[0] }
+  toolResult(sourceKey: string): string | undefined {
+    return (this.db.prepare('SELECT text FROM scheduled_task_tool_results WHERE source_key=?').get(sourceKey) as { text: string } | undefined)?.text
+  }
+  saveToolResult(sourceKey: string, sessionId: string, now: number, text: string): void {
+    this.db.prepare('INSERT INTO scheduled_task_tool_results(source_key,session_id,created_at,text) VALUES(?,?,?,?)').run(sourceKey, sessionId, now, text)
+  }
+  tasks(sessionId: string): ScheduledTask[] {
+    return this.taskRows('SELECT payload FROM scheduled_tasks WHERE session_id=? AND deleted=0 ORDER BY next_run_at, id', sessionId)
+  }
   save(task: ScheduledTask): void {
     this.db.prepare(`INSERT INTO scheduled_tasks(id,session_id,source_key,enabled,deleted,next_run_at,payload) VALUES(?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,deleted=excluded.deleted,next_run_at=excluded.next_run_at,payload=excluded.payload`)
@@ -79,7 +92,7 @@ export class ScheduledTaskStore {
       .map(row => JSON.parse(row.payload) as ScheduledTaskRun)
   }
   snapshot(sessionId: string): ScheduledTasksState {
-    const tasks = this.taskRows('SELECT payload FROM scheduled_tasks WHERE session_id=? AND deleted=0 ORDER BY next_run_at', sessionId)
+    const tasks = this.tasks(sessionId)
     const runs = (this.db.prepare(`SELECT r.payload FROM scheduled_task_runs r JOIN scheduled_tasks t ON t.id=r.task_id
       WHERE t.session_id=? AND t.deleted=0 AND (r.status IN ('pending','sending','needs-attention') OR r.id IN
         (SELECT recent.id FROM scheduled_task_runs recent WHERE recent.task_id=r.task_id ORDER BY recent.created_at DESC LIMIT 12))
@@ -89,6 +102,7 @@ export class ScheduledTaskStore {
   }
   removeSession(sessionId: string): void {
     this.transaction(() => {
+      this.db.prepare('DELETE FROM scheduled_task_tool_results WHERE session_id=?').run(sessionId)
       this.db.prepare('DELETE FROM scheduled_task_runs WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE session_id=?)').run(sessionId)
       this.db.prepare('DELETE FROM scheduled_tasks WHERE session_id=?').run(sessionId)
     })
