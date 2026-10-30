@@ -61,7 +61,7 @@ import {
   canEditTerminalNotes,
   terminalNotesOwnerKey
 } from '../shared/types'
-import { CHAT_PLATFORMS, DEEPSEEK_PLATFORM } from '../shared/platforms'
+import { CHAT_PLATFORMS } from '../shared/platforms'
 import { selectionQuestionConversation } from '../shared/deepseek-question'
 import { computerUseCapabilityPrompt, computerUseStatusPrompt, computerUseSendBlock, resolveComputerUseCapability, supportsComputerUsePlatform } from '../shared/computer-use'
 import { normalizeComputerResultDelay } from '../shared/computer-progress'
@@ -782,7 +782,7 @@ export class SessionRuntime {
     this.runner.restoreMode(options.initialMode)
     this.runner.restorePaused(options.initialPaused ?? false)
     this.taskCoordinator.setPaused(options.initialPaused ?? false)
-    this.runner.setSendDelay(options.platform.id === DEEPSEEK_PLATFORM.id ? 4 : this.preferredSendDelaySeconds)
+    this.runner.setSendDelay(this.preferredSendDelaySeconds)
     this.embed.setBaselinePolicy(options.initialMode === 'auto')
 
     this.ssh = new SshManager((state) => {
@@ -1250,12 +1250,14 @@ export class SessionRuntime {
     const capability = this.getComputerUseCapability(platformId)
     entry.embed.setComputerUseRecognitionEnabled(capability.scopeSupported && capability.computerUseEnabled)
     entry.embed.setSendBlock(computerUseSendBlock(capability))
+    // A lazy platform must inherit the real slot BEFORE attach starts its first navigation.
+    // Hiding a zero-sized view first lets the outer bounds change while Chromium's native
+    // content host retains a 0x0 viewport; showing the original page then appears to fix it.
+    if (this.lastBounds) entry.embed.setBounds(this.lastBounds)
+    entry.embed.setVisible(false)
     if (this.window && !this.window.isDestroyed()) {
       entry.embed.attach(this.window)
-      entry.embed.setVisible(false)
     }
-    // The renderer measured the slot long before this view existed; see `lastBounds`.
-    if (this.lastBounds) entry.embed.setBounds(this.lastBounds)
     entry.embed.setBaselinePolicy(this.runner?.getAutomation().mode === 'auto')
     /*
      * A NEW EMBED STARTS WITH THE FALLBACK PROMPT, so the runtime's real one has to be pushed
@@ -1345,7 +1347,7 @@ export class SessionRuntime {
     this.interruptTaskControl(this.activePlatformId)
     this.activePlatformId = platformId
     this.syncWindowsHelperDemand()
-    this.runner.setSendDelay(platformId === DEEPSEEK_PLATFORM.id ? 4 : this.preferredSendDelaySeconds)
+    this.runner.setSendDelay(this.preferredSendDelaySeconds)
     // Created here on first switch, and kept alive after that so its conversation survives.
     const created = this.ensureEmbed(platformId)
     const embed = created.embed as ChatGptEmbed
@@ -2977,7 +2979,7 @@ export class SessionRuntime {
   setTerminalSendDelay(seconds: number): TerminalState {
     const value = Number.isFinite(seconds) ? Math.min(Math.max(Math.floor(seconds), 0), 600) : 0
     this.preferredSendDelaySeconds = value
-    const state = this.runner.setSendDelay(this.activePlatformId === DEEPSEEK_PLATFORM.id ? 4 : value)
+    const state = this.runner.setSendDelay(value)
     this.options.onSummaryChanged()
     return state
   }

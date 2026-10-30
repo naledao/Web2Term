@@ -614,6 +614,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [imagePreview, setImagePreview] = useState<{ source: string; name: string } | null>(null)
   const openImagePreview = useCallback((source: string, name: string): void => setImagePreview({ source, name }), [])
   const sshFilesModalRef = useRef<HTMLDivElement>(null)
+  const sshFilesCloseButtonRef = useRef<HTMLButtonElement>(null)
   const sshHostIdRef = useRef('')
   sshHostIdRef.current = ssh?.hostId ?? ''
   const [sshFileData, setSshFileData] = useState<FilemanagerEntity[]>([])
@@ -1803,11 +1804,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [])
 
   const updateSendDelay = useCallback(async (seconds: number): Promise<void> => {
-    try {
-      setTerminal(await window.api.setTerminalSendDelay(seconds))
-    } catch {
-      /* main keeps the previous value */
-    }
+    setTerminal(await window.api.setTerminalSendDelay(seconds))
   }, [])
 
   const resetTerminal = useCallback(async (): Promise<void> => {
@@ -1969,7 +1966,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * it while they are open. The recent-command popover is constrained to the terminal column,
    * as is the pending-question widget, so both leave the chat page usable underneath.
    */
-  const terminalModalOpen = terminalVisible && sshFilesOpen
+  const terminalModalOpen = terminalVisible && sshActive && sshFilesOpen
   const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen
   const nativeEmbedVisible = !placeholderToggle && !isFocusView && !leavingView && chatSurfaceVisible
   useEffect(() => {
@@ -2877,21 +2874,30 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             onSendDelayChange={updateSendDelay}
           />
         </div>
-        {sshActive && sshFilesOpen ? (
-          <AppPopover
+        {terminalModalOpen && appContainer ? (
+          <Dialog.Root open modal onOpenChange={(open, details) => {
+            if (open) return
+            // The nested PDF preview handles its own dismissal first.
+            if (pdfPreview) { details.cancel(); return }
+            setSshFilesOpen(false)
+          }}>
+          <Dialog.Portal container={appContainer}>
+          <Dialog.Popup
             ref={sshFilesModalRef}
             className="modal modal--ssh-files"
-            aria-label="远程文件"
-            inert={pdfPreview !== null}
-           onClose={() => setSshFilesOpen(false)}>
-            <div className="ssh-files-modal">
+            initialFocus={sshFilesCloseButtonRef}
+            finalFocus={terminalSwitchRef}
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget && event.button === 0 && !pdfPreview) setSshFilesOpen(false)
+            }}>
+            <div className="ssh-files-modal" inert={pdfPreview !== null}>
               <div className="ssh-files-modal__head">
                 <div className="ssh-files-modal__heading">
-                  <span className="ssh-files-modal__title">远程文件</span>
+                  <Dialog.Title className="ssh-files-modal__title">远程文件</Dialog.Title>
                   <span className="ssh-files-modal__path" title={sshFilePath}>{sshFilePath}</span>
                 </div>
                 <span className="panel__spacer" />
-                <button type="button" className="ssh-files-modal__close" aria-label="关闭" onClick={() => setSshFilesOpen(false)}>×</button>
+                <Dialog.Close ref={sshFilesCloseButtonRef} type="button" className="ssh-files-modal__close" aria-label="关闭远程文件" title="关闭（Esc）">×</Dialog.Close>
               </div>
               <div className="ssh-files">
                 {sshFilesError ? <div className="ssh-files__error">{sshFilesError}</div> : null}
@@ -3070,7 +3076,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                 </div>
               </div>
             </div>
-          </AppPopover>
+            {pdfPreview ? <PdfPreviewDialog key={`${pdfPreview.hostId}:${pdfPreview.path}`} target={pdfPreview} theme={settings?.theme ?? 'light'} onClose={() => setPdfPreview(null)} /> : null}
+          </Dialog.Popup>
+          </Dialog.Portal>
+          </Dialog.Root>
         ) : null}
           <>
             {/*
@@ -4205,7 +4214,6 @@ ${record.command}`
           </Dialog.Portal>
         </Dialog.Root>
       ) : null}
-      {pdfPreview ? <PdfPreviewDialog key={`${pdfPreview.hostId}:${pdfPreview.path}`} target={pdfPreview} theme={settings?.theme ?? 'light'} onClose={() => setPdfPreview(null)} /> : null}
       {imagePreview ? <ImagePreviewDialog source={imagePreview.source} name={imagePreview.name} onClose={() => setImagePreview(null)} /> : null}
     </div>
   )

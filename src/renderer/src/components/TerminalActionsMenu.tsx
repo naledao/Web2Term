@@ -67,7 +67,9 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
   const [open, setOpen] = useState(false)
   const [page, setPage] = useState<MenuPage>('main')
   const [delayDraft, setDelayDraft] = useState<string | null>(null)
+  const [delayError, setDelayError] = useState('')
   const delayDraftRef = useRef<string | null>(null)
+  const delaySaveIdRef = useRef(0)
   const popupRef = useRef<HTMLDivElement>(null)
   const suppressRestoreRef = useRef(false)
 
@@ -75,10 +77,22 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
   const commitDelay = useCallback((): void => {
     const raw = delayDraftRef.current
     delayDraftRef.current = null
-    setDelayDraft(null)
     if (raw === null) return
-    const seconds = raw.trim() === '' ? 0 : Number(raw)
-    if (Number.isFinite(seconds)) void onSendDelayChange(seconds)
+    const value = raw.trim() === '' ? 0 : Number(raw)
+    if (!Number.isFinite(value)) { setDelayDraft(null); return }
+    const seconds = Math.min(600, Math.max(0, Math.floor(value)))
+    const saveId = ++delaySaveIdRef.current
+    // Keep the edited value visible until IPC acknowledges it. An older save
+    // must not reset a newer edit or a subsequent save.
+    setDelayDraft(String(seconds))
+    setDelayError('')
+    void onSendDelayChange(seconds).then(() => {
+      if (saveId === delaySaveIdRef.current && delayDraftRef.current === null) setDelayDraft(null)
+    }).catch(() => {
+      if (saveId !== delaySaveIdRef.current || delayDraftRef.current !== null) return
+      setDelayDraft(null)
+      setDelayError('保存失败，请重新设置回传等待时间。')
+    })
   }, [onSendDelayChange])
 
   useEffect(() => {
@@ -145,12 +159,14 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
             <label className="terminal-actions__delay">
               <span>回传等待</span>
               <span className="terminal-actions__delay-field">
-                <input type="text" inputMode="numeric" aria-label="回传前的等待秒数"
-                  title="命令执行完成后，等待这么多秒再把结果回传给模型（0 表示立即发送）"
+                <input type="number" inputMode="numeric" min={0} max={600} step={1} aria-label="回传前的等待秒数"
+                  aria-invalid={delayError ? true : undefined}
+                  title="命令执行完成后的回传等待时间：0–600 秒。0 表示立即发送；上下箭头每次调整 1 秒，离开输入框或按 Enter 保存。"
                   value={delayDraft ?? String(sendDelaySeconds)}
-                  onChange={(event) => { delayDraftRef.current = event.target.value; setDelayDraft(event.target.value) }}
+                  onChange={(event) => { delayDraftRef.current = event.target.value; setDelayDraft(event.target.value); setDelayError('') }}
                   onBlur={commitDelay}
                   onKeyDown={(event) => {
+                    if (event.nativeEvent.isComposing) return
                     if (event.key === 'Enter') {
                       event.preventDefault()
                       commitDelay()
@@ -164,6 +180,7 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
                 <span>秒</span>
               </span>
             </label>
+            {delayError ? <p className="terminal-actions__delay-error" role="alert">{delayError}</p> : null}
           </> : <>
             <Popover.Title className="terminal-actions__sr-only">连接方式</Popover.Title>
             <button type="button" className="terminal-actions__item terminal-actions__back" onClick={() => setPage('main')}>

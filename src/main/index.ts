@@ -53,7 +53,7 @@ import { Web2termConnection } from './web2term-connection'
 import { disconnectUnusedWeb2term, parseWeb2termBinding, restoreWeb2termSessions, web2termHostId } from './web2term-shell'
 import type { Web2termSessionBinding } from './web2term-shell'
 import { EMPTY_WEB2TERM_CONNECTION, EMPTY_WEB2TERM_TERMINALS } from '../shared/types'
-import { CHAT_PLATFORMS, CHATGPT_PLATFORM, DEFAULT_PLATFORM_ID, platformById } from '../shared/platforms'
+import { CHAT_PLATFORMS, CHATGPT_PLATFORM, DEEPSEEK_PLATFORM, DEFAULT_PLATFORM_ID, platformById } from '../shared/platforms'
 import type { ChatPlatform } from '../shared/platforms'
 import type {
   AppInfo,
@@ -1051,7 +1051,7 @@ function createSession(
     initialSshAttached: restored?.sshAttached ?? false,
     initialSshReconnect: restored?.sshReconnect ?? false,
     initialSshCwd: restored?.sshCwd ?? '',
-    initialSendDelaySeconds: restored?.sendDelaySeconds ?? 3,
+    initialSendDelaySeconds: restored?.sendDelaySeconds ?? (platform.id === DEEPSEEK_PLATFORM.id ? 6 : 3),
     store,
     localMachineId,
     initialMode,

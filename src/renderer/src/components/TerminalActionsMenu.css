@@ -134,7 +134,7 @@
 
 .terminal-actions__delay-field { display: flex; align-items: center; gap: 5px; }
 .terminal-actions__delay input {
-  width: 48px;
+  width: 76px;
   height: 30px;
   padding: 0 5px;
   border: 1px solid var(--border);
@@ -143,6 +143,16 @@
   color: var(--text);
   font: inherit;
   text-align: center;
+}
+.terminal-actions__delay input::-webkit-inner-spin-button {
+  opacity: 1;
+  cursor: pointer;
+}
+.terminal-actions__delay-error {
+  margin: 4px 10px 6px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .terminal-actions__sr-only {

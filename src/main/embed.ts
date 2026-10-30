@@ -1,5 +1,7 @@
-import { BrowserWindow, WebContentsView, session, shell } from 'electron'
+import { app, BrowserWindow, WebContentsView, session, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
 import { ContextUsageRecorder } from './context-usage-recorder'
 import type { ContextUsageEntry } from '../shared/context-usage'
 import { estimateContextText } from '../shared/focus-token-usage'
@@ -488,6 +490,7 @@ export interface EmbedHandlers {
 
 export class ChatGptEmbed {
   private view: WebContentsView | null = null
+  private hiddenViewProbe: { active(waiting?: boolean): void; note(reason: string): void; stop(): void } | null = null
   private selectionQuestion: SelectionQuestion | null = null
   private bounds: EmbedBounds = { x: 0, y: 0, width: 0, height: 0 }
   private visible = true
@@ -667,6 +670,22 @@ export class ChatGptEmbed {
     parent.contentView.addChildView(view)
 
     const contents = view.webContents
+    // User-run, metadata-only diagnostics against THIS view, never a second Electron/page.
+    // The tools file stays outside the product bundle and is loaded only by explicit dev opt-in.
+    if (!app.isPackaged && process.env.WEB2TERM_HIDDEN_VIEW_DIAG === '1' && this.platform.id === 'deepseek') {
+      try {
+        const probe = createRequire(join(app.getAppPath(), 'package.json'))(
+          join(app.getAppPath(), 'tools', 'diag', 'deepseek-hidden-view-probe.cjs'))
+        this.hiddenViewProbe = probe.attachExistingView(view, { nativeState: () => {
+          const actual = view.getBounds(), [width, height] = parent.getContentSize()
+          return { requestedVisible: this.visible, nativeVisible: view.getVisible(), requestedBounds: { ...this.bounds }, actualBounds: actual,
+            windowWidth: width, windowHeight: height, windowVisible: parent.isVisible(), minimized: parent.isMinimized(),
+            clippedWidth: Math.max(0, Math.min(width, actual.x + actual.width) - Math.max(0, actual.x)),
+            clippedHeight: Math.max(0, Math.min(height, actual.y + actual.height) - Math.max(0, actual.y)),
+            pageZoom: contents.getZoomFactor(), appZoom: parent.webContents.getZoomFactor() }
+        } })
+      } catch { console.warn('[embed:deepseek] hidden-view diagnostic could not be loaded') }
+    }
     const baseUserAgent = process.env.EMBED_USER_AGENT ?? chromeLikeUserAgent()
     contents.setUserAgent(baseUserAgent)
     if (supportsSelectionQuestion(this.platform.id)) {
@@ -823,8 +842,11 @@ export class ChatGptEmbed {
     })
     contents.on('render-process-gone', () => this.publishState())
 
-    void contents.loadURL(this.initialUrl || this.platform.homeUrl)
+    // Allocate the real native content viewport while the new view is still blank,
+    // then apply the requested visibility BEFORE any third-party page is loaded.
+    // Loading first and setting bounds only after hiding leaves a lazy platform at 0x0.
     this.applyBounds()
+    void contents.loadURL(this.initialUrl || this.platform.homeUrl)
   }
 
   setBounds(bounds: EmbedBounds): void {
@@ -1439,6 +1461,7 @@ export class ChatGptEmbed {
   }
 
   async readFocusSnapshot(): Promise<FocusPageSnapshot | null> {
+    this.hiddenViewProbe?.active()
     const contents = this.focusPage()
     if (!contents) return null
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1462,6 +1485,7 @@ export class ChatGptEmbed {
       if (raw.modelSettings !== undefined && !validFocusModelSettings(raw.modelSettings)) return null
       if (raw.modelSettingsReady !== undefined && typeof raw.modelSettingsReady !== 'boolean') return null
       if (raw.sendFailure != null && !validFocusSendFailure(raw.sendFailure)) return null
+      this.hiddenViewProbe?.active(raw.waiting && !raw.reply && !raw.sendFailure)
       return raw
     } catch { return null }
     finally { if (timer) clearTimeout(timer) }
@@ -2030,6 +2054,8 @@ export class ChatGptEmbed {
     // Stop watching for a bot check before the page goes away: the timer holds the contents, and
     // a tick after teardown would read a destroyed webContents.
     this.endBotCheckWait()
+    this.hiddenViewProbe?.stop()
+    this.hiddenViewProbe = null
     this.selectionQuestion?.destroy()
     this.selectionQuestion = null
 
@@ -2640,20 +2666,17 @@ export class ChatGptEmbed {
   }
 
   /**
-   * Keep a page that is created or loaded HIDDEN rendering, as it would if it were shown.
+   * Keep a natively hidden page rendering and reporting visible to its own site.
    *
-   * The `backgroundThrottling: false` webPreference only sets Electron's `disable_hidden_`
-   * on each new widget, which blocks FUTURE hides; a widget that starts hidden stays hidden,
-   * and a page that never renders runs no frames, ResizeObserver or requestAnimationFrame.
-   * DeepSeek's virtual list then renders no rows: measured 2026-10-22 with the focus view as
-   * the startup view, the reply log read only `no-turns`, the title never arrived and every
-   * focus-view send was refused — until one switch to the original view showed the page,
-   * after which `disable_hidden_` kept it rendering.
+   * The 2026-10-30 user probe on Electron 44.4.3 measured a real viewport and advancing
+   * animation frames, but document.visibilityState remained hidden until the first native
+   * show. Repeating setBackgroundThrottling(false) did not change it. Painting alone is
+   * insufficient for a site that defers work while its document is hidden.
    *
-   * The RUNTIME `setBackgroundThrottling(false)` additionally moves a hidden widget to
-   * hidden-but-painting (electron/electron#52844, in 44.0.0-beta.5+). It has no
-   * same-value early return, and a navigation can create a new hidden widget, so it is
-   * applied on every load. Nothing appears on screen: the view itself stays hidden.
+   * Electron 44.5.0+ re-applies renderer visibility in SetSchedulerThrottling (#54311,
+   * backport #54341), in addition to the hidden-but-painting widget repair (#52844).
+   * Keep that runtime floor in package.json/lock; reapply after document loads, navigation
+   * and native hiding. No native show, focus, page visibility override or repeated send.
    */
   private keepRenderingWhileHidden(): void {
     const contents = this.liveContents()
@@ -2669,6 +2692,8 @@ export class ChatGptEmbed {
     // A zero-sized or hidden slot must not keep a native rectangle on screen.
     if (width < 1 || height < 1) {
       view.setVisible(false)
+      this.keepRenderingWhileHidden()
+      this.hiddenViewProbe?.note('zero-slot')
       return
     }
 
@@ -2680,6 +2705,10 @@ export class ChatGptEmbed {
     })
     // A hidden chat still needs a real viewport for its composer and virtual list.
     view.setVisible(this.visible)
+    // Native hiding/relayout can happen after dom-ready and navigation hooks.
+    // Reassert hidden-but-painting AFTER hiding, with the real viewport already applied.
+    if (!this.visible) this.keepRenderingWhileHidden()
+    this.hiddenViewProbe?.note(this.visible ? 'shown' : 'hidden')
   }
 
   private publishState(): void {

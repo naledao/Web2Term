@@ -2468,6 +2468,8 @@ body {
   padding: 24px;
   background: rgba(23, 32, 46, 0.42);
   backdrop-filter: blur(3px);
+  -webkit-app-region: no-drag;
+  outline: none;
 }
 .ssh-files-modal {
   width: min(1180px, calc(100vw - 64px));
@@ -2537,6 +2539,10 @@ body {
 .ssh-files-modal__close:hover {
   background: #e6e9f0;
   color: #2b3648;
+}
+.ssh-files-modal__close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 .ssh-files {
   display: flex;
