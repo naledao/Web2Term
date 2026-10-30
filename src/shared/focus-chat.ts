@@ -150,6 +150,7 @@ export interface FocusPageSnapshot {
   modelSettingsReady?: boolean
 }
 export interface FocusChatState extends FocusOwner {
+  historyCursor?: FocusHistoryCursor
   ready: boolean
   nativeDraft: boolean
   generating: FocusPageSnapshot['generating']
@@ -167,6 +168,17 @@ export interface FocusChatState extends FocusOwner {
   contextUsage?: ContextUsageSummary
   /** Set while computer use is on and the Windows helper is not ready: why sending waits. */
   sendBlock?: string | null
+}
+/** Revisions are scoped to an owner; omitted collections mean reuse that owner's snapshot. */
+export interface FocusHistoryCursor {
+  ownerKey: string
+  turns: number
+  executions: string
+}
+export type FocusChatUpdate = Omit<FocusChatState, 'turns' | 'executions' | 'hiddenMessageIds'> & {
+  turns?: FocusTurn[]
+  executions?: ExecutionRecord[]
+  hiddenMessageIds?: string[]
 }
 /** File delivery has its own persisted lifecycle; shell delivery is recorded by the turn. */
 export function focusDelivery(record: ExecutionRecord, delivery?: FocusDelivery): FocusDelivery | undefined {

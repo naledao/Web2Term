@@ -1750,6 +1750,6 @@ export class CommandRunner {
   }
 
   private broadcastExecutions(conversationId: string): void {
-    this.deps.onExecutionChanged(this.deps.store.listExecutions(conversationId))
+    this.deps.onExecutionChanged(this.deps.store.listExecutions(conversationId, false))
   }
 }

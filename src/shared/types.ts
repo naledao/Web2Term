@@ -8,7 +8,7 @@ import type { ScheduledTasksState, ScheduledTaskDraft, ScheduledTaskAction } fro
 import type { AutonomousTaskState, TaskResumeRequest } from './autonomous-task'
 import type { TaskLease } from './autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from './task-presentation'
-import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo, FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from './focus-chat'
+import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo, FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from './focus-chat'
 import type { FocusUiRequest } from './focus-smart-ui'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
@@ -149,6 +149,7 @@ export const IpcChannels = {
   recentCommandRun: 'recent-command:run',
   automationChanged: 'automation:changed',
   executionList: 'execution:list',
+  focusExecutionOutput: 'focus:execution-output',
   executionRun: 'execution:run',
   executionSkip: 'execution:skip',
   executionChanged: 'execution:changed',
@@ -1659,6 +1660,8 @@ export interface ExecutionRecord {
   status: ExecutionStatus
   exitCode: number | null
   output: string
+  /** UI summaries defer full output until the user expands that execution. */
+  outputDeferred?: boolean
   createdAt: number
   /** Epoch milliseconds when the command actually started running. */
   startedAt: number | null
@@ -2348,6 +2351,8 @@ export interface AppApi {
   /** Current embed snapshot; call once on mount to cover events fired before subscribing. */
   getEmbedState(): Promise<EmbedState>
   getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
+  pollFocusChat(owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null>
+  readFocusExecutionOutput(owner: FocusOwner, messageId: string): Promise<string | null>
   sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome>
   retryFocusSend(owner: FocusOwner, failureId: string): Promise<FocusSendOutcome>
   editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome>

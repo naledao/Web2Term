@@ -20,6 +20,7 @@ import TerminalActionsMenu from './components/TerminalActionsMenu'
 import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
 import ExtraTerminalPane from './components/ExtraTerminalPane'
+import OutputText from './components/OutputText'
 import BackgroundTasksPane from './components/BackgroundTasksPane'
 import ScheduledTasksPane from './components/ScheduledTasksPane'
 import type { ScheduledTasksState } from '@shared/scheduled-tasks'
@@ -428,6 +429,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [recentCommandError, setRecentCommandError] = useState('')
   const [conversationTranscript, setConversationTranscript] = useState<{ ownerKey: string | null; messages: ConversationMessage[] }>({ ownerKey: null, messages: [] })
   const conversationRequestRef = useRef(0)
+  const executionRequestRef = useRef(0)
   const [terminal, setTerminal] = useState<TerminalState | null>(null)
   const [durationNow, setDurationNow] = useState(() => Date.now())
   const [address, setAddress] = useState('')
@@ -1086,12 +1088,14 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   )
   // Executions belong to whichever conversation is on screen.
   const refreshExecutions = useCallback(async (): Promise<void> => {
+    const request = ++executionRequestRef.current
     if (!conversationId) {
       setExecutions([])
       return
     }
     try {
-      setExecutions(await window.api.listExecutions(conversationId))
+      const records = await window.api.listExecutions(conversationId)
+      if (request === executionRequestRef.current) setExecutions(records)
     } catch {
       /* leave the previous list in place */
     }
@@ -1099,9 +1103,18 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
 
   useEffect(() => {
     void refreshExecutions()
+    return () => { executionRequestRef.current++ }
   }, [refreshExecutions])
 
-  useEffect(() => window.api.onExecutionChanged(() => void refreshExecutions()), [refreshExecutions])
+  useEffect(() => window.api.onExecutionChanged(records => {
+    // The event already contains this snapshot; do not query and transfer it a second time.
+    if (!conversationId) return
+    if (records.length === 0) { void refreshExecutions(); return }
+    if (records.every(record => record.conversationId === conversationId)) {
+      executionRequestRef.current++
+      setExecutions(records)
+    }
+  }), [conversationId, refreshExecutions])
 
   // Mirror the real URL into the address bar, but never while it is being typed.
   useEffect(() => {
@@ -1934,6 +1947,15 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     try { localStorage.setItem('chat.view.' + sessionId + '.' + platformId, view) } catch { /* In-memory preference remains usable. */ }
   }, [sessionId, platformId, chatView])
 
+  // Terminal streaming must not invalidate the focus transcript's memoized props.
+  const focusOwner = useMemo(() => ({ sessionId, platformId, conversationId }), [sessionId, platformId, conversationId])
+  const focusNewChat = useCallback(() => window.api.sendEmbedCommand('home'), [])
+  const focusQuestion = useCallback(() => setQuestionMinimized(false), [])
+  const focusOriginal = useCallback(() => selectChatView('original'), [selectChatView])
+  const focusOpenTerminal = useCallback(() => { setPanelTab('terminal'); setPanelCollapsed(false) }, [])
+  const focusAttachment = useCallback((attachment: ConversationAttachment) =>
+    <ConversationAttachmentImage key={attachment.id} attachment={attachment} onPreview={openImagePreview} />, [openImagePreview])
+
   /**
    * The embedded page is a NATIVE view: it always paints above the DOM. Regular dialogs hide
    * it while they are open. The recent-command popover is constrained to the terminal column,
@@ -2383,17 +2405,17 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           aria-labelledby={'chat-view-tab-' + (isFocusView ? 'focus' : placeholderToggle ? 'local' : 'original')}>
           {showFocusView ? (
             <div className={'stage__view' + (isFocusView ? '' : ' stage__view--leaving')}>
-            <FocusChatView key={transcriptScrollKey} owner={{ sessionId, platformId, conversationId }} theme={theme}
+            <FocusChatView key={transcriptScrollKey} owner={focusOwner} theme={theme}
               visible={chatSurfaceVisible} messages={conversationMessages} messagesReady={conversationMessagesReady}
               needsAnswer={!!pendingQuestion}
               newChatDisabled={taskRunning || embed.isLoading || switchingPlatform}
-              onNewChat={() => window.api.sendEmbedCommand('home')}
-              onQuestion={() => setQuestionMinimized(false)}
-              onOriginal={() => selectChatView('original')}
-              onOpenTerminal={() => { setPanelTab('terminal'); setPanelCollapsed(false) }}
+              onNewChat={focusNewChat}
+              onQuestion={focusQuestion}
+              onOriginal={focusOriginal}
+              onOpenTerminal={focusOpenTerminal}
               onRun={runExecution} onSkip={skipExecution} onStop={endTask}
               onPreviewImage={openImagePreview}
-              renderAttachment={attachment => <ConversationAttachmentImage key={attachment.id} attachment={attachment} onPreview={openImagePreview} />} />
+              renderAttachment={focusAttachment} />
             </div>
           ) : null}
           {showLocalView ? (
@@ -3149,9 +3171,8 @@ ${record.command}`
                     {block.lines.length > 0 ? (
                       <div className="terminal-entry__body">
                         {block.lines.map((line, lineIndex) => (
-                          <pre key={`${blockIndex}-${lineIndex}-${line.kind}`} className={`line line--${line.kind}`}>
-                            {line.text}
-                          </pre>
+                          line.kind === 'output' ? <OutputText key={`${blockIndex}-${lineIndex}-${line.kind}`} className="line line--output" text={line.text} /> :
+                            <pre key={`${blockIndex}-${lineIndex}-${line.kind}`} className={`line line--${line.kind}`}>{line.text}</pre>
                         ))}
                       </div>
                     ) : null}

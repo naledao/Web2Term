@@ -23,11 +23,18 @@ const compiled = ts.transpileModule('export const renderTurn = ' + renderer.getT
 }).outputText
 const Markdown = ({ text }) => React.createElement('p', null, text)
 const ProcessScroll = ({ children }) => React.createElement('div', null, children)
+const FocusDetails = ({ children, summary, className }) => React.createElement('details', { className, open: true },
+  React.createElement('summary', null, summary), children())
+const historyExports = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-history.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: historyExports, require: () => ({}) })
 
 function fixture({ records = [], richAnswers = new Map() } = {}) {
   const exports = {}, copies = []
   new Script(compiled).runInNewContext({
-    exports, require: createRequire(import.meta.url), Markdown, ProcessScroll,
+    exports, require: createRequire(import.meta.url), Markdown, ProcessScroll, FocusDetails,
+    groupFocusExecutions: historyExports.groupFocusExecutions, ownerKey: 'test-owner', EMPTY_RECORDS: [], sendFailure: null, lastTurn: null,
     ProcessHint: () => null, richAnswers, recordsById: new Map(records.map(record => [record.messageId, record])),
     messagesById: new Map(), focusDelivery: (_record, delivery) => delivery,
     remembered: (_key, open = false) => ({ open }),
@@ -46,6 +53,7 @@ const turn = segments => ({ id: 'turn-1', userMessageId: null, userText: '看看
 function elements(node, ancestors = []) {
   if (Array.isArray(node)) return node.flatMap(child => elements(child, ancestors))
   if (!React.isValidElement(node)) return []
+  if (node.type === FocusDetails) node = FocusDetails(node.props)
   return [{ node, ancestors }, ...elements(node.props.children, [...ancestors, node])]
 }
 const inProcess = entry => entry.ancestors.some(node => node.props.className === 'focus-process')

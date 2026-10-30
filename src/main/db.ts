@@ -426,6 +426,7 @@ interface ExecutionRow {
   status: string
   exit_code: number | null
   output: string
+  output_deferred?: number
   created_at: number
   started_at: number | null
   finished_at: number | null
@@ -479,6 +480,7 @@ function toExecutionRecord(row: ExecutionRow): ExecutionRecord {
     status: row.status as ExecutionStatus,
     exitCode: row.exit_code,
     output: row.output,
+    ...(row.output_deferred ? { outputDeferred: true } : {}),
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -494,6 +496,7 @@ function toExecutionRecord(row: ExecutionRow): ExecutionRecord {
  */
 export class ConversationStore {
   private readonly db: DatabaseSync
+  private executionsRevision = 0
   readonly contextUsage: ContextUsageStore
   readonly scheduledTasks: ScheduledTaskStore
   private readonly attachmentsDir: string
@@ -887,6 +890,7 @@ export class ConversationStore {
     this.db.prepare('DELETE FROM focus_turns WHERE conversation_id = ?').run(id)
     this.db.prepare('DELETE FROM context_usage WHERE conversation_id = ?').run(id)
     this.db.prepare('DELETE FROM conversations WHERE id = ?').run(id)
+    this.executionsRevision++
 
     for (const row of paths) {
       const stillReferenced = this.db
@@ -927,6 +931,7 @@ export class ConversationStore {
   /** Persist shutdown synchronously, before shell callbacks or the database are gone. */
   interruptRunningCommands(messageIds: Iterable<string>): void {
     interruptRunningCommands(this.db, messageIds)
+    this.executionsRevision++
   }
 
   /**
@@ -978,6 +983,7 @@ export class ConversationStore {
         record.backgroundOptions ? JSON.stringify(record.backgroundOptions) : null,
         record.taskContext ? JSON.stringify(record.taskContext) : null
       )
+    this.executionsRevision++
     return true
   }
 
@@ -1341,6 +1347,7 @@ export class ConversationStore {
           WHERE message_id = ?`
       )
       .run(update.status, update.exitCode, update.output, update.finishedAt, messageId)
+    this.executionsRevision++
   }
 
   setExecutionStatus(messageId: string, status: ExecutionStatus): void {
@@ -1348,13 +1355,16 @@ export class ConversationStore {
       this.db
         .prepare('UPDATE executions SET status = ?, started_at = COALESCE(started_at, ?) WHERE message_id = ?')
         .run(status, Date.now(), messageId)
+      this.executionsRevision++
       return
     }
     this.db.prepare('UPDATE executions SET status = ? WHERE message_id = ?').run(status, messageId)
+    this.executionsRevision++
   }
 
   setFileDeliveryStatus(messageId: string, status: FileDeliveryStatus): void {
     this.db.prepare('UPDATE executions SET delivery_status = ? WHERE message_id = ? AND kind = ?').run(status, messageId, 'read_files')
+    this.executionsRevision++
   }
 
   getExecution(messageId: string): ExecutionRecord | null {
@@ -1364,9 +1374,16 @@ export class ConversationStore {
     return row ? toExecutionRecord(row) : null
   }
 
-  listExecutions(conversationId: string): ExecutionRecord[] {
+  /** Changes only with execution writes, so focus polling need not reload old output. */
+  getExecutionRevision(): number { return this.executionsRevision }
+
+  listExecutions(conversationId: string, includeOutput = true): ExecutionRecord[] {
+    // A UI snapshot needs lifecycle metadata, not every historical command's output.
+    const columns = includeOutput ? '*' : `message_id, conversation_id, command, background, background_options,
+      kind, file_request, task_context, delivery_status, description, timeout_seconds, status, exit_code,
+      '' AS output, 1 AS output_deferred, created_at, started_at, finished_at`
     const rows = this.db
-      .prepare('SELECT * FROM executions WHERE conversation_id = ? ORDER BY created_at ASC')
+      .prepare(`SELECT ${columns} FROM executions WHERE conversation_id = ? ORDER BY created_at ASC`)
       .all(conversationId) as unknown as ExecutionRow[]
     return rows.map(toExecutionRecord)
   }

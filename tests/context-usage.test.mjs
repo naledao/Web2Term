@@ -36,6 +36,36 @@ const schema = `CREATE TABLE conversations (id TEXT PRIMARY KEY);
   INSERT INTO conversations VALUES ('chat-a'), ('chat-b');
   INSERT INTO focus_turns VALUES ('turn-a', '{}'), ('old-turn', '{"supersededBy":"turn-a"}');`
 
+test('long-task statistics parse each turn once, reuse unchanged summaries and invalidate after edits', t => {
+  const db = new DatabaseSync(':memory:')
+  try {
+    db.exec(schema)
+    let parses = 0
+    const canCountParses = typeof db.function === 'function'
+    if (canCountParses) db.function('json_extract', (payload, path) => {
+      assert.equal(path, '$.supersededBy')
+      parses++
+      return JSON.parse(payload).supersededBy ?? null
+    })
+    const store = new ContextUsageStore(db)
+    db.exec('BEGIN')
+    for (let index = 0; index < 1000; index++) store.save('chatgpt', entry('event-' + index))
+    store.save('chatgpt', entry('archived', { turnId: 'old-turn' }))
+    db.exec('COMMIT')
+    const summary = store.summary('chatgpt', 'chat-a')
+    assert.equal(summary.toolResults.estimatedTokens, 3000)
+    if (canCountParses) assert.equal(parses, 2, 'one JSON read per referenced turn, independent of tool-event count')
+    else t.diagnostic('Node <22.13: SQLite function instrumentation unavailable; checking cache reuse and exact totals.')
+    assert.equal(store.summary('chatgpt', 'chat-a'), summary)
+    if (canCountParses) assert.equal(parses, 2, 'idle polls do not rescan historical statistics')
+    db.prepare('UPDATE focus_turns SET payload = ? WHERE id = ?').run('{"supersededBy":"replacement"}', 'turn-a')
+    assert.equal(store.summary('chatgpt', 'chat-a').toolResults.estimatedTokens, 0)
+    if (canCountParses) assert.equal(parses, 4)
+    store.save('chatgpt', entry('new', { turnId: null, estimatedTokens: 9 }))
+    assert.equal(store.summary('chatgpt', 'chat-a').toolResults.estimatedTokens, 9)
+  } finally { db.close() }
+})
+
 test('statistics resolve only the matching cached turn without loading history or resuming task authority', () => {
   const chat = new FocusChat('session-a', {
     listFocusTurns() { assert.fail('statistics must not load or replace focus state') },

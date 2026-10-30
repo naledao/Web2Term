@@ -306,7 +306,7 @@ function rendererInitialization(results) {
     state: { ...owner, ready: true, modelSettingsReady: true, modelSettings: empty },
     useCallback: callback => callback, focusOwnerKey: () => 'workspace:home',
     setSettingPending(value) { context.settingPending = value }, setSettingError(value) { errors.push(value) }, setError() {},
-    setState(value) { context.state = value }, window: { api: {
+    applySnapshot(value) { context.state = value }, setState(value) { context.state = value }, window: { api: {
       async updateFocusModelSettings() { requests++; return results.shift() },
       async getFocusChat() { return context.state }
     } } })

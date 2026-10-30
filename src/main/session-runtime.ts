@@ -129,12 +129,12 @@ import { RedisReader, normalizeRedisDraft } from './redis-reader'
 import { ChatGptEmbed } from './embed'
 import { FocusChat } from './focus-chat'
 import { stageFocusAttachments } from './focus-attachments'
-import { cleanFocusUserText, supportsFocusView, validFocusFiles } from '../shared/focus-chat'
+import { cleanFocusUserText, focusOwnerKey, supportsFocusView, validFocusFiles } from '../shared/focus-chat'
 import { writeFocusDiagnostic } from './focus-chat-log'
 import { getGithubCliState } from './github-cli'
 import { dispatchGithubLoginTask } from './github-login-task'
 import type { GithubLoginTaskResult } from '../shared/github'
-import type { FocusChatState, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome } from '../shared/focus-chat'
+import type { FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome } from '../shared/focus-chat'
 import type { EmbedHandlers } from './embed'
 import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseWindowsEnvironment } from './environment'
 import { ConversationShell, resolvePowerShell } from './shell'
@@ -1579,7 +1579,9 @@ export class SessionRuntime {
     finally { if (locked) this.focusSending = false; this.focusUiRecovering = false }
   }
 
-  async getFocusChat(owner: FocusOwner): Promise<FocusChatState | null> {
+  async getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
+  async getFocusChat(owner: FocusOwner, cursor: FocusHistoryCursor): Promise<FocusChatUpdate | null>
+  async getFocusChat(owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null> {
     if (!this.ownsFocus(owner)) return null
     this.focusChat.context(owner.platformId, owner.conversationId)
     await this.recoverFocusUi(owner)
@@ -1607,14 +1609,21 @@ export class SessionRuntime {
       reasoningCount: page?.reply?.parts.filter(part => part.kind === 'reasoning').length ?? 0,
       searchCount: page?.reply?.parts.filter(part => part.kind === 'search').length ?? 0 })
     const archivedExecutions = this.focusChat.supersededExecutionIds(owner.platformId, owner.conversationId)
+    const historyCursor: FocusHistoryCursor = { ownerKey: focusOwnerKey(owner),
+      turns: this.focusChat.version(owner.platformId, owner.conversationId),
+      executions: JSON.stringify([this.options.store.getExecutionRevision(), ...archivedExecutions]) }
+    const sameOwner = cursor?.ownerKey === historyCursor.ownerKey
+    const sameTurns = sameOwner && cursor?.turns === historyCursor.turns
+    const sameExecutions = sameOwner && cursor?.executions === historyCursor.executions
     let contextUsage: import('../shared/context-usage').ContextUsageSummary | undefined
     try { contextUsage = owner.conversationId ? this.options.store.contextUsage?.summary(owner.platformId, owner.conversationId) : undefined }
     catch { /* Optional statistics must not prevent the conversation from opening. */ }
     return { ...owner, ready: page?.ready === true, nativeDraft: page?.nativeDraft === true,
+      historyCursor,
       sendFailure: page?.sendFailure ?? null,
       generating: page?.generating ?? 'unknown', waiting: page?.waiting === true,
-      turns: this.focusChat.turns(owner.platformId, owner.conversationId),
-      hiddenMessageIds: this.focusChat.hiddenMessageIds(owner.platformId, owner.conversationId),
+      turns: sameTurns ? undefined : this.focusChat.turns(owner.platformId, owner.conversationId),
+      hiddenMessageIds: sameTurns ? undefined : this.focusChat.hiddenMessageIds(owner.platformId, owner.conversationId),
       smartReplies: page?.smartReplies ?? [],
       composerModes: page?.composerModes ?? [],
       modelSettings: page?.modelSettings,
@@ -1623,7 +1632,15 @@ export class SessionRuntime {
         this.conversationTools.injectionLedger(owner.platformId, owner.conversationId), this.embed.getInterceptorStatus()),
       contextUsage,
       sendBlock: computerUseSendBlock(this.getComputerUseCapability(owner.platformId)),
-      executions: owner.conversationId ? this.options.store.listExecutions(owner.conversationId).filter(record => !archivedExecutions.has(record.messageId)) : [] }
+      executions: sameExecutions ? undefined : owner.conversationId ? this.options.store.listExecutions(owner.conversationId, false).filter(record => !archivedExecutions.has(record.messageId)) : [] }
+  }
+
+  readFocusExecutionOutput(owner: FocusOwner, messageId: string): string | null {
+    if (!this.ownsFocus(owner) || !owner.conversationId || typeof messageId !== 'string' || !messageId || messageId.length > 512) return null
+    const record = this.options.store.getExecution(messageId)
+    if (!record || record.conversationId !== owner.conversationId ||
+      this.focusChat.supersededExecutionIds(owner.platformId, owner.conversationId).has(messageId)) return null
+    return record.output
   }
 
   /** @returns '' once the side chat is open, otherwise the message the focus view shows. */

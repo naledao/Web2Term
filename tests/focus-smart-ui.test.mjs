@@ -471,7 +471,8 @@ function recoveryRuntimeFixture() {
   const methods = runtimeClass.members.filter(node => ['recoverFocusUi', 'getFocusChat'].includes(node.name?.getText(runtimeAst)))
   new Script(ts.transpileModule('class Runtime {' + methods.map(node => node.getText(runtimeAst)).join('\n') + '} exports.Runtime = Runtime', {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
-  }).outputText).runInNewContext({ exports, cleanFocusUserText: focusShared.cleanFocusUserText,
+  }).outputText).runInNewContext({ exports, cleanFocusUserText: focusShared.cleanFocusUserText, focusOwnerKey: focusShared.focusOwnerKey,
+    computerUseSendBlock: () => '',
     focusPromptInjectionState: () => ({ phase: 'countdown', characterBudget: 60000, charactersSinceFull: 0 }),
     writeFocusDiagnostic(owner, details) { diagnostics.push(details) } })
   const saved = new Map(), messages = [
@@ -483,10 +484,10 @@ function recoveryRuntimeFixture() {
     segments: [{ cycle: 0, sourceMessageId: 'answer-1', answer: '旧卡片', parts: [], settled: true }] })
   const store = { listFocusTurns: () => [...saved.values()].map(value => JSON.parse(JSON.stringify(value))),
     saveFocusTurn(session, platform, conversation, turn) { saved.set(turn.id, JSON.parse(JSON.stringify(turn))) },
-    listConversationMessages: () => messages, listExecutions: () => [] }
+    listConversationMessages: () => messages, listExecutions: () => [], getExecutionRevision: () => 0 }
   const runtime = new exports.Runtime(), owner = { sessionId: 'session', platformId: 'chatgpt', conversationId: 'one' }
   Object.assign(runtime, { focusSending: false, focusRevision: null, focusUiRecovering: false, focusUiRecoveredTurn: null,
-    ownsFocus: () => true, options: { store }, runner: { hasInFlightWork: () => false }, focusChat: new FocusChat('session', store),
+    ownsFocus: () => true, getComputerUseCapability: () => ({}), options: { store }, runner: { hasInFlightWork: () => false }, focusChat: new FocusChat('session', store),
     conversationTools: { injectionLedger: () => null } })
   const page = { path: '/c/one', ready: true, nativeDraft: false, waiting: false, generating: 'active',
     reply: { sourceMessageId: 'answer-new', parts: [], answer: '正在形成的新回复' } }
@@ -503,6 +504,32 @@ function recoveryRuntimeFixture() {
   }
   return { runtime, owner, page, captured, calls, messages, saved, diagnostics }
 }
+
+test('focus polling omits unchanged histories, reloads changed execution data and keeps owner boundaries', async () => {
+  const f = recoveryRuntimeFixture()
+  let reads = 0, revision = 1
+  f.runtime.options.store.getExecutionRevision = () => revision
+  f.runtime.options.store.listExecutions = () => { reads++; return [{ messageId: 'command', output: '完整输出' }] }
+  const initial = await f.runtime.getFocusChat(f.owner)
+  assert.equal(initial.executions[0].output, '完整输出')
+  const unchanged = await f.runtime.getFocusChat(f.owner, initial.historyCursor)
+  assert.equal(unchanged.turns, undefined)
+  assert.equal(unchanged.executions, undefined)
+  assert.equal(reads, 1)
+  f.page.reply.answer += '新的流式内容'
+  const streamed = await f.runtime.getFocusChat(f.owner, initial.historyCursor)
+  assert.ok(streamed.turns)
+  assert.equal(streamed.executions, undefined)
+  assert.equal(reads, 1, 'streaming answer changes do not reload every old command output')
+  revision++
+  const completed = await f.runtime.getFocusChat(f.owner, streamed.historyCursor)
+  assert.equal(completed.turns, undefined)
+  assert.ok(completed.executions)
+  assert.equal(reads, 2)
+  const wrongOwner = await f.runtime.getFocusChat(f.owner, { ...completed.historyCursor, ownerKey: 'other-workspace' })
+  assert.ok(wrongOwner.turns)
+  assert.ok(wrongOwner.executions)
+})
 
 test('a missed native send recovers its focus turn, follows the streamed answer and settles once without resending', async () => {
   const f = recoveryRuntimeFixture()

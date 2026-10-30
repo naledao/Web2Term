@@ -12,13 +12,15 @@ interface Entry {
   turns: FocusTurn[]
   current: string | null
   cycle: number
-  dirty: boolean
+  dirty: Set<string>
+  revision: number
   lastSave: number
   /** The newest turn that was still working when this entry was restored, until the task shows it is alive. */
   resumable: string | null
 }
 export class FocusChat {
   private readonly entries = new Map<string, Entry>()
+  private revision = 0
   constructor(private readonly sessionId: string, private readonly store: FocusStore) {}
   context(platformId: string, conversationId: string | null): Entry {
     let entry = this.entries.get(platformId)
@@ -26,7 +28,7 @@ export class FocusChat {
     if (entry) this.persist(platformId, entry, true)
     if (entry && entry.conversationId === null && conversationId && entry.current) {
       entry.conversationId = conversationId
-      entry.dirty = true
+      this.changed(entry, ...entry.turns)
     } else {
       const turns = conversationId ? this.store.listFocusTurns(this.sessionId, platformId, conversationId) : []
       // Restored work is history. Never claim a previous process is still working.
@@ -38,7 +40,7 @@ export class FocusChat {
           turn.commandRecovery = { ...turn.commandRecovery, status: 'blocked', message: '之前的指令格式恢复已中断，请在原始视图核对后继续。' }
         }
       }
-      entry = { conversationId, turns, current: null, cycle: 0, dirty: false, lastSave: 0, resumable }
+      entry = { conversationId, turns, current: null, cycle: 0, dirty: new Set(), revision: ++this.revision, lastSave: 0, resumable }
     }
     this.entries.set(platformId, entry)
     return entry
@@ -54,9 +56,10 @@ export class FocusChat {
     entry.current = turn.id
     entry.resumable = null
     entry.cycle = 0
-    entry.dirty = true
+    this.changed(entry, turn)
     this.persist(platformId, entry, true)
-    if (entry.turns.length > 80) entry.turns = entry.turns.slice(-80)
+    if (entry.turns.length > 80) entry.turns = entry.turns.filter((item, index) =>
+      index >= entry.turns.length - 80 || entry.dirty.has(item.id))
     return turn.id
   }
   linkUser(platformId: string, turnId: string | undefined, messageId: string | null): void {
@@ -64,7 +67,7 @@ export class FocusChat {
     const turn = entry?.turns.find(item => item.id === turnId)
     if (!entry || !turn || !messageId) return
     turn.userMessageId = messageId
-    entry.dirty = true
+    this.changed(entry, turn)
     this.persist(platformId, entry, true)
   }
   ownsTurn(platformId: string, turnId: string): boolean {
@@ -77,9 +80,13 @@ export class FocusChat {
     const entry = this.entries.get(platformId)
     if (!id || !entry) return undefined
     const replaced = new Set(turnIds)
-    for (const turn of entry.turns) if (replaced.has(turn.id)) turn.supersededBy = id
-    entry.turns.find(turn => turn.id === id)!.hiddenMessageIds = [...new Set([...hidden, ...messageIds])]
-    entry.dirty = true
+    for (const turn of entry.turns) if (replaced.has(turn.id)) {
+      turn.supersededBy = id
+      this.changed(entry, turn)
+    }
+    const replacement = entry.turns.find(turn => turn.id === id)!
+    replacement.hiddenMessageIds = [...new Set([...hidden, ...messageIds])]
+    this.changed(entry, replacement)
     this.persist(platformId, entry, true)
     return id
   }
@@ -102,7 +109,7 @@ export class FocusChat {
       })
       current.turn.parseFailures = failures.slice(-10)
     }
-    current.entry.dirty = true
+    this.changed(current.entry, current.turn)
     this.persist(platformId, current.entry, true)
   }
   commandRecovery(platformId: string, recovery: CommandRecoveryState): void {
@@ -111,7 +118,7 @@ export class FocusChat {
     current.turn.commandRecovery = { ...recovery }
     current.turn.notice = 'parse-failed'
     current.turn.status = recovery.status === 'pending' || recovery.status === 'sent' ? 'working' : 'blocked'
-    current.entry.dirty = true
+    this.changed(current.entry, current.turn)
     this.persist(platformId, current.entry, true)
   }
   private current(platformId: string): { entry: Entry; turn: FocusTurn } | null {
@@ -172,7 +179,7 @@ export class FocusChat {
     if (segment.settled) {
       if (segment.sourceMessageId === page.reply.sourceMessageId && JSON.stringify(segment.parts) !== JSON.stringify(page.reply.parts)) {
         segment.parts = page.reply.parts
-        entry.dirty = true
+        this.changed(entry, turn)
         this.persist(platformId, entry)
       }
       return
@@ -181,7 +188,7 @@ export class FocusChat {
     if (JSON.stringify([segment.sourceMessageId, segment.parts, segment.answer]) === JSON.stringify([next.sourceMessageId, next.parts, next.answer])) return
     Object.assign(segment, next)
     turn.updatedAt = Date.now()
-    entry.dirty = true
+    this.changed(entry, turn)
     this.persist(platformId, entry)
   }
   settled(platformId: string, messageId: string, text: string): void {
@@ -196,7 +203,7 @@ export class FocusChat {
     delete turn.commandRecovery
     turn.status = 'answered'
     turn.updatedAt = Date.now()
-    entry.dirty = true
+    this.changed(entry, turn)
     this.persist(platformId, entry, true)
   }
   /**
@@ -214,11 +221,11 @@ export class FocusChat {
       for (const segment of turn.segments) {
         if (segment.sourceMessageId !== messageId || !segment.settled || !segment.answer || segment.answer === answer) continue
         segment.answer = answer
+        this.changed(entry, turn)
         changed = true
       }
     }
     if (!changed) return
-    entry.dirty = true
     this.persist(platformId, entry, true)
   }
   command(platformId: string, messageId: string, live: boolean): void {
@@ -239,7 +246,7 @@ export class FocusChat {
     delete turn.commandRecovery
     turn.status = 'working'
     turn.updatedAt = Date.now()
-    entry.dirty = true
+    this.changed(entry, turn)
     this.persist(platformId, entry, true)
   }
   rawSent(platformId: string): void {
@@ -248,7 +255,7 @@ export class FocusChat {
     current.entry.cycle++
     current.turn.status = 'working'
     current.turn.updatedAt = Date.now()
-    current.entry.dirty = true
+    this.changed(current.entry, current.turn)
     this.persist(platformId, current.entry, true)
   }
   delivery(platformId: string, conversationId: string | undefined, messageId: string | undefined, outcome: FocusDelivery): void {
@@ -258,7 +265,7 @@ export class FocusChat {
     if (!turn) return
     turn.deliveries[messageId] = outcome
     turn.updatedAt = Date.now()
-    entry.dirty = true
+    this.changed(entry, turn)
     this.persist(platformId, entry, true)
   }
   stop(platformId: string, expectedTurnId?: string): void {
@@ -266,7 +273,7 @@ export class FocusChat {
     if (!current || !['working', 'blocked'].includes(current.turn.status) || (expectedTurnId && current.turn.id !== expectedTurnId)) return
     current.turn.status = 'stopped'
     current.turn.updatedAt = Date.now()
-    current.entry.dirty = true
+    this.changed(current.entry, current.turn)
     this.persist(platformId, current.entry, true)
   }
   turns(platformId: string, conversationId: string | null): FocusTurn[] {
@@ -277,15 +284,24 @@ export class FocusChat {
   flush(platformId?: string): void {
     for (const [id, entry] of this.entries) if (!platformId || platformId === id) this.persist(id, entry, true)
   }
+  version(platformId: string, conversationId: string | null): number {
+    return this.context(platformId, conversationId).revision
+  }
+  private changed(entry: Entry, ...turns: FocusTurn[]): void {
+    for (const turn of turns) entry.dirty.add(turn.id)
+    entry.revision = ++this.revision
+  }
   private persist(platformId: string, entry: Entry, force = false): void {
-    if (!entry.conversationId || !entry.dirty || (!force && Date.now() - entry.lastSave < 1500)) return
+    if (!entry.conversationId || !entry.dirty.size || (!force && Date.now() - entry.lastSave < 1500)) return
     try {
-      for (const turn of entry.turns) this.store.saveFocusTurn(this.sessionId, platformId, entry.conversationId, turn)
-      entry.dirty = false
+      for (const turn of entry.turns) if (entry.dirty.has(turn.id)) {
+        this.store.saveFocusTurn(this.sessionId, platformId, entry.conversationId, turn)
+        entry.dirty.delete(turn.id)
+      }
       entry.lastSave = Date.now()
     } catch {
       // A first-send route can arrive before the conversation row. Retry after upsert.
-      entry.dirty = true
+      // Successfully written turns stay clean; retry only the remaining turns.
     }
   }
 }

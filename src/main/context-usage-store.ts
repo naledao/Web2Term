@@ -3,6 +3,7 @@ import { emptyContextUsage } from '../shared/context-usage'
 import type { ContextUsageEntry, ContextUsageSummary } from '../shared/context-usage'
 
 export class ContextUsageStore {
+  private readonly summaries = new Map<string, { version: string; value: ContextUsageSummary }>()
   constructor(private readonly db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS context_usage (
       id TEXT NOT NULL, platform_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -24,11 +25,24 @@ export class ContextUsageStore {
         entry.estimatedTokens, entry.characters, entry.images, entry.files, entry.createdAt)
   }
   summary(platformId: string, conversationId: string): ContextUsageSummary {
+    // total_changes covers this connection; data_version also covers another app process.
+    const changes = this.db.prepare('SELECT total_changes() AS n').get() as { n: number }
+    const external = this.db.prepare('PRAGMA data_version').get() as { data_version: number }
+    const version = changes.n + ':' + external.data_version
+    const key = JSON.stringify([platformId, conversationId])
+    const cached = this.summaries.get(key)
+    if (cached?.version === version) return cached.value
     const result = emptyContextUsage()
-    const rows = this.db.prepare(`SELECT usage.* FROM context_usage usage WHERE platform_id = ? AND conversation_id = ?
-      AND NOT EXISTS (SELECT 1 FROM focus_turns turn WHERE turn.id = usage.turn_id
-        AND CASE WHEN json_valid(turn.payload) THEN json_extract(turn.payload, '$.supersededBy') END IS NOT NULL)`)
-      .all(platformId, conversationId) as unknown as Array<{ category: ContextUsageEntry['category']; state: ContextUsageEntry['state'];
+    // Parse each referenced turn once, rather than its growing JSON payload once per tool event.
+    const rows = this.db.prepare(`WITH referenced_turns AS MATERIALIZED (
+        SELECT DISTINCT turn_id FROM context_usage WHERE platform_id = ? AND conversation_id = ? AND turn_id IS NOT NULL
+      ), archived_turns AS MATERIALIZED (
+        SELECT turn.id FROM referenced_turns ref JOIN focus_turns turn ON turn.id = ref.turn_id
+        WHERE CASE WHEN json_valid(turn.payload) THEN json_extract(turn.payload, '$.supersededBy') END IS NOT NULL
+      )
+      SELECT usage.* FROM context_usage usage WHERE platform_id = ? AND conversation_id = ?
+      AND NOT EXISTS (SELECT 1 FROM archived_turns turn WHERE turn.id = usage.turn_id)`)
+      .all(platformId, conversationId, platformId, conversationId) as unknown as Array<{ category: ContextUsageEntry['category']; state: ContextUsageEntry['state'];
         source_message_id: string | null; tokens: number; characters: number; images: number; files: number; created_at: number }>
     for (const row of rows) {
       result.observedSince = Math.min(result.observedSince ?? row.created_at, row.created_at)
@@ -42,6 +56,8 @@ export class ContextUsageStore {
       if (row.source_message_id) result.requestSourceIds.push(row.source_message_id)
       result.images += row.images; result.files += row.files
     }
+    if (this.summaries.size >= 32) this.summaries.delete(this.summaries.keys().next().value!)
+    this.summaries.set(key, { version, value: result })
     return result
   }
 }

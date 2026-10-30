@@ -1522,7 +1522,14 @@ function registerIpcHandlers(): void {
       (value.conversationId !== null && (typeof value.conversationId !== 'string' || value.conversationId.length > 512))) return null
     return questionRuntime(event, value.sessionId)
   }
-  ipcMain.handle(IpcChannels.focusChatGet, (event, owner) => focusRuntime(event, owner)?.getFocusChat(owner) ?? null)
+  ipcMain.handle(IpcChannels.focusChatGet, (event, owner, cursor) => {
+    const runtime = focusRuntime(event, owner)
+    if (!runtime) return null
+    return cursor && typeof cursor.ownerKey === 'string' && Number.isSafeInteger(cursor.turns) && typeof cursor.executions === 'string'
+      ? runtime.getFocusChat(owner, cursor) : runtime.getFocusChat(owner)
+  })
+  ipcMain.handle(IpcChannels.focusExecutionOutput, (event, owner, messageId) =>
+    focusRuntime(event, owner)?.readFocusExecutionOutput(owner, messageId) ?? null)
   ipcMain.handle(IpcChannels.focusChatRetrySend, (event, owner, failureId) => {
     if (typeof failureId !== 'string' || !failureId || failureId.length > 512) return 'invalid'
     return focusRuntime(event, owner)?.retryFocusSend(owner, failureId) ?? 'unavailable'
@@ -1735,7 +1742,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.executionList, (event, conversationId: string): ExecutionRecord[] => {
     if (!runtimeForEvent(event) || !store) return []
     const id = typeof conversationId === 'string' ? conversationId : ''
-    return id === '' ? [] : store.listExecutions(id)
+    return id === '' ? [] : store.listExecutions(id, false)
   })
   ipcMain.handle(IpcChannels.executionRun, (event, messageId: string): ExecutionRecord[] => {
     const runtime = runtimeForEvent(event)
@@ -1744,7 +1751,7 @@ function registerIpcHandlers(): void {
     const record = store.getExecution(id)
     if (!record) return []
     void runtime.runner.runExecution(id)
-    return store.listExecutions(record.conversationId)
+    return store.listExecutions(record.conversationId, false)
   })
   ipcMain.handle(IpcChannels.executionSkip, (event, messageId: string): ExecutionRecord[] => {
     const runtime = runtimeForEvent(event)
@@ -1753,7 +1760,7 @@ function registerIpcHandlers(): void {
     const record = store.getExecution(id)
     if (!record) return []
     runtime.runner.skipExecution(id)
-    return store.listExecutions(record.conversationId)
+    return store.listExecutions(record.conversationId, false)
   })
 
   ipcMain.handle(IpcChannels.terminalGetState, (event): TerminalState => runtimeForEvent(event)?.runner.getTerminalState() ?? FALLBACK_TERMINAL_STATE)

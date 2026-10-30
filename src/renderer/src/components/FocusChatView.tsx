@@ -12,6 +12,8 @@ import FocusLayout from './FocusLayout'
 import FocusComposerModes from './FocusComposerModes'
 import FocusCodeBlock from './FocusCodeBlock'
 import FocusTokenUsage from './FocusTokenUsage'
+import FocusExecutionOutput from './FocusExecutionOutput'
+import { groupFocusExecutions, mergeFocusChatUpdate } from '@shared/focus-history'
 import { estimateFocusConversation } from '@shared/focus-token-usage'
 import FocusModelSettings from './FocusModelSettings'
 import { parseFocusLayout } from '@shared/focus-layout'
@@ -24,7 +26,7 @@ import chatgptIcon from '../assets/ChatGPT.svg'
 // The view's brand icon per focus platform (`FOCUS_PLATFORMS`); a platform without one shows its name.
 const FOCUS_ICONS: Readonly<Record<string, string>> = { deepseek: deepseekIcon, chatgpt: chatgptIcon }
 import type { AppTheme, ConversationAttachment, ConversationMessage, ExecutionRecord } from '@shared/types'
-import type { FocusChatState, FocusOwner, FocusTurn, FocusDelivery } from '@shared/focus-chat'
+import type { FocusChatState, FocusChatUpdate, FocusOwner, FocusTurn, FocusDelivery } from '@shared/focus-chat'
 import { cleanFocusAnswer, cleanFocusUserText, focusOwnerKey, focusDelivery, focusPlatformLabel, supportsFocusEdit } from '@shared/focus-chat'
 import { FOCUS_MAX_FILES, FOCUS_MAX_FILE_BYTES, FOCUS_MAX_BATCH_BYTES } from '@shared/focus-chat'
 import type { FocusAttachmentInput } from '@shared/focus-chat'
@@ -48,17 +50,20 @@ interface Props {
   onPreviewImage(source: string, name: string): void
   renderAttachment(attachment: ConversationAttachment): ReactNode
 }
-/** The expanded process scrolls on its own; a working turn keeps its newest step in view unless the user scrolled up. */
-function ProcessScroll(props: { follow: boolean; children: ReactNode }): JSX.Element {
+const processPositions = new Map<string, { top: number; pinned: boolean }>()
+/** The expanded process scrolls on its own; preserve its reading position across lazy remounts. */
+function ProcessScroll(props: { scrollKey: string; follow: boolean; children: ReactNode }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
-  const pinned = useRef(true)
+  const pinned = useRef(processPositions.get(props.scrollKey)?.pinned ?? true)
   const follow = useRef(props.follow)
   const syncRef = useRef<(() => void) | null>(null)
   useLayoutEffect(() => {
     const element = ref.current
     const content = contentRef.current
     if (!element || !content) return
+    const previous = processPositions.get(props.scrollKey)
+    if (previous) element.scrollTop = previous.top
     const sync = (): void => {
       // A closed <details> has no viewport; retain the user's follow preference until it opens.
       if (follow.current && pinned.current && element.clientHeight > 0) element.scrollTop = element.scrollHeight
@@ -87,6 +92,8 @@ function ProcessScroll(props: { follow: boolean; children: ReactNode }): JSX.Ele
     const element = event.currentTarget
     if (element.clientHeight === 0) return
     pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24
+    if (processPositions.size >= 200 && !processPositions.has(props.scrollKey)) processPositions.delete(processPositions.keys().next().value!)
+    processPositions.set(props.scrollKey, { top: element.scrollTop, pinned: pinned.current })
   }}><div className="focus-process__content" ref={contentRef}>{props.children}</div></div>
 }
 function ProcessHint(): JSX.Element {
@@ -112,6 +119,23 @@ const labels: Record<string, string> = {
  * collapsed when the user closes them. Kept in memory for the app's lifetime.
  */
 const detailStates = new Map<string, Map<string, boolean>>()
+/** Native closed details still build their React children. Defer expensive bodies until opened. */
+function FocusDetails({ ownerKey, stateKey, defaultOpen = false, className, summary, children }: {
+  ownerKey: string; stateKey: string; defaultOpen?: boolean; className?: string
+  summary: ReactNode; children(): ReactNode
+}): JSX.Element {
+  const [open, setOpen] = useState(() => detailStates.get(ownerKey)?.get(stateKey) ?? defaultOpen)
+  return <details className={className} open={open} onToggle={event => {
+    if (event.target !== event.currentTarget) return
+    const next = event.currentTarget.open
+    const states = detailStates.get(ownerKey) ?? new Map<string, boolean>()
+    states.set(stateKey, next)
+    detailStates.set(ownerKey, states)
+    setOpen(next)
+  }}><summary>{summary}</summary>{open ? children() : null}</details>
+}
+const EMPTY_TURNS: FocusTurn[] = []
+const EMPTY_RECORDS: ExecutionRecord[] = []
 interface DraftFile { id: string; file: File }
 // Keep unsent files across view switches in memory, never in localStorage.
 const fileDrafts = new Map<string, DraftFile[]>()
@@ -449,7 +473,7 @@ function EditableUser({ text, children, editable, open, disabled, onOpen, onClos
   </div> : null}</>
 }
 
-export default function FocusChatView(props: Props): JSX.Element {
+function FocusChatView(props: Props): JSX.Element {
   const { owner, visible, theme, messages, messagesReady } = props
   const ownerKey = focusOwnerKey(owner)
   // Apply the default until a toggle is recorded; preserve manual choices across view switches.
@@ -486,7 +510,14 @@ export default function FocusChatView(props: Props): JSX.Element {
   const alive = useRef(true)
   const composing = useRef(false)
   const draftRef = useRef(draft)
-  const lastSnapshot = useRef('')
+  const snapshotRef = useRef<FocusChatState | null>(null)
+  const applySnapshot = (update: FocusChatUpdate): void => {
+    const next = mergeFocusChatUpdate(snapshotRef.current, update)
+    if (next && next !== snapshotRef.current) {
+      snapshotRef.current = next
+      setState(next)
+    }
+  }
   const transcriptRef = useRef<HTMLDivElement>(null)
   useEffect(() => { alive.current = true; return () => {
     alive.current = false
@@ -530,13 +561,9 @@ export default function FocusChatView(props: Props): JSX.Element {
       const epoch = readEpoch.current
       try {
         if (settingBusy.current) return
-        const next = await window.api.getFocusChat(owner)
+        const next = await window.api.pollFocusChat(owner, snapshotRef.current?.historyCursor)
         if (disposed || epoch !== readEpoch.current || !next || focusOwnerKey(next) !== ownerKey) return
-        const signature = JSON.stringify(next)
-        if (signature !== lastSnapshot.current) {
-          lastSnapshot.current = signature
-          setState(next)
-        }
+        applySnapshot(next)
       } catch {
         if (!disposed) setError('暂时无法读取页面状态，请稍后重试或切回原始视图。')
       } finally {
@@ -547,8 +574,8 @@ export default function FocusChatView(props: Props): JSX.Element {
     return () => { disposed = true; if (timer) clearTimeout(timer) }
   }, [ownerKey, visible])
 
-  const turns = state?.turns ?? []
-  const records = state?.executions ?? []
+  const turns = state?.turns ?? EMPTY_TURNS
+  const records = state?.executions ?? EMPTY_RECORDS
   const tokenUsage = useMemo(() => estimateFocusConversation({ messages, turns, executions: records,
     hiddenMessageIds: state?.hiddenMessageIds, smartReplies: state?.smartReplies, contextUsage: state?.contextUsage }),
   [messages, turns, records, state?.hiddenMessageIds, state?.smartReplies, state?.contextUsage])
@@ -565,20 +592,24 @@ export default function FocusChatView(props: Props): JSX.Element {
   }, [turns])
   // Only explicitly associated rows are merged. Unknown old history stays readable.
   const hiddenMessageIds = useMemo(() => new Set(state?.hiddenMessageIds ?? []), [state?.hiddenMessageIds])
-  const history = messages.filter(message => !represented.ids.has(message.id) &&
+  const entries = useMemo(() => {
+    const history = messages.filter(message => !represented.ids.has(message.id) &&
     !hiddenMessageIds.has(message.id) &&
     !(message.sourceMessageId && represented.sources.has(message.sourceMessageId)) &&
     (message.role !== 'assistant' || !!cleanFocusAnswer(message.content).trim() || message.attachments.length > 0) &&
     !(message.role === 'assistant' && message.sourceMessageId && recordsById.has(message.sourceMessageId)) &&
     !message.sourceMessageId?.startsWith('read-files:'))
-  const entries = [...history.map(message => ({ at: message.createdAt, message, turn: null as FocusTurn | null })),
+    return [...history.map(message => ({ at: message.createdAt, message, turn: null as FocusTurn | null })),
     ...turns.map(turn => ({ at: turn.createdAt, turn, message: null as ConversationMessage | null }))]
     .sort((a, b) => a.at - b.at)
+  }, [messages, represented, hiddenMessageIds, recordsById, turns])
   const lastTurn = turns.at(-1)
   const sendFailure = state?.sendFailure
   const working = !sendFailure && (props.needsAnswer || state?.waiting === true || state?.generating === 'active' || lastTurn?.status === 'working')
-  const linkedExecutions = new Set(turns.flatMap(turn => turn.executionIds))
-  const unlinkedAttention = records.filter(record => !linkedExecutions.has(record.messageId) && executionNeedsAction(record, focusDelivery(record)))
+  const unlinkedAttention = useMemo(() => {
+    const linkedExecutions = new Set(turns.flatMap(turn => turn.executionIds))
+    return records.filter(record => !linkedExecutions.has(record.messageId) && executionNeedsAction(record, focusDelivery(record)))
+  }, [turns, records])
   const ready = state?.ready === true
   // Computer use waits for its Windows helper; the composer keeps the draft meanwhile.
   const sendBlock = state?.sendBlock || ''
@@ -593,7 +624,7 @@ export default function FocusChatView(props: Props): JSX.Element {
       if (!alive.current) return
       if (next && focusOwnerKey(next) === ownerKey) {
         const updated = { ...next, modelSettings: result.settings ?? next.modelSettings }
-        lastSnapshot.current = JSON.stringify(updated); setState(updated)
+        applySnapshot(updated)
       }
       // Only failures before native input may be retried automatically. A dispatched
       // click with an unknown result must remain a user-confirmed operation.
@@ -638,13 +669,13 @@ export default function FocusChatView(props: Props): JSX.Element {
       readEpoch.current++
       const next = await window.api.getFocusChat(owner)
       if (!alive.current) return
-      if (next && focusOwnerKey(next) === ownerKey) { lastSnapshot.current = JSON.stringify(next); setState(next) }
+      if (next && focusOwnerKey(next) === ownerKey) applySnapshot(next)
       if (outcome !== 'ok') setError(outcome === 'busy' ? '当前正在处理任务，请稍后切换回答模式。' :
         '开关状态尚未确认，请到原始视图检查后再发送。')
     } catch { if (alive.current) setError('暂时无法同步开关状态，请到原始视图检查。') }
     finally { sendLock.current = false; if (alive.current) setChangingMode(null) }
   }
-  const richAnswers = new Map((state?.smartReplies ?? []).map(reply => [reply.sourceMessageId, reply.answer]))
+  const richAnswers = useMemo(() => new Map((state?.smartReplies ?? []).map(reply => [reply.sourceMessageId, reply.answer])), [state?.smartReplies])
   const actOnUi = useCallback(async (action: FocusUiAction): Promise<FocusSendOutcome> => {
     if (sendLock.current || working || editingId || !ready || state?.nativeDraft) return 'busy'
     sendLock.current = true; setSending(true); readEpoch.current++
@@ -653,7 +684,7 @@ export default function FocusChatView(props: Props): JSX.Element {
       readEpoch.current++
       const next = await window.api.getFocusChat(owner)
       if (alive.current && next && focusOwnerKey(next) === ownerKey) {
-        lastSnapshot.current = JSON.stringify(next); setState(next)
+        applySnapshot(next)
       }
       return result
     } finally { sendLock.current = false; if (alive.current) setSending(false) }
@@ -742,8 +773,7 @@ export default function FocusChatView(props: Props): JSX.Element {
         setEditingId(null)
         const next = await window.api.getFocusChat(owner)
         if (alive.current && next && focusOwnerKey(next) === ownerKey) {
-          lastSnapshot.current = JSON.stringify(next)
-          setState(next)
+          applySnapshot(next)
         }
       }
       return null
@@ -781,8 +811,7 @@ export default function FocusChatView(props: Props): JSX.Element {
               : '未能定位这条消息的重试控件，请到原始视图处理。')
       const next = await window.api.getFocusChat(owner)
       if (alive.current && next && focusOwnerKey(next) === ownerKey) {
-        lastSnapshot.current = JSON.stringify(next)
-        setState(next)
+        applySnapshot(next)
       }
     } catch { if (alive.current) setError('重试发送的结果尚未确认，请到原始视图核对。') }
     finally { readEpoch.current++; sendLock.current = false; if (alive.current) setActionId(null) }
@@ -802,16 +831,17 @@ export default function FocusChatView(props: Props): JSX.Element {
     <div className={'focus-execution' + (executionNeedsAction(record, delivery) ? ' focus-execution--attention' : '')} key={record.messageId}>
       <div className="focus-execution__head"><strong>{record.description || (record.kind === 'read_files' ? '读取文件' : '执行命令')}</strong><span>{labels[record.status] || record.status}</span></div>
       {actionable && ['pending', 'blocked'].includes(record.status) ? <pre>{record.command}</pre> : null}
-      <details {...remembered('exec:' + record.messageId)}><summary>查看命令与输出{record.exitCode !== null ? ' · 退出码 ' + record.exitCode : ''}</summary><pre>{record.command}</pre>{record.output ? <pre className="focus-execution__output">{record.output}</pre> : null}
+      <FocusDetails ownerKey={ownerKey} stateKey={'exec:' + record.messageId} summary={<>查看命令与输出{record.exitCode !== null ? ' · 退出码 ' + record.exitCode : ''}</>}>{() => <><pre>{record.command}</pre><FocusExecutionOutput owner={owner} record={record} />
         <div className="focus-execution__meta">{record.startedAt && record.finishedAt ? ((record.finishedAt - record.startedAt) / 1000).toFixed(1) + ' 秒 · ' : ''}{delivery === 'sent' ? '结果已回传' : delivery === 'background' ? '已交由后台任务处理，创建、就绪和结束结果单独回传' : delivery === 'pending' && record.status === 'done' ? '等待结果回传' : delivery === 'blocked' || delivery === 'failed' ? '结果尚未回传' : delivery === 'superseded' ? '结果未回传：已由后续执行接替' : ''}</div>
-      </details>
+      </>}</FocusDetails>
       {actionable && ['pending', 'blocked'].includes(record.status) ? <div className="focus-chat__actions"><button type="button" disabled={!!actionId} onClick={() => void action(record.messageId)}>{actionId === record.messageId ? '处理中…' : '运行'}</button><button type="button" disabled={!!actionId} onClick={() => void action(record.messageId, true)}>跳过</button></div> : null}
       {actionable && (delivery === 'blocked' || delivery === 'failed' || ['failed', 'timeout'].includes(record.status)) ? <button type="button" onClick={props.onOpenTerminal}>打开执行控制</button> : null}
     </div>
   )
   const renderTurn = (turn: FocusTurn): JSX.Element => {
     const sendBlocked = !!sendFailure && turn === lastTurn
-    const executions = turn.executionIds.flatMap(id => recordsById.get(id) ? [recordsById.get(id)!] : [])
+    const { executions, byCycle, unassigned } = groupFocusExecutions(turn, recordsById)
+    const executionIds = new Set(turn.executionIds)
     const deliveryOf = (record: ExecutionRecord): FocusDelivery | undefined => focusDelivery(record, turn.deliveries[record.messageId])
     const running = executions.some(record => record.status === 'running')
     const pending = executions.some(record => ['pending', 'blocked'].includes(record.status))
@@ -821,7 +851,7 @@ export default function FocusChatView(props: Props): JSX.Element {
       // Empty command answers are intentional. Rich content may enrich actual
       // prose, but must never recreate a protocol response as an answer bubble.
       if (!segment.answer.trim() ||
-        (segment.sourceMessageId && turn.executionIds.includes(segment.sourceMessageId))) return []
+        (segment.sourceMessageId && executionIds.has(segment.sourceMessageId))) return []
       // Older versions saved raw question JSON; normalize it at display time too.
       const text = cleanFocusAnswer((segment.sourceMessageId ? richAnswers.get(segment.sourceMessageId) : '') || segment.answer)
       return text.trim() ? [{ cycle: segment.cycle, sourceMessageId: segment.sourceMessageId, text }] : []
@@ -838,25 +868,25 @@ export default function FocusChatView(props: Props): JSX.Element {
         </>)}</div>
       <div className="focus-assistant">
         <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}<span>{modelLabel}</span></div>
-        <details className="focus-process" {...remembered('process:' + turn.id, true)}><summary><span className={turn.status === 'working' && !sendBlocked ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{sendBlocked ? '!' : turn.status === 'working' ? '' : turn.status === 'blocked' ? '!' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <ProcessHint /> : null}</summary>
-          <ProcessScroll follow={turn.status === 'working' && !sendBlocked}>
+        <FocusDetails className="focus-process" ownerKey={ownerKey} stateKey={'process:' + turn.id} defaultOpen summary={<><span className={turn.status === 'working' && !sendBlocked ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{sendBlocked ? '!' : turn.status === 'working' ? '' : turn.status === 'blocked' ? '!' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <ProcessHint /> : null}</>}>{() =>
+          <ProcessScroll scrollKey={ownerKey + ':turn:' + turn.id} follow={turn.status === 'working' && !sendBlocked}>
           {turn.segments.map(segment => {
-            const segmentExecutions = executions.filter(record => turn.executionCycles?.[record.messageId] === segment.cycle)
+            const segmentExecutions = byCycle.get(segment.cycle) ?? EMPTY_RECORDS
             // Empty cycles have margins and padding too; they must not push the placeholder down.
             if (!segment.parts.length && !segmentExecutions.length) return null
             return <div className="focus-process__cycle" key={segment.cycle}>
-              {segment.parts.map((part, index) => part.kind === 'reasoning' ? <details className="focus-reasoning" key={index} {...remembered('reasoning:' + turn.id + ':' + segment.cycle + ':' + index)}><summary>思考过程</summary><Markdown text={part.text} theme={theme} /></details> :
+              {segment.parts.map((part, index) => part.kind === 'reasoning' ? <FocusDetails className="focus-reasoning" key={index} ownerKey={ownerKey} stateKey={'reasoning:' + turn.id + ':' + segment.cycle + ':' + index} summary="思考过程">{() => <Markdown text={part.text} theme={theme} />}</FocusDetails> :
                 <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
               {segmentExecutions.map(record => renderExecution(record, deliveryOf(record), true))}
             </div>
           })}
-          {executions.filter(record => !turn.segments.some(segment => segment.cycle === turn.executionCycles?.[record.messageId])).map(record => renderExecution(record, deliveryOf(record), true))}
+          {unassigned.map(record => renderExecution(record, deliveryOf(record), true))}
           {turn.parseFailures?.map(failure => <details className="focus-execution" key={'parse:' + failure.messageId}>
             <summary>指令格式错误 · 未执行</summary><pre>{failure.text}</pre>
           </details>)}
           {!hasProcess ? <p className="focus-chat__muted focus-process__empty">{sendBlocked ? '消息尚未发送成功。' : turn.status === 'working' ? '正在思考…' : '本轮没有额外执行步骤。'}</p> : null}
           </ProcessScroll>
-        </details>
+        }</FocusDetails>
         {turn.notice === 'parse-failed' ? <div className="focus-chat__error" role="alert">
           {turn.commandRecovery?.message || '指令格式无效，本条请求未执行。'}
           {turn.commandRecovery && ['blocked', 'failed'].includes(turn.commandRecovery.status) && turn === state?.turns.at(-1)
@@ -883,7 +913,7 @@ export default function FocusChatView(props: Props): JSX.Element {
           </article>)}
         {unlinkedAttention.length > 0 ? <details className="focus-process" {...remembered('unlinked-process', true)}>
           <summary>其他执行记录 · {unlinkedAttention.length}<ProcessHint /></summary>
-          <ProcessScroll follow={working}>
+          <ProcessScroll scrollKey={ownerKey + ':unlinked'} follow={working}>
             {unlinkedAttention.map(record => renderExecution(record, focusDelivery(record), true))}
           </ProcessScroll>
         </details> : null}
@@ -970,3 +1000,5 @@ export default function FocusChatView(props: Props): JSX.Element {
     </div>
   </section></FocusSmartUiContext.Provider>
 }
+
+export default memo(FocusChatView)

@@ -27,16 +27,58 @@ function fixture(sessionId = 'workspace-1') {
   const rows = new Map()
   const store = {
     blocked: false,
+    writes: [],
     listFocusTurns(session, platform, conversation) {
       return [...rows.values()].filter(row => row.owner === JSON.stringify([session, platform, conversation])).map(row => clone(row.turn))
     },
     saveFocusTurn(session, platform, conversation, turn) {
       if (this.blocked) throw new Error('conversation not inserted yet')
+      this.writes.push(turn.id)
       rows.set(turn.id, { owner: JSON.stringify([session, platform, conversation]), turn: clone(turn) })
     }
   }
   return { chat: new FocusChat(sessionId, store), store, rows }
 }
+
+test('progress in a long conversation writes only the changed turn, while confirmed edits persist archived turns', () => {
+  const { chat, store } = fixture()
+  const ids = []
+  for (let index = 0; index < 80; index++) {
+    ids.push(chat.begin('chatgpt', 'chat-1', '第 ' + index + ' 轮'))
+    chat.settled('chatgpt', 'answer-' + index, '已完成')
+  }
+  store.writes.length = 0
+  chat.delivery('chatgpt', 'chat-1', 'unknown-command', 'sent')
+  assert.equal(store.writes.length, 0)
+  const current = chat.begin('chatgpt', 'chat-1', '新的长任务')
+  chat.command('chatgpt', 'command', true)
+  chat.delivery('chatgpt', 'chat-1', 'command', 'sent')
+  assert.deepEqual([...new Set(store.writes)], [current])
+  const before = chat.version('chatgpt', 'chat-1')
+  store.writes.length = 0
+  const replacement = chat.revise('chatgpt', 'chat-1', '修改消息', [ids.at(-1), current], ['old-message'])
+  assert.ok(chat.version('chatgpt', 'chat-1') > before)
+  assert.ok(store.writes.includes(ids.at(-1)))
+  assert.ok(store.writes.includes(current))
+  assert.ok(store.writes.includes(replacement))
+})
+
+test('failed writes remain dirty until storage is available and clean history is not rewritten on retry', () => {
+  const { chat, store, rows } = fixture()
+  chat.begin('deepseek', 'chat-1', '已完成的历史')
+  chat.settled('deepseek', 'old-answer', '旧回答')
+  store.writes.length = 0
+  store.blocked = true
+  const id = chat.begin('deepseek', 'chat-1', '尚未能落盘的新任务')
+  chat.command('deepseek', 'new-command', true)
+  assert.equal(store.writes.length, 0)
+  store.blocked = false
+  chat.flush()
+  assert.deepEqual(store.writes, [id])
+  assert.deepEqual(rows.get(id).turn.executionIds, ['new-command'])
+  chat.flush()
+  assert.deepEqual(store.writes, [id])
+})
 const page = (id, answer, parts = []) => ({ path: '/a/chat/s/chat-1', ready: true, nativeDraft: false,
   waiting: true, generating: 'active', reply: { sourceMessageId: id, answer, parts } })
 const onlyTurn = chat => chat.turns('deepseek', 'chat-1')[0]

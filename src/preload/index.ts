@@ -9,7 +9,7 @@ import type { TaskLease } from '../shared/autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from '../shared/task-presentation'
 import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/background-tasks'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from '../shared/github'
-import type { FocusOwner, FocusChatState, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusModelSettingsResult } from '../shared/focus-chat'
+import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusModelSettingsResult } from '../shared/focus-chat'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
@@ -215,6 +215,8 @@ const api: AppApi = {
 
   getEmbedState: (): Promise<EmbedState> => ipcRenderer.invoke(IpcChannels.embedGetState),
   getFocusChat: (owner: FocusOwner): Promise<FocusChatState | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner),
+  pollFocusChat: (owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner, cursor),
+  readFocusExecutionOutput: (owner: FocusOwner, messageId: string): Promise<string | null> => ipcRenderer.invoke(IpcChannels.focusExecutionOutput, owner, messageId),
   sendFocusMessage: (request: FocusSendRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatSend, request),
   retryFocusSend: (owner, failureId): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatRetrySend, owner, failureId),
   editFocusMessage: (request: FocusEditRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatEdit, request),

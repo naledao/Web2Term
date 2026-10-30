@@ -1,0 +1,23 @@
+.output-text__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 0;
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.output-text__controls button {
+  padding: 3px 7px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.output-text__controls button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
