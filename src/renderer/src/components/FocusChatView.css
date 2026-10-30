@@ -8,7 +8,19 @@
 .focus-chat button{font:inherit;cursor:pointer;color:inherit}
 .focus-chat button:disabled{opacity:.45;cursor:default}
 .focus-chat button:focus-visible,.focus-chat summary:focus-visible,.focus-chat a:focus-visible{outline:2px solid var(--fc-accent);outline-offset:3px}
-.focus-chat__header{flex:none;display:flex;align-items:center;gap:10px;padding:13px 22px;border-bottom:1px solid var(--fc-border);font-size:14px}
+.focus-chat__header{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:13px 22px;border-bottom:1px solid var(--fc-border);font-size:14px}
+.focus-chat__token-usage{display:flex;flex-direction:column;align-items:flex-end;flex-shrink:0;gap:2px;margin-left:auto;max-width:100%;font-size:11px;line-height:1.6;color:var(--fc-muted)}
+.focus-chat__token-usage strong{font-size:12px;color:var(--fc-text);font-variant-numeric:tabular-nums}
+.focus-chat__token-usage [data-injection-phase=full-next] strong{color:var(--fc-accent)}
+.focus-context-details{position:relative;max-width:100%}
+.focus-context-details>summary{cursor:pointer;list-style:none;text-align:right}
+.focus-context-details>summary::-webkit-details-marker{display:none}
+.focus-context-details>summary strong{text-decoration:underline dotted;text-underline-offset:3px}
+.focus-context-details>summary small{font-size:10px}
+.focus-context-details__body{position:absolute;right:0;top:calc(100% + 8px);z-index:12;box-sizing:border-box;width:320px;max-width:calc(100vw - 70px);max-height:65vh;overflow:auto;padding:16px;border:1px solid var(--fc-border);border-radius:10px;background:var(--fc-bg);color:var(--fc-text);box-shadow:0 8px 24px #0002;text-align:left;font-size:12px;line-height:1.7}
+.focus-context-details__body dl{margin:12px 0 0}
+.focus-context-details__body dl>div{display:flex;justify-content:space-between;gap:12px;margin:5px 0}
+.focus-context-details__body dd{margin:0;white-space:nowrap;font-variant-numeric:tabular-nums}
 .focus-chat__header strong{font-weight:650}
 .focus-chat__header .focus-chat__brand-icon{width:40px;height:40px;object-fit:contain;display:block}
 .focus-chat__new-chat{display:inline-flex;flex:none;align-items:center;justify-content:center;width:36px;height:36px;padding:6px;border:0;border-radius:8px;background:transparent}

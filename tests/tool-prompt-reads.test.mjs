@@ -135,12 +135,13 @@ test('the bridge rejects stale epoch, generation, source and path', () => {
   assert.equal(received.length, 1)
 })
 
-const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['toolPromptReadCurrent'], {
+const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['toolPromptReadCurrent', 'canRunConversationInBackground'], {
   taskPausedByInput: task => !!task?.paused
 })
 function runtime() {
   return Object.assign(new Runtime(), { active: true, disposed: false, taskEnded: false, stoppingTask: null,
     activePlatformId: 'claude', options: {}, lastSubmissions: new Map([['claude', 'user:first']]),
+    getComputerUseCapability: () => ({ scopeSupported: false }),
     runner: { getAutomation: () => ({ paused: false }) },
     taskCoordinator: { waitingForUser: () => false, latest: () => null },
     embed: { getComputerUsePageEpoch: () => 'epoch-a', getState: () => ({ conversationId: 'chat-a' }),
@@ -151,7 +152,7 @@ function runtime() {
 test('runtime admission rejects stopped, paused and stale conversation calls', () => {
   const subject = runtime()
   assert.equal(subject.toolPromptReadCurrent(call), true)
-  for (const [key, value] of [['disposed', true], ['active', false], ['taskEnded', true], ['stoppingTask', {}]]) {
+  for (const [key, value] of [['disposed', true], ['taskEnded', true], ['stoppingTask', {}]]) {
     const original = subject[key]; subject[key] = value
     assert.equal(subject.toolPromptReadCurrent(call), false); subject[key] = original
   }

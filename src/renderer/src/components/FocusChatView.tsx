@@ -11,6 +11,8 @@ import FocusSmartUi, { FocusSmartUiContext } from './FocusSmartUi'
 import FocusLayout from './FocusLayout'
 import FocusComposerModes from './FocusComposerModes'
 import FocusCodeBlock from './FocusCodeBlock'
+import FocusTokenUsage from './FocusTokenUsage'
+import { estimateFocusConversation } from '@shared/focus-token-usage'
 import FocusModelSettings from './FocusModelSettings'
 import { parseFocusLayout } from '@shared/focus-layout'
 import type { FocusLayoutData } from '@shared/focus-layout'
@@ -547,6 +549,9 @@ export default function FocusChatView(props: Props): JSX.Element {
 
   const turns = state?.turns ?? []
   const records = state?.executions ?? []
+  const tokenUsage = useMemo(() => estimateFocusConversation({ messages, turns, executions: records,
+    hiddenMessageIds: state?.hiddenMessageIds, smartReplies: state?.smartReplies, contextUsage: state?.contextUsage }),
+  [messages, turns, records, state?.hiddenMessageIds, state?.smartReplies, state?.contextUsage])
   const recordsById = useMemo(() => new Map(records.map(record => [record.messageId, record])), [records])
   const messagesById = useMemo(() => new Map(messages.map(message => [message.id, message])), [messages])
   const represented = useMemo(() => {
@@ -902,6 +907,7 @@ export default function FocusChatView(props: Props): JSX.Element {
         disabled={working || sending || stopping || !!editingId || !ready} pending={settingPending}
         waiting={ready && !state?.modelSettings?.model && !modelReadAttempted.current && settingPending === null}
         onChange={(kind, value) => { void updateModelSettings(kind, value) }} onRefresh={() => { void updateModelSettings('read') }} /> : null}
+      <FocusTokenUsage usage={tokenUsage} injection={state?.promptInjection} loading={!messagesReady || state === null} />
     </header>
     <div className="focus-chat__transcript" ref={transcriptRef}>
       {transcript}

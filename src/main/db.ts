@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { ScheduledTaskStore } from './scheduled-task-store'
+import { ContextUsageStore } from './context-usage-store'
 import { parseAutonomousTask, parseTaskToolContext } from '../shared/autonomous-task'
 import type { AutonomousTask, TaskToolContext, TaskLease } from '../shared/autonomous-task'
 import { validComputerActionClaim } from '../shared/computer-actions'
@@ -493,6 +494,7 @@ function toExecutionRecord(row: ExecutionRow): ExecutionRecord {
  */
 export class ConversationStore {
   private readonly db: DatabaseSync
+  readonly contextUsage: ContextUsageStore
   readonly scheduledTasks: ScheduledTaskStore
   private readonly attachmentsDir: string
 
@@ -504,6 +506,7 @@ export class ConversationStore {
     this.db = new DatabaseSync(filePath)
     this.db.exec('PRAGMA journal_mode = WAL;')
     this.db.exec(SCHEMA)
+    this.contextUsage = new ContextUsageStore(this.db)
     this.scheduledTasks = new ScheduledTaskStore(this.db)
     this.migrate()
     const computerInterrupted = recoverInterruptedComputerActions(this.db)
@@ -882,6 +885,7 @@ export class ConversationStore {
       .run(id)
     this.db.prepare('DELETE FROM conversation_messages WHERE conversation_id = ?').run(id)
     this.db.prepare('DELETE FROM focus_turns WHERE conversation_id = ?').run(id)
+    this.db.prepare('DELETE FROM context_usage WHERE conversation_id = ?').run(id)
     this.db.prepare('DELETE FROM conversations WHERE id = ?').run(id)
 
     for (const row of paths) {

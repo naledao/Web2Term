@@ -1989,11 +1989,14 @@
     const promptInjected = active && !state.taskPromptInjected && !conversationPromptInjected
     const prefix = active ? (promptInjected ? state.prefix : state.replyProtocolPrefix) : ''
     const full = promptInjected && state.prefixIncludesReplyProtocol
+    // Snapshot the counts configured WITH this exact prefix. A send can outlive a
+    // reconfiguration; its acknowledgement must not estimate the next task's prompt.
+    const usage = promptInjected ? state.contextPrefixUsage : state.contextReminderUsage
     return { prefix, metadata: { promptInjected, ...(prefix && state.replyProtocolVersion ? {
       replyProtocolVersion: state.replyProtocolVersion,
       replyProtocolKind: full ? 'full' : 'short',
       replyProtocolLength: full ? state.replyProtocolFullLength : state.replyProtocolPrefix.length
-    } : {}) } }
+    } : {}), ...(prefix && usage ? { contextUsage: { ...usage, id: Date.now().toString(36) + ':' + Math.random().toString(36).slice(2) } } : {}) } }
   }
 
   const reportUserInjection = (injection, generation = state.taskPromptGeneration) => {
@@ -2409,6 +2412,7 @@
                 replyProtocolVersion: sendContext.replyProtocolVersion,
                 replyProtocolKind: sendContext.replyProtocolKind,
                 replyProtocolLength: sendContext.replyProtocolLength,
+                contextUsage: sendContext.contextUsage,
                 conversationPromptInjected: sendContext.conversationPromptInjected === true,
                 taskPromptGeneration: sendContext.taskPromptGeneration
               }
@@ -4381,7 +4385,7 @@
       state.replyActionDetected = state.enabled
       state.failedCommand = null
       state.commandRecoveryUsed = false
-      if (state.enabled) report({ event: 'read-files', messageId, ...parsed, live: state.awaitingReplySince !== 0,
+      if (state.enabled) report({ event: 'read-files', messageId, ...parsed, rawJson: text, live: state.awaitingReplySince !== 0,
         ...(state.awaitingReplySince !== 0 ? legacyTaskSource(node) : {}) })
       return
     }
@@ -5550,6 +5554,8 @@
       if (typeof config.promptInjectionEnabled === 'boolean') state.promptInjectionEnabled = config.promptInjectionEnabled
       if (typeof config.prefix === 'string') state.prefix = config.prefix
       if (typeof config.replyProtocolPrefix === 'string') state.replyProtocolPrefix = config.replyProtocolPrefix
+      state.contextPrefixUsage = config.contextPrefixUsage
+      state.contextReminderUsage = config.contextReminderUsage
       if (Number.isSafeInteger(config.replyProtocolVersion) && config.replyProtocolVersion > 0) state.replyProtocolVersion = config.replyProtocolVersion
       if (typeof config.prefixIncludesReplyProtocol === 'boolean') state.prefixIncludesReplyProtocol = config.prefixIncludesReplyProtocol
       if (Number.isSafeInteger(config.replyProtocolFullLength) && config.replyProtocolFullLength > 0) state.replyProtocolFullLength = config.replyProtocolFullLength
@@ -6294,7 +6300,7 @@
       const outcome = await window[STATE_KEY].sendRaw(payload, ownedDraft, { generation: taskPromptGeneration, path: location.pathname, question: { messageId, source } })
       if (outcome === 'ok') {
         reportUserInjection(injection, taskPromptGeneration)
-        report({ event: 'user-message', text: answer, submissionKind: 'clarification', taskPromptGeneration,
+        report({ event: 'user-message', text: answer, submissionKind: 'clarification', taskPromptGeneration, contextUsage: injection.metadata.contextUsage,
           answeredQuestionId: messageId, questionSource: source })
       } else if (outcome === 'stuck' || outcome === 'insert-failed') {
         // A retry may replace only the text that this submission left in the composer.

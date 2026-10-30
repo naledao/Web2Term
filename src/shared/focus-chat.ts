@@ -1,4 +1,6 @@
 import type { CommandRecoveryState, ExecutionRecord } from './types'
+import type { FocusPromptInjectionState } from './focus-token-usage'
+import type { ContextUsageSummary } from './context-usage'
 
 export type ChatView = 'original' | 'local' | 'focus'
 export const DEFAULT_CHAT_VIEW: ChatView = 'focus'
@@ -160,6 +162,9 @@ export interface FocusChatState extends FocusOwner {
   composerModes?: FocusComposerMode[]
   modelSettings?: FocusModelSettings
   modelSettingsReady?: boolean
+  /** Display-only snapshot of the same planner that owns the next task's prefix. */
+  promptInjection?: FocusPromptInjectionState
+  contextUsage?: ContextUsageSummary
   /** Set while computer use is on and the Windows helper is not ready: why sending waits. */
   sendBlock?: string | null
 }

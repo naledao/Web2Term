@@ -103,12 +103,13 @@ test('the bridge works with computer use disabled and rejects stale epoch, gener
   assert.equal(received.length, 1)
 })
 
-const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['mailNotificationCurrent'], {
+const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['mailNotificationCurrent', 'canRunConversationInBackground'], {
   taskPausedByInput: task => !!task?.paused
 })
 function runtime() {
   return Object.assign(new Runtime(), { active: true, disposed: false, taskEnded: false, stoppingTask: null,
     activePlatformId: 'claude', options: {}, lastSubmissions: new Map([['claude', 'user:first']]),
+    getComputerUseCapability: () => ({ scopeSupported: false }),
     runner: { getAutomation: () => ({ paused: false }) }, toolPreferences: () => ({ mailNotificationsEnabled: true }),
     taskCoordinator: { waitingForUser: () => false, latest: () => null },
     embed: { getComputerUsePageEpoch: () => 'epoch-a', getState: () => ({ conversationId: 'chat-a' }),
@@ -119,7 +120,7 @@ function runtime() {
 test('runtime admission rejects disabled, paused, stopped and stale conversation calls', () => {
   const subject = runtime()
   assert.equal(subject.mailNotificationCurrent(call), true)
-  for (const [key, value] of [['disposed', true], ['active', false], ['taskEnded', true], ['stoppingTask', {}]]) {
+  for (const [key, value] of [['disposed', true], ['taskEnded', true], ['stoppingTask', {}]]) {
     const original = subject[key]; subject[key] = value
     assert.equal(subject.mailNotificationCurrent(call), false); subject[key] = original
   }

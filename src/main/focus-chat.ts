@@ -155,6 +155,13 @@ export class FocusChat {
   currentTurnId(platformId: string): string | undefined {
     return this.current(platformId)?.turn.id
   }
+  /** Statistics may observe a resumed turn, but must never load/reopen a task or cross conversations. */
+  contextUsageTurnId(platformId: string, conversationId: string | null): string | undefined {
+    const entry = this.entries.get(platformId)
+    if (!entry || entry.conversationId !== conversationId && !(entry.conversationId === null && entry.current)) return undefined
+    const turns = entry.turns.filter(turn => !turn.supersededBy)
+    return turns.find(turn => turn.id === entry.current)?.id ?? turns.at(-1)?.id
+  }
   snapshot(platformId: string, token: string, page: FocusPageSnapshot): void {
     if (token !== this.token(platformId)) return
     const current = this.current(platformId)

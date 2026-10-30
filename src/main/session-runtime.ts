@@ -42,6 +42,8 @@ import { validFocusUiAction } from '../shared/focus-smart-ui'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
 import type { FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
 import { validFocusModelSettingsRequest } from '../shared/focus-chat'
+import { focusPromptInjectionState } from '../shared/focus-token-usage'
+import type { ContextUsageEntry } from '../shared/context-usage'
 import { writeFile } from 'node:fs/promises'
 import { createConnection } from 'mysql2/promise'
 import { formatMysqlCell } from './mysql-field-value'
@@ -510,6 +512,7 @@ export class SessionRuntime {
       focusTurnId?: string
     }>
   >()
+  private readonly pendingContextUsage = new Map<string, Map<string, ContextUsageEntry>>()
 
   constructor(private readonly options: SessionRuntimeOptions) {
     this.web2term = options.web2term ? new Web2termShell(options.web2term.binding, options.web2term.connection) : null
@@ -906,6 +909,8 @@ export class SessionRuntime {
     const isActive = (): boolean => platform.id === this.activePlatformId
 
     return {
+      contextTurnId: conversationId => this.focusChat?.contextUsageTurnId(platform.id, conversationId),
+      onContextUsage: entry => this.recordContextUsage(platform.id, entry),
       onQuestionChat: state => {
         if (isActive()) this.send(IpcChannels.questionChatState, state)
       },
@@ -976,6 +981,7 @@ export class SessionRuntime {
       },
       onConversation: (conversation) => {
         this.options.store.upsert(conversation, this.currentConversationProject())
+        this.flushContextUsage(platform.id, conversation.id)
         this.flushDeferredCommands(conversation.id)
         this.flushPendingGoal(conversation.id)
         this.flushPendingConversationMessages(platform.id, conversation.id)
@@ -988,7 +994,7 @@ export class SessionRuntime {
       },
       onUserStarted: (text, files, editToken, submission, scheduledRunId) => {
         if (this.disposed) return undefined
-        const controlsCurrent = !this.disposed && this.active && isActive()
+        const controlsCurrent = !this.disposed && isActive() && (this.active || this.canRunConversationInBackground(platform.id))
         const automatic = scheduledRunId !== undefined || submission?.id.startsWith('user:scheduled:') === true
         const scheduled = this.scheduledSubmission
         const scheduledCurrent = automatic && !!scheduled && scheduledRunId === scheduled.runId &&
@@ -1200,7 +1206,7 @@ export class SessionRuntime {
           const ledger = this.updateInjectionLedger(platform.id, noteInjectionViolation)
           if (ledger) writeInjectionLedgerDiagnostic(platform.id, 'injection-violation', record().conversationId === null ? 'draft' : 'saved', ledger)
         }
-        if (payload.live === true) void record().embed?.recoverCommand(this.active && this.runner.canSendAutomaticResult())
+        if (payload.live === true) void record().embed?.recoverCommand((this.active || this.canRunConversationInBackground(platform.id)) && this.runner.canSendAutomaticResult())
       },
       onCommandRecovery: recovery => {
         if (isActive()) this.focusChat.commandRecovery(platform.id, recovery)
@@ -1289,15 +1295,19 @@ export class SessionRuntime {
   }
 
   setActive(active: boolean): void {
-    if (!active) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel() }
-    if (!active) this.scheduledSendAbort?.abort()
-    if (this.active && !active) this.interruptTaskControl(this.activePlatformId)
+    // Selecting another workspace hides this conversation, but does not replace its
+    // terminal, target or send owner. Only desktop-tool authority needs that handover.
+    if (!active && !this.canRunConversationInBackground()) {
+      this.mailNotifications?.cancel(); this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel()
+      this.scheduledSendAbort?.abort()
+      if (this.active) this.interruptTaskControl(this.activePlatformId)
+    }
     this.active = active
     this.syncWindowsHelperDemand()
     this.taskProgression?.reconcile()
     if (active) void this.taskProgression?.wake()
     this.applyVisibility()
-    if (active) this.options.scheduledTasks?.wake()
+    this.options.scheduledTasks?.wake()
   }
 
   /**
@@ -1597,6 +1607,9 @@ export class SessionRuntime {
       reasoningCount: page?.reply?.parts.filter(part => part.kind === 'reasoning').length ?? 0,
       searchCount: page?.reply?.parts.filter(part => part.kind === 'search').length ?? 0 })
     const archivedExecutions = this.focusChat.supersededExecutionIds(owner.platformId, owner.conversationId)
+    let contextUsage: import('../shared/context-usage').ContextUsageSummary | undefined
+    try { contextUsage = owner.conversationId ? this.options.store.contextUsage?.summary(owner.platformId, owner.conversationId) : undefined }
+    catch { /* Optional statistics must not prevent the conversation from opening. */ }
     return { ...owner, ready: page?.ready === true, nativeDraft: page?.nativeDraft === true,
       sendFailure: page?.sendFailure ?? null,
       generating: page?.generating ?? 'unknown', waiting: page?.waiting === true,
@@ -1606,6 +1619,9 @@ export class SessionRuntime {
       composerModes: page?.composerModes ?? [],
       modelSettings: page?.modelSettings,
       modelSettingsReady: page?.modelSettingsReady,
+      promptInjection: focusPromptInjectionState(owner.platformId,
+        this.conversationTools.injectionLedger(owner.platformId, owner.conversationId), this.embed.getInterceptorStatus()),
+      contextUsage,
       sendBlock: computerUseSendBlock(this.getComputerUseCapability(owner.platformId)),
       executions: owner.conversationId ? this.options.store.listExecutions(owner.conversationId).filter(record => !archivedExecutions.has(record.messageId)) : [] }
   }
@@ -2428,7 +2444,7 @@ export class SessionRuntime {
   }
 
   private scheduledOwnerCurrent(task: ScheduledTask): boolean {
-    if (this.disposed || !this.active || task.owner.sessionId !== this.id || this.activePlatformId !== task.owner.platformId ||
+    if (this.disposed || (!this.active && !this.canRunConversationInBackground(task.owner.platformId)) || task.owner.sessionId !== this.id || this.activePlatformId !== task.owner.platformId ||
       this.embed.getState().conversationId !== task.owner.conversationId || this.options.automationBlocked?.() || this.stoppingTask ||
       this.runner.getAutomation().paused || this.options.desktopCoordinator?.getState().humanControl ||
       taskPausedByInput(this.taskCoordinator.latest(task.owner.platformId)) || !this.toolPreferences(task.owner.platformId).scheduledTasksEnabled) return false
@@ -2444,8 +2460,14 @@ export class SessionRuntime {
     if (this.options.scheduledTasks) this.send(IpcChannels.scheduledTasksChanged, this.options.scheduledTasks.store.snapshot(this.id))
   }
 
+  /** Hidden terminal conversations keep their own send loop; desktop-tool tasks require selection. */
+  private canRunConversationInBackground(platformId = this.activePlatformId): boolean {
+    const capability = this.getComputerUseCapability(platformId)
+    return !capability.scopeSupported || !capability.computerUseEnabled
+  }
+
   private mailNotificationCurrent(call: MailNotificationCall): boolean {
-    if (this.disposed || !this.active || this.taskEnded || this.stoppingTask || this.options.automationBlocked?.() ||
+    if (this.disposed || (!this.active && !this.canRunConversationInBackground()) || this.taskEnded || this.stoppingTask || this.options.automationBlocked?.() ||
       this.runner.getAutomation().paused || !this.toolPreferences().mailNotificationsEnabled ||
       this.options.desktopCoordinator?.getState().humanControl ||
       taskPausedByInput(this.taskCoordinator.latest(this.activePlatformId)) ||
@@ -2457,7 +2479,7 @@ export class SessionRuntime {
   }
 
   private toolPromptReadCurrent(call: ToolPromptReadCall): boolean {
-    if (this.disposed || !this.active || this.taskEnded || this.stoppingTask || this.options.automationBlocked?.() ||
+    if (this.disposed || (!this.active && !this.canRunConversationInBackground()) || this.taskEnded || this.stoppingTask || this.options.automationBlocked?.() ||
       this.runner.getAutomation().paused || this.options.desktopCoordinator?.getState().humanControl ||
       taskPausedByInput(this.taskCoordinator.latest(this.activePlatformId)) ||
       this.lastSubmissions.get(this.activePlatformId) !== call.sourceSubmissionId ||
@@ -2486,7 +2508,7 @@ export class SessionRuntime {
   }
 
   private receiveScheduledTask(call: ScheduledToolCall): void {
-    if (this.disposed || !this.active) return
+    if (this.disposed || (!this.active && !this.canRunConversationInBackground())) return
     const conversationId = this.embed.getState().conversationId, scheduledTasks = this.options.scheduledTasks
     // A stale or unauthorised request is never answered to the AI, but it must not vanish without a trace.
     const ignored = !scheduledTasks ? '定时任务服务不可用。'
@@ -2501,7 +2523,7 @@ export class SessionRuntime {
       this.runner.refreshTerminal('定时任务操作未完成：' + message)
       const owner = this.toolsOwner(), epoch = this.embed.getComputerUsePageEpoch()
       void this.embed.sendTaskResult('【定时任务操作未完成】\n' + message,
-        call.conversationId, new AbortController().signal, () => !this.disposed && this.active && sameConversationToolsOwner(owner, this.toolsOwner()) &&
+        call.conversationId, new AbortController().signal, () => !this.disposed && (this.active || this.canRunConversationInBackground()) && sameConversationToolsOwner(owner, this.toolsOwner()) &&
           epoch === this.embed.getComputerUsePageEpoch() && this.lastSubmissions.get(owner.platformId) === call.sourceSubmissionId).catch(() => {})
     }
     if (!this.toolPreferences().scheduledTasksEnabled) { refuse('当前对话已关闭定时任务工具，不要再输出 scheduled_task 请求。'); return }
@@ -2518,7 +2540,8 @@ export class SessionRuntime {
   }
 
   scheduledTaskReady(task: ScheduledTask, run: ScheduledTaskRun): string | null {
-    if (this.disposed || !this.active) return '等待选中原工作区。'
+    if (this.disposed) return '等待原工作区恢复。'
+    if (!this.active && !this.canRunConversationInBackground(task.owner.platformId)) return '等待选中原工作区以继续桌面操作任务。'
     if (this.activePlatformId !== task.owner.platformId || this.embed.getState().conversationId !== task.owner.conversationId) return '等待回到原 AI 平台和对话。'
     if (run.kind === 'receipt' && (this.taskEnded || task.receiptSubmissionId !== this.lastSubmissions.get(task.owner.platformId))) return 'cancel:原任务已切换或结束，创建确认不再自动回传；计划仍已保存。'
     if (this.options.automationBlocked?.()) return '全局急停中，等待手动解除。'
@@ -2705,6 +2728,28 @@ export class SessionRuntime {
     this.conversationTools.setInjectionLedger(platformId, entry.conversationId, ledger)
     entry.embed?.refreshInjectionPlan()
     return ledger
+  }
+
+  private recordContextUsage(platformId: string, entry: ContextUsageEntry): void {
+    if (this.disposed) return
+    if (entry.conversationId) {
+      try { this.options.store.contextUsage.save(platformId, entry); return } catch { /* The first conversation row may not exist yet. */ }
+    }
+    const pending = this.pendingContextUsage.get(platformId) ?? new Map<string, ContextUsageEntry>()
+    const previous = pending.get(entry.id)
+    if (previous?.state !== 'sent') pending.set(entry.id, entry)
+    if (pending.size > 500) pending.delete(pending.keys().next().value!)
+    this.pendingContextUsage.set(platformId, pending)
+  }
+
+  private flushContextUsage(platformId: string, conversationId: string): void {
+    const pending = this.pendingContextUsage.get(platformId)
+    if (!pending) return
+    for (const [id, entry] of pending) {
+      try { this.options.store.contextUsage.save(platformId, { ...entry, conversationId: entry.conversationId ?? conversationId }); pending.delete(id) }
+      catch { /* Keep observations pending until their exact conversation is persisted. */ }
+    }
+    if (!pending.size) this.pendingContextUsage.delete(platformId)
   }
 
   private captureConversationMessage(

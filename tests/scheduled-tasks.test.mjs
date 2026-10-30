@@ -403,7 +403,7 @@ test('scheduled transport restores confirmed conversation prompt history without
 })
 
 test('runtime checks send availability and owner controls without waiting for AI task completion', () => {
-  const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['scheduledTaskReady'], {
+  const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['scheduledTaskReady', 'canRunConversationInBackground'], {
     taskPausedByInput: task => task?.paused === true, computerUseSendBlock: () => null, sameScheduledTarget: targets.sameScheduledTarget
   })
   const task = { ...request, owner, target }, run = { kind: 'task' }
@@ -413,7 +413,10 @@ test('runtime checks send availability and owner controls without waiting for AI
     taskCoordinator: { latest: () => null, waitingForUser: () => false }, options: {}, toolPreferences: () => ({ scheduledTasksEnabled: true }),
     scheduledTarget: () => target, getComputerUseCapability: () => ({}), taskRunning: () => false })
   assert.equal(subject.scheduledTaskReady(task, run), null)
-  subject.active = false; assert.match(subject.scheduledTaskReady(task, run), /工作区/); subject.active = true
+  subject.active = false; assert.equal(subject.scheduledTaskReady(task, run), null, 'terminal schedules run without selecting their workspace')
+  subject.getComputerUseCapability = () => ({ scopeSupported: true, computerUseEnabled: true })
+  assert.match(subject.scheduledTaskReady(task, run), /工作区/, 'desktop-tool tasks still require the selected workspace')
+  subject.getComputerUseCapability = () => ({}); subject.active = true
   subject.options.automationBlocked = () => true; assert.match(subject.scheduledTaskReady(task, run), /急停/); delete subject.options.automationBlocked
   subject.options.desktopCoordinator = { getState: () => ({ humanControl: true }) }; assert.match(subject.scheduledTaskReady(task, run), /接管/); delete subject.options.desktopCoordinator
   subject.scheduledTarget = () => ({ ...target, cwd: 'C:\\other' }); assert.match(subject.scheduledTaskReady(task, run), /工作目录/)

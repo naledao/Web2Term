@@ -40,6 +40,7 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
     './posix-shell': { localPosixShellPath: () => '/bin/zsh' }, '../shared/types': types
   }, desktop)
   const { SessionRuntime } = load('../src/main/session-runtime.ts', {
+    '../shared/focus-token-usage': {},
   './computer-recovery': {},
     './task-coordinator': {},
     './computer-use-tool': {},

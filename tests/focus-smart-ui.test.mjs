@@ -472,6 +472,7 @@ function recoveryRuntimeFixture() {
   new Script(ts.transpileModule('class Runtime {' + methods.map(node => node.getText(runtimeAst)).join('\n') + '} exports.Runtime = Runtime', {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText).runInNewContext({ exports, cleanFocusUserText: focusShared.cleanFocusUserText,
+    focusPromptInjectionState: () => ({ phase: 'countdown', characterBudget: 60000, charactersSinceFull: 0 }),
     writeFocusDiagnostic(owner, details) { diagnostics.push(details) } })
   const saved = new Map(), messages = [
     { id: 'u1', role: 'user', content: '产品路线选择', sourceMessageId: null, createdAt: 1 },
@@ -485,10 +486,12 @@ function recoveryRuntimeFixture() {
     listConversationMessages: () => messages, listExecutions: () => [] }
   const runtime = new exports.Runtime(), owner = { sessionId: 'session', platformId: 'chatgpt', conversationId: 'one' }
   Object.assign(runtime, { focusSending: false, focusRevision: null, focusUiRecovering: false, focusUiRecoveredTurn: null,
-    ownsFocus: () => true, options: { store }, runner: { hasInFlightWork: () => false }, focusChat: new FocusChat('session', store) })
+    ownsFocus: () => true, options: { store }, runner: { hasInFlightWork: () => false }, focusChat: new FocusChat('session', store),
+    conversationTools: { injectionLedger: () => null } })
   const page = { path: '/c/one', ready: true, nativeDraft: false, waiting: false, generating: 'active',
     reply: { sourceMessageId: 'answer-new', parts: [], answer: '正在形成的新回复' } }
   runtime.embed = {
+    getInterceptorStatus: () => ({ installed: true, enabled: true, promptInjectionEnabled: true, prefix: 'SYSTEM' }),
     async readFocusUiRecovery() { calls.push('read'); return { sourceMessageId: 'answer-1', userMessageId: 'native-user', userText: '按这个方向深入设计：综合工具箱型工作台' } },
     async adoptFocusUiRecovery() { calls.push('adopt'); return true }, async readFocusSnapshot() { return page }
   }

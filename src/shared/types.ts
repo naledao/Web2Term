@@ -1377,6 +1377,8 @@ export interface InterceptorPageEvent {
   enabled?: boolean
   promptInjectionEnabled?: boolean
   prefixLength?: number
+  /** Metadata for the exact submitted prefix, including the user-text separator; no prompt copy. */
+  contextUsage?: { id: string; estimatedTokens: number; characters: number }
   /** Version and size of the reply contract actually carried by this human send. */
   replyProtocolVersion?: number
   replyProtocolKind?: 'full' | 'short'

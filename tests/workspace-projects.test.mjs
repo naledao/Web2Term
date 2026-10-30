@@ -26,6 +26,7 @@ function load(path, overrides = {}) {
 }
 const { workspaceProjectDraft, workspaceSessionOptions } = load('../src/main/workspace-projects.ts')
 const { ConversationStore } = load('../src/main/db.ts', {
+  './context-usage-store': load('../src/main/context-usage-store.ts', { '../shared/context-usage': load('../src/shared/context-usage.ts') }),
   './scheduled-task-store': load('../src/main/scheduled-task-store.ts'),
   './computer-action-storage': load('../src/main/computer-action-storage.ts'),
   './computer-recovery': load('../src/main/computer-recovery.ts', { '../shared/autonomous-task': load('../src/shared/autonomous-task.ts') }),

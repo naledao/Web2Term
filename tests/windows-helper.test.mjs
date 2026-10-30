@@ -683,7 +683,7 @@ test('capabilities require both a registered adapter and the same ready helper a
 
 const runtimeSource = ts.createSourceFile('session-runtime.ts', readFileSync(new URL('../src/main/session-runtime.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
 const runtimeClass = runtimeSource.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'SessionRuntime')
-const methods = ['getComputerUseCapability', 'syncWindowsHelperDemand', 'setActive'].map(name => {
+const methods = ['getComputerUseCapability', 'syncWindowsHelperDemand', 'canRunConversationInBackground', 'setActive'].map(name => {
   const method = runtimeClass.members.find(member => member.name?.getText(runtimeSource) === name)
   assert.ok(method, name); return method.getText(runtimeSource)
 }).join('\n')

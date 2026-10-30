@@ -1,5 +1,8 @@
 import { BrowserWindow, WebContentsView, session, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
+import { ContextUsageRecorder } from './context-usage-recorder'
+import type { ContextUsageEntry } from '../shared/context-usage'
+import { estimateContextText } from '../shared/focus-token-usage'
 import type { ScheduledToolCall } from '../shared/scheduled-tasks'
 import type { MailNotificationCall } from '../shared/mail-notification'
 import type { ToolPromptReadCall } from '../shared/tool-prompts'
@@ -421,6 +424,8 @@ interface ScrapeResult {
 
 /** Callbacks the embed raises towards the main process. */
 export interface EmbedHandlers {
+  contextTurnId?(conversationId: string | null): string | undefined
+  onContextUsage?(entry: ContextUsageEntry): void
   onState(state: EmbedState): void
   onQuestionChat?(state: QuestionChatState | null): void
   readQuestionContext?: SavedQuestionContextReader
@@ -522,6 +527,11 @@ export class ChatGptEmbed {
   }
   /** Kept per view so a full page reload preserves the current task's injection. */
   private taskPromptInjected = false
+  private readonly contextUsage = new ContextUsageRecorder(() => {
+    const contents = this.liveContents()
+    const conversationId = contents ? conversationIdOf(this.platform, contents.getURL()) : null
+    return { conversationId, turnId: this.handlers.contextTurnId?.(conversationId) ?? null }
+  }, entry => this.handlers.onContextUsage?.(entry))
   /** The plan behind the prefix last pushed to the page, and the length the page last injected. */
   private injectionPlan: InjectionPlan | null = null
   private pushedPrefix: string | null = null
@@ -1305,6 +1315,8 @@ export class ChatGptEmbed {
       computerProtocol: this.computerUseProtocolContext,
       sendBlock: this.sendBlock,
       prefix,
+      contextPrefixUsage: estimateContextText(prefix + '\u2063\u2063'),
+      contextReminderUsage: estimateContextText(REPLY_PROTOCOL_REMINDER + '\u2063\u2063'),
       replyProtocolPrefix: REPLY_PROTOCOL_REMINDER,
       replyProtocolVersion: REPLY_PROTOCOL_VERSION,
       prefixIncludesReplyProtocol: prefix.includes(REPLY_PROTOCOL_SECTION),
@@ -1738,15 +1750,19 @@ export class ChatGptEmbed {
   ): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed'> {
     const contents = this.liveContents()
     if (!contents) return 'no-composer'
+    const usage = this.contextUsage?.begin(text, 'tool-result')
+    let usageOutcome: unknown = 'not-sent'
 
     try {
       const path = new URL(contents.getURL()).pathname
       if (options && this.platform.conversationIdFromPath(path) !== options.conversationId) return 'busy'
+      usageOutcome = 'unknown'
       const outcome = (await contents.executeJavaScript(
         `window.__cmdTerminalInterceptor
            ? window.__cmdTerminalInterceptor.sendRaw(${JSON.stringify(text)}, null, ${JSON.stringify(options ? { requireIdle: options.requireIdle, path } : null)})
            : 'no-composer'`
       )) as unknown
+      usageOutcome = ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed'].includes(String(outcome)) ? outcome : 'unknown'
 
       if (
         outcome === 'ok' ||
@@ -1760,7 +1776,7 @@ export class ChatGptEmbed {
     } catch (error) {
       console.warn('[embed] sendRaw failed:', (error as Error).message)
       return 'no-composer'
-    }
+    } finally { this.contextUsage?.finish(usage, usageOutcome) }
   }
 
   /** Strict outcome semantics for automatic desktop results; legacy sendRaw stays unchanged. */
@@ -1778,8 +1794,11 @@ export class ChatGptEmbed {
       } catch { return false }
     }
     if (!current()) return 'stale'
-    const outcome = await sendPageFiles(contents, this.platform.id, attachments, 'computer-image:' + imageId, current, signal,
-      { caption: text, computerResult: { path: new URL(contents.getURL()).pathname, generation } })
+    const usage = this.contextUsage?.begin(text, 'tool-result', 'observation:' + imageId, { images: 1, files: 0 })
+    let outcome: import('../shared/file-requests').FileSendOutcome = 'unknown'
+    try { outcome = await sendPageFiles(contents, this.platform.id, attachments, 'computer-image:' + imageId, current, signal,
+      { caption: text, computerResult: { path: new URL(contents.getURL()).pathname, generation } }) }
+    finally { this.contextUsage?.finish(usage, outcome) }
     if (outcome === 'ok') return 'ok'
     if (signal.aborted || !current()) return 'stale'
     if (outcome === 'not-submitted' || outcome === 'insert-failed' || outcome === 'unsupported-file-type') return 'failed'
@@ -1804,21 +1823,25 @@ export class ChatGptEmbed {
         `window.__cmdTerminalInterceptor?.cancelComputerResult(${JSON.stringify(token)})`).catch(() => {})
     }
     signal.addEventListener('abort', cancel, { once: true })
+    const usage = this.contextUsage?.begin(text, 'tool-result')
+    let usageOutcome: unknown = 'not-sent'
     try {
       const path = new URL(contents.getURL()).pathname
       if (!current()) return 'stale'
       const options = { path, generation, requireIdle: true, computerResultToken: token }
+      usageOutcome = 'unknown'
       const outcome: unknown = await contents.executeJavaScript(
         `window.__cmdTerminalInterceptor?.sendComputerResult
           ? window.__cmdTerminalInterceptor.sendComputerResult(${JSON.stringify(text)}, ${JSON.stringify(options)})
           : 'no-composer'`)
+      usageOutcome = ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed'].includes(String(outcome)) ? outcome : 'unknown'
       if (!current()) return 'stale'
       if (outcome === 'ok' || outcome === 'busy' || outcome === 'no-composer' || outcome === 'stuck' || outcome === 'insert-failed') return outcome
       return 'unknown'
     } catch {
       // IPC/navigation can fail after clicking Send. It is unsafe to assume nothing was sent.
       return !current() ? 'stale' : 'unknown'
-    } finally { signal.removeEventListener('abort', cancel) }
+    } finally { signal.removeEventListener('abort', cancel); this.contextUsage?.finish(usage, usageOutcome) }
   }
 
   /** Page-side token, generation and path checks pin this to one unexecuted reply. */
@@ -1869,7 +1892,12 @@ export class ChatGptEmbed {
       try { return new URL(contents.getURL()).origin === new URL(this.platform.homeUrl).origin } catch { return false }
     }
     if (!guard()) return 'cancelled'
-    const outcome = await sendPageFiles(contents, platform.id, result.attachments, token, guard, signal)
+    const usage = this.contextUsage?.begin('', 'attachment', token, {
+      images: result.attachments.filter(file => file.mimeType.startsWith('image/')).length,
+      files: result.attachments.filter(file => !file.mimeType.startsWith('image/')).length })
+    let outcome: FileSendOutcome = 'unknown'
+    try { outcome = await sendPageFiles(contents, platform.id, result.attachments, token, guard, signal) }
+    finally { this.contextUsage?.finish(usage, outcome) }
     if (outcome === 'ok') this.noteAttachmentTraffic(result.attachments)
     return outcome
   }
@@ -2174,6 +2202,7 @@ export class ChatGptEmbed {
           const scheduledRunId = typeof payload.scheduledRunId === 'string' && payload.scheduledRunId.length <= 128 ? payload.scheduledRunId : undefined
           const turnId = this.handlers.onUserStarted?.(text, files, editToken, submission, scheduledRunId)
           if (editToken && !turnId) break
+          if (payload.contextUsage) this.contextUsage?.confirmedUsage(payload.contextUsage, 'injection', 'prefix:' + payload.contextUsage.id)
           if (submission) {
             this.userSubmissions.add(submission.id)
             if (this.userSubmissions.size > 1000) this.userSubmissions.delete(this.userSubmissions.values().next().value!)
@@ -2207,6 +2236,7 @@ export class ChatGptEmbed {
         break
       case 'sent':
         if (payload.taskPromptGeneration !== this.taskPromptGeneration) break
+        if (payload.contextUsage) this.contextUsage?.confirmedUsage(payload.contextUsage, 'injection', 'prefix:' + payload.contextUsage.id)
         if (payload.promptInjected === false && payload.replyProtocolKind === 'short' &&
           payload.replyProtocolVersion === REPLY_PROTOCOL_VERSION && payload.replyProtocolLength === REPLY_PROTOCOL_REMINDER.length) {
           this.handlers.onContextTraffic?.(REPLY_PROTOCOL_REMINDER.length)
@@ -2266,6 +2296,8 @@ export class ChatGptEmbed {
           )
           questionAccepted = validQuestion
           if (validQuestion) {
+            if (typeof payload.rawJson === 'string' && payload.rawJson.length <= 1_000_000)
+              this.contextUsage?.confirmed(payload.rawJson, 'tool-request', messageId!, messageId!)
             const isNewQuestion = this.interceptor.pendingQuestion?.messageId !== messageId
             this.interceptor.pendingQuestion = {
               messageId,
@@ -2343,6 +2375,7 @@ export class ChatGptEmbed {
           if (!this.platform.allowedOriginPattern.test(url.href) || payload.pagePath !== url.pathname ||
             !this.platform.conversationIdFromPath(url.pathname)) break
         } catch { break }
+        this.contextUsage?.confirmed(payload.rawJson, 'tool-request', payload.messageId, payload.messageId)
         computerAccepted = this.handlers.onComputerRequest?.({ messageId: payload.messageId, sourceSubmissionId: payload.sourceSubmissionId,
           taskPromptGeneration: payload.taskPromptGeneration, pagePath: payload.pagePath!, rawJson: payload.rawJson,
           pageEpoch: payload.computerPageEpoch,
@@ -2363,6 +2396,9 @@ export class ChatGptEmbed {
             })
         )
         if (payload.messageId && typeof payload.command === 'string') {
+          if (payload.live === true) this.contextUsage?.confirmed(typeof payload.rawJson === 'string' ? payload.rawJson
+            : JSON.stringify({ command: payload.command, description: payload.description, timeoutSeconds: payload.timeoutSeconds }),
+          'tool-request', payload.messageId, payload.messageId)
           this.handlers.onCommand({
             messageId: payload.messageId,
             command: payload.command,
@@ -2382,6 +2418,8 @@ export class ChatGptEmbed {
         if (payload.sourceSubmissionId !== undefined && !taskSource) break
         const request = parseReadFilesRequest({ type: 'read_files', files: payload.files, description: payload.description })
         if (fileReadingPlatform(this.platform.id) && request && typeof payload.messageId === 'string' && payload.messageId) {
+          if (payload.live === true) this.contextUsage?.confirmed(typeof payload.rawJson === 'string' ? payload.rawJson : JSON.stringify(request),
+            'tool-request', payload.messageId, payload.messageId)
           this.handlers.onCommand({ ...request, messageId: payload.messageId, live: payload.live === true, ...(taskSource ? { taskSource } : {}) })
         }
         break
@@ -2396,6 +2434,7 @@ export class ChatGptEmbed {
         const url = new URL(contents.getURL())
         const conversationId = this.platform.conversationIdFromPath(url.pathname)
         if (url.origin !== new URL(this.platform.homeUrl).origin || !conversationId || payload.pagePath !== url.pathname) break
+        this.contextUsage?.confirmed(payload.rawJson, 'tool-request', payload.messageId, payload.messageId)
         this.handlers.onMailNotification?.({ messageId: payload.messageId, rawJson: payload.rawJson, conversationId,
           pageEpoch: this.computerPageEpoch, sourceSubmissionId: payload.sourceSubmissionId })
         break
@@ -2410,6 +2449,7 @@ export class ChatGptEmbed {
         const url = new URL(contents.getURL())
         const conversationId = this.platform.conversationIdFromPath(url.pathname)
         if (url.origin !== new URL(this.platform.homeUrl).origin || !conversationId || payload.pagePath !== url.pathname) break
+        this.contextUsage?.confirmed(payload.rawJson, 'tool-request', payload.messageId, payload.messageId)
         this.handlers.onToolPromptRead?.({ messageId: payload.messageId, rawJson: payload.rawJson, conversationId,
           pageEpoch: this.computerPageEpoch, sourceSubmissionId: payload.sourceSubmissionId })
         break
@@ -2422,6 +2462,7 @@ export class ChatGptEmbed {
         const url = new URL(contents.getURL())
         const conversationId = this.platform.conversationIdFromPath(url.pathname)
         if (url.origin !== new URL(this.platform.homeUrl).origin || !conversationId || payload.pagePath !== url.pathname) break
+        this.contextUsage?.confirmed(payload.rawJson, 'tool-request', payload.messageId, payload.messageId)
         this.handlers.onScheduledTask?.({ messageId: payload.messageId, rawJson: payload.rawJson, conversationId,
           pageEpoch: this.computerPageEpoch, sourceSubmissionId: typeof payload.sourceSubmissionId === 'string' ? payload.sourceSubmissionId : undefined })
         break
