@@ -457,6 +457,7 @@ test('model-created plans take their owner from the live app and reject stale ep
   const calls = [], errors = [], notes = []
   let scheduledTasksEnabled = true
   const subject = Object.assign(new Runtime(), { active: true, disposed: false, taskEnded: false, activePlatformId: owner.platformId,
+    observeFocusTool: () => undefined,
     options: { scheduledTasks: { create(...args) { calls.push(args) } } }, lastSubmissions: new Map([[owner.platformId, 'user:first']]),
     embed: { getComputerUsePageEpoch: () => 'epoch-a', getState: () => ({ conversationId: owner.conversationId }),
       async sendTaskResult(text) { errors.push(text); return 'ok' } },
@@ -489,6 +490,7 @@ test('live model requests query, update and delete the saved plan and deliver de
   })
   let humanControl = false, enabled = true
   const subject = Object.assign(new Runtime(), { id: owner.sessionId, active: true, disposed: false, taskEnded: false, activePlatformId: owner.platformId,
+    observeFocusTool: () => undefined,
     options: { scheduledTasks: f.scheduler, desktopCoordinator: { getState: () => ({ humanControl }) } },
     lastSubmissions: new Map([[owner.platformId, 'user:first']]),
     embed: { getComputerUsePageEpoch: () => 'epoch-a', getState: () => ({ conversationId: owner.conversationId }),

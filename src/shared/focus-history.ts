@@ -1,5 +1,5 @@
 import { focusOwnerKey } from './focus-chat'
-import type { FocusChatState, FocusChatUpdate, FocusTurn } from './focus-chat'
+import type { FocusChatState, FocusChatUpdate, FocusTurn, FocusToolCall } from './focus-chat'
 import type { ExecutionRecord } from './types'
 
 /** Keep history references stable when only live page metadata changed. Never mix owners. */
@@ -35,10 +35,19 @@ export function groupFocusExecutions(turn: FocusTurn, records: ReadonlyMap<strin
   executions: ExecutionRecord[]
   byCycle: Map<number, ExecutionRecord[]>
   unassigned: ExecutionRecord[]
+  toolsByCycle: Map<number, FocusToolCall[]>
+  unassignedTools: FocusToolCall[]
 } {
   const executions: ExecutionRecord[] = [], unassigned: ExecutionRecord[] = []
   const byCycle = new Map<number, ExecutionRecord[]>()
   const cycles = new Set(turn.segments.map(segment => segment.cycle))
+  const toolsByCycle = new Map<number, FocusToolCall[]>(), unassignedTools: FocusToolCall[] = []
+  for (const call of turn.toolCalls ?? []) {
+    if (!cycles.has(call.cycle)) { unassignedTools.push(call); continue }
+    const group = toolsByCycle.get(call.cycle)
+    if (group) group.push(call)
+    else toolsByCycle.set(call.cycle, [call])
+  }
   for (const id of turn.executionIds) {
     const record = records.get(id)
     if (!record) continue
@@ -49,5 +58,5 @@ export function groupFocusExecutions(turn: FocusTurn, records: ReadonlyMap<strin
     if (group) group.push(record)
     else byCycle.set(cycle, [record])
   }
-  return { executions, byCycle, unassigned }
+  return { executions, byCycle, unassigned, toolsByCycle, unassignedTools }
 }

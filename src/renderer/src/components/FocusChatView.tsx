@@ -13,6 +13,7 @@ import FocusComposerModes from './FocusComposerModes'
 import FocusCodeBlock from './FocusCodeBlock'
 import FocusTokenUsage from './FocusTokenUsage'
 import FocusExecutionOutput from './FocusExecutionOutput'
+import OutputText from './OutputText'
 import { groupFocusExecutions, mergeFocusChatUpdate } from '@shared/focus-history'
 import { estimateFocusConversation } from '@shared/focus-token-usage'
 import FocusModelSettings from './FocusModelSettings'
@@ -26,7 +27,7 @@ import chatgptIcon from '../assets/ChatGPT.svg'
 // The view's brand icon per focus platform (`FOCUS_PLATFORMS`); a platform without one shows its name.
 const FOCUS_ICONS: Readonly<Record<string, string>> = { deepseek: deepseekIcon, chatgpt: chatgptIcon }
 import type { AppTheme, ConversationAttachment, ConversationMessage, ExecutionRecord } from '@shared/types'
-import type { FocusChatState, FocusChatUpdate, FocusOwner, FocusTurn, FocusDelivery } from '@shared/focus-chat'
+import type { FocusChatState, FocusChatUpdate, FocusOwner, FocusTurn, FocusDelivery, FocusToolCall } from '@shared/focus-chat'
 import { cleanFocusAnswer, cleanFocusUserText, focusOwnerKey, focusDelivery, focusPlatformLabel, supportsFocusEdit } from '@shared/focus-chat'
 import { FOCUS_MAX_FILES, FOCUS_MAX_FILE_BYTES, FOCUS_MAX_BATCH_BYTES } from '@shared/focus-chat'
 import type { FocusAttachmentInput } from '@shared/focus-chat'
@@ -138,6 +139,7 @@ function FocusDetails({ ownerKey, stateKey, defaultOpen = false, className, summ
 }
 const EMPTY_TURNS: FocusTurn[] = []
 const EMPTY_RECORDS: ExecutionRecord[] = []
+const EMPTY_TOOL_CALLS: FocusToolCall[] = []
 interface DraftFile { id: string; file: File }
 // Keep unsent files across view switches in memory, never in localStorage.
 const fileDrafts = new Map<string, DraftFile[]>()
@@ -580,6 +582,7 @@ function FocusChatView(props: Props): JSX.Element {
     for (const turn of turns) {
       if (turn.userMessageId) ids.add(turn.userMessageId)
       for (const segment of turn.segments) if (segment.sourceMessageId) sources.add(segment.sourceMessageId)
+      for (const call of turn.toolCalls ?? []) sources.add(call.sourceMessageId)
     }
     return { ids, sources }
   }, [turns])
@@ -831,26 +834,42 @@ function FocusChatView(props: Props): JSX.Element {
       {actionable && (delivery === 'blocked' || delivery === 'failed' || ['failed', 'timeout'].includes(record.status)) ? <button type="button" onClick={props.onOpenTerminal}>打开执行控制</button> : null}
     </div>
   )
+  const renderToolCall = (call: FocusToolCall): JSX.Element => {
+    const statuses = { running: '正在调用', done: '调用完成', failed: '调用失败', blocked: '未执行', cancelled: '已取消', unknown: '执行结果未确认' }
+    const delivery = { pending: '等待结果回传', sent: '结果已回传', blocked: '结果回传已中止', failed: '结果回传失败', unknown: '结果回传未确认' }
+    return <div className={'focus-execution' + (['failed', 'blocked', 'unknown'].includes(call.status) ? ' focus-execution--attention' : '')}
+      key={call.id} data-tool-name={call.tool}>
+      <div className="focus-execution__head"><strong>{call.title}</strong><span>{statuses[call.status]}</span></div>
+      {call.request ? <p className="focus-chat__muted">{call.request}</p> : null}
+      <FocusDetails ownerKey={ownerKey} stateKey={'tool:' + call.id} summary="查看调用详情">{() => <>
+        {call.result ? <OutputText className="focus-execution__output" text={call.result} /> : <p className="focus-chat__muted">{call.status === 'running' ? '正在等待工具返回结果。' : '暂无结果摘要。'}</p>}
+        <div className="focus-execution__meta">{delivery[call.delivery]}</div>
+      </>}</FocusDetails>
+    </div>
+  }
   const renderTurn = (turn: FocusTurn): JSX.Element => {
     const sendBlocked = !!sendFailure && turn === lastTurn
-    const { executions, byCycle, unassigned } = groupFocusExecutions(turn, recordsById)
+    const { executions, byCycle, unassigned, toolsByCycle, unassignedTools } = groupFocusExecutions(turn, recordsById)
     const executionIds = new Set(turn.executionIds)
+    const toolSources = new Set((turn.toolCalls ?? []).map(call => call.sourceMessageId))
     const deliveryOf = (record: ExecutionRecord): FocusDelivery | undefined => focusDelivery(record, turn.deliveries[record.messageId])
     const running = executions.some(record => record.status === 'running')
+    const toolRunning = turn.status === 'working' && turn.toolCalls?.some(call => call.status === 'running')
     const pending = executions.some(record => ['pending', 'blocked'].includes(record.status))
-    const deliveryPending = turn.status === 'working' && executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending')
+    const deliveryPending = turn.status === 'working' && (executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending') ||
+      turn.toolCalls?.some(call => call.status === 'done' && call.delivery === 'pending'))
     // A new tool/result cycle must not move earlier prose into the process panel.
     const answers = turn.segments.flatMap(segment => {
       // Empty command answers are intentional. Rich content may enrich actual
       // prose, but must never recreate a protocol response as an answer bubble.
       if (!segment.answer.trim() ||
-        (segment.sourceMessageId && executionIds.has(segment.sourceMessageId))) return []
+        (segment.sourceMessageId && (executionIds.has(segment.sourceMessageId) || toolSources.has(segment.sourceMessageId)))) return []
       // Older versions saved raw question JSON; normalize it at display time too.
       const text = cleanFocusAnswer((segment.sourceMessageId ? richAnswers.get(segment.sourceMessageId) : '') || segment.answer)
       return text.trim() ? [{ cycle: segment.cycle, sourceMessageId: segment.sourceMessageId, text }] : []
     })
-    const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.parseFailures?.length
-    const label = sendBlocked ? '消息发送失败 · 等待重试' : turn.commandRecovery ? (turn.status === 'working' ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : deliveryPending ? '正在回传执行结果…' :
+    const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.toolCalls?.length || !!turn.parseFailures?.length
+    const label = sendBlocked ? '消息发送失败 · 等待重试' : turn.commandRecovery ? (turn.status === 'working' ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : toolRunning ? '正在调用工具…' : deliveryPending ? '正在回传执行结果…' :
       turn.status === 'stopped' ? '已停止 · 已有内容保留' : turn.status === 'working' ? '正在处理…' : '已回复'
     const userMessage = turn.userMessageId ? messagesById.get(turn.userMessageId) : null
     return <article className="focus-turn" data-message-id={turn.id} key={turn.id}>
@@ -865,15 +884,18 @@ function FocusChatView(props: Props): JSX.Element {
           <ProcessScroll scrollKey={ownerKey + ':turn:' + turn.id} follow={turn.status === 'working' && !sendBlocked}>
           {turn.segments.map(segment => {
             const segmentExecutions = byCycle.get(segment.cycle) ?? EMPTY_RECORDS
+            const segmentTools = toolsByCycle.get(segment.cycle) ?? EMPTY_TOOL_CALLS
             // Empty cycles have margins and padding too; they must not push the placeholder down.
-            if (!segment.parts.length && !segmentExecutions.length) return null
+            if (!segment.parts.length && !segmentExecutions.length && !segmentTools.length) return null
             return <div className="focus-process__cycle" key={segment.cycle}>
               {segment.parts.map((part, index) => part.kind === 'reasoning' ? <FocusDetails className="focus-reasoning" key={index} ownerKey={ownerKey} stateKey={'reasoning:' + turn.id + ':' + segment.cycle + ':' + index} summary="思考过程">{() => <Markdown text={part.text} theme={theme} />}</FocusDetails> :
                 <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
               {segmentExecutions.map(record => renderExecution(record, deliveryOf(record), true))}
+              {segmentTools.map(renderToolCall)}
             </div>
           })}
           {unassigned.map(record => renderExecution(record, deliveryOf(record), true))}
+          {unassignedTools.map(renderToolCall)}
           {turn.parseFailures?.map(failure => <details className="focus-execution" key={'parse:' + failure.messageId}>
             <summary>指令格式错误 · 未执行</summary><pre>{failure.text}</pre>
           </details>)}

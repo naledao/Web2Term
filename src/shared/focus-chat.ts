@@ -1,6 +1,7 @@
 import type { CommandRecoveryState, ExecutionRecord } from './types'
 import type { FocusPromptInjectionState } from './focus-token-usage'
 import type { ContextUsageSummary } from './context-usage'
+import type { TaskToolStep } from './autonomous-task'
 
 export type ChatView = 'original' | 'local' | 'focus'
 export const DEFAULT_CHAT_VIEW: ChatView = 'focus'
@@ -64,6 +65,75 @@ export interface FocusSegment {
   answer: string
   settled: boolean
 }
+export type FocusToolKind = 'read_tool_prompt' | 'scheduled_task' | 'send_email' | 'computer'
+export type FocusToolStatus = 'running' | 'done' | 'failed' | 'blocked' | 'cancelled' | 'unknown'
+export type FocusToolDelivery = 'pending' | 'sent' | 'blocked' | 'failed' | 'unknown'
+/** Display history only. It never grants permission to dispatch or retry a tool. */
+export interface FocusToolCall {
+  id: string
+  sourceMessageId: string
+  tool: FocusToolKind
+  title: string
+  request: string
+  cycle: number
+  status: FocusToolStatus
+  delivery: FocusToolDelivery
+  result: string
+  createdAt: number
+  updatedAt: number
+}
+export type FocusToolUpdate = Partial<Pick<FocusToolCall, 'status' | 'delivery' | 'result'>>
+export type FocusToolObserver = (update: FocusToolUpdate) => void
+export const FOCUS_TOOL_LABELS: Readonly<Record<FocusToolKind, string>> = {
+  read_tool_prompt: '读取工具说明', scheduled_task: '定时任务', send_email: '发送邮件通知', computer: '电脑操作'
+}
+export function focusToolInfo(tool: FocusToolKind, rawJson: string): { title: string; request: string } {
+  let value: Record<string, unknown> = {}
+  try { if (rawJson.length <= 256_000) value = JSON.parse(rawJson) ?? {} } catch { /* Display metadata never authorizes a request. */ }
+  const text = (input: unknown, limit = 200): string => typeof input === 'string' ? input.slice(0, limit) : ''
+  const names: Readonly<Record<string, string>> = { ...FOCUS_TOOL_LABELS, read_files: '读取文件', background_task: '后台任务' }
+  if (tool === 'read_tool_prompt') return { title: FOCUS_TOOL_LABELS[tool], request: Array.isArray(value.tools)
+    ? value.tools.filter((item): item is string => typeof item === 'string' && /^[a-z_]{1,40}$/.test(item)).slice(0, 5)
+      .map(item => Object.hasOwn(names, item) ? names[item] : item).join('、') : '' }
+  if (tool === 'scheduled_task') {
+    const actions: Record<string, string> = { create: '创建定时任务', list: '查询定时任务', get: '查看定时任务', update: '修改定时任务', delete: '删除定时任务' }
+    const action = text(value.action) || 'create'
+    return { title: Object.hasOwn(actions, action) ? actions[action] : FOCUS_TOOL_LABELS[tool], request: text(value.id) }
+  }
+  // Do not copy email bodies, computer input text, screenshots or credentials into display history.
+  return { title: FOCUS_TOOL_LABELS[tool], request: text(tool === 'send_email' ? value.subject : value.action) }
+}
+export function focusToolDelivery(outcome: string): FocusToolDelivery {
+  return outcome === 'ok' || outcome === 'sent' ? 'sent' : outcome === 'busy' || outcome === 'no-composer' ? 'pending'
+    : outcome === 'stale' || outcome === 'cancelled' ? 'blocked' : outcome === 'unknown' ? 'unknown' : 'failed'
+}
+export function focusComputerToolUpdate(step: Pick<TaskToolStep, 'status' | 'execution' | 'delivery' | 'message' | 'resultText'>): FocusToolUpdate {
+  const update: FocusToolUpdate = { delivery: step.delivery === 'sent' ? 'sent' : step.delivery === 'failed' ? 'failed'
+    : step.delivery === 'uncertain' ? 'unknown' : step.delivery === 'cancelled' ? 'blocked' : 'pending' }
+  if (step.message) update.result = step.message
+  if (step.status === 'queued' || step.status === 'executing') update.status = 'running'
+  else if (step.resultText) {
+    try {
+      const result = JSON.parse(step.resultText)
+      update.status = result.execution === 'unknown' ? 'unknown' : result.ok === true ? 'done' : result.execution === 'not_executed' ? 'blocked' : 'failed'
+      if (typeof result.message === 'string') update.result = result.message
+    } catch { update.status = 'unknown' }
+  } else if (step.execution === 'unknown') update.status = 'unknown'
+  else if (step.status === 'interrupted' && step.execution === 'not_executed') update.status = 'cancelled'
+  // Delivery clears resultText. Preserve the recorded execution outcome instead of inventing success.
+  return update
+}
+export function validFocusToolCall(value: unknown): value is FocusToolCall {
+  if (!value || typeof value !== 'object') return false
+  const call = value as FocusToolCall
+  return typeof call.id === 'string' && call.id.length > 0 && call.id.length <= 600 &&
+    typeof call.sourceMessageId === 'string' && call.sourceMessageId.length > 0 && call.sourceMessageId.length <= 512 &&
+    Object.hasOwn(FOCUS_TOOL_LABELS, call.tool) && typeof call.title === 'string' && call.title.length <= 100 &&
+    typeof call.request === 'string' && call.request.length <= 500 && typeof call.result === 'string' && call.result.length <= 4100 &&
+    ['running', 'done', 'failed', 'blocked', 'cancelled', 'unknown'].includes(call.status) &&
+    ['pending', 'sent', 'blocked', 'failed', 'unknown'].includes(call.delivery) &&
+    Number.isSafeInteger(call.cycle) && call.cycle >= 0 && Number.isFinite(call.createdAt) && Number.isFinite(call.updatedAt)
+}
 export interface FocusTurn {
   id: string
   userMessageId: string | null
@@ -76,6 +146,7 @@ export interface FocusTurn {
   executionIds: string[]
   executionCycles: Record<string, number>
   deliveries: Record<string, FocusDelivery>
+  toolCalls?: FocusToolCall[]
   /** Archived locally after a confirmed edit; retained for execution/history records. */
   supersededBy?: string
   /** Local transcript rows belonging to branches replaced by this edit. */

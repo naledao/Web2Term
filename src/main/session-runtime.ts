@@ -129,12 +129,12 @@ import { RedisReader, normalizeRedisDraft } from './redis-reader'
 import { ChatGptEmbed } from './embed'
 import { FocusChat } from './focus-chat'
 import { stageFocusAttachments } from './focus-attachments'
-import { cleanFocusUserText, focusOwnerKey, supportsFocusView, validFocusFiles } from '../shared/focus-chat'
+import { cleanFocusUserText, focusOwnerKey, supportsFocusView, validFocusFiles, focusToolInfo, focusToolDelivery, focusComputerToolUpdate } from '../shared/focus-chat'
 import { writeFocusDiagnostic } from './focus-chat-log'
 import { getGithubCliState } from './github-cli'
 import { dispatchGithubLoginTask } from './github-login-task'
 import type { GithubLoginTaskResult } from '../shared/github'
-import type { FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome } from '../shared/focus-chat'
+import type { FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusToolKind, FocusToolObserver } from '../shared/focus-chat'
 import type { EmbedHandlers } from './embed'
 import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseWindowsEnvironment } from './environment'
 import { ConversationShell, resolvePowerShell } from './shell'
@@ -468,18 +468,21 @@ export class SessionRuntime {
   private legacyToolSend: { context: TaskToolContext; abort: AbortController } | null = null
   private focusSending = false
   private readonly mailNotifications = new MailNotifications({
+    observe: call => this.observeFocusTool('send_email', call),
     mail: () => this.options.qqMail,
     current: call => this.mailNotificationCurrent(call),
     send: (text, call, signal, current) => this.embed.sendTaskResult(text, call.conversationId, signal, current),
     note: message => this.runner.refreshTerminal(message)
   })
   private readonly toolPromptReads = new ToolPromptReads({
+    observe: call => this.observeFocusTool('read_tool_prompt', call),
     current: call => this.toolPromptReadCurrent(call),
     lookup: name => this.fullToolPrompt(name, this.activePlatformId),
     send: (text, call, signal, current) => this.embed.sendTaskResult(text, call.conversationId, signal, current),
     note: message => this.runner.refreshTerminal(message)
   })
   private readonly scheduledTaskTools = new ScheduledTaskTools({
+    observe: call => this.observeFocusTool('scheduled_task', call),
     current: call => !!call.sourceSubmissionId && this.toolPreferences().scheduledTasksEnabled &&
       this.toolPromptReadCurrent({ ...call, sourceSubmissionId: call.sourceSubmissionId }),
     send: async (text, call, signal, current) => {
@@ -525,6 +528,7 @@ export class SessionRuntime {
     this.computerUseTool = new ComputerUseTool(() => this.refreshComputerUseCapabilities(), options.desktopCoordinator)
     this.focusChat = new FocusChat(this.id, options.store)
     this.taskCoordinator = new TaskCoordinator(this.id, options.store, state => {
+      this.recordFocusComputer(state)
       if (state.task) this.computerOverlayLifetime.update(state.task)
       this.taskProgression?.reconcile()
       this.taskBackgroundWait?.reconcile()
@@ -1579,6 +1583,38 @@ export class SessionRuntime {
     finally { if (locked) this.focusSending = false; this.focusUiRecovering = false }
   }
 
+  /** Observation callbacks retain the accepted call's owner and never participate in tool admission. */
+  private observeFocusTool(tool: FocusToolKind, call: { messageId: string; rawJson: string; conversationId: string; sourceSubmissionId?: string }): FocusToolObserver | undefined {
+    try {
+      const platformId = this.activePlatformId
+      if (!supportsFocusView(platformId) || !call.sourceSubmissionId || this.lastSubmissions.get(platformId) !== call.sourceSubmissionId) return undefined
+      const observer = this.focusChat.observeTool(platformId, call.conversationId, call.messageId, tool, focusToolInfo(tool, call.rawJson))
+      return observer ? update => {
+        try { observer(update) } catch { /* Transcript failures must not change execution or trigger retries. */ }
+      } : undefined
+    } catch { return undefined }
+  }
+
+  private recordFocusComputer(state: AutonomousTaskState): void {
+    try {
+      const task = state.task, step = task?.progress?.currentStep
+      if (!task?.conversationId || !step || (step.tool ?? 'computer') !== 'computer') return
+      this.focusChat.observeTool(state.platformId, task.conversationId, step.sourceMessageId, 'computer',
+        { title: '电脑操作', request: step.action, status: 'unknown', working: task.status === 'recorded' }, task.sourceTurnId ?? undefined)
+        ?.(focusComputerToolUpdate(step))
+    } catch { /* Display metadata must never block desktop action progression. */ }
+  }
+
+  private recordFocusScheduledReceipt(task: ScheduledTask, outcome: string): void {
+    try {
+      const source = JSON.parse(task.sourceKey)
+      if (Array.isArray(source) && source[0] === 'model' && source[1] === this.id && source[2] === task.owner.platformId &&
+        source[3] === task.owner.conversationId && typeof source[5] === 'string') {
+        this.focusChat.updateTool(task.owner.platformId, task.owner.conversationId, source[5], { delivery: focusToolDelivery(outcome) })
+      }
+    } catch { /* Legacy/UI-created plans do not carry a model tool-call association. */ }
+  }
+
   async getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
   async getFocusChat(owner: FocusOwner, cursor: FocusHistoryCursor): Promise<FocusChatUpdate | null>
   async getFocusChat(owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null> {
@@ -2536,12 +2572,16 @@ export class SessionRuntime {
       : !call.sourceSubmissionId || this.lastSubmissions.get(this.activePlatformId) !== call.sourceSubmissionId ? '该请求不属于最新一次发送。'
       : null
     if (ignored || !scheduledTasks) { this.runner.refreshTerminal('定时任务请求未处理：' + ignored); return }
+    let observe: FocusToolObserver | undefined
     const refuse = (message: string): void => {
+      observe ??= this.observeFocusTool('scheduled_task', call)
+      observe?.({ status: 'blocked', result: message })
       this.runner.refreshTerminal('定时任务操作未完成：' + message)
       const owner = this.toolsOwner(), epoch = this.embed.getComputerUsePageEpoch()
       void this.embed.sendTaskResult('【定时任务操作未完成】\n' + message,
         call.conversationId, new AbortController().signal, () => !this.disposed && (this.active || this.canRunConversationInBackground()) && sameConversationToolsOwner(owner, this.toolsOwner()) &&
-          epoch === this.embed.getComputerUsePageEpoch() && this.lastSubmissions.get(owner.platformId) === call.sourceSubmissionId).catch(() => {})
+          epoch === this.embed.getComputerUsePageEpoch() && this.lastSubmissions.get(owner.platformId) === call.sourceSubmissionId)
+        .then(outcome => observe?.({ delivery: focusToolDelivery(outcome) })).catch(() => observe?.({ delivery: 'unknown' }))
     }
     if (!this.toolPreferences().scheduledTasksEnabled) { refuse('当前对话已关闭定时任务工具，不要再输出 scheduled_task 请求。'); return }
     try {
@@ -2550,7 +2590,11 @@ export class SessionRuntime {
       const owner = { ...this.toolsOwner(), conversationId: call.conversationId }
       const sourceKey = JSON.stringify(['model', this.id, this.activePlatformId, call.conversationId, call.sourceSubmissionId, call.messageId])
       if ('action' in request) this.scheduledTaskTools.receive(call, () => scheduledTasks.manage(owner, request, sourceKey))
-      else scheduledTasks.create(owner, this.scheduledTarget(), request, sourceKey, true, call.sourceSubmissionId)
+      else {
+        observe = this.observeFocusTool('scheduled_task', call)
+        const task = scheduledTasks.create(owner, this.scheduledTarget(), request, sourceKey, true, call.sourceSubmissionId)
+        observe?.({ status: 'done', result: `定时任务已创建。\n任务编号：${task.id}\n下次触发：${new Date(task.nextRunAt).toISOString()}\n计划已保存，本次不立即执行。` })
+      }
     } catch (error) {
       refuse((error instanceof Error ? error.message : '参数无效。') + '\n请修正参数后重新提交。')
     }
@@ -2589,7 +2633,11 @@ export class SessionRuntime {
       (run.kind !== 'receipt' || !this.taskEnded && task.receiptSubmissionId === this.lastSubmissions.get(task.owner.platformId))
     try {
       if (!current()) return { outcome: 'cancelled' }
-      if (run.kind === 'receipt') return { outcome: await this.embed.sendTaskResult(run.text, task.owner.conversationId, controller.signal, current) }
+      if (run.kind === 'receipt') {
+        const outcome = await this.embed.sendTaskResult(run.text, task.owner.conversationId, controller.signal, current)
+        this.recordFocusScheduledReceipt(task, outcome)
+        return { outcome }
+      }
       const text = ['【定时任务】', `任务编号：${task.id}`, `本次计划时间：${new Date(run.plannedAt).toISOString()}`,
         ...(run.missedSince !== null ? [`此前错过的周期已合并，从 ${new Date(run.missedSince).toISOString()} 起仅执行本次。`] : []),
         '这是本次需要执行的任务，请按当前工具能力处理：', '', task.prompt].join('\n')

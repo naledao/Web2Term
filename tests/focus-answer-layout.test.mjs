@@ -11,13 +11,13 @@ import ts from 'typescript'
 
 const source = readFileSync(new URL('../src/renderer/src/components/FocusChatView.tsx', import.meta.url), 'utf8')
 const file = ts.createSourceFile('FocusChatView.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
-function findRenderer(node = file) {
-  if (ts.isVariableDeclaration(node) && node.name.getText(file) === 'renderTurn') return node.initializer
-  return ts.forEachChild(node, findRenderer)
+function findRenderer(node = file, name = 'renderTurn') {
+  if (ts.isVariableDeclaration(node) && node.name.getText(file) === name) return node.initializer
+  return ts.forEachChild(node, child => findRenderer(child, name))
 }
 const renderer = findRenderer()
 assert.ok(renderer, 'Missing actual focus turn renderer')
-const compiled = ts.transpileModule('export const renderTurn = ' + renderer.getText(file), {
+const compiled = ts.transpileModule('const renderToolCall = ' + findRenderer(file, 'renderToolCall').getText(file) + ';\nexport const renderTurn = ' + renderer.getText(file), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   fileName: 'render-turn.tsx'
 }).outputText
@@ -34,7 +34,8 @@ function fixture({ records = [], richAnswers = new Map() } = {}) {
   const exports = {}, copies = []
   new Script(compiled).runInNewContext({
     exports, require: createRequire(import.meta.url), Markdown, ProcessScroll, FocusDetails,
-    groupFocusExecutions: historyExports.groupFocusExecutions, ownerKey: 'test-owner', EMPTY_RECORDS: [], sendFailure: null, lastTurn: null,
+    groupFocusExecutions: historyExports.groupFocusExecutions, ownerKey: 'test-owner', EMPTY_RECORDS: [], EMPTY_TOOL_CALLS: [], sendFailure: null, lastTurn: null,
+    OutputText: ({ text, className }) => React.createElement('pre', { className }, text),
     ProcessHint: () => null, richAnswers, recordsById: new Map(records.map(record => [record.messageId, record])),
     messagesById: new Map(), focusDelivery: (_record, delivery) => delivery,
     userContent: (_id, text) => React.createElement('p', null, text),
@@ -58,6 +59,22 @@ function elements(node, ancestors = []) {
 const inProcess = entry => entry.ancestors.some(node => node.props.className === 'focus-process')
 const answersOf = tree => elements(tree).filter(({ node }) => node.props.className === 'focus-answer')
 const answerTexts = tree => answersOf(tree).map(({ node }) => node.props.children.props.text)
+
+test('tool-only cycles render their call and receipt without duplicating protocol text as a prose answer', () => {
+  const current = turn([{ ...segment(0, '正在读取工具说明：read_files'), sourceMessageId: 'tool-message' }, segment(1, '文件工具说明已就绪。')])
+  current.toolCalls = [{ id: 'read_tool_prompt:tool-message', sourceMessageId: 'tool-message', tool: 'read_tool_prompt',
+    title: '读取工具说明', request: '读取文件', cycle: 0, status: 'done', delivery: 'sent', result: '已准备 1 项工具说明。', createdAt: 1, updatedAt: 2 }]
+  const tree = fixture().render(current), all = elements(tree)
+  assert.deepEqual(answerTexts(tree), ['文件工具说明已就绪。'])
+  const card = all.find(({ node }) => node.props['data-tool-name'] === 'read_tool_prompt')
+  assert.ok(card)
+  assert.ok(inProcess(card))
+  const html = renderToStaticMarkup(tree)
+  assert.match(html, /读取工具说明/)
+  assert.match(html, /调用完成/)
+  assert.match(html, /结果已回传/)
+  assert.doesNotMatch(html, /本轮没有额外执行步骤/)
+})
 
 test('a prose reply stays outside the process panel after a command and an empty result cycle', () => {
   const text = '站点启动失败的根本原因是数据库尚未初始化。'

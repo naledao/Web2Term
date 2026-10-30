@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import type { FocusTurn, FocusSegment, FocusPageSnapshot, FocusDelivery, FocusAttachmentInfo } from '../shared/focus-chat'
+import type { FocusTurn, FocusSegment, FocusPageSnapshot, FocusDelivery, FocusAttachmentInfo, FocusToolCall, FocusToolKind, FocusToolObserver, FocusToolUpdate } from '../shared/focus-chat'
 import type { CommandRecoveryState, InterceptorPageEvent } from '../shared/types'
-import { cleanFocusAnswer, cleanFocusUserText, supportsFocusView } from '../shared/focus-chat'
+import { cleanFocusAnswer, cleanFocusUserText, supportsFocusView, validFocusToolCall } from '../shared/focus-chat'
 
 interface FocusStore {
   listFocusTurns(sessionId: string, platformId: string, conversationId: string): FocusTurn[]
@@ -36,6 +36,10 @@ export class FocusChat {
       const resumable = last && ['working', 'blocked'].includes(last.status) ? last.id : null
       for (const turn of turns) {
         if (turn.status === 'working') turn.status = 'stopped'
+        if (turn.toolCalls) turn.toolCalls = (Array.isArray(turn.toolCalls) ? turn.toolCalls.filter(validFocusToolCall) : []).map(call => ({ ...call,
+          status: call.status === 'running' ? 'unknown' : call.status,
+          delivery: call.delivery === 'pending' ? 'blocked' : call.delivery,
+          result: call.status === 'running' ? '上次调用已中断，执行结果尚未确认；请核对实际状态。' : call.result }))
         if (turn.commandRecovery && ['pending', 'sent'].includes(turn.commandRecovery.status)) {
           turn.commandRecovery = { ...turn.commandRecovery, status: 'blocked', message: '之前的指令格式恢复已中断，请在原始视图核对后继续。' }
         }
@@ -268,10 +272,62 @@ export class FocusChat {
     this.changed(entry, turn)
     this.persist(platformId, entry, true)
   }
+  /** Capture the original owner and turn; late receipts can update history without touching a new goal. */
+  observeTool(platformId: string, conversationId: string, sourceMessageId: string, tool: FocusToolKind,
+    info: { title: string; request: string; status?: FocusToolCall['status']; working?: boolean }, turnId?: string): FocusToolObserver | undefined {
+    let entry = this.entries.get(platformId)
+    if (entry?.conversationId === null && entry.current && (!turnId || entry.current === turnId)) entry = this.context(platformId, conversationId)
+    if (!entry || entry.conversationId !== conversationId || !sourceMessageId || sourceMessageId.length > 512) return undefined
+    const owner = entry.turns.find(item => item.toolCalls?.some(call => call.sourceMessageId === sourceMessageId && call.tool === tool))
+    const turn = owner ?? (turnId ? entry.turns.find(item => item.id === turnId && !item.supersededBy) : this.live(platformId)?.turn)
+    if (!turn || !owner && turn.status === 'stopped' && !turnId) return undefined
+    let call = turn.toolCalls?.find(item => item.sourceMessageId === sourceMessageId && item.tool === tool)
+    if (!call) {
+      let cycle = turn.segments.find(segment => segment.sourceMessageId === sourceMessageId)?.cycle ??
+        (turn.id === entry.current ? entry.cycle : Math.max(-1, ...turn.segments.map(segment => segment.cycle)) + 1)
+      const previous = turn.segments.find(segment => segment.cycle === cycle)
+      if (previous?.answer.trim() && previous.sourceMessageId !== sourceMessageId) {
+        cycle = Math.max(cycle, ...turn.segments.map(segment => segment.cycle)) + 1
+        if (turn.id === entry.current) entry.cycle = cycle
+      }
+      const now = Date.now()
+      call = { id: tool + ':' + sourceMessageId, sourceMessageId, tool, title: info.title.slice(0, 100), request: info.request.slice(0, 500),
+        cycle, status: info.status ?? 'running', delivery: 'pending', result: '', createdAt: now, updatedAt: now }
+      turn.toolCalls ??= []
+      turn.toolCalls.push(call)
+      let segment = turn.segments.find(item => item.cycle === cycle)
+      if (!segment) { segment = { cycle, sourceMessageId, parts: [], answer: '', settled: true }; turn.segments.push(segment) }
+      segment.sourceMessageId = sourceMessageId; segment.answer = ''; segment.settled = true
+      if (turn.status !== 'stopped' && info.working !== false) turn.status = 'working'
+      this.changed(entry, turn)
+      this.persist(platformId, entry, true)
+    }
+    const record = call
+    return update => {
+      const patch: FocusToolUpdate = { ...update }
+      if (patch.result !== undefined) patch.result = patch.result.length > 4000 ? patch.result.slice(0, 4000) + '\n（仅保留结果摘要）' : patch.result
+      if (Object.entries(patch).every(([key, value]) => record[key as keyof FocusToolCall] === value)) return
+      Object.assign(record, patch, { updatedAt: Date.now() })
+      turn.updatedAt = record.updatedAt
+      this.changed(entry, turn)
+      this.persist(platformId, entry, true)
+    }
+  }
+  updateTool(platformId: string, conversationId: string, messageId: string, update: FocusToolUpdate): void {
+    const entry = this.entries.get(platformId)
+    if (entry?.conversationId !== conversationId) return
+    const turn = entry.turns.find(item => item.toolCalls?.some(call => call.sourceMessageId === messageId))
+    const call = turn?.toolCalls?.find(item => item.sourceMessageId === messageId)
+    if (turn && call) this.observeTool(platformId, conversationId, messageId, call.tool, call, turn.id)?.(update)
+  }
   stop(platformId: string, expectedTurnId?: string): void {
     const current = this.current(platformId)
     if (!current || !['working', 'blocked'].includes(current.turn.status) || (expectedTurnId && current.turn.id !== expectedTurnId)) return
     current.turn.status = 'stopped'
+    for (const call of current.turn.toolCalls ?? []) {
+      if (call.status === 'running') call.status = 'unknown'
+      if (call.delivery === 'pending') call.delivery = 'blocked'
+    }
     current.turn.updatedAt = Date.now()
     this.changed(current.entry, current.turn)
     this.persist(platformId, current.entry, true)
