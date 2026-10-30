@@ -58,7 +58,12 @@ test('long-task statistics parse each turn once, reuse unchanged summaries and i
     else t.diagnostic('Node <22.13: SQLite function instrumentation unavailable; checking cache reuse and exact totals.')
     assert.equal(store.summary('chatgpt', 'chat-a'), summary)
     if (canCountParses) assert.equal(parses, 2, 'idle polls do not rescan historical statistics')
+    store.save('chatgpt', entry('other', { conversationId: 'chat-b' }))
+    db.prepare('INSERT INTO conversations VALUES (?)').run('chat-c')
+    assert.equal(store.summary('chatgpt', 'chat-a'), summary, 'unrelated writes keep the cached summary')
     db.prepare('UPDATE focus_turns SET payload = ? WHERE id = ?').run('{"supersededBy":"replacement"}', 'turn-a')
+    // ConversationStore.saveFocusTurn does this when it writes a superseded turn.
+    store.invalidate('chat-a')
     assert.equal(store.summary('chatgpt', 'chat-a').toolResults.estimatedTokens, 0)
     if (canCountParses) assert.equal(parses, 4)
     store.save('chatgpt', entry('new', { turnId: null, estimatedTokens: 9 }))

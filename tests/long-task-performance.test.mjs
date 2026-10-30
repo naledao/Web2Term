@@ -34,6 +34,15 @@ test('unchanged polling never serializes history and preserves references even a
   for (const key of ['turns', 'executions', 'hiddenMessageIds', 'smartReplies', 'contextUsage']) assert.equal(changed[key], initial[key], key)
 })
 
+test('changed page controls serialize each metadata object at most once', () => {
+  let serialized = 0
+  const replies = () => ({ toJSON() { serialized++; return [] } })
+  const initial = { ...metadata(), smartReplies: replies(), turns: [], executions: [], hiddenMessageIds: [] }
+  const changed = mergeFocusChatUpdate(initial, { ...metadata(), smartReplies: replies(), nativeDraft: true })
+  assert.equal(serialized, 2, 'previous and next replies, once each')
+  assert.equal(changed.smartReplies, initial.smartReplies)
+})
+
 test('changed execution or turn snapshots replace only their own collection, including empty replacements', () => {
   const initial = { ...metadata(), turns: [{ id: 'turn' }], executions: [{ messageId: 'command' }], hiddenMessageIds: [] }
   const executions = [{ messageId: 'command', status: 'done', output: '完整结果' }]

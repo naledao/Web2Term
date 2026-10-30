@@ -497,6 +497,8 @@ function toExecutionRecord(row: ExecutionRow): ExecutionRecord {
 export class ConversationStore {
   private readonly db: DatabaseSync
   private executionsRevision = 0
+  private executionsBaseline = 0
+  private readonly executionRevisions = new Map<string, number>()
   readonly contextUsage: ContextUsageStore
   readonly scheduledTasks: ScheduledTaskStore
   private readonly attachmentsDir: string
@@ -890,7 +892,8 @@ export class ConversationStore {
     this.db.prepare('DELETE FROM focus_turns WHERE conversation_id = ?').run(id)
     this.db.prepare('DELETE FROM context_usage WHERE conversation_id = ?').run(id)
     this.db.prepare('DELETE FROM conversations WHERE id = ?').run(id)
-    this.executionsRevision++
+    this.touchExecutions(id)
+    this.contextUsage.invalidate(id)
 
     for (const row of paths) {
       const stillReferenced = this.db
@@ -931,7 +934,7 @@ export class ConversationStore {
   /** Persist shutdown synchronously, before shell callbacks or the database are gone. */
   interruptRunningCommands(messageIds: Iterable<string>): void {
     interruptRunningCommands(this.db, messageIds)
-    this.executionsRevision++
+    this.touchExecutions()
   }
 
   /**
@@ -983,7 +986,7 @@ export class ConversationStore {
         record.backgroundOptions ? JSON.stringify(record.backgroundOptions) : null,
         record.taskContext ? JSON.stringify(record.taskContext) : null
       )
-    this.executionsRevision++
+    this.touchExecutions(record.conversationId)
     return true
   }
 
@@ -1149,6 +1152,8 @@ export class ConversationStore {
       'INSERT INTO focus_turns (id, session_id, platform_id, conversation_id, payload, created_at) VALUES (?, ?, ?, ?, ?, ?) ' +
       'ON CONFLICT(id) DO UPDATE SET payload = excluded.payload WHERE focus_turns.session_id = excluded.session_id AND focus_turns.platform_id = excluded.platform_id AND focus_turns.conversation_id = excluded.conversation_id'
     ).run(turn.id, sessionId, platformId, conversationId, payload, turn.createdAt)
+    // Statistics exclude superseded turns; ordinary streaming saves leave them unchanged.
+    if (turn.supersededBy) this.contextUsage.invalidate(conversationId)
   }
 
   /** Raw payloads, oldest first; the runtime parses and validates them. */
@@ -1340,31 +1345,30 @@ export class ConversationStore {
       finishedAt: number
     }
   ): void {
-    this.db
+    const row = this.db
       .prepare(
         `UPDATE executions
             SET status = ?, exit_code = ?, output = ?, finished_at = ?
-          WHERE message_id = ?`
+          WHERE message_id = ? RETURNING conversation_id`
       )
-      .run(update.status, update.exitCode, update.output, update.finishedAt, messageId)
-    this.executionsRevision++
+      .get(update.status, update.exitCode, update.output, update.finishedAt, messageId) as { conversation_id: string } | undefined
+    if (row) this.touchExecutions(row.conversation_id)
   }
 
   setExecutionStatus(messageId: string, status: ExecutionStatus): void {
-    if (status === 'running') {
-      this.db
-        .prepare('UPDATE executions SET status = ?, started_at = COALESCE(started_at, ?) WHERE message_id = ?')
-        .run(status, Date.now(), messageId)
-      this.executionsRevision++
-      return
-    }
-    this.db.prepare('UPDATE executions SET status = ? WHERE message_id = ?').run(status, messageId)
-    this.executionsRevision++
+    const row = (status === 'running'
+      ? this.db
+        .prepare('UPDATE executions SET status = ?, started_at = COALESCE(started_at, ?) WHERE message_id = ? RETURNING conversation_id')
+        .get(status, Date.now(), messageId)
+      : this.db.prepare('UPDATE executions SET status = ? WHERE message_id = ? RETURNING conversation_id').get(status, messageId)
+    ) as { conversation_id: string } | undefined
+    if (row) this.touchExecutions(row.conversation_id)
   }
 
   setFileDeliveryStatus(messageId: string, status: FileDeliveryStatus): void {
-    this.db.prepare('UPDATE executions SET delivery_status = ? WHERE message_id = ? AND kind = ?').run(status, messageId, 'read_files')
-    this.executionsRevision++
+    const row = this.db.prepare('UPDATE executions SET delivery_status = ? WHERE message_id = ? AND kind = ? RETURNING conversation_id')
+      .get(status, messageId, 'read_files') as { conversation_id: string } | undefined
+    if (row) this.touchExecutions(row.conversation_id)
   }
 
   getExecution(messageId: string): ExecutionRecord | null {
@@ -1374,8 +1378,21 @@ export class ConversationStore {
     return row ? toExecutionRecord(row) : null
   }
 
-  /** Changes only with execution writes, so focus polling need not reload old output. */
-  getExecutionRevision(): number { return this.executionsRevision }
+  /** Changes only with this conversation's execution writes, so focus polling need not reload old output. */
+  getExecutionRevision(conversationId: string): number {
+    return this.executionRevisions.get(conversationId) ?? this.executionsBaseline
+  }
+
+  /** Without a conversation, the write may touch any of them: invalidate every cursor. */
+  private touchExecutions(conversationId?: string): void {
+    const revision = ++this.executionsRevision
+    if (conversationId) {
+      this.executionRevisions.set(conversationId, revision)
+      return
+    }
+    this.executionsBaseline = revision
+    this.executionRevisions.clear()
+  }
 
   listExecutions(conversationId: string, includeOutput = true): ExecutionRecord[] {
     // A UI snapshot needs lifecycle metadata, not every historical command's output.
@@ -1832,6 +1849,8 @@ export class ConversationStore {
   removeManagedSession(id: string): void {
     this.scheduledTasks.removeSession(id)
     this.db.prepare('DELETE FROM focus_turns WHERE session_id = ?').run(id)
+    // Removing superseded turns re-includes their statistics in any conversation.
+    this.contextUsage.invalidate()
     this.db.prepare('DELETE FROM background_tasks WHERE session_id = ?').run(id)
     this.db.prepare('DELETE FROM managed_sessions WHERE id = ?').run(id)
   }

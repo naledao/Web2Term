@@ -11,9 +11,10 @@ const source = readFileSync(new URL('../src/main/db.ts', import.meta.url), 'utf8
 const ast = ts.createSourceFile('db.ts', source, ts.ScriptTarget.Latest, true)
 const declaration = ast.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'ConversationStore')
 const converter = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'toExecutionRecord')
-const methods = ['createExecution', 'finishExecution', 'setExecutionStatus', 'setFileDeliveryStatus', 'getExecution', 'getExecutionRevision', 'listExecutions']
+const methods = ['createExecution', 'finishExecution', 'setExecutionStatus', 'setFileDeliveryStatus', 'getExecution', 'getExecutionRevision',
+  'touchExecutions', 'listExecutions', 'executionsRevision', 'executionsBaseline', 'executionRevisions']
 const exports = {}
-new Script(ts.transpileModule(converter.getText(ast) + '\nexport class Store { executionsRevision = 0;\n' +
+new Script(ts.transpileModule(converter.getText(ast) + '\nexport class Store {\n' +
   declaration.members.filter(node => methods.includes(node.name?.getText(ast))).map(node => node.getText(ast)).join('\n') + '\n}', {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText).runInNewContext({ exports, parseTaskToolContext: value => value, parseBackgroundOptions: value => value,
@@ -56,21 +57,36 @@ test('UI histories omit large output while internal reads and explicit output ac
 
 test('execution revisions invalidate on every lifecycle write and duplicate admission remains blocked', t => {
   const { store } = fixture(t)
-  const before = store.getExecutionRevision()
+  const before = store.getExecutionRevision('chat')
   assert.equal(store.createExecution(command()), true)
-  assert.ok(store.getExecutionRevision() > before)
-  let version = store.getExecutionRevision()
+  assert.ok(store.getExecutionRevision('chat') > before)
+  let version = store.getExecutionRevision('chat')
   assert.equal(store.createExecution(command()), false)
-  assert.equal(store.getExecutionRevision(), version)
+  assert.equal(store.getExecutionRevision('chat'), version)
   for (const write of [
     () => store.setExecutionStatus('command', 'running'),
     () => store.finishExecution('command', { status: 'done', exitCode: 0, output: 'result', finishedAt: 20 }),
     () => store.setFileDeliveryStatus('command', 'sent')
   ]) {
     write()
-    assert.ok(store.getExecutionRevision() > version)
-    version = store.getExecutionRevision()
+    assert.ok(store.getExecutionRevision('chat') > version)
+    version = store.getExecutionRevision('chat')
   }
+})
+
+test('one busy conversation does not invalidate another, while bulk writes invalidate every cursor', t => {
+  const { store } = fixture(t)
+  store.createExecution(command('quiet', 'quiet-chat'))
+  const quiet = store.getExecutionRevision('quiet-chat')
+  store.createExecution(command('busy', 'busy-chat'))
+  store.setExecutionStatus('busy', 'running')
+  store.finishExecution('busy', { status: 'done', exitCode: 0, output: 'result', finishedAt: 20 })
+  store.setExecutionStatus('missing', 'running')
+  assert.equal(store.getExecutionRevision('quiet-chat'), quiet)
+  const busy = store.getExecutionRevision('busy-chat')
+  store.touchExecutions()
+  assert.ok(store.getExecutionRevision('quiet-chat') > quiet)
+  assert.ok(store.getExecutionRevision('busy-chat') > busy)
 })
 
 test('lazy focus output reads reject another conversation, replaced branches and stale owners', () => {

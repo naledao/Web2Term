@@ -21,6 +21,7 @@ import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
 import ExtraTerminalPane from './components/ExtraTerminalPane'
 import OutputText from './components/OutputText'
+import { OUTPUT_WINDOW_CHARS } from '@shared/output-window'
 import BackgroundTasksPane from './components/BackgroundTasksPane'
 import ScheduledTasksPane from './components/ScheduledTasksPane'
 import type { ScheduledTasksState } from '@shared/scheduled-tasks'
@@ -89,6 +90,8 @@ const INITIAL_EMBED_STATE: EmbedState = {
   botCheckSince: null
 }
 
+// A stable empty transcript keeps the memoized focus view from re-rendering while loading.
+const EMPTY_MESSAGES: ConversationMessage[] = []
 const PANEL_MIN_WIDTH = 380
 const PANEL_DEFAULT_WIDTH = 400
 const PANEL_MAX_RESERVE = 520
@@ -729,7 +732,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [sessionId, platformId, conversationId])
   const transcriptScrollKey = conversationScrollKey(sessionId, platformId, conversationId)
   const conversationMessagesReady = conversationTranscript.ownerKey === transcriptScrollKey
-  const conversationMessages = conversationMessagesReady ? conversationTranscript.messages : []
+  const conversationMessages = conversationMessagesReady ? conversationTranscript.messages : EMPTY_MESSAGES
   const isAuto = automation?.mode === 'auto'
   const taskRunning = interceptor?.taskStartedAt != null && interceptor.taskFinishedAt == null
   const pendingQuestion = interceptor?.pendingQuestion ?? null
@@ -1483,10 +1486,13 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     }
   }, [automation])
 
+  // A late reply must not replace a newer list or another conversation's list.
   const runExecution = useCallback(
     async (messageId: string): Promise<void> => {
+      const request = ++executionRequestRef.current
       try {
-        setExecutions(await window.api.runExecution(messageId))
+        const records = await window.api.runExecution(messageId)
+        if (request === executionRequestRef.current) setExecutions(records)
       } catch {
         /* the pushed update will correct the list */
       }
@@ -1495,8 +1501,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   )
 
   const skipExecution = useCallback(async (messageId: string): Promise<void> => {
+    const request = ++executionRequestRef.current
     try {
-      setExecutions(await window.api.skipExecution(messageId))
+      const records = await window.api.skipExecution(messageId)
+      if (request === executionRequestRef.current) setExecutions(records)
     } catch {
       /* ignore */
     }
@@ -3171,7 +3179,7 @@ ${record.command}`
                     {block.lines.length > 0 ? (
                       <div className="terminal-entry__body">
                         {block.lines.map((line, lineIndex) => (
-                          line.kind === 'output' ? <OutputText key={`${blockIndex}-${lineIndex}-${line.kind}`} className="line line--output" text={line.text} /> :
+                          line.kind === 'output' && line.text.length > OUTPUT_WINDOW_CHARS ? <OutputText key={`${blockIndex}-${lineIndex}-${line.kind}`} className="line line--output" text={line.text} /> :
                             <pre key={`${blockIndex}-${lineIndex}-${line.kind}`} className={`line line--${line.kind}`}>{line.text}</pre>
                         ))}
                       </div>

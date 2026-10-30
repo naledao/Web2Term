@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ComponentProps, FormEvent, JSX, ReactNode, RefObject, SyntheticEvent } from 'react'
+import type { ComponentProps, FormEvent, JSX, ReactNode, RefObject } from 'react'
 import MDEditor from '@uiw/react-md-editor'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -92,7 +92,9 @@ function ProcessScroll(props: { scrollKey: string; follow: boolean; children: Re
     const element = event.currentTarget
     if (element.clientHeight === 0) return
     pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24
-    if (processPositions.size >= 200 && !processPositions.has(props.scrollKey)) processPositions.delete(processPositions.keys().next().value!)
+    // Re-insert so eviction drops the least recently scrolled process, not the oldest one.
+    processPositions.delete(props.scrollKey)
+    if (processPositions.size >= 200) processPositions.delete(processPositions.keys().next().value!)
     processPositions.set(props.scrollKey, { top: element.scrollTop, pinned: pinned.current })
   }}><div className="focus-process__content" ref={contentRef}>{props.children}</div></div>
 }
@@ -476,15 +478,6 @@ function EditableUser({ text, children, editable, open, disabled, onOpen, onClos
 function FocusChatView(props: Props): JSX.Element {
   const { owner, visible, theme, messages, messagesReady } = props
   const ownerKey = focusOwnerKey(owner)
-  // Apply the default until a toggle is recorded; preserve manual choices across view switches.
-  const remembered = (key: string, defaultOpen = false): { open: boolean; onToggle: (event: SyntheticEvent<HTMLDetailsElement>) => void } => ({
-    open: detailStates.get(ownerKey)?.get(key) ?? defaultOpen,
-    onToggle: event => {
-      const states = detailStates.get(ownerKey) ?? new Map<string, boolean>()
-      states.set(key, event.currentTarget.open)
-      detailStates.set(ownerKey, states)
-    }
-  })
   const modelLabel = focusPlatformLabel(owner.platformId)
   const modelIcon = FOCUS_ICONS[owner.platformId]
   const [state, setState] = useState<FocusChatState | null>(null)
@@ -911,12 +904,12 @@ function FocusChatView(props: Props): JSX.Element {
             {entry.message!.role === 'assistant' ? <>{entry.message!.attachments.map(props.renderAttachment)}<div data-question-answer={entry.message!.sourceMessageId ?? ''}><Markdown text={richAnswers.get(entry.message!.sourceMessageId ?? '') || entry.message!.content} theme={theme} /></div></>
               : userContent(entry.message!.id, cleanFocusUserText(entry.message!.content), entry.message!.attachments.length > 0, entry.message!.attachments.map(props.renderAttachment))}
           </article>)}
-        {unlinkedAttention.length > 0 ? <details className="focus-process" {...remembered('unlinked-process', true)}>
-          <summary>其他执行记录 · {unlinkedAttention.length}<ProcessHint /></summary>
+        {unlinkedAttention.length > 0 ? <FocusDetails className="focus-process" ownerKey={ownerKey} stateKey="unlinked-process" defaultOpen
+          summary={<>其他执行记录 · {unlinkedAttention.length}<ProcessHint /></>}>{() =>
           <ProcessScroll scrollKey={ownerKey + ':unlinked'} follow={working}>
             {unlinkedAttention.map(record => renderExecution(record, focusDelivery(record), true))}
           </ProcessScroll>
-        </details> : null}
+        }</FocusDetails> : null}
       </ConversationTranscript>,
   [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, working, sending, stopping, editingId, settingPending, props.renderAttachment, props.onOpenTerminal, props.onRun, props.onSkip])
   return <FocusSmartUiContext.Provider value={smartUiContext}><section className="focus-chat" aria-label="专注对话" data-theme={theme}>

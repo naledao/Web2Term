@@ -581,7 +581,7 @@ export class CommandRunner {
     if (!conversationId) return
 
     const newest = this.deps.store
-      .listExecutions(conversationId)
+      .listExecutions(conversationId, false)
       .filter((record) => record.status === 'pending' || (record.kind === 'read_files' && record.deliveryStatus === 'pending' && (record.status === 'done' || record.status === 'failed')))
       .pop()
 
@@ -1449,7 +1449,7 @@ export class CommandRunner {
     try {
       if (conversationId) {
         let changed = false
-        for (const record of this.deps.store.listExecutions(conversationId)) {
+        for (const record of this.deps.store.listExecutions(conversationId, false)) {
           if (record.status !== 'pending' && record.status !== 'blocked') continue
           this.deps.store.setExecutionStatus(record.messageId, 'skipped'); changed = true
         }

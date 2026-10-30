@@ -4,6 +4,7 @@ import type { ExtraTerminal, TerminalLine } from '@shared/types'
 import { canNavigateCommandHistory, navigateCommandHistory, terminalCommandHistory } from '../terminal-command-history'
 import type { CommandHistoryCursor } from '../terminal-command-history'
 import OutputText from './OutputText'
+import { OUTPUT_WINDOW_CHARS } from '@shared/output-window'
 
 interface Block {
   command: TerminalLine | null
@@ -120,7 +121,7 @@ export default function ExtraTerminalPane({ sessionId, terminal, visible }: {
           {block.lines.length > 0 ? (
             <div className="terminal-entry__body">
               {block.lines.map((line, lineIndex) => (
-                line.kind === 'output' ? <OutputText key={`${blockIndex}-${lineIndex}-${line.kind}`} className="line line--output" text={line.text} /> :
+                line.kind === 'output' && line.text.length > OUTPUT_WINDOW_CHARS ? <OutputText key={`${blockIndex}-${lineIndex}-${line.kind}`} className="line line--output" text={line.text} /> :
                   <pre key={`${blockIndex}-${lineIndex}-${line.kind}`} className={`line line--${line.kind}`}>{line.text}</pre>
               ))}
             </div>

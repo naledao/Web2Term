@@ -37,7 +37,6 @@ function fixture({ records = [], richAnswers = new Map() } = {}) {
     groupFocusExecutions: historyExports.groupFocusExecutions, ownerKey: 'test-owner', EMPTY_RECORDS: [], sendFailure: null, lastTurn: null,
     ProcessHint: () => null, richAnswers, recordsById: new Map(records.map(record => [record.messageId, record])),
     messagesById: new Map(), focusDelivery: (_record, delivery) => delivery,
-    remembered: (_key, open = false) => ({ open }),
     userContent: (_id, text) => React.createElement('p', null, text),
     renderExecution: record => React.createElement('div', { 'data-execution': record.messageId }),
     modelIcon: null, modelLabel: 'DeepSeek', theme: 'light', state: null,

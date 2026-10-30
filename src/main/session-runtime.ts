@@ -1611,7 +1611,7 @@ export class SessionRuntime {
     const archivedExecutions = this.focusChat.supersededExecutionIds(owner.platformId, owner.conversationId)
     const historyCursor: FocusHistoryCursor = { ownerKey: focusOwnerKey(owner),
       turns: this.focusChat.version(owner.platformId, owner.conversationId),
-      executions: JSON.stringify([this.options.store.getExecutionRevision(), ...archivedExecutions]) }
+      executions: JSON.stringify([this.options.store.getExecutionRevision(owner.conversationId ?? ''), ...archivedExecutions]) }
     const sameOwner = cursor?.ownerKey === historyCursor.ownerKey
     const sameTurns = sameOwner && cursor?.turns === historyCursor.turns
     const sameExecutions = sameOwner && cursor?.executions === historyCursor.executions

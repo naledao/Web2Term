@@ -3,7 +3,8 @@ import { emptyContextUsage } from '../shared/context-usage'
 import type { ContextUsageEntry, ContextUsageSummary } from '../shared/context-usage'
 
 export class ContextUsageStore {
-  private readonly summaries = new Map<string, { version: string; value: ContextUsageSummary }>()
+  /** Per conversation, then platform. Invalidated by the writes that change a summary, not by every database write. */
+  private readonly summaries = new Map<string, Map<string, ContextUsageSummary>>()
   constructor(private readonly db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS context_usage (
       id TEXT NOT NULL, platform_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -23,15 +24,16 @@ export class ContextUsageStore {
       ON CONFLICT(platform_id, conversation_id, id) DO UPDATE SET state = CASE WHEN context_usage.state = 'sent' THEN 'sent' ELSE excluded.state END`)
       .run(entry.id, platformId, entry.conversationId, entry.turnId, entry.sourceMessageId, entry.category, entry.state,
         entry.estimatedTokens, entry.characters, entry.images, entry.files, entry.createdAt)
+    this.invalidate(entry.conversationId)
+  }
+  /** Also called when a turn becomes superseded or turns are deleted. No conversation: all of them. */
+  invalidate(conversationId?: string): void {
+    if (conversationId === undefined) this.summaries.clear()
+    else this.summaries.delete(conversationId)
   }
   summary(platformId: string, conversationId: string): ContextUsageSummary {
-    // total_changes covers this connection; data_version also covers another app process.
-    const changes = this.db.prepare('SELECT total_changes() AS n').get() as { n: number }
-    const external = this.db.prepare('PRAGMA data_version').get() as { data_version: number }
-    const version = changes.n + ':' + external.data_version
-    const key = JSON.stringify([platformId, conversationId])
-    const cached = this.summaries.get(key)
-    if (cached?.version === version) return cached.value
+    const cached = this.summaries.get(conversationId)?.get(platformId)
+    if (cached) return cached
     const result = emptyContextUsage()
     // Parse each referenced turn once, rather than its growing JSON payload once per tool event.
     const rows = this.db.prepare(`WITH referenced_turns AS MATERIALIZED (
@@ -56,8 +58,12 @@ export class ContextUsageStore {
       if (row.source_message_id) result.requestSourceIds.push(row.source_message_id)
       result.images += row.images; result.files += row.files
     }
-    if (this.summaries.size >= 32) this.summaries.delete(this.summaries.keys().next().value!)
-    this.summaries.set(key, { version, value: result })
+    let platforms = this.summaries.get(conversationId)
+    if (!platforms) {
+      if (this.summaries.size >= 32) this.summaries.delete(this.summaries.keys().next().value!)
+      this.summaries.set(conversationId, platforms = new Map())
+    }
+    platforms.set(platformId, result)
     return result
   }
 }

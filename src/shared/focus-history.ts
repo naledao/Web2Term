@@ -13,15 +13,21 @@ export function mergeFocusChatUpdate(previous: FocusChatState | null, update: Fo
     turns: sameTurns ? current!.turns : turns ?? current!.turns,
     executions: sameExecutions ? current!.executions : executions ?? current!.executions,
     hiddenMessageIds: sameTurns ? current!.hiddenMessageIds : hiddenMessageIds ?? current?.hiddenMessageIds }
-  if (current && next.turns === current.turns && next.executions === current.executions && next.hiddenMessageIds === current.hiddenMessageIds) {
-    const { turns: _turns, executions: _executions, hiddenMessageIds: _hidden, ...previousMetadata } = current
-    // Only small live metadata is compared; historical answers and command output are excluded.
-    if (JSON.stringify(previousMetadata) === JSON.stringify(metadata)) return current
+  if (!current) return next
+  let unchanged = next.turns === current.turns && next.executions === current.executions && next.hiddenMessageIds === current.hiddenMessageIds
+  // Histories are compared by cursor above; serialize each metadata object at most once per poll.
+  const reused = next as unknown as Record<string, unknown>, earlier = current as unknown as Record<string, unknown>
+  for (const key of new Set([...Object.keys(current), ...Object.keys(next)])) {
+    if (key === 'turns' || key === 'executions' || key === 'hiddenMessageIds') continue
+    const before = earlier[key], after = reused[key]
+    if (before === after) continue
+    if (before && after && typeof before === 'object' && typeof after === 'object' && JSON.stringify(before) === JSON.stringify(after)) {
+      reused[key] = before
+      continue
+    }
+    unchanged = false
   }
-  if (current) for (const key of ['smartReplies', 'composerModes', 'modelSettings', 'promptInjection', 'contextUsage', 'historyCursor', 'sendFailure'] as const) {
-    if (JSON.stringify(current[key]) === JSON.stringify(next[key])) Object.assign(next, { [key]: current[key] })
-  }
-  return next
+  return unchanged ? current : next
 }
 
 /** One pass instead of scanning every execution once for every process segment. */
