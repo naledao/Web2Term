@@ -56,6 +56,7 @@ export class ScheduledTaskTools {
       operation.timer.unref?.()
       return
     }
+    if (outcome === 'busy' || outcome === 'no-composer') operation.observe?.({ delivery: 'failed' })
     if (outcome !== 'ok') this.deps.note('定时任务操作结果未确认发回 AI，请在「定时任务」页核对，或让 AI 重新查询；不会自动重复变更或重发不确定的消息。')
     this.clear()
   }

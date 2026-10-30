@@ -70,6 +70,7 @@ export class MailNotifications {
       operation.timer.unref?.()
       return
     }
+    if (outcome === 'busy' || outcome === 'no-composer') operation.observe?.({ delivery: 'failed' })
     if (outcome !== 'ok') this.dependencies.note('邮件发送结果未能自动回传 AI，请查看终端中的邮件通知结果；不要据此重新发信。')
     this.clear()
   }

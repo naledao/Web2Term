@@ -302,23 +302,37 @@ export class FocusChat {
       this.changed(entry, turn)
       this.persist(platformId, entry, true)
     }
-    const record = call
-    return update => {
-      const patch: FocusToolUpdate = { ...update }
-      if (patch.result !== undefined) patch.result = patch.result.length > 4000 ? patch.result.slice(0, 4000) + '\n（仅保留结果摘要）' : patch.result
-      if (Object.entries(patch).every(([key, value]) => record[key as keyof FocusToolCall] === value)) return
-      Object.assign(record, patch, { updatedAt: Date.now() })
-      turn.updatedAt = record.updatedAt
+    const ownerId = turn.id
+    return update => this.updateTool(platformId, conversationId, sourceMessageId, update, { turnId: ownerId, tool })
+  }
+  updateTool(platformId: string, conversationId: string, messageId: string, update: FocusToolUpdate,
+    owner?: { turnId: string; tool: FocusToolKind }): void {
+    const entry = this.entries.get(platformId)
+    const matchesCall = (call: FocusToolCall): boolean => call.sourceMessageId === messageId && (!owner || call.tool === owner.tool)
+    const matchesTurn = (turn: FocusTurn): boolean => (!owner || turn.id === owner.turnId) && !!turn.toolCalls?.some(matchesCall)
+    const cached = entry?.conversationId === conversationId ? entry.turns.find(matchesTurn) : undefined
+    // A navigation replaces Entry objects. Merge into current history, including archived branches,
+    // rather than writing the observer's old snapshot over a later edit or another receipt.
+    const turn = cached ?? this.store.listFocusTurns(this.sessionId, platformId, conversationId).find(matchesTurn)
+    const call = turn?.toolCalls?.find(matchesCall)
+    if (!turn || !call) return
+    const patch: FocusToolUpdate = { ...update }
+    if (call.tool === 'computer') {
+      // An interrupted task snapshot can outlive its late receipt. It cannot revoke known facts.
+      if (['done', 'failed', 'blocked'].includes(call.status) && (patch.status === 'unknown' || patch.status === 'running')) {
+        delete patch.status
+        delete patch.result
+      }
+      if (call.delivery === 'sent' && patch.delivery !== 'sent') delete patch.delivery
+    }
+    if (patch.result !== undefined) patch.result = patch.result.length > 4000 ? patch.result.slice(0, 4000) + '\n（仅保留结果摘要）' : patch.result
+    if (Object.entries(patch).every(([key, value]) => call[key as keyof FocusToolCall] === value)) return
+    Object.assign(call, patch, { updatedAt: Date.now() })
+    turn.updatedAt = call.updatedAt
+    if (cached && entry) {
       this.changed(entry, turn)
       this.persist(platformId, entry, true)
-    }
-  }
-  updateTool(platformId: string, conversationId: string, messageId: string, update: FocusToolUpdate): void {
-    const entry = this.entries.get(platformId)
-    if (entry?.conversationId !== conversationId) return
-    const turn = entry.turns.find(item => item.toolCalls?.some(call => call.sourceMessageId === messageId))
-    const call = turn?.toolCalls?.find(item => item.sourceMessageId === messageId)
-    if (turn && call) this.observeTool(platformId, conversationId, messageId, call.tool, call, turn.id)?.(update)
+    } else this.store.saveFocusTurn(this.sessionId, platformId, conversationId, turn)
   }
   stop(platformId: string, expectedTurnId?: string): void {
     const current = this.current(platformId)

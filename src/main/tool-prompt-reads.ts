@@ -65,6 +65,7 @@ export class ToolPromptReads {
       operation.timer.unref?.()
       return
     }
+    if (outcome === 'busy' || outcome === 'no-composer') operation.observe?.({ delivery: 'failed' })
     if (outcome !== 'ok') this.dependencies.note('工具说明未能自动发回 AI，可让 AI 重新读取。')
     this.clear()
   }

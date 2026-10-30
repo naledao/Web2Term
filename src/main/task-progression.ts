@@ -28,6 +28,8 @@ interface ProgressionDependencies {
   release?(attachments: ComputerUseImageReference[], lease: TaskLease): void
   continuity?(call: ComputerUseToolCall, result: ComputerUseToolResult, lease: TaskLease, stepId: string): unknown
   diagnosticContext?(lease: TaskLease): ComputerDiagnosticContext
+  /** History only: an obsolete operation's receipt must not reactivate its goal or send loop. */
+  onLateReceipt?(request: ComputerUseStepRequest, event: ComputerActionEvent): void
   onError(lease: TaskLease): void
   /** Returns a cancellation function. No model polling or app startup is performed. */
   schedule?(callback: () => void): () => void
@@ -187,7 +189,14 @@ export class TaskProgression {
       generation: r.generation, executionId: op.progress.currentStep!.id, at: Date.now(), ...event }
   }
 
-  private record(op: Operation, event: ComputerActionEvent): ComputerUseToolResult | undefined { return this.deps.coordinator.recordComputerAction(this.update(op, event)) }
+  private record(op: Operation, event: ComputerActionEvent): ComputerUseToolResult | undefined {
+    const result = this.deps.coordinator.recordComputerAction(this.update(op, event))
+    if (!this.current(op)) {
+      try { this.deps.onLateReceipt?.(op.request, event.event === 'result' && result ? { ...event, result } : event) }
+      catch { /* Display history must not change execution or trigger a retry. */ }
+    }
+    return result
+  }
 
   private save(op: Operation, event?: ComputerActionEvent): boolean {
     if (!this.current(op)) return false

@@ -2,6 +2,7 @@ import type { CommandRecoveryState, ExecutionRecord } from './types'
 import type { FocusPromptInjectionState } from './focus-token-usage'
 import type { ContextUsageSummary } from './context-usage'
 import type { TaskToolStep } from './autonomous-task'
+import type { ComputerUseToolResult } from './computer-use'
 
 export type ChatView = 'original' | 'local' | 'focus'
 export const DEFAULT_CHAT_VIEW: ChatView = 'focus'
@@ -107,6 +108,10 @@ export function focusToolDelivery(outcome: string): FocusToolDelivery {
   return outcome === 'ok' || outcome === 'sent' ? 'sent' : outcome === 'busy' || outcome === 'no-composer' ? 'pending'
     : outcome === 'stale' || outcome === 'cancelled' ? 'blocked' : outcome === 'unknown' ? 'unknown' : 'failed'
 }
+export function focusComputerResultUpdate(result: Pick<ComputerUseToolResult, 'ok' | 'execution' | 'message'>): FocusToolUpdate {
+  return { status: result.execution === 'unknown' ? 'unknown' : result.ok === true ? 'done' : result.execution === 'not_executed' ? 'blocked' : 'failed',
+    ...(typeof result.message === 'string' ? { result: result.message } : {}) }
+}
 export function focusComputerToolUpdate(step: Pick<TaskToolStep, 'status' | 'execution' | 'delivery' | 'message' | 'resultText'>): FocusToolUpdate {
   const update: FocusToolUpdate = { delivery: step.delivery === 'sent' ? 'sent' : step.delivery === 'failed' ? 'failed'
     : step.delivery === 'uncertain' ? 'unknown' : step.delivery === 'cancelled' ? 'blocked' : 'pending' }
@@ -114,9 +119,7 @@ export function focusComputerToolUpdate(step: Pick<TaskToolStep, 'status' | 'exe
   if (step.status === 'queued' || step.status === 'executing') update.status = 'running'
   else if (step.resultText) {
     try {
-      const result = JSON.parse(step.resultText)
-      update.status = result.execution === 'unknown' ? 'unknown' : result.ok === true ? 'done' : result.execution === 'not_executed' ? 'blocked' : 'failed'
-      if (typeof result.message === 'string') update.result = result.message
+      Object.assign(update, focusComputerResultUpdate(JSON.parse(step.resultText)))
     } catch { update.status = 'unknown' }
   } else if (step.execution === 'unknown') update.status = 'unknown'
   else if (step.status === 'interrupted' && step.execution === 'not_executed') update.status = 'cancelled'

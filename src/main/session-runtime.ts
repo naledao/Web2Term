@@ -129,7 +129,8 @@ import { RedisReader, normalizeRedisDraft } from './redis-reader'
 import { ChatGptEmbed } from './embed'
 import { FocusChat } from './focus-chat'
 import { stageFocusAttachments } from './focus-attachments'
-import { cleanFocusUserText, focusOwnerKey, supportsFocusView, validFocusFiles, focusToolInfo, focusToolDelivery, focusComputerToolUpdate } from '../shared/focus-chat'
+import { cleanFocusUserText, focusOwnerKey, supportsFocusView, validFocusFiles, focusToolInfo, focusToolDelivery, focusComputerToolUpdate, focusComputerResultUpdate } from '../shared/focus-chat'
+import type { ComputerActionEvent } from '../shared/computer-actions'
 import { writeFocusDiagnostic } from './focus-chat-log'
 import { getGithubCliState } from './github-cli'
 import { dispatchGithubLoginTask } from './github-login-task'
@@ -551,6 +552,7 @@ export class SessionRuntime {
     this.taskContinuity = new TaskContinuityService(this.taskCoordinator)
     this.taskProgression = new TaskProgression({
       coordinator: this.taskCoordinator,
+      onLateReceipt: (request, event) => this.recordFocusComputerReceipt(request, event),
       isCurrent: lease => !this.disposed && this.active && lease.sessionId === this.id &&
         lease.platformId === this.activePlatformId && this.embeds.get(lease.platformId)?.embed?.getState().conversationId === lease.conversationId &&
         this.getComputerUseCapability(lease.platformId).scopeSupported && this.getComputerUseCapability(lease.platformId).computerUseEnabled,
@@ -1599,10 +1601,21 @@ export class SessionRuntime {
     try {
       const task = state.task, step = task?.progress?.currentStep
       if (!task?.conversationId || !step || (step.tool ?? 'computer') !== 'computer') return
+      const turnId = (task.status === 'recorded' ? this.focusChat.contextUsageTurnId(state.platformId, task.conversationId) : undefined)
+        ?? task.sourceTurnId ?? undefined
       this.focusChat.observeTool(state.platformId, task.conversationId, step.sourceMessageId, 'computer',
-        { title: '电脑操作', request: step.action, status: 'unknown', working: task.status === 'recorded' }, task.sourceTurnId ?? undefined)
+        { title: '电脑操作', request: step.action, status: 'unknown', working: task.status === 'recorded' }, turnId)
         ?.(focusComputerToolUpdate(step))
     } catch { /* Display metadata must never block desktop action progression. */ }
+  }
+
+  private recordFocusComputerReceipt(request: ComputerUseStepRequest, event: ComputerActionEvent): void {
+    try {
+      if (event.event === 'result') this.focusChat.updateTool(request.platformId, request.conversationId, request.sourceMessageId,
+        focusComputerResultUpdate(event.result))
+      else if (event.event === 'delivery-outcome') this.focusChat.updateTool(request.platformId, request.conversationId, request.sourceMessageId,
+        { delivery: event.outcome === 'busy' || event.outcome === 'no-composer' ? 'blocked' : focusToolDelivery(event.outcome) })
+    } catch { /* Late receipts update display history only, never the current task. */ }
   }
 
   private recordFocusScheduledReceipt(task: ScheduledTask, outcome: string): void {
