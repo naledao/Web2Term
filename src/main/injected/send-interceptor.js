@@ -3202,7 +3202,7 @@
     const rejected = nativeEditRejection(row, auto, kind)
     if (rejected) { report({ event: 'native-edit', reason: rejected }); return false }
     const attempt = { auto, kind, budget: safetyLeak, path: location.pathname, generation: state.taskPromptGeneration,
-      baseline: computerBaselineOf(), previous, startedAt: Date.now() }
+      baseline: computerBaselineOf(), focusBaselinePosition: focusRowPosition(latestReplyNode(queryAllAssistant())), previous, startedAt: Date.now() }
     nativeEditRetry = attempt
     const poll = () => {
       if (nativeEditRetry !== attempt) return
@@ -3216,6 +3216,10 @@
         nativeEditRetry = null
         safetyLeak.busy = false
         state.taskActive = true
+        // Editing replaces the reply row. Keep its pre-send boundary, then pin the new row.
+        focusReplyBaseline = attempt.previous
+        focusBaselinePosition = attempt.focusBaselinePosition
+        focusReplyPosition = null
         state.replyActionDetected = false
         state.lastCommandMessageId = kind === 'safety' ? attempt.previous : null
         setReplyWaiting(Date.now(), 'user-edited', null, attempt.baseline)

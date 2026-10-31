@@ -44,6 +44,8 @@ function fixture() {
     state, location: { pathname: '/a/chat/s/one' }, Date: { now: () => now },
     safetyLeak: { count: 0, busy: false, failedKey: null }, nativeEditRetry: null,
     computerSourceSubmissionId: null, focusEditing: null, fileSend: null,
+    focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
+    focusRowPosition: node => node === reply ? '2' : node?.key || null,
     queryAll: selectors => selectors.includes(rules.rowSelector) ? rows : selectors.includes(rules.editorSelector) && opened ? [editor] : [],
     queryAllAssistant: () => rows, latestReplyNode: nodes => nodes.at(-1), turnKeyOf: node => node.id,
     isAssistantTurn: node => !!node.assistant, isVisibleElement: node => !!node,

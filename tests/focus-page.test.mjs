@@ -351,6 +351,44 @@ test('virtualized history cannot replace the current streaming row', () => {
   assert.equal(f.snapshot().reply, null)
 })
 
+test('confirmed native edit retries follow the replacement reply and keep older history excluded', () => {
+  for (const kind of ['stopped', 'analysis', 'safety']) {
+    const f = fixture(), timers = []
+    let generating = false
+    Object.assign(f.context, {
+      nativeEditRetry: null, safetyLeak: { count: 1, busy: true, failedKey: null },
+      nativeEditRejection: () => null, computerBaselineOf: () => ({}), lastAssistantId: () => 'interrupted',
+      setTimeout: callback => timers.push(callback), scheduleCheck() {},
+      setReplyWaiting: since => { f.context.state.awaitingReplySince = since },
+      findStopButton: () => generating ? {} : null
+    })
+    f.context.state.taskActive = true
+    f.context.state.awaitingReplySince = 1
+    f.context.focusReplyBaseline = 'previous'
+    f.context.focusBaselinePosition = '4'
+    f.context.queryAllAssistant = () => [reply('previous', 4), reply('interrupted', 6, '未完成正文', [node(1, '旧思考')])]
+    assert.equal(f.snapshot().reply.sourceMessageId, 'interrupted')
+
+    const retry = arrow('startNativeEditRetry', f.context)
+    assert.equal(retry({}, true, kind), true)
+    timers.shift()() // No stream yet: keep following the original reply until the resend is confirmed.
+    assert.equal(f.snapshot().reply.sourceMessageId, 'interrupted')
+    generating = true
+    f.context.queryAllAssistant = () => [reply('previous', 4)]
+    timers.shift()()
+    assert.equal(f.snapshot().reply, null, 'older history is not the replacement reply')
+
+    f.context.queryAllAssistant = () => [reply('previous', 4), reply('replacement', 8, '重新生成的正文', [node(1, '新的思考')])]
+    const snapshot = f.snapshot()
+    assert.equal(snapshot.reply.sourceMessageId, 'replacement', kind)
+    assert.equal(snapshot.reply.answer, '**重新生成的正文**', kind)
+    assert.deepEqual(Array.from(snapshot.reply.parts, part => part.text), ['新的思考'], kind)
+    generating = false
+    assert.equal(f.snapshot().reply.answer, '**重新生成的正文**', kind)
+    assert.equal(f.reports.some(event => event.reason === 'native-edit-retry'), true, kind)
+  }
+})
+
 test('ChatGPT pins the reply by its message id and reads generation from the measured stop button', () => {
   const f = fixture()
   f.context.PAGE = CHATGPT_PAGE
