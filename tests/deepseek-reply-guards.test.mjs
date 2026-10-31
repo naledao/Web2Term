@@ -25,6 +25,8 @@ new Script(ts.transpileModule(platformSource, {
   }
 })
 const { CHATGPT_PAGE, DEEPSEEK_PAGE } = platformExports
+// Keep coverage of the generic resume fallback for adapters without native edit recovery.
+const LEGACY_CONTINUE_PAGE = { ...DEEPSEEK_PAGE, nativeEdit: null }
 
 class ElementFixture {
   nodeType = 1
@@ -193,9 +195,9 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
   }
 }
 
-test('a DeepSeek reply cut off while thinking is resumed with 继续生成 during a live wait', () => {
+test('an adapter without native edit recovery resumes a cut-off reply with its measured button', () => {
   const button = continueButton()
-  const app = fixture([userTurn('1'), cutOffTurn('2', button)])
+  const app = fixture([userTurn('1'), cutOffTurn('2', button)], LEGACY_CONTINUE_PAGE)
   app.controller.checkNow()
   assert.equal(button.clicks, 1)
   assert.deepEqual(app.continues().map((event) => [event.reason, event.attempt]), [['continue-clicked', 1]])
@@ -204,7 +206,7 @@ test('a DeepSeek reply cut off while thinking is resumed with 继续生成 durin
 
 test('partial prose next to 继续生成 is not saved as the final answer', () => {
   const button = continueButton()
-  const app = fixture([proseTurn('2', 'Now need to add CSS for the header.', button)])
+  const app = fixture([proseTurn('2', 'Now need to add CSS for the header.', button)], LEGACY_CONTINUE_PAGE)
   app.controller.checkNow()
   app.tick(250)
   assert.equal(button.clicks, 1)
@@ -214,7 +216,7 @@ test('partial prose next to 继续生成 is not saved as the final answer', () =
 
 test('presses are spaced by the cooldown and capped, then the partial reply settles normally', () => {
   const button = continueButton()
-  const app = fixture([proseTurn('2', '部分回答', button)])
+  const app = fixture([proseTurn('2', '部分回答', button)], LEGACY_CONTINUE_PAGE)
   app.controller.checkNow()
   app.scan()
   assert.equal(button.clicks, 1, 'a scan inside the cooldown must not press again')
@@ -252,7 +254,7 @@ test('history and older turns are never resumed', () => {
 test('a covered button is not clicked through whatever covers it, but the reply stays unfinished', () => {
   const button = continueButton()
   const overlay = element('div', { class: 'overlay' })
-  const app = fixture([proseTurn('2', '部分回答', button), overlay])
+  const app = fixture([proseTurn('2', '部分回答', button), overlay], LEGACY_CONTINUE_PAGE)
   app.cover(overlay)
   app.controller.checkNow()
   const reported = app.continues()
@@ -265,7 +267,7 @@ test('a covered button is not clicked through whatever covers it, but the reply 
 
 test('a new reply wait gets a fresh press budget', () => {
   const button = continueButton()
-  const app = fixture([proseTurn('2', '部分回答', button)])
+  const app = fixture([proseTurn('2', '部分回答', button)], LEGACY_CONTINUE_PAGE)
   app.controller.checkNow()
   app.advance(1)
   app.controller.checkNow()
@@ -292,6 +294,58 @@ const commandTurn = (key, text) => element('div', { 'data-virtual-list-item-key'
 const commandCodeTurn = (key, text) => element('div', { 'data-virtual-list-item-key': key }, [
   element('div', { class: 'ds-assistant-message-main-content' }, [element('pre', {}, [element('code', {}, text)])])
 ])
+
+test('a raw analysis recap is intercepted before quoted commands or placeholders can execute', async () => {
+  for (const command of ['...', 'echo old-command']) {
+    const app = fixture([userTurn('1')])
+    app.confirmSend()
+    app.replaceNodes([userTurn('1'), proseTurn('2', '<analysis> 让我按时间顺序梳理整个对话：\n' + commandJson(command))])
+    app.scan()
+    assert.equal(app.commands().length, 0)
+    app.tick(250)
+    for (let i = 0; i < 6; i++) await Promise.resolve()
+    assert.ok(app.events.some(event => event.reason === 'analysis-leak-detected'))
+    assert.equal(app.commands().length, 0)
+    assert.equal(app.events.some(event => event.event === 'parse-failed'), false)
+  }
+})
+
+test('analysis tags in restored history, reasoning panels and explicit code examples do not resend', () => {
+  const restored = fixture([userTurn('1'), proseTurn('2', '<analysis> 旧对话回顾')])
+  restored.controller.armBaseline()
+  restored.scan(); restored.tick(250)
+  assert.equal(restored.events.some(event => event.reason === 'analysis-leak-detected'), false)
+
+  const example = fixture([userTurn('1')])
+  example.confirmSend()
+  example.replaceNodes([userTurn('1'), commandCodeTurn('2', '<analysis>标签示例</analysis>')])
+  example.scan(); example.tick(250)
+  assert.equal(example.events.some(event => event.reason === 'analysis-leak-detected'), false)
+
+  const thought = fixture([userTurn('1')])
+  thought.confirmSend()
+  thought.replaceNodes([userTurn('1'), element('div', { 'data-virtual-list-item-key': '2' }, [
+    element('div', { class: 'ds-think-content' }, '<analysis> 正常思考内容'),
+    element('div', { class: 'ds-assistant-message-main-content' }, '正常回答')
+  ])])
+  thought.scan(); thought.tick(250)
+  assert.equal(thought.events.some(event => event.reason === 'analysis-leak-detected'), false)
+})
+
+test('analysis recovery waits for stable text and is cancelled by task or conversation changes', () => {
+  for (const change of ['text', 'stop', 'route', 'generation']) {
+    const app = fixture([userTurn('1')])
+    app.confirmSend()
+    app.replaceNodes([userTurn('1'), proseTurn('2', '<analysis> 尚未稳定的回复')])
+    app.scan()
+    if (change === 'text') app.replaceNodes([userTurn('1'), proseTurn('2', '已纠正的正常回答')])
+    if (change === 'stop') app.controller.endTask()
+    if (change === 'route') app.navigate('/a/chat/s/another-chat')
+    if (change === 'generation') app.controller.configure({ taskPromptGeneration: 1 })
+    app.tick(250)
+    assert.equal(app.events.some(event => event.reason === 'analysis-leak-detected'), false, change)
+  }
+})
 
 test('a streaming JSON fragment is rechecked before format feedback is sent', () => {
   const app = fixture([userTurn('1')])
@@ -774,8 +828,64 @@ const stoppedTurn = (key) => element('div', { 'data-virtual-list-item-key': key 
 // The first scan only marks the turn; the settle timer rescans it.
 const settleStopped = (app) => { app.advance(4000); app.tick(4000); app.tick(800) }
 
+test('DeepSeek interruptions use edit recovery and never press Continue or send a continuation message', () => {
+  for (const reasoningOnly of [false, true]) {
+    const button = continueButton()
+    const reply = reasoningOnly ? stoppedTurn('2') : proseTurn('2', '未完成的回顾：' + commandJson('echo should-not-run'), button)
+    const app = fixture([userTurn('1'), reply])
+    const sent = stubSends(app)
+    app.controller.checkNow()
+    assert.equal(app.events.some(event => event.reason === 'stopped-retry-detected'), false, 'wait until the stopped reply is stable')
+    settleStopped(app)
+    assert.ok(app.events.some(event => event.reason === 'stopped-retry-detected'))
+    assert.ok(app.events.some(event => event.reason === 'stopped-retry-failed' && event.step === 'edit-button'), 'the user row is selected even before an assistant answer marker exists')
+    assert.equal(button.clicks, 0)
+    assert.deepEqual(sent, [])
+    assert.equal(app.commands().length, 0)
+    app.scan() // Missing edit control gives up; it never falls back to the old recovery method.
+    assert.equal(app.controller.status().awaitingReplySince, 0)
+    assert.equal(app.commands().length, 0)
+    assert.deepEqual(sent, [])
+    assert.equal(app.continues().some(event => event.reason === 'continue-clicked'), false)
+  }
+})
+
+test('restored or explicitly ended DeepSeek tasks are not edited to recover a stopped reply', () => {
+  for (const ended of [false, true]) {
+    const button = continueButton()
+    const app = fixture([userTurn('1'), proseTurn('2', '部分回复', button)])
+    if (ended) { app.controller.checkNow(); app.controller.endTask() }
+    else app.controller.armBaseline()
+    settleStopped(app); app.scan()
+    assert.equal(app.events.some(event => event.reason === 'stopped-retry-detected'), false)
+    assert.equal(button.clicks, 0)
+  }
+})
+
+test('a disabled DeepSeek Continue control still selects edit recovery', () => {
+  const button = continueButton()
+  button.attributes['aria-disabled'] = 'true'
+  const app = fixture([userTurn('1'), proseTurn('2', '部分回复', button)])
+  app.controller.checkNow(); settleStopped(app)
+  assert.ok(app.events.some(event => event.reason === 'stopped-retry-detected'))
+  assert.equal(button.clicks, 0)
+  assert.equal(app.continues().some(event => event.reason === 'continue-clicked'), false)
+})
+
+test('changed interrupted content starts a fresh stability wait before edit recovery', () => {
+  const app = fixture([userTurn('1'), proseTurn('2', '第一段', continueButton())])
+  app.controller.checkNow()
+  app.advance(3000)
+  app.replaceNodes([userTurn('1'), proseTurn('2', '后续仍在变化的内容', continueButton())])
+  app.scan()
+  app.advance(1000); app.tick(800)
+  assert.equal(app.events.some(event => event.reason === 'stopped-retry-detected'), false)
+  settleStopped(app)
+  assert.ok(app.events.some(event => event.reason === 'stopped-retry-detected'))
+})
+
 test('a reply the site stopped mid-thinking gets one automatic 继续 after it stays stopped', async () => {
-  const app = fixture([userTurn('1'), stoppedTurn('2')])
+  const app = fixture([userTurn('1'), stoppedTurn('2')], LEGACY_CONTINUE_PAGE)
   const sent = stubSends(app)
   app.controller.checkNow()
   assert.deepEqual(sent, [], 'never on the first sight of a stopped turn')
@@ -788,7 +898,7 @@ test('a reply the site stopped mid-thinking gets one automatic 继续 after it s
 })
 
 test('automatic 继续 stops after three stopped replies in a row, and never fires outside a live wait or with an answer', () => {
-  const app = fixture([userTurn('1'), stoppedTurn('2')])
+  const app = fixture([userTurn('1'), stoppedTurn('2')], LEGACY_CONTINUE_PAGE)
   const sent = stubSends(app)
   app.controller.checkNow()
   for (const key of ['2', '4', '6', '8']) {
@@ -798,7 +908,7 @@ test('automatic 继续 stops after three stopped replies in a row, and never fir
   assert.equal(sent.length, 3)
   assert.ok(app.events.some((event) => event.reason === 'stopped-continue-limit'))
 
-  const history = fixture([userTurn('1'), stoppedTurn('2')])
+  const history = fixture([userTurn('1'), stoppedTurn('2')], LEGACY_CONTINUE_PAGE)
   const none = stubSends(history)
   history.controller.armBaseline()
   history.scan(); settleStopped(history)

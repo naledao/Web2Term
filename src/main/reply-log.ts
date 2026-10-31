@@ -30,7 +30,10 @@ const reasons = new Set([
   'computer-quoted-content', 'computer-not-live', 'computer-reply-cut-off',
   'stopped-continue-sent', 'stopped-continue-failed', 'stopped-continue-limit', 'resume-forced', 'computer-rejected',
   'user-edited', 'native-edit-retry', 'native-edit-unconfirmed', 'native-edit-not-latest', 'native-edit-no-task',
-  'safety-leak-detected', 'safety-leak-edit-click', 'safety-leak-send-click', 'safety-leak-limit', 'safety-leak-failed'
+  'safety-leak-detected', 'safety-leak-edit-click', 'safety-leak-send-click', 'safety-leak-limit', 'safety-leak-failed',
+  'analysis-leak-detected', 'analysis-leak-edit-click', 'analysis-leak-send-click', 'analysis-leak-limit', 'analysis-leak-failed',
+  'native-edit-draft', 'stopped-retry-detected', 'stopped-retry-edit-click', 'stopped-retry-send-click',
+  'stopped-retry-limit', 'stopped-retry-failed', 'stopped-retry-abandoned'
 ])
 
 function identifier(value: unknown): string | null {

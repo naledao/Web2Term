@@ -200,6 +200,10 @@ export interface PageAdapter {
     submitSelector: string
     /** A whole reply consisting only of this is a leaked moderation verdict, not an answer. */
     safetyLeakPattern?: string
+    /** A leading raw analysis tag in the answer is an abnormal reply, not an executable request. */
+    analysisLeakPattern?: string
+    /** Recover interrupted replies by editing the preceding user message instead of continuing. */
+    retryStoppedByEditing?: boolean
   }
   /** Attachment acknowledgements only; never used as command message identities. */
   fileTurnPositionAttr?: string
@@ -819,7 +823,10 @@ export const DEEPSEEK_PAGE: PageAdapter = {
     buttonSelector: '.ds-button--icon:has(svg path[d^="M9.94076 1.34942"])',
     editorSelector: 'textarea.ds-textarea__textarea',
     submitSelector: '.ds-button--primary.ds-button--filled',
-    safetyLeakPattern: '^<ds_safety>[\\s\\S]*</ds_safety>\\s*Safe$'
+    safetyLeakPattern: '^<ds_safety>[\\s\\S]*</ds_safety>\\s*Safe$',
+    // User screenshot 2026-10-31: the answer begins with literal <analysis> and a conversation recap.
+    analysisLeakPattern: '^<analysis>\\s*\\S',
+    retryStoppedByEditing: true
   },
   /*
    * The focus view's reads, measured in the user's 2026-10-22 chat-view log: send and stop

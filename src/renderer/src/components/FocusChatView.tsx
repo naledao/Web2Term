@@ -602,10 +602,6 @@ function FocusChatView(props: Props): JSX.Element {
   const lastTurn = turns.at(-1)
   const sendFailure = state?.sendFailure
   const working = !sendFailure && (props.needsAnswer || state?.waiting === true || state?.generating === 'active' || lastTurn?.status === 'working')
-  const unlinkedAttention = useMemo(() => {
-    const linkedExecutions = new Set(turns.flatMap(turn => turn.executionIds))
-    return records.filter(record => !linkedExecutions.has(record.messageId) && executionNeedsAction(record, focusDelivery(record)))
-  }, [turns, records])
   const ready = state?.ready === true
   // Computer use waits for its Windows helper; the composer keeps the draft meanwhile.
   const sendBlock = state?.sendBlock || ''
@@ -847,15 +843,9 @@ function FocusChatView(props: Props): JSX.Element {
       </>}</FocusDetails>
     </div>
   }
-  const renderUnlinkedExecutions = (): JSX.Element => (
-    <FocusDetails className="focus-process focus-process--unlinked" ownerKey={ownerKey} stateKey="unlinked-process" defaultOpen
-      summary={<>其他执行记录 · {unlinkedAttention.length}<ProcessHint /></>}>{() =>
-      unlinkedAttention.map(record => renderExecution(record, focusDelivery(record), true))
-    }</FocusDetails>
-  )
   const renderTurn = (turn: FocusTurn): JSX.Element => {
     const sendBlocked = !!sendFailure && turn === lastTurn
-    const showUnlinked = turn === lastTurn && unlinkedAttention.length > 0
+    // Only explicit turn ownership belongs in this process. Unlinked history stays in the terminal.
     const { executions, byCycle, unassigned, toolsByCycle, unassignedTools } = groupFocusExecutions(turn, recordsById)
     const executionIds = new Set(turn.executionIds)
     const toolSources = new Set((turn.toolCalls ?? []).map(call => call.sourceMessageId))
@@ -875,7 +865,7 @@ function FocusChatView(props: Props): JSX.Element {
       const text = cleanFocusAnswer((segment.sourceMessageId ? richAnswers.get(segment.sourceMessageId) : '') || segment.answer)
       return text.trim() ? [{ cycle: segment.cycle, sourceMessageId: segment.sourceMessageId, text }] : []
     })
-    const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.toolCalls?.length || !!turn.parseFailures?.length || showUnlinked
+    const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.toolCalls?.length || !!turn.parseFailures?.length
     const label = sendBlocked ? '消息发送失败 · 等待重试' : turn.commandRecovery ? (turn.status === 'working' ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : toolRunning ? '正在调用工具…' : deliveryPending ? '正在回传执行结果…' :
       turn.status === 'stopped' ? '已停止 · 已有内容保留' : turn.status === 'working' ? '正在处理…' : '已回复'
     const userMessage = turn.userMessageId ? messagesById.get(turn.userMessageId) : null
@@ -906,7 +896,6 @@ function FocusChatView(props: Props): JSX.Element {
           {turn.parseFailures?.map(failure => <details className="focus-execution" key={'parse:' + failure.messageId}>
             <summary>指令格式错误 · 未执行</summary><pre>{failure.text}</pre>
           </details>)}
-          {showUnlinked ? renderUnlinkedExecutions() : null}
           {!hasProcess ? <p className="focus-chat__muted focus-process__empty">{sendBlocked ? '消息尚未发送成功。' : turn.status === 'working' ? '正在思考…' : '本轮没有额外执行步骤。'}</p> : null}
           </ProcessScroll>
         }</FocusDetails>
@@ -934,9 +923,6 @@ function FocusChatView(props: Props): JSX.Element {
             {entry.message!.role === 'assistant' ? <>{entry.message!.attachments.map(props.renderAttachment)}<div data-question-answer={entry.message!.sourceMessageId ?? ''}><Markdown text={richAnswers.get(entry.message!.sourceMessageId ?? '') || entry.message!.content} theme={theme} /></div></>
               : userContent(entry.message!.id, cleanFocusUserText(entry.message!.content), entry.message!.attachments.length > 0, entry.message!.attachments.map(props.renderAttachment))}
           </article>)}
-        {!lastTurn && unlinkedAttention.length > 0 ? <ProcessScroll scrollKey={ownerKey + ':unlinked'} follow={working}>
-          {renderUnlinkedExecutions()}
-        </ProcessScroll> : null}
       </ConversationTranscript>,
   [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, working, sending, stopping, editingId, settingPending, props.renderAttachment, props.onOpenTerminal, props.onRun, props.onSkip])
   return <FocusSmartUiContext.Provider value={smartUiContext}><section className="focus-chat" aria-label="专注对话" data-theme={theme}>

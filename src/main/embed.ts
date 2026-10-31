@@ -2172,9 +2172,7 @@ export class ChatGptEmbed {
         break
       case 'native-edit':
         // Same rule as 继续生成: the page measured the control; only a trusted input event presses it.
-        // Limited to the automatic resend of a leaked safety verdict during computer-use recognition.
-        if ((payload.reason === 'safety-leak-edit-click' || payload.reason === 'safety-leak-send-click') &&
-          this.platform.id === 'deepseek' && this.computerUseRecognitionEnabled && this.platform.page.nativeEdit) this.clickAt(payload.x, payload.y)
+        this.clickNativeEdit(payload)
         console.info(`[embed:${this.platform.id}] interceptor ${JSON.stringify(payload)}`)
         break
       case 'focus-ui-click':
@@ -2628,6 +2626,26 @@ export class ChatGptEmbed {
       currentPage: payload.computerPageEpoch === this.computerPageEpoch
     })
     this.handlers.onInterceptor(this.getInterceptorStatus())
+  }
+
+  /** Only the live DeepSeek task may request the measured edit/send controls. */
+  private clickNativeEdit(payload: InterceptorPageEvent): void {
+    const analysis = payload.reason === 'analysis-leak-edit-click' || payload.reason === 'analysis-leak-send-click'
+    const stopped = payload.reason === 'stopped-retry-edit-click' || payload.reason === 'stopped-retry-send-click'
+    const safety = payload.reason === 'safety-leak-edit-click' || payload.reason === 'safety-leak-send-click'
+    if ((!analysis && !safety && !stopped) || this.platform.id !== 'deepseek' || !this.platform.page.nativeEdit ||
+      (stopped && !this.platform.page.nativeEdit.retryStoppedByEditing) ||
+      !this.interceptor.enabled || this.interceptor.taskFinishedAt !== null ||
+      payload.taskPromptGeneration !== this.taskPromptGeneration || payload.taskActive !== true ||
+      payload.awaitingReply !== true || this.interceptor.pendingQuestion ||
+      (safety && !this.computerUseRecognitionEnabled)) return
+    const contents = this.liveContents()
+    if (!contents) return
+    try {
+      const url = new URL(contents.getURL())
+      if (!this.platform.allowedOriginPattern.test(url.href) || payload.pagePath !== url.pathname) return
+    } catch { return }
+    this.clickAt(payload.x, payload.y)
   }
 
   /** A real left click at a viewport CSS-pixel point; input events are in DIPs, hence the zoom. */

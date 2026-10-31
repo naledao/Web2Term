@@ -191,7 +191,7 @@
   let mailSourceSubmissionId = null
   // A native edit-and-resend of the last user message that is waiting for generation to start.
   let nativeEditRetry = null
-  // Leaked moderation verdicts answered by an automatic unchanged resend; reset by a genuine send.
+  // Abnormal tagged replies share a bounded unchanged-resend budget; reset by a genuine send.
   let safetyLeak = { count: 0, busy: false, failedKey: null }
   let computerReplyWait = null
   let computerReplySerial = 0
@@ -3177,14 +3177,18 @@
 
   const nativeEditRows = () => PAGE.nativeEdit ? queryAll([PAGE.nativeEdit.rowSelector]).filter(isVisibleElement) : []
   // An open edit box replaces the bubble, so a row is the user's when it holds no reply.
-  const latestUserRow = () => nativeEditRows().filter(row => !isAssistantTurn(row)).pop() || null
+  const latestUserRow = () => nativeEditRows().filter(row => !isAssistantTurn(row) &&
+    !(PAGE.focus?.reasoningSelectors || []).some(selector => row.matches(selector) || row.querySelector(selector))).pop() || null
   const nativeEditor = (row) => row ? [...row.querySelectorAll(PAGE.nativeEdit.editorSelector)].find(isVisibleElement) || null : null
 
   /** Only the current task's latest message may be retried; anything older is the user's own history edit. */
-  const nativeEditRejection = (row, auto) => {
+  const nativeEditRejection = (row, auto, kind = 'safety') => {
     if (row !== latestUserRow()) return 'native-edit-not-latest'
-    if (PAGE.computerUseRequests !== true || !state.enabled || !state.computerUseEnabled || !computerSourceSubmissionId ||
+    if (PAGE.computerUseRequests !== true || !state.enabled ||
+      (kind === 'safety' && (!state.computerUseEnabled || !computerSourceSubmissionId)) ||
       !state.taskActive || state.pendingQuestion || state.programmatic || focusEditing || (!auto && safetyLeak.busy)) return 'native-edit-no-task'
+    if (auto && (fileSend || state.sendBlock || collapse(readComposer(getComposer())) !== '' ||
+      hasDraftImageAttachment() || draftAttachmentEvidence(attachmentSnapshot()))) return 'native-edit-draft'
     return null
   }
 
@@ -3194,18 +3198,26 @@
    * the task waiting for a reply that will never come. The baseline is taken before the send:
    * row keys are message ids, so the replaced reply stays in it and the new reply's id does not.
    */
-  const startNativeEditRetry = (row, auto) => {
-    const rejected = nativeEditRejection(row, auto)
+  const startNativeEditRetry = (row, auto, kind = 'safety', current = null, previous = lastAssistantId()) => {
+    const rejected = nativeEditRejection(row, auto, kind)
     if (rejected) { report({ event: 'native-edit', reason: rejected }); return false }
-    const attempt = { auto, baseline: computerBaselineOf(), previous: lastAssistantId(), startedAt: Date.now() }
+    const attempt = { auto, kind, budget: safetyLeak, path: location.pathname, generation: state.taskPromptGeneration,
+      baseline: computerBaselineOf(), previous, startedAt: Date.now() }
     nativeEditRetry = attempt
     const poll = () => {
       if (nativeEditRetry !== attempt) return
+      if (attempt.budget !== safetyLeak || attempt.path !== location.pathname || attempt.generation !== state.taskPromptGeneration || !state.enabled ||
+        !state.taskActive || state.pendingQuestion || (current && !current())) {
+        nativeEditRetry = null
+        if (auto) giveUpSafetyLeak(attempt.previous, 'context', kind, attempt.budget)
+        return
+      }
       if (findStopButton()) {
         nativeEditRetry = null
         safetyLeak.busy = false
         state.taskActive = true
-        state.lastCommandMessageId = attempt.previous
+        state.replyActionDetected = false
+        state.lastCommandMessageId = kind === 'safety' ? attempt.previous : null
         setReplyWaiting(Date.now(), 'user-edited', null, attempt.baseline)
         report({ event: 'native-edit', reason: 'native-edit-retry', attempt: safetyLeak.count })
         scheduleCheck()
@@ -3214,7 +3226,7 @@
       if (Date.now() - attempt.startedAt < 10000) { setTimeout(poll, 200); return }
       nativeEditRetry = null
       report({ event: 'native-edit', reason: 'native-edit-unconfirmed' })
-      if (auto) giveUpSafetyLeak(attempt.previous, 'generation')
+      if (auto) giveUpSafetyLeak(attempt.previous, 'generation', kind, attempt.budget)
     }
     setTimeout(poll, 200)
     return true
@@ -3236,13 +3248,13 @@
 
   /** A center point the page itself would deliver to `element` (or, for a hover-only toolbar, to its row). */
   const nativeEditPoint = (element, row) => {
-    if (!element || !isVisibleElement(element)) return null
+    if (!element || !isVisibleElement(element) || controlDisabled(element)) return null
     try { element.scrollIntoView({ block: 'nearest' }) } catch (_) { /* measured as-is */ }
     const rect = element.getBoundingClientRect()
     const x = Math.round(rect.left + rect.width / 2)
     const y = Math.round(rect.top + rect.height / 2)
     const hit = document.elementFromPoint(x, y)
-    return hit && (element.contains(hit) || hit.contains(element) || row.contains(hit)) ? { x, y } : null
+    return hit && row.contains(element) && (element.contains(hit) || hit.contains(element)) ? { x, y } : null
   }
   const nativeEditWait = async (probe, ms) => {
     const end = Date.now() + ms
@@ -3253,10 +3265,12 @@
     }
     return null
   }
-  const giveUpSafetyLeak = (messageId, step) => {
+  const nativeRetryPrefix = kind => kind === 'stopped' ? 'stopped-retry' : `${kind}-leak`
+  const giveUpSafetyLeak = (messageId, step, kind = 'safety', budget = safetyLeak) => {
+    if (budget !== safetyLeak) return
     safetyLeak.busy = false
     safetyLeak.failedKey = messageId
-    report({ event: 'native-edit', reason: 'safety-leak-failed', messageId, step })
+    report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-failed`, messageId, step })
     scheduleCheck()
   }
 
@@ -3265,40 +3279,65 @@
    * measured here (the site ignores script clicks, as with 继续生成). Every miss gives up and lets
    * the reply settle as before; nothing else on the page is ever clicked.
    */
-  const resendAfterSafetyLeak = async (messageId) => {
+  const resendAfterSafetyLeak = async (messageId, kind) => {
+    const budget = safetyLeak, path = location.pathname, generation = state.taskPromptGeneration, since = state.awaitingReplySince
     safetyLeak.busy = true
+    const current = () => budget === safetyLeak && path === location.pathname && generation === state.taskPromptGeneration &&
+      state.enabled && state.taskActive && state.awaitingReplySince === since && !state.pendingQuestion && !state.programmatic && !focusEditing
+    const fail = step => giveUpSafetyLeak(messageId, step, kind, budget)
     const row = latestUserRow()
-    if (!row || nativeEditRejection(row, true)) return giveUpSafetyLeak(messageId, 'row')
+    const rowKey = row?.getAttribute(PAGE.fileTurnPositionAttr)
+    if (!row || !rowKey || nativeEditRejection(row, true, kind) ||
+      queryAll([PAGE.nativeEdit.editorSelector]).some(isVisibleElement)) return fail('row')
+    const latest = latestReplyNode(queryAllAssistant())
+    if (!current() || !latest || turnKeyOf(latest) !== messageId) return fail('context')
     const editPoint = nativeEditPoint(row.querySelector(PAGE.nativeEdit.buttonSelector), row)
-    if (!editPoint) return giveUpSafetyLeak(messageId, 'edit-button')
-    report({ event: 'native-edit', reason: 'safety-leak-edit-click', messageId, ...editPoint })
-    const editor = await nativeEditWait(() => nativeEditor(latestUserRow()), 3000)
-    if (!editor || collapse(editor.value) === '') return giveUpSafetyLeak(messageId, 'editor')
+    if (!editPoint) return fail('edit-button')
+    report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-edit-click`, messageId, pagePath: path, ...editPoint })
+    const editor = await nativeEditWait(() => current() && nativeEditor(latestUserRow()), 3000)
+    if (!current() || !editor || collapse(editor.value) === '') return fail('editor')
     const editRow = editor.closest(PAGE.nativeEdit.rowSelector)
+    if (editRow?.getAttribute(PAGE.fileTurnPositionAttr) !== rowKey) return fail('row-changed')
     const sendPoint = nativeEditPoint(editRow.querySelector(PAGE.nativeEdit.submitSelector), editRow)
-    if (!sendPoint) return giveUpSafetyLeak(messageId, 'submit')
-    if (!startNativeEditRetry(editRow, true)) return giveUpSafetyLeak(messageId, 'task')
-    report({ event: 'native-edit', reason: 'safety-leak-send-click', messageId, ...sendPoint })
+    if (!sendPoint) return fail('submit')
+    if (!current() || !startNativeEditRetry(editRow, true, kind, current, messageId)) return fail('task')
+    report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-send-click`, messageId, pagePath: path, ...sendPoint })
   }
 
-  /** @returns true while a leaked moderation verdict is being answered by a resend instead of ending the task. */
-  const handleSafetyLeak = (messageId, text) => {
-    const source = PAGE.nativeEdit?.safetyLeakPattern
-    if (!source || PAGE.computerUseRequests !== true) return false
-    let pattern
-    try { pattern = new RegExp(source, 'i') } catch (_) { return false }
-    if (!pattern.test(String(text || '').trim())) return false
+  const replyLeakKind = (text, node = null) => {
+    for (const kind of ['analysis', 'safety']) {
+      const source = PAGE.nativeEdit?.[`${kind}LeakPattern`]
+      if (!source) continue
+      try {
+        if (!new RegExp(source, 'i').test(String(text || '').trim())) continue
+        // Quoted/code examples of the tag are ordinary content, not a leaked analysis reply.
+        if (kind === 'analysis' && node && /^(?:`|~{3,}|>)/.test(readReplyMarkdown(node).trimStart())) return null
+        return kind
+      } catch (_) { /* invalid adapter */ }
+    }
+    return null
+  }
+
+  /** Shared budget for all recoveries of the same preceding user message. */
+  const retryReplyByEditing = (messageId, kind) => {
     if (safetyLeak.busy || nativeEditRetry) return true
     if (safetyLeak.failedKey === messageId) return false
-    report({ event: 'native-edit', reason: 'safety-leak-detected', messageId, attempt: safetyLeak.count })
+    report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-detected`, messageId, attempt: safetyLeak.count })
     if (safetyLeak.count >= 2) {
       safetyLeak.failedKey = messageId
-      report({ event: 'native-edit', reason: 'safety-leak-limit', messageId, attempt: safetyLeak.count })
+      report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-limit`, messageId, attempt: safetyLeak.count })
       return false
     }
     safetyLeak.count += 1
-    void resendAfterSafetyLeak(messageId).catch(() => giveUpSafetyLeak(messageId, 'error'))
+    const budget = safetyLeak
+    void resendAfterSafetyLeak(messageId, kind).catch(() => giveUpSafetyLeak(messageId, 'error', kind, budget))
     return true
+  }
+
+  /** @returns true while an abnormal tagged reply is being answered by an unchanged resend. */
+  const handleSafetyLeak = (messageId, text, node = null) => {
+    const kind = replyLeakKind(text, node)
+    return kind && PAGE.computerUseRequests === true ? retryReplyByEditing(messageId, kind) : false
   }
 
   // Capture phase, on `document`: survives ChatGPT's client-side route changes,
@@ -4181,7 +4220,8 @@
    *
    * Without this the partial text settles like any other reply: prose is saved as the final
    * answer and the task ends, or a thinking-only turn simply sits there, and auto mode stalls
-   * until the user presses the button. Pressing it is what the user would do.
+   * until the user intervenes. DeepSeek uses the preceding message's edit-and-resend;
+   * adapters without that recovery retain their measured Continue control.
    *
    * Only while the app is waiting for its OWN reply, so a restored conversation's old
    * stopped turn is never resumed. Only a button inside or after the newest turn, so an
@@ -4194,11 +4234,11 @@
   let continueAttempts = { since: 0, count: 0, at: 0 }
   let continueTimer = null
 
-  const findContinueButton = (latest) => {
+  const findContinueButton = (latest, includeDisabled = false) => {
     const labels = PAGE.continueButtonLabels || []
     if (labels.length === 0) return null
     const matches = [...document.querySelectorAll(CONTROL_SELECTOR)].filter((element) =>
-      labels.includes(collapse(element.innerText)) && isVisibleElement(element) && !controlDisabled(element))
+      labels.includes(collapse(element.innerText)) && isVisibleElement(element) && (includeDisabled || !controlDisabled(element)))
     const button = matches[matches.length - 1] || null
     if (!button || !latest || latest.contains(button)) return button
     return latest.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_PRECEDING ? null : button
@@ -4207,8 +4247,11 @@
   /** @returns true while the cut-off reply is being resumed and must not be read as final. */
   const continueCutOffReply = (latest) => {
     if (state.awaitingReplySince === 0 || state.pendingQuestion || findStopButton()) return false
-    const button = findContinueButton(latest)
+    // A disabled Continue control still identifies an interruption; edit recovery
+    // uses the preceding message's controls instead of pressing this button.
+    const button = findContinueButton(latest, PAGE.nativeEdit?.retryStoppedByEditing === true)
     if (!button) return false
+    if (PAGE.nativeEdit?.retryStoppedByEditing) return editStoppedReply(latest)
     if (continueAttempts.since !== state.awaitingReplySince) {
       continueAttempts = { since: state.awaitingReplySince, count: 0, at: 0 }
     }
@@ -4260,7 +4303,7 @@
    * written and no 继续生成 control is offered. Without an answer marker the turn never passes the
    * role check below, so the wait for our own reply would hang until something else ends the task.
    *
-   * Send 继续, as the user would — only during our own live wait, only after the turn has stayed
+   * DeepSeek edits and resends the preceding message. Other adapters may send 继续 — only during our own live wait, after the turn has stayed
    * stopped for STOPPED_SETTLE_MS, never after the user pressed stop themselves, and at most
    * STOPPED_LIMIT times in a row (a real answer resets the count).
    */
@@ -4275,12 +4318,36 @@
     if (!labels.length || !reasoning || PAGE.assistantReplySelectors.some((selector) => node.matches(selector) || node.querySelector(selector))) return false
     return [...node.querySelectorAll('div, span')].some((element) => !reasoning.contains(element) && labels.includes(collapse(element.textContent)))
   }
+  const editStoppedReply = (node) => {
+    if (!node || !state.enabled || !state.taskActive || state.programmatic || state.pendingQuestion ||
+      state.awaitingReplySince === 0 || userStoppedAt >= state.awaitingReplySince || findStopButton()) return false
+    const messageId = turnKeyOf(node)
+    const key = JSON.stringify([location.pathname, state.taskPromptGeneration, state.awaitingReplySince, messageId])
+    if (stoppedReply.key !== key) stoppedReply = { key, at: Date.now() }
+    const wait = STOPPED_SETTLE_MS - (Date.now() - stoppedReply.at)
+    if (wait > 0) {
+      if (continueTimer) clearTimeout(continueTimer)
+      continueTimer = setTimeout(() => { continueTimer = null; scheduleCheck() }, wait)
+      return true
+    }
+    if (!retryReplyByEditing(messageId, 'stopped')) {
+      // A failed edit or exhausted budget must not fall back to Continue, send 继续,
+      // or execute a JSON example in an unfinished reply.
+      state.lastCommandMessageId = messageId
+      setReplyWaiting(0, 'stopped-retry-abandoned', messageId)
+      if (isAssistantTurn(node)) report({ event: 'assistant-message', messageId, text: readReplyMarkdown(node) || readReplyText(node) })
+      report({ event: 'task-finished', messageId, completed: false, live: true,
+        taskPromptGeneration: state.taskPromptGeneration, pagePath: location.pathname })
+    }
+    return true
+  }
   const continueStoppedReply = (node) => {
     if (state.awaitingReplySince === 0 || !state.enabled || !state.taskActive || state.pendingQuestion || state.programmatic ||
         userStoppedAt >= state.awaitingReplySince || findStopButton() || replyIsGenerating(node) || !stoppedReasoning(node)) {
       stoppedReply = { key: '', at: 0 }
       return false
     }
+    if (PAGE.nativeEdit?.retryStoppedByEditing) return editStoppedReply(node)
     const key = turnKeyOf(node), now = Date.now()
     if (key === state.lastCommandMessageId) return false // Already answered with 继续 (or handled otherwise).
     if (stoppedReply.key !== key) {
@@ -4306,6 +4373,42 @@
     return true
   }
 
+  /** Final prose and leaked analysis both settle without inspecting nested command examples. */
+  const settleAssistantReply = (messageId, text) => {
+    if (!text.trim() || state.awaitingReplySince === 0 || pendingAssistantCompletion?.messageId === messageId) return
+    const completion = { messageId, path: location.pathname, generation: state.taskPromptGeneration }
+    pendingAssistantCompletion = completion
+    setTimeout(() => {
+      if (pendingAssistantCompletion !== completion) return
+      pendingAssistantCompletion = null
+      if (completion.path !== location.pathname || completion.generation !== state.taskPromptGeneration ||
+        state.awaitingReplySince === 0 || state.pendingQuestion) return
+      const nodes = queryAllAssistant()
+      const latest = latestReplyNode(nodes)
+      if (!latest || !isAssistantTurn(latest) || !latest.isConnected) return
+      if (continueCutOffReply(latest)) return
+      if (replyIsGenerating(latest) || turnKeyOf(latest) !== messageId || readReplyText(latest) !== text) {
+        scheduleCheck()
+        return
+      }
+      if (handleSafetyLeak(messageId, text, latest)) return
+      const markdown = readReplyMarkdown(latest) || text
+      const completed = /^(?:#{1,6}\s*)?(?:\*\*)?(?:【任务完成】|任务完成(?=$|[\s。！!：:]))/.test(text.trimStart())
+      const completionSource = completed ? legacyTaskSource(latest) : {}
+      replyScanSnapshot = snapshotReplyScan(latest, nodes)
+      state.lastCommandMessageId = messageId
+      setReplyWaiting(0, 'non-command-reply', messageId)
+      if (completed) {
+        state.taskActive = false
+        resetTaskPrompt()
+      }
+      report({ event: 'assistant-message', messageId, text: markdown })
+      report({ event: 'task-finished', messageId, completed, live: true,
+        taskPromptGeneration: completion.generation, pagePath: completion.path,
+        ...completionSource, computerPageEpoch })
+    }, 250)
+  }
+
   /**
    * Runs after the reply has been quiet for REPLY_SETTLE_MS. Only the LAST
    * assistant message is considered, and each message id is reported at most
@@ -4314,7 +4417,7 @@
   const checkForCommand = () => {
     lastReplyScanAt = Date.now()
     replyScanSnapshot = {}
-    if (focusEditing || focusModeChanging) return
+    if (focusEditing || focusModeChanging || nativeEditRetry || safetyLeak.busy) return
     // Confirm our submitted user turn before accepting a fast next assistant action.
     if (fileSend?.submitted) {
       fileSendStatus(fileSend.token)
@@ -4403,6 +4506,12 @@
     const text = readReplyText(node)
     if (replyIsGenerating(node)) {
       noteScan(messageId, 'still-generating')
+      return
+    }
+    // DeepSeek can leak an analysis recap containing old command JSON or placeholders.
+    // Retry the preceding user message before any protocol parser can act on those examples.
+    if (replyLeakKind(text, node) === 'analysis') {
+      settleAssistantReply(messageId, text)
       return
     }
     if (checkComputerRequest(node, messageId)) return
@@ -4520,44 +4629,7 @@
 
       // Commit only a settled final answer. Keep the wait owned until the
       // delayed Markdown read confirms that generation has not resumed.
-      if (text.trim() && state.awaitingReplySince !== 0 && pendingAssistantCompletion?.messageId !== messageId) {
-        const completion = { messageId, path: location.pathname, generation: state.taskPromptGeneration }
-        pendingAssistantCompletion = completion
-        // ChatGPT can remove the stop control before its Markdown renderer has
-        // replaced the final plain text with <code>/<strong>/<table> nodes. Read
-        // once more after that DOM pass so the database keeps the formatting.
-        setTimeout(() => {
-          if (pendingAssistantCompletion !== completion) return
-          pendingAssistantCompletion = null
-          if (completion.path !== location.pathname || completion.generation !== state.taskPromptGeneration ||
-              state.awaitingReplySince === 0 || state.pendingQuestion) return
-          const nodes = queryAllAssistant()
-          const latest = latestReplyNode(nodes)
-          if (!latest || !isAssistantTurn(latest) || !latest.isConnected) return
-          if (continueCutOffReply(latest)) return
-          if (replyIsGenerating(latest) || turnKeyOf(latest) !== messageId || readReplyText(latest) !== text) {
-            scheduleCheck()
-            return
-          }
-          // A leaked moderation verdict is not the model's answer: resend instead of ending the task.
-          if (handleSafetyLeak(messageId, text)) return
-          const markdown = readReplyMarkdown(latest) || text
-          const completed = /^(?:#{1,6}\s*)?(?:\*\*)?(?:【任务完成】|任务完成(?=$|[\s。！!：:]))/.test(text.trimStart())
-          // Capture the live reply's owner before clearing its wait and advancing the page generation.
-          const completionSource = completed ? legacyTaskSource(latest) : {}
-          replyScanSnapshot = snapshotReplyScan(latest, nodes)
-          state.lastCommandMessageId = messageId
-          setReplyWaiting(0, 'non-command-reply', messageId)
-          if (completed) {
-            state.taskActive = false
-            resetTaskPrompt()
-          }
-          report({ event: 'assistant-message', messageId, text: markdown })
-          report({ event: 'task-finished', messageId, completed, live: true,
-            taskPromptGeneration: completion.generation, pagePath: completion.path,
-            ...completionSource, computerPageEpoch })
-        }, 250)
-      }
+      settleAssistantReply(messageId, text)
 
       /*
        * The catch-all, and the one that would have answered the question this was written for.

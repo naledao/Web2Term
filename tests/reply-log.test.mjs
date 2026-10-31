@@ -29,6 +29,19 @@ test('command parsing and recovery retain only bounded diagnostic metadata', () 
   assert.equal(replyDiagnosticMetadata('deepseek', { event: 'command-recovery', recoveryStatus: 'sent' }, context).recoveryStatus, 'sent')
 })
 
+test('analysis resend diagnostics keep recovery reasons without message text or click coordinates', () => {
+  for (const reason of ['analysis-leak-detected', 'analysis-leak-edit-click', 'analysis-leak-send-click', 'analysis-leak-limit', 'analysis-leak-failed',
+    'stopped-retry-detected', 'stopped-retry-edit-click', 'stopped-retry-send-click', 'stopped-retry-limit', 'stopped-retry-failed', 'stopped-retry-abandoned']) {
+    const value = replyDiagnosticMetadata('deepseek', { event: 'native-edit', reason, attempt: 1,
+      text: '<analysis>private recap', pagePath: '/private-conversation', x: 15, y: 5 }, context)
+    assert.equal(value.reason, reason)
+    assert.equal(value.attempt, 1)
+    assert.ok(!JSON.stringify(value).includes('private'))
+    assert.equal(value.x, undefined)
+    assert.equal(value.y, undefined)
+  }
+})
+
 test('computer recognition retains outcome and acceptance without raw JSON or paths', () => {
   const value = replyDiagnosticMetadata('deepseek', { event: 'computer-request', messageId: 'computer:page:1',
     computerOutcome: 'invalid', computerIssue: 'ambiguous-request', computerProtocolCode: 'duplicate_field', live: true,
