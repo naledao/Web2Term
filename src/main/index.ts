@@ -1791,13 +1791,23 @@ function registerIpcHandlers(): void {
     console.info('[interrupt] completed')
     return runtime.runner.getTerminalState()
   })
+  ipcMain.handle(IpcChannels.terminalReconnect, (event): TerminalState => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime) return FALLBACK_TERMINAL_STATE
+    if (runtime.web2term) {
+      const { status } = runtime.web2term.transport
+      if (status !== 'connecting' && status !== 'closing') {
+        runtime.runner.prepareTerminalReconnect()
+        runtime.web2term.reconnect()
+      }
+    } else {
+      runtime.reconnectSsh()
+    }
+    return runtime.runner.getTerminalState()
+  })
   ipcMain.handle(IpcChannels.terminalReset, (event): TerminalState => {
     const runtime = runtimeForEvent(event)
     if (!runtime) return FALLBACK_TERMINAL_STATE
-    if (runtime.web2term && !runtime.web2term.alive) {
-      runtime.web2term.reconnect()
-      return runtime.runner.getTerminalState()
-    }
     runtime.runner.resetTerminal()
     if (runtime.ssh.getState().attached) runtime.resetSshTerminal()
     runtime.web2term?.reset()

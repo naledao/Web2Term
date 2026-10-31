@@ -3852,7 +3852,9 @@
 
   // Different page instances must not reuse a pending recovery token after reload.
   let commandFailureSerial = Math.floor(Math.random() * 0x100000000) * 100000
-  const commandParseFailed = (node, messageId, input) => {
+  let pendingCommandFailure = null
+  let failedCommandReply = null
+  const reportCommandParseFailure = (node, messageId, input) => {
     if (state.lastUnparsedMessageId === messageId) return
     state.lastUnparsedMessageId = messageId
     const live = state.enabled && state.awaitingReplySince !== 0 && !state.replyActionDetected
@@ -3862,6 +3864,8 @@
       path: location.pathname, ...issue, status: state.commandRecoveryUsed ? 'failed' : 'pending' }
     if (live) {
       state.failedCommand = failure
+      failedCommandReply = { failure, node, since: state.awaitingReplySince,
+        position: PAGE.fileTurnPositionAttr ? node.getAttribute(PAGE.fileTurnPositionAttr) : null }
       // The model has finished this reply. It is no longer generating a command.
       setReplyWaiting(0, 'command-format-error', messageId)
     }
@@ -3869,6 +3873,50 @@
       parseFailureToken: failure.token, recoveryStatus: failure.status,
       text: input.text.slice(0, 20000), textLength: input.text.length, objectCount: attempts.length,
       lastObject: attempts.at(-1)?.slice(0, 1200) ?? null })
+  }
+
+  const commandParseFailed = (node, messageId, input) => {
+    if (state.lastUnparsedMessageId === messageId) return
+    if (pendingCommandFailure?.messageId === messageId && pendingCommandFailure.input.text === input.text &&
+        pendingCommandFailure.input.source === input.source && pendingCommandFailure.path === location.pathname &&
+        pendingCommandFailure.generation === state.taskPromptGeneration && pendingCommandFailure.since === state.awaitingReplySince &&
+        pendingCommandFailure.enabled === state.enabled && pendingCommandFailure.actionDetected === state.replyActionDetected) return
+    // A missing stop control during a streaming pause is not proof that the JSON
+    // is complete. Confirm the same bytes again before spending the recovery budget.
+    const pending = { messageId, path: location.pathname, generation: state.taskPromptGeneration,
+      since: state.awaitingReplySince, enabled: state.enabled, actionDetected: state.replyActionDetected,
+      input: { ...input, issue: { ...(input.issue || commandParseIssue || { parseErrorCode: 'invalid-json' }) } } }
+    pendingCommandFailure = pending
+    setTimeout(() => {
+      if (pendingCommandFailure !== pending) return
+      pendingCommandFailure = null
+      if (pending.path !== location.pathname || pending.generation !== state.taskPromptGeneration ||
+          pending.since !== state.awaitingReplySince || pending.enabled !== state.enabled ||
+          pending.actionDetected !== state.replyActionDetected) return
+      const latest = latestReplyNode(queryAllAssistant())
+      if (!latest || !latest.isConnected || !isAssistantTurn(latest)) return
+      const current = input.source === 'rendered' ? { text: readReplyText(latest), source: 'rendered' } : readCommandText(latest)
+      if (replyIsGenerating(latest) || turnKeyOf(latest) !== messageId ||
+          current.text !== input.text || current.source !== input.source) {
+        scheduleCheck()
+        return
+      }
+      reportCommandParseFailure(latest, messageId, pending.input)
+    }, 1000)
+  }
+
+  const restoreFailedCommandWait = (node, messageId) => {
+    const reply = failedCommandReply
+    const failure = state.failedCommand
+    if (state.awaitingReplySince !== 0 || !state.enabled || !state.taskActive || state.replyActionDetected ||
+        !reply || failure !== reply.failure || failure.sending || ['sent', 'uncertain'].includes(failure.status) ||
+        failure.path !== location.pathname || failure.generation !== state.taskPromptGeneration) return
+    const position = PAGE.fileTurnPositionAttr ? node.getAttribute(PAGE.fileTurnPositionAttr) : null
+    // DeepSeek hashes the growing text. Keep ownership by row only within this
+    // exact failed reply; history, a new task or another row cannot resume it.
+    if (reply.node !== node && (!position || position !== reply.position)) return
+    setReplyWaiting(reply.since, 'command-format-resolved', messageId)
+    failedCommandReply = null
   }
 
   const looksLikeReadFilesReply = (text) => /"type"\s*:\s*"read_files"/.test(String(text || ''))
@@ -4389,6 +4437,8 @@
         } })
         return
       }
+      pendingCommandFailure = null
+      restoreFailedCommandWait(node, messageId)
       state.lastCommandMessageId = messageId
       state.replyActionDetected = state.enabled
       state.failedCommand = null
@@ -4545,6 +4595,8 @@
       noteScan(messageId, 'terminal-mode-off')
       return
     }
+    pendingCommandFailure = null
+    restoreFailedCommandWait(node, messageId)
     const live = state.awaitingReplySince !== 0
     /*
      * The same command from the same turn, during the same wait, is the same command.
@@ -4622,6 +4674,8 @@
    * creates the conversation, so that URL change must not land here.
    */
   const armBaseline = () => {
+    pendingCommandFailure = null
+    failedCommandReply = null
     if (focusModelCache) delete focusModelCache.firstSendGeneration
     setReplyWaiting(0, 'history-baseline')
     state.lastCommandMessageId = null
@@ -5638,6 +5692,8 @@
       // Main has already advanced this boundary. Its configure() may arrive before
       // or after the stop call; applying the same value must never advance it twice.
       if (generation !== null && (!Number.isSafeInteger(generation) || generation < state.taskPromptGeneration)) return false
+      pendingCommandFailure = null
+      failedCommandReply = null
       if (fileSend) {
         state.programmatic = false
         fileSend = null

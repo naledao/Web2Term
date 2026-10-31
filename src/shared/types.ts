@@ -161,6 +161,7 @@ export const IpcChannels = {
   terminalGetState: 'terminal:get-state',
   terminalInput: 'terminal:input',
   terminalInterrupt: 'terminal:interrupt',
+  terminalReconnect: 'terminal:reconnect',
   terminalReset: 'terminal:reset',
   terminalCloseWeb2term: 'terminal:close-web2term',
   terminalSetCwd: 'terminal:set-cwd',
@@ -2525,6 +2526,8 @@ export interface AppApi {
   sendTerminalInput(text: string): Promise<TerminalState>
   /** Stop the command currently running in the execution shell. */
   interruptTerminal(): Promise<TerminalState>
+  /** Reconnect the attached remote terminal using its current host and directory. */
+  reconnectTerminal(): Promise<TerminalState>
   /** Kill the shell and start a fresh one. */
   resetTerminal(): Promise<TerminalState>
   /** Close the current workspace's web2term PTY, retaining its transcript and binding. */

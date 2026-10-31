@@ -133,6 +133,7 @@
 .focus-process__body{max-height:min(360px,45vh);overflow-y:auto;overflow-anchor:none;margin-top:4px;padding:0 8px 6px 2px;border:1px solid var(--fc-border);border-radius:8px;background:var(--fc-soft)}
 .focus-process__content{display:flow-root}
 .focus-process__cycle{border-left:1px solid var(--fc-border);padding:4px 0 5px 13px;margin:8px 0 0 3px}
+.focus-process--unlinked{border-left:1px solid var(--fc-border);padding:4px 0 5px 13px;margin:8px 0 0 3px}
 .focus-reasoning{margin:4px 0 10px}
 .focus-reasoning>summary{cursor:pointer;padding:3px 0;color:var(--fc-muted)}
 .focus-reasoning .wmde-markdown{font-size:11px;color:var(--fc-muted)}

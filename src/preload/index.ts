@@ -533,6 +533,7 @@ removeConversation: (id: string): Promise<Conversation[]> =>
 
   interruptTerminal: (): Promise<TerminalState> => ipcRenderer.invoke(IpcChannels.terminalInterrupt),
   resetTerminal: (): Promise<TerminalState> => ipcRenderer.invoke(IpcChannels.terminalReset),
+  reconnectTerminal: (): Promise<TerminalState> => ipcRenderer.invoke(IpcChannels.terminalReconnect),
   closeCurrentWeb2termTerminal: (): Promise<TerminalState> => ipcRenderer.invoke(IpcChannels.terminalCloseWeb2term),
 
   setTerminalCwd: (path: string): Promise<TerminalState> =>

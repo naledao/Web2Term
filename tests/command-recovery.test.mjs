@@ -52,6 +52,17 @@ test('a newer failed request keeps its own recovery state when the older call fa
   assert.equal(recovery.interceptor.commandRecovery.status, 'pending')
 })
 
+test('a corrected request stays resolved when an earlier recovery bridge fails late', async () => {
+  const recovery = new Recovery({ executeJavaScript: async () => {
+    // A live, valid command or file request clears this before the send promise settles.
+    recovery.interceptor.commandRecovery = null
+    throw new Error('older bridge failed after corrected request')
+  } })
+  recovery.interceptor.commandRecovery = pending()
+  await recovery.recoverCommand(true)
+  assert.equal(recovery.interceptor.commandRecovery, null)
+})
+
 test('the bridge result closes a pending state even when the console status event is missed', async () => {
   for (const [outcome, status] of [['ok', 'sent'], ['busy', 'blocked'], ['stale', 'blocked'], ['limit', 'failed'], ['stuck', 'uncertain']]) {
     const recovery = new Recovery({ executeJavaScript: async () => outcome })

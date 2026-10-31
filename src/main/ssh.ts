@@ -152,7 +152,7 @@ const EMPTY: SshState = {
  */
 export class SshManager {
   private client: Client | null = null
-  /** Kept only for this live connection, including credentials not saved to disk. */
+  /** Retained for manual retries until the pane is dismissed, including unsaved credentials. */
   private connectionTarget: SshTarget | null = null
   private stream: ClientChannel | null = null
   private buffer = ''
@@ -277,7 +277,7 @@ export class SshManager {
    * `onChanged`. A handshake can take twenty seconds, and blocking an IPC reply
    * on it would freeze the dialog that started it.
    */
-  connect(target: SshTarget, resumeCwd = '', resumePtyCwd = resumeCwd, automatic = false): SshState {
+  connect(target: SshTarget, resumeCwd = '', resumePtyCwd = resumeCwd, automatic = false, preserveTranscript = false): SshState {
     if (!automatic) {
       this.reconnectAttempts = 0
       this.reconnectEnabled = false
@@ -287,7 +287,7 @@ export class SshManager {
     this.teardown()
     this.connectionTarget = { ...target }
 
-    if (!automatic) this.lines = []
+    if (!automatic && !preserveTranscript) this.lines = []
     this.buffer = ''
     this.partialLineIndex = null
     this.manualInputPending = false
@@ -303,8 +303,8 @@ export class SshManager {
       message: automatic
         ? `正在自动重连 ${target.username}@${target.host}:${target.port}（${this.reconnectAttempts}/${MAX_SSH_RECONNECT_ATTEMPTS}）…`
         : target.proxy
-          ? `正在通过代理 ${target.proxy} 连接 ${target.username}@${target.host}:${target.port}…`
-          : `正在连接 ${target.username}@${target.host}:${target.port}…`,
+          ? `正在通过代理 ${target.proxy} ${preserveTranscript ? '重新连接' : '连接'} ${target.username}@${target.host}:${target.port}…`
+          : `正在${preserveTranscript ? '重新连接' : '连接'} ${target.username}@${target.host}:${target.port}…`,
       // Both are derived in getState(); these are only the values for the window
       // before a command channel exists.
       remoteExec: false,
@@ -397,6 +397,16 @@ export class SshManager {
     return this.getState()
   }
 
+  /** Retry the attached host without clearing output or replaying commands. */
+  reconnect(): SshState | null {
+    if (!this.state.attached || !this.connectionTarget) return null
+    if (this.state.status === 'connecting') return this.getState()
+    const cwd = this.exec?.cwd || this.ptyCwd || this.reconnectCwd
+    const ptyCwd = this.ptyCwd || this.reconnectPtyCwd || cwd
+    this.exec?.dispose(true)
+    return this.connect(this.connectionTarget, cwd, ptyCwd, false, true)
+  }
+
   /** Clear the transcript and recreate the current host's shells at the same directory. */
   resetTerminal(): SshState {
     const target = this.connectionTarget
@@ -420,6 +430,7 @@ export class SshManager {
   /** Restore an attached-but-disconnected SSH pane without opening a network connection. */
   restoreAttachment(target: Pick<SshTarget, 'hostId' | 'name' | 'host' | 'port'>): SshState {
     this.teardown()
+    this.connectionTarget = null
     this.lines = []
     this.buffer = ''
     this.execAttempts = 0
@@ -438,6 +449,8 @@ export class SshManager {
   }
 
   disconnect(): SshState {
+    this.reconnectCwd = this.exec?.cwd || this.ptyCwd || this.reconnectCwd
+    this.reconnectPtyCwd = this.ptyCwd || this.reconnectPtyCwd || this.reconnectCwd
     this.pushLine('notice', '正在断开…')
     this.teardown()
     this.state = { ...this.state, status: 'disconnected', message: '已断开' }
@@ -448,6 +461,7 @@ export class SshManager {
   /** Hide the SSH transcript and go back to the local terminal. */
   dismiss(): SshState {
     this.teardown()
+    this.connectionTarget = null
     this.lines = []
     this.buffer = ''
     this.state = { ...EMPTY, lines: [] }
@@ -945,6 +959,7 @@ export class SshManager {
 
   dispose(): void {
     this.teardown()
+    this.connectionTarget = null
   }
 
   /* ---------------------------------------------------------------- */
@@ -1053,6 +1068,8 @@ export class SshManager {
     const target = this.connectionTarget
     const cwd = this.exec?.cwd || this.ptyCwd || this.reconnectCwd
     const ptyCwd = this.ptyCwd || this.reconnectPtyCwd || cwd
+    this.reconnectCwd = cwd
+    this.reconnectPtyCwd = ptyCwd
     this.teardown()
 
     if (!this.reconnectEnabled || !target) {
@@ -1071,8 +1088,6 @@ export class SshManager {
       return
     }
 
-    this.reconnectCwd = cwd
-    this.reconnectPtyCwd = ptyCwd
     const attempt = ++this.reconnectAttempts
     const message = `${reason}，${SSH_RECONNECT_DELAY_MS / 1000} 秒后自动重连（${attempt}/${MAX_SSH_RECONNECT_ATTEMPTS}）`
     this.state = { ...this.state, status: 'connecting', message }
@@ -1092,7 +1107,6 @@ export class SshManager {
     }
     const client = this.client
     this.client = null
-    this.connectionTarget = null
     for (const task of this.downloads.values()) {
       if (task.status === 'downloading') this.cancelDownload(task.id)
     }

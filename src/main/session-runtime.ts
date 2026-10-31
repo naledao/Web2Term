@@ -3678,6 +3678,22 @@ export class SessionRuntime {
     return this.ssh.resetTerminal()
   }
 
+  reconnectSsh(): SshState {
+    const state = this.ssh.getState()
+    if (!state.attached || state.status === 'connecting') return state
+    this.runner.prepareTerminalReconnect()
+    this.sshTerminalResetting = state.status === 'connected'
+    const resumed = this.ssh.reconnect()
+    if (resumed) return resumed
+
+    // Restored panes have no in-memory credentials; resolve their saved host.
+    const host = this.options.store.listSshHosts().find(item => item.id === state.hostId)
+    if (!host) throw new Error('当前 SSH 主机配置已不存在，请通过“切换连接 → SSH 连接”重新选择主机。')
+    const next = this.connectSsh({ ...host, password: '' }, this.sshCwd)
+    if (next.status === 'error') throw new Error(next.message)
+    return next
+  }
+
   connectSsh(draft: SshHostDraft, resumeCwd = ''): SshState {
     if (this.web2term) throw new Error('此会话使用 web2term，请通过 + 另建 SSH 会话。')
     const host = String(draft?.host ?? '').trim()

@@ -263,6 +263,7 @@ test('duplicate flags, mixed path escaping and an invalid final request never ru
   ]) {
     const app = fixture([protocolReply(payload)])
     app.controller.checkNow()
+    app.tick(1000)
     assert.equal(app.commands().length, 0)
     assert.equal(app.controller.status().awaitingReplySince, 0)
     assert.ok(app.events.some(event => event.event === 'parse-failed' && event.live))
@@ -291,6 +292,7 @@ test('format recovery is bound to one unexecuted reply and automatically sends a
     return 'ok'
   }
   app.controller.checkNow()
+  app.tick(1000)
   const failure = app.controller.status().failedCommand
   assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true), 'ok')
   assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true), 'stale')
@@ -299,6 +301,7 @@ test('format recovery is bound to one unexecuted reply and automatically sends a
   assert.match(sent[0], /保留原命令意图和 background/)
   app.replaceNodes([protocolReply('{"command":"gh auth login --web","background":1}')])
   app.controller.checkNow()
+  app.tick(1000)
   const second = app.controller.status().failedCommand
   assert.equal(await app.controller.recoverCommand(second.token, second.generation, true), 'limit')
   assert.equal(sent.length, 1)
@@ -311,6 +314,7 @@ test('paused or draft-blocked recovery stays retryable while uncertain submissio
   let calls = 0
   app.controller.sendRaw = async () => { calls++; return 'busy' }
   app.controller.checkNow()
+  app.tick(1000)
   const failure = app.controller.status().failedCommand
   assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, false), 'busy')
   assert.equal(calls, 0)
@@ -329,6 +333,7 @@ test('history, changed route, changed generation and stopped tasks cannot send f
     app.controller.sendRaw = async () => { calls++; return 'ok' }
     if (change === 'history') { app.controller.armBaseline(); app.scan() }
     else app.controller.checkNow()
+    app.tick(1000)
     const failure = app.controller.status().failedCommand
     if (change === 'route') app.navigate('/chat/another')
     if (change === 'stop') app.controller.endTask()

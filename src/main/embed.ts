@@ -2472,6 +2472,7 @@ export class ChatGptEmbed {
         if (payload.sourceSubmissionId !== undefined && !taskSource) break
         const request = parseReadFilesRequest({ type: 'read_files', files: payload.files, description: payload.description })
         if (fileReadingPlatform(this.platform.id) && request && typeof payload.messageId === 'string' && payload.messageId) {
+          if (payload.live === true) this.interceptor.commandRecovery = null
           if (payload.live === true) this.contextUsage?.confirmed(typeof payload.rawJson === 'string' ? payload.rawJson : JSON.stringify(request),
             'tool-request', payload.messageId, payload.messageId)
           this.handlers.onCommand({ ...request, messageId: payload.messageId, live: payload.live === true, ...(taskSource ? { taskSource } : {}) })

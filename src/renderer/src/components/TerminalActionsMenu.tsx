@@ -3,7 +3,7 @@ import type { JSX, ReactNode, RefObject } from 'react'
 import { Popover } from '@base-ui/react/popover'
 import './TerminalActionsMenu.css'
 
-export type TerminalActionId = 'interrupt' | 'reset' | 'close' | 'local' | 'ssh' | 'web2term'
+export type TerminalActionId = 'interrupt' | 'reconnect' | 'reset' | 'close' | 'local' | 'ssh' | 'web2term'
   | 'directory' | 'edit-directory' | 'upload' | 'files'
 
 interface TerminalActionsMenuProps {
@@ -12,6 +12,7 @@ interface TerminalActionsMenuProps {
   visible: boolean
   mode: 'local' | 'ssh' | 'web2term'
   connected: boolean
+  reconnecting: boolean
   resetDisabled: boolean
   closeDisabled: boolean
   closing: boolean
@@ -22,13 +23,14 @@ interface TerminalActionsMenuProps {
 }
 
 type MenuPage = 'main' | 'connection'
-type IconName = 'down' | 'stop' | 'reset' | 'connection' | 'folder' | 'edit' | 'upload'
+type IconName = 'down' | 'stop' | 'reconnect' | 'reset' | 'connection' | 'folder' | 'edit' | 'upload'
   | 'files' | 'back' | 'next' | 'close' | 'local'
 
 const ICON_PATHS: Record<IconName, string> = {
   down: 'm6 9 6 6 6-6',
   stop: 'M5 5h14v14H5z',
   reset: 'M3 11a9 9 0 1 1 2.6 7M3 4v7h7',
+  reconnect: 'M20 7h-7l3-3M4 17h7l-3 3M20 7a8 8 0 0 0-14-2M4 17a8 8 0 0 0 14 2',
   local: 'M4 4h16v12H4zM12 16v4m-4 0h8',
   connection: 'M7 3v4m10-4v4M5 7h14v4a7 7 0 0 1-14 0V7zm7 11v3',
   folder: 'M3 8V5h6l2 3h10v3M3 8h18l-3 11H1L3 8z',
@@ -62,7 +64,7 @@ function ActionButton({ children, icon, disabled, danger, trailing, onClick }: {
 }
 
 export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JSX.Element {
-  const { containerRef, triggerRef, visible, mode, connected, resetDisabled, closeDisabled,
+  const { containerRef, triggerRef, visible, mode, connected, reconnecting, resetDisabled, closeDisabled,
     closing, uploading, sendDelaySeconds, onAction, onSendDelayChange } = props
   const [open, setOpen] = useState(false)
   const [page, setPage] = useState<MenuPage>('main')
@@ -114,7 +116,7 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
 
   const choose = (action: TerminalActionId): void => {
     // Dialogs and inline directory editors manage their own focus after selection.
-    suppressRestoreRef.current = action !== 'interrupt' && action !== 'reset' && action !== 'local'
+    suppressRestoreRef.current = action !== 'interrupt' && action !== 'reconnect' && action !== 'reset' && action !== 'local'
     commitDelay()
     setOpen(false)
     onAction(action)
@@ -141,8 +143,11 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
           {page === 'main' ? <>
             <Popover.Title className="terminal-actions__heading">终端操作</Popover.Title>
             <ActionButton icon={<ActionIcon name="stop" />} danger onClick={() => choose('interrupt')}>中断当前命令</ActionButton>
+            {mode !== 'local' ? <ActionButton icon={<ActionIcon name="reconnect" />} disabled={resetDisabled} onClick={() => choose('reconnect')}>
+              {reconnecting ? '正在连接…' : '重新连接'}
+            </ActionButton> : null}
             <ActionButton icon={<ActionIcon name="reset" />} disabled={resetDisabled} onClick={() => choose('reset')}>
-              {mode === 'web2term' && !connected ? '重新连接' : '重置终端'}
+              重置终端
             </ActionButton>
             {mode !== 'web2term' ? <ActionButton icon={<ActionIcon name="connection" />} trailing={next} onClick={() => setPage('connection')}>切换连接</ActionButton> : null}
             {mode !== 'local' ? <ActionButton icon={<ActionIcon name="close" />} disabled={closeDisabled} onClick={() => choose('close')}>

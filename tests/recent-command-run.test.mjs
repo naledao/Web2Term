@@ -161,6 +161,28 @@ test('reset recovery preserves a late remote result without returning it to AI f
   assert.equal(f.sent.length, 0)
 })
 
+test('manual reconnect preserves transcript and blocks late remote results from returning to AI', async t => {
+  let finish
+  const f = fixture(t, { remote: true, pending: new Promise(resolve => { finish = resolve }) })
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'ok')
+  await new Promise(setImmediate)
+  const lines = JSON.parse(JSON.stringify(f.runner.getTerminalState().lines))
+  assert.equal(f.calls.length, 1)
+  assert.ok(lines.some(line => line.kind === 'command'))
+  const admission = new AbortController(), fileRead = new AbortController()
+  f.runner.commandAdmissions.set('pending-admission', { controller: admission })
+  f.runner.fileAbort = fileRead
+  f.runner.prepareTerminalReconnect()
+  assert.equal(admission.signal.aborted, true)
+  assert.equal(fileRead.signal.aborted, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(f.runner.getTerminalState().lines)), lines)
+  finish({ output: '原 SSH 会话已关闭。', exitCode: null, cwd: '/remote/current',
+    timedOut: false, interrupted: false, sessionLost: true })
+  await f.settled()
+  assert.equal(f.calls.length, 1, 'reconnect never replays the interrupted command')
+  assert.equal(f.sent.length, 0, 'a late old result must not start a new AI turn')
+})
+
 test('background history replay keeps its execution mode and goes through the software launcher', async t => {
   const starts = []
   const backgroundOptions = { kind: 'service', readiness: { type: 'tcp', port: 44301 } }

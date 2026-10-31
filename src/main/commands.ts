@@ -1508,15 +1508,23 @@ export class CommandRunner {
   }
 
 
-  resetTerminal(): void {
+  private invalidateTerminalWork(message: string): void {
     for (const entry of this.commandAdmissions.values()) entry.controller.abort()
     const pending = this.taskTextResult?.record ?? this.taskFileResult
-    if (pending) this.taskEvent(pending, { stage: 'cancelled', message: '终端已重置，原结果停止自动交付，不重跑原工具。' })
+    if (pending) this.taskEvent(pending, { stage: 'cancelled', message })
     this.clearTaskResults()
-    // Reset is an explicit recovery action. Late output from the discarded
+    // Manual recovery invalidates queued work. Late output from the discarded
     // command must not return to the model and trigger an automatic retry.
     this.executionRequest += 1
     this.fileAbort?.abort()
+  }
+
+  prepareTerminalReconnect(): void {
+    this.invalidateTerminalWork('终端正在重新连接，原结果停止自动交付，不重跑原工具。')
+  }
+
+  resetTerminal(): void {
+    this.invalidateTerminalWork('终端已重置，原结果停止自动交付，不重跑原工具。')
     // dispose(), not kill(): dropping the reference without tearing the shell
     // down would leave a running command orphaned. Dropping it first also stops
     // the dying session's onExit from posting "会话已结束" over the reset notice.

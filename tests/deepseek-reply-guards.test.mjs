@@ -110,6 +110,7 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
   let now = 1_000_000
   const body = element('body', {}, nodes)
   const window = {}
+  const location = { pathname: '/a/chat/s/offline-fixture' }
   const refreshPositions = () => {
     ;[body, ...body.descendants()].forEach((node, index) => { node.position = index })
   }
@@ -130,7 +131,7 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
   }
   new Script(instrumentedInterceptor).runInNewContext({
     window, document, Date: FakeDate,
-    location: { pathname: '/a/chat/s/offline-fixture' },
+    location,
     Element: ElementFixture,
     Node: { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_PRECEDING: 2 },
     MutationObserver: class {
@@ -153,6 +154,7 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
   controller.configure({ enabled: true, page })
   return {
     controller, events,
+    navigate(path) { location.pathname = path },
     confirmSend() {
       window.__replyGuardFixture.state.taskActive = true
       window.__replyGuardFixture.state.replyActionDetected = false
@@ -287,6 +289,105 @@ const commandJson = (command) => JSON.stringify({ command, description: '替换�
 const commandTurn = (key, text) => element('div', { 'data-virtual-list-item-key': key }, [
   element('div', { class: 'ds-assistant-message-main-content' }, text)
 ])
+const commandCodeTurn = (key, text) => element('div', { 'data-virtual-list-item-key': key }, [
+  element('div', { class: 'ds-assistant-message-main-content' }, [element('pre', {}, [element('code', {}, text)])])
+])
+
+test('a streaming JSON fragment is rechecked before format feedback is sent', () => {
+  const app = fixture([userTurn('1')])
+  app.confirmSend()
+  app.replaceNodes([userTurn('1'), commandCodeTurn('2', '{"command":"cat /etc/letsencrypt/')])
+  app.scan()
+  assert.equal(app.events.some(event => event.event === 'parse-failed'), false)
+  assert.notEqual(app.controller.status().awaitingReplySince, 0)
+  // Markdown finishes rendering before the delayed failure confirmation.
+  app.replaceNodes([userTurn('1'), commandCodeTurn('2', commandJson('cat /etc/letsencrypt/renewal/example.conf'))])
+  app.tick(1000)
+  app.scan()
+  assert.equal(app.commands().length, 1)
+  assert.equal(app.commands()[0].live, true)
+  assert.equal(app.events.some(event => event.event === 'parse-failed'), false)
+  assert.equal(app.controller.status().commandRecoveryUsed, false)
+})
+
+test('a corrected reply that grows after a second format failure remains live and is reported once', async () => {
+  const app = fixture([userTurn('1')])
+  app.confirmSend()
+  app.replaceNodes([userTurn('1'), commandCodeTurn('2', '{"command":"uname -a","background":"true"}')])
+  app.scan()
+  app.tick(1000)
+  const original = app.controller.status().failedCommand
+  const sent = stubSends(app)
+  assert.equal(await app.controller.recoverCommand(original.token, original.generation, true), 'ok')
+  app.confirmResult()
+  app.replaceNodes([userTurn('1'), commandCodeTurn('3', '{"command":"cat /etc/letsencrypt/')])
+  app.scan()
+  app.tick(1000)
+  const second = app.controller.status().failedCommand
+  assert.equal(second.status, 'failed')
+  assert.equal(app.controller.status().awaitingReplySince, 0)
+  const json = commandJson('cat /etc/letsencrypt/renewal/example.conf')
+  // A remounted row and a changed content hash still belong to this failed reply.
+  app.replaceNodes([userTurn('1'), commandCodeTurn('3', json)])
+  app.scan()
+  assert.equal(app.commands().length, 1)
+  assert.equal(app.commands()[0].live, true)
+  assert.equal(app.controller.status().failedCommand, null)
+  assert.equal(app.controller.status().commandRecoveryUsed, false)
+  assert.ok(app.events.some(event => event.reason === 'command-format-resolved'))
+  app.replaceNodes([userTurn('1'), commandCodeTurn('3', json + '\n等待结果')])
+  app.scan()
+  assert.equal(app.commands().length, 1)
+  assert.equal(sent.length, 1, 'no additional correction is sent after the valid command')
+})
+
+test('failure ownership cannot promote history, another row, another route or a stopped task to live', () => {
+  for (const change of ['history', 'row', 'route', 'stop', 'generation']) {
+    const app = fixture([userTurn('1')])
+    app.confirmSend()
+    app.replaceNodes([userTurn('1'), commandCodeTurn('2', '{"command":"uname')])
+    app.scan()
+    app.tick(1000)
+    assert.ok(app.controller.status().failedCommand)
+    if (change === 'history') app.controller.armBaseline()
+    if (change === 'route') app.navigate('/a/chat/s/another-chat')
+    if (change === 'stop') app.controller.endTask()
+    if (change === 'generation') app.controller.configure({ taskPromptGeneration: 1 })
+    app.replaceNodes([userTurn('1'), commandCodeTurn(change === 'row' ? '3' : '2', commandJson('uname -a'))])
+    app.scan()
+    assert.equal(app.commands().some(event => event.live), false, change)
+  }
+})
+
+test('a file request that finishes rendering after a format failure also resolves the live wait', () => {
+  const app = fixture([userTurn('1')])
+  app.confirmSend()
+  app.replaceNodes([userTurn('1'), proseTurn('2', '{"type":"read_files","files":[')])
+  app.scan()
+  app.tick(1000)
+  assert.equal(app.controller.status().failedCommand.parseErrorCode, 'invalid-read-files')
+  app.replaceNodes([userTurn('1'), proseTurn('2', JSON.stringify({ type: 'read_files',
+    files: [{ path: '/var/log/example.log' }], description: '读取日志' }))])
+  app.scan()
+  const reads = app.events.filter(event => event.event === 'read-files')
+  assert.equal(reads.length, 1)
+  assert.equal(reads[0].live, true)
+  assert.equal(app.controller.status().failedCommand, null)
+})
+
+test('delayed format errors are discarded after a task is stopped or its conversation changes', () => {
+  for (const change of ['stop', 'route', 'generation']) {
+    const app = fixture([userTurn('1')])
+    app.confirmSend()
+    app.replaceNodes([userTurn('1'), commandCodeTurn('2', '{"command":"uname')])
+    app.scan()
+    if (change === 'stop') app.controller.endTask()
+    if (change === 'route') app.navigate('/a/chat/s/another-chat')
+    if (change === 'generation') app.controller.configure({ taskPromptGeneration: 1 })
+    app.tick(1000)
+    assert.equal(app.events.some(event => event.event === 'parse-failed'), false, change)
+  }
+})
 
 test('a reply that grows after its command was reported does not report the same command again', () => {
   const turn = commandTurn('2', commandJson('Get-Content a.txt'))
@@ -577,6 +678,7 @@ test('invalid or ambiguous DSML file lists retain file validation and produce on
     app.replaceNodes([userTurn('1'), dsmlTurn('2', dsmlCall('read_files', parameters))])
     app.scan()
     app.scan()
+    app.tick(1000)
     const failures = app.events.filter(event => event.event === 'parse-failed')
     assert.equal(failures.length, 1)
     assert.equal(failures[0].reason, 'invalid-read-files')
@@ -593,6 +695,7 @@ test('invalid file requests get a file-specific correction and a corrected reply
   app.confirmSend()
   app.replaceNodes([userTurn('1'), proseTurn('2', '{"type":"read_files","paths":["stdout.log"]}')])
   app.scan()
+  app.tick(1000)
   const failure = app.controller.status().failedCommand
   const sent = stubSends(app)
   assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true), 'ok')
@@ -615,6 +718,7 @@ test('file format recovery respects the automatic retry budget and inactive hist
   app.confirmSend()
   app.replaceNodes([userTurn('1'), dsmlTurn('2', dsmlCall('read_files', [['paths', 'false', '[]']]))])
   app.scan()
+  app.tick(1000)
   const sent = stubSends(app)
   let failure = app.controller.status().failedCommand
   assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, false), 'busy')
@@ -623,12 +727,14 @@ test('file format recovery respects the automatic retry budget and inactive hist
   app.confirmResult()
   app.replaceNodes([userTurn('1'), dsmlTurn('3', dsmlCall('read_files', [['files', 'false', '[]']]))])
   app.scan()
+  app.tick(1000)
   failure = app.controller.status().failedCommand
   assert.equal(await app.controller.recoverCommand(failure.token, failure.generation, true), 'limit')
   assert.equal(sent.length, 1)
 
   const history = fixture([userTurn('1'), dsmlTurn('2', dsmlCall('read_files', [['paths', 'false', '[]']]))])
   history.scan()
+  history.tick(1000)
   assert.equal(history.controller.status().failedCommand, null)
   assert.equal(history.events.find(event => event.event === 'parse-failed').live, false)
 })

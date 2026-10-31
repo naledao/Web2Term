@@ -612,6 +612,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [sshAdvancedOpen, setSshAdvancedOpen] = useState(true)
   /** The quick host list, shown inside the terminal pane. */
   const [sshBusy, setSshBusy] = useState(false)
+  const [terminalActionError, setTerminalActionError] = useState('')
   const [sshUploading, setSshUploading] = useState(false)
   const [sshFilesOpen, setSshFilesOpen] = useState(false)
   const [pdfPreview, setPdfPreview] = useState<PdfPreviewTarget | null>(null)
@@ -1538,6 +1539,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   )
 
   const connectSsh = useCallback(async (draft: SshHostDraft): Promise<void> => {
+    setTerminalActionError('')
     setSshBusy(true)
     try {
       // Resolves with `connecting`; the outcome arrives over onSshChanged.
@@ -1564,6 +1566,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     async (host: SshHost): Promise<void> => {
       // Already here: reconnecting would drop a working session for nothing.
       if (sshLive && ssh?.hostId === host.id) return
+      setTerminalActionError('')
 
       if (!host.hasPassword) {
         setSshDraft({
@@ -1786,6 +1789,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [])
 
   const dismissSsh = useCallback(async (): Promise<void> => {
+    setTerminalActionError('')
     try {
       setSsh(await window.api.dismissSsh())
     } catch {
@@ -1812,6 +1816,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [])
 
   const resetTerminal = useCallback(async (): Promise<void> => {
+    setTerminalActionError('')
     try {
       setTerminal(await window.api.resetTerminal())
     } catch {
@@ -1819,7 +1824,17 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     }
   }, [])
 
+  const reconnectTerminal = useCallback(async (): Promise<void> => {
+    setTerminalActionError('')
+    try {
+      setTerminal(await window.api.reconnectTerminal())
+    } catch (error) {
+      setTerminalActionError(error instanceof Error ? error.message : '重新连接失败，请重试。')
+    }
+  }, [])
+
   const closeWeb2termTerminal = useCallback(async (): Promise<void> => {
+    setTerminalActionError('')
     setTerminal(await window.api.closeCurrentWeb2termTerminal())
   }, [])
 
@@ -2276,6 +2291,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const handleTerminalAction = (action: TerminalActionId): void => {
     switch (action) {
       case 'interrupt': void interruptTerminal(); break
+      case 'reconnect': void reconnectTerminal(); break
       case 'reset': void resetTerminal(); break
       case 'close':
         if (web2termActive) void closeWeb2termTerminal()
@@ -2884,6 +2900,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             visible={terminalVisible && chatSurfaceVisible}
             mode={sshActive ? 'ssh' : web2termActive ? 'web2term' : 'local'}
             connected={sshActive ? ssh?.status === 'connected' : web2termActive ? Boolean(terminal?.alive) : true}
+            reconnecting={sshActive ? ssh?.status === 'connecting' : terminal?.transport?.status === 'connecting'}
             resetDisabled={web2termActive
               ? terminal?.transport?.status === 'connecting' || terminal?.transport?.status === 'closing'
               : sshActive && ssh?.status === 'connecting'}
@@ -2895,6 +2912,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             onSendDelayChange={updateSendDelay}
           />
         </div>
+        {terminalActionError ? <p className="terminal-actions__error" role="alert">{terminalActionError}</p> : null}
         {terminalModalOpen && appContainer ? (
           <Dialog.Root open modal onOpenChange={(open, details) => {
             if (open) return
