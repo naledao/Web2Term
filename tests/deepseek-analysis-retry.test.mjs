@@ -42,7 +42,7 @@ function fixture() {
   const context = {
     PAGE: { nativeEdit: rules, computerUseRequests: true, fileTurnPositionAttr: 'data-virtual-list-item-key' },
     state, location: { pathname: '/a/chat/s/one' }, Date: { now: () => now },
-    safetyLeak: { count: 0, busy: false, failedKey: null }, nativeEditRetry: null,
+    safetyLeak: { count: 0, busy: false, failedKey: null }, nativeEditRetry: null, userStoppedAt: 0,
     computerSourceSubmissionId: null, focusEditing: null, fileSend: null,
     focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
     focusRowPosition: node => node === reply ? '2' : node?.key || null,
@@ -103,6 +103,24 @@ test('repeated abnormal replies share a two-attempt budget without requiring com
   assert.ok(f.events.some(event => event.reason === 'analysis-leak-limit'))
 })
 
+test('a native user Stop suppresses every automatic resend until a newer reply wait', async () => {
+  for (const kind of ['analysis', 'safety', 'stopped']) {
+    const f = fixture()
+    f.context.userStoppedAt = f.state.awaitingReplySince
+    assert.equal(f.context.api.retryReplyByEditing(f.reply.id, kind), false, kind)
+    await tick()
+    assert.equal(f.sent.length, 0, kind)
+    assert.equal(f.events.some(event => event.event === 'native-edit'), false, kind)
+    assert.equal(f.context.safetyLeak.count, 0, 'a user Stop must not spend the retry budget')
+    assert.equal(f.state.taskActive, true, 'native Stop does not end terminal automation')
+    // The user's next confirmed message starts its own reply and may recover normally.
+    f.state.awaitingReplySince++
+    assert.equal(f.context.api.retryReplyByEditing(f.reply.id, 'analysis'), true)
+    await tick()
+    assert.equal(f.sent.length, 1)
+  }
+})
+
 test('stopped replies edit and resend the original user message even with only a reasoning panel', async () => {
   const f = fixture(), original = f.editor.value
   const reasoning = { id: 'stopped-reply', matches: () => false,
@@ -141,13 +159,14 @@ test('drafts, disabled/covered buttons and open questions never submit a retry',
   }
 })
 
-test('conversation, task, row or generation changes while opening the editor cancel resend', async () => {
-  for (const condition of ['path', 'generation', 'stop', 'row', 'new-send']) {
+test('conversation, task, native Stop, row or generation changes while opening the editor cancel resend', async () => {
+  for (const condition of ['path', 'generation', 'stop', 'native-stop', 'row', 'new-send']) {
     const f = fixture()
     f.recover()
     if (condition === 'path') f.context.location.pathname = '/a/chat/s/two'
     if (condition === 'generation') f.state.taskPromptGeneration++
     if (condition === 'stop') f.state.taskActive = false
+    if (condition === 'native-stop') f.context.userStoppedAt = f.state.awaitingReplySince
     if (condition === 'row') f.row.key = 'another-user'
     if (condition === 'new-send') f.context.safetyLeak = { count: 0, busy: false, failedKey: null }
     await tick()

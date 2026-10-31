@@ -578,6 +578,91 @@ test('focus attachments follow native idle while retaining the old wait until su
   assert.equal(f.api.begin('other', f.files, '新附件', '/a/chat/s/one'), 'busy')
 })
 
+function completionFixture() {
+  const f = fixture(), timers = []
+  const reply = { id: 'previous-answer', body: '【任务完成】上一轮已经完成。', isConnected: true }
+  Object.assign(f.context, {
+    pendingAssistantCompletion: null, pendingComputerRecognition: null,
+    computerReplyWait: null, computerReplySerial: 0, computerSourceSubmissionId: null, mailSourceSubmissionId: null,
+    computerPageEpoch: 'page-one', computerBaselineOf: () => ({}),
+    queryAllAssistant: () => [reply], continueCutOffReply: () => false, replyIsGenerating: () => false,
+    handleSafetyLeak: () => false, legacyTaskSource: () => ({}), snapshotReplyScan: () => ({}), replyScanSnapshot: {},
+    attachmentRoot: () => ({}), findAttachmentInput: () => ({ setAttribute() {} }),
+    fileSendStatus: () => ({ status: 'ready' }), discardUserImageCapture() {}, scheduleCheck() {},
+    setTimeout(callback, delay) { assert.equal(delay, 250); timers.push(callback) }
+  })
+  f.context.setReplyWaiting = arrow('setReplyWaiting', f.context)
+  f.context.resetTaskPrompt = arrow('resetTaskPrompt', f.context)
+  f.context.state.awaitingReplySince = 123
+  f.context.state.taskActive = true
+  const api = Object.fromEntries(['beginFileSend', 'beginFocusFileSend', 'prepareFocusFileSendCaption', 'releaseFileSend']
+    .map(name => [name, method(name, f.context)]))
+  return { ...f, api, timers,
+    queueCompletion() { arrow('settleAssistantReply', f.context)(reply.id, reply.body) },
+    beginUpload() { return api.beginFocusFileSend('new-upload', [{ fileName: 'image.png', mimeType: 'image/png', sizeBytes: 3 }], '新附件', '/a/chat/s/one') },
+    tick() { for (const callback of timers.splice(0)) callback() }
+  }
+}
+
+test('a queued previous completion cannot end a focus text send or attachment upload', async () => {
+  for (const kind of ['text', 'file']) {
+    const f = completionFixture()
+    f.queueCompletion()
+    const pending = kind === 'text' ? f.send('新要求', '/a/chat/s/one', { fromFocus: true }) : null
+    if (kind === 'file') assert.equal(f.beginUpload(), 'ok')
+    // The old task-complete reply remains the latest DOM row throughout the send.
+    f.tick(); f.tick()
+    assert.equal(f.context.state.taskPromptGeneration, 1, kind)
+    assert.equal(f.context.state.taskActive, true, kind)
+    assert.equal(f.context.state.awaitingReplySince, 123, kind)
+    assert.equal(f.reports.some(report => report.event === 'task-finished'), false, kind)
+    if (kind === 'file') assert.equal(f.api.prepareFocusFileSendCaption('new-upload'), true)
+    // Use the actual wait transition that submission/confirmation invokes.
+    f.context.setReplyWaiting(456, kind === 'file' ? 'file-send-submitted' : 'user-sent')
+    f.context.state.programmatic = false
+    f.context.fileSend = null
+    if (pending) { f.calls[0][3]('ok'); assert.equal(await pending, 'ok') }
+    f.tick()
+    assert.equal(f.context.state.awaitingReplySince, 456, kind)
+    assert.equal(f.context.state.taskPromptGeneration, 1, kind)
+    assert.equal(f.reports.some(report => report.event === 'task-finished'), false, kind)
+    assert.equal(f.timers.length, 0, kind)
+  }
+})
+
+test('a completion first observed during an upload waits and resumes if the upload is abandoned', () => {
+  const f = completionFixture()
+  assert.equal(f.beginUpload(), 'ok')
+  f.queueCompletion()
+  f.tick()
+  assert.equal(f.context.state.taskPromptGeneration, 1)
+  assert.equal(f.context.state.awaitingReplySince, 123)
+  assert.equal(f.reports.some(report => report.event === 'task-finished'), false)
+  assert.equal(f.api.releaseFileSend('new-upload'), true)
+  f.tick()
+  assert.equal(f.context.state.awaitingReplySince, 0)
+  assert.equal(f.context.state.taskPromptGeneration, 2)
+  assert.equal(f.context.state.taskActive, false)
+  assert.equal(f.reports.filter(report => report.event === 'task-finished' && report.completed).length, 1)
+  assert.equal(f.timers.length, 0)
+})
+
+test('a deferred completion expires on a route or generation change without another timer', () => {
+  for (const change of ['route', 'generation']) {
+    const f = completionFixture()
+    f.queueCompletion()
+    assert.equal(f.beginUpload(), 'ok')
+    f.tick()
+    if (change === 'route') f.context.location.pathname = '/a/chat/s/two'
+    else f.context.state.taskPromptGeneration++
+    f.tick()
+    assert.equal(f.context.pendingAssistantCompletion, null, change)
+    assert.equal(f.context.state.awaitingReplySince, 123, change)
+    assert.equal(f.reports.some(report => report.event === 'task-finished'), false, change)
+    assert.equal(f.timers.length, 0, change)
+  }
+})
+
 test('confirmed attachment upload reports one human message and never sent-raw', () => {
   const f = uploadFixture('阅读附件')
   const turn = {}

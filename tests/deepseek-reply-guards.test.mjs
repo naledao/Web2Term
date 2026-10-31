@@ -107,6 +107,7 @@ const userTurn = (key) => element('div', { 'data-virtual-list-item-key': key }, 
 function fixture(nodes, page = DEEPSEEK_PAGE) {
   const events = []
   const timers = new Map()
+  const listeners = new Map()
   let timerSerial = 0
   let notifyMutation
   let now = 1_000_000
@@ -119,7 +120,11 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
   const document = {
     body,
     activeElement: null,
-    addEventListener() {},
+    addEventListener(type, listener) {
+      const handlers = listeners.get(type) || []
+      handlers.push(listener)
+      listeners.set(type, handlers)
+    },
     querySelectorAll(selector) { refreshPositions(); return body.querySelectorAll(selector) },
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null },
     elementFromPoint(_x, y) {
@@ -171,6 +176,12 @@ function fixture(nodes, page = DEEPSEEK_PAGE) {
     continues: () => events.filter((event) => event.event === 'continue-generation'),
     commands: () => events.filter((event) => event.event === 'command'),
     cover(element) { cover = element },
+    click(target, isTrusted = true) {
+      const event = { type: 'click', target, isTrusted,
+        preventDefault() { assert.fail('native Stop must reach the site without being intercepted') },
+        stopImmediatePropagation() { assert.fail('native Stop must not submit a draft') } }
+      for (const listener of listeners.get('click') || []) listener(event)
+    },
     replaceNodes(next) {
       body.childNodes = next
       for (const node of next) node.parentElement = body
@@ -294,6 +305,41 @@ const commandTurn = (key, text) => element('div', { 'data-virtual-list-item-key'
 const commandCodeTurn = (key, text) => element('div', { 'data-virtual-list-item-key': key }, [
   element('div', { class: 'ds-assistant-message-main-content' }, [element('pre', {}, [element('code', {}, text)])])
 ])
+
+test('a trusted native Stop prevents analysis recovery after generation becomes idle', () => {
+  for (const trusted of [true, false]) {
+    const composer = element('textarea', { placeholder: '发送消息' })
+    composer.value = ''
+    const stop = element('button', { 'aria-label': '停止' }, element('span', {}, '■'))
+    const toolbar = element('div', {}, [composer, element('button', {}, '附件'), stop])
+    const page = { ...DEEPSEEK_PAGE, stopButtonSelectors: ['button[aria-label="停止"]'],
+      sendButtonSelectors: ['button[aria-label="停止"]'] }
+    const user = userTurn('1'), reply = proseTurn('2', '<analysis> 用户选择停止的回复')
+    const app = fixture([user, toolbar], page)
+    app.confirmSend()
+    app.replaceNodes([user, reply, toolbar])
+    app.click(stop.childNodes[0], trusted)
+    // The site handles Stop and removes the generating control.
+    app.replaceNodes([user, reply])
+    app.scan(); app.tick(250)
+    assert.equal(app.events.some(event => event.reason === 'analysis-leak-detected'), !trusted)
+    assert.equal(app.commands().length, 0)
+  }
+})
+
+test('a trusted Stop sharing Send selectors preserves a native draft and reaches the site', () => {
+  const composer = element('textarea', { placeholder: '发送消息' })
+  composer.value = '用户尚未发送的草稿'
+  const stop = element('button', { 'aria-label': '停止' })
+  const toolbar = element('div', {}, [composer, element('button', {}, '附件'), stop])
+  const app = fixture([userTurn('1'), toolbar], { ...DEEPSEEK_PAGE,
+    stopButtonSelectors: ['button[aria-label="停止"]'], sendButtonSelectors: ['button[aria-label="停止"]'] })
+  app.confirmSend()
+  app.controller.configure({ prefix: 'SYSTEM\n\n' })
+  app.click(stop)
+  assert.equal(composer.value, '用户尚未发送的草稿')
+  assert.equal(app.events.some(event => event.event === 'user-message' && event.text.includes('草稿')), false)
+})
 
 test('a raw analysis recap is intercepted before quoted commands or placeholders can execute', async () => {
   for (const command of ['...', 'echo old-command']) {

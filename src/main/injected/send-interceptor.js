@@ -3300,7 +3300,8 @@
     const budget = safetyLeak, path = location.pathname, generation = state.taskPromptGeneration, since = state.awaitingReplySince
     safetyLeak.busy = true
     const current = () => budget === safetyLeak && path === location.pathname && generation === state.taskPromptGeneration &&
-      state.enabled && state.taskActive && state.awaitingReplySince === since && !state.pendingQuestion && !state.programmatic && !focusEditing
+      state.enabled && state.taskActive && state.awaitingReplySince === since && userStoppedAt < since &&
+      !state.pendingQuestion && !state.programmatic && !focusEditing
     const fail = step => giveUpSafetyLeak(messageId, step, kind, budget)
     const row = latestUserRow()
     const rowKey = row?.getAttribute(PAGE.fileTurnPositionAttr)
@@ -3337,6 +3338,7 @@
 
   /** Shared budget for all recoveries of the same preceding user message. */
   const retryReplyByEditing = (messageId, kind) => {
+    if (state.awaitingReplySince === 0 || userStoppedAt >= state.awaitingReplySince) return false
     if (safetyLeak.busy || nativeEditRetry) return true
     if (safetyLeak.failedKey === messageId) return false
     report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-detected`, messageId, attempt: safetyLeak.count })
@@ -3389,11 +3391,16 @@
     (event) => {
       const target = event.target
       if (!target || typeof target.closest !== 'function') return
+      // Stop can share Send's classes. Record the trusted click before the send
+      // interceptor can treat an existing native draft as another message.
+      const stop = event.isTrusted ? findStopButton() : null
+      if (stop && (target === stop || stop.contains(target))) {
+        userStoppedAt = Date.now()
+        return
+      }
       if (!PAGE.sendButtonSelectors.some((selector) => target.closest(selector))) return
       // The edit box's 发送 shares the send button's classes; it resends that message, not the composer.
       if (handleNativeEditSend(event)) return
-      // While a reply streams the primary button is stop. A user's own stop is never answered with 继续.
-      if (event.isTrusted && state.awaitingReplySince !== 0 && collapse(readComposer(getComposer())) === '') userStoppedAt = Date.now()
       intercept(event)
     },
     true
@@ -4395,11 +4402,18 @@
     if (!text.trim() || state.awaitingReplySince === 0 || pendingAssistantCompletion?.messageId === messageId) return
     const completion = { messageId, path: location.pathname, generation: state.taskPromptGeneration }
     pendingAssistantCompletion = completion
-    setTimeout(() => {
+    const settle = () => {
       if (pendingAssistantCompletion !== completion) return
-      pendingAssistantCompletion = null
       if (completion.path !== location.pathname || completion.generation !== state.taskPromptGeneration ||
-        state.awaitingReplySince === 0 || state.pendingQuestion) return
+        state.awaitingReplySince === 0 || state.pendingQuestion) {
+        pendingAssistantCompletion = null
+        return
+      }
+      // A focus send may start while the native page is idle but this reply's
+      // completion is still pending. Confirmation invalidates this callback via
+      // setReplyWaiting; failure releases it to finish the original reply.
+      if (state.programmatic) { setTimeout(settle, 250); return }
+      pendingAssistantCompletion = null
       const nodes = queryAllAssistant()
       const latest = latestReplyNode(nodes)
       if (!latest || !isAssistantTurn(latest) || !latest.isConnected) return
@@ -4423,7 +4437,8 @@
       report({ event: 'task-finished', messageId, completed, live: true,
         taskPromptGeneration: completion.generation, pagePath: completion.path,
         ...completionSource, computerPageEpoch })
-    }, 250)
+    }
+    setTimeout(settle, 250)
   }
 
   /**
