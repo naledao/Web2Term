@@ -1,5 +1,5 @@
 // User-run only: node --test tests/focus-mermaid.test.mjs tests/focus-code.test.mjs tests/focus-math.test.mjs
-// Real render orchestration with fake Mermaid and DOM; no Electron, browser, user session or network.
+// Render orchestration and real Mermaid parsing with fake DOM/layout; no Electron, browser, user session or network.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
@@ -13,7 +13,7 @@ const compiled = ts.transpileModule(source, {
 const plain = value => JSON.parse(JSON.stringify(value))
 const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve() }
 
-function fixture(render = async () => ({ svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>图表</text></svg>' }), vertices = new Map()) {
+function fixture(render = async () => ({ svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>图表</text></svg>' }), vertices = new Map(), mermaid) {
   const configurations = [], renders = [], containers = []
   let imports = 0
   const exports = {}
@@ -33,8 +33,11 @@ function fixture(render = async () => ({ svg: '<svg xmlns="http://www.w3.org/200
       assert.equal(name, 'mermaid')
       imports++
       return { default: {
-        initialize(config) { configurations.push(plain(config)) },
-        mermaidAPI: { async getDiagramFromText() { return { db: { getVertices: () => vertices } } } },
+        initialize(config) { configurations.push(plain(config)); mermaid?.initialize(config) },
+        async parse(text) { return mermaid ? mermaid.parse(text) : { diagramType: 'flowchart-v2' } },
+        mermaidAPI: { async getDiagramFromText(text) {
+          return mermaid ? mermaid.mermaidAPI.getDiagramFromText(text) : { db: { getVertices: () => vertices } }
+        } },
         render(id, text, container) { renders.push({ id, text, container }); return render(id, text, container) }
       } }
     }
@@ -57,6 +60,41 @@ test('rendering uses the requested theme, protected strict configuration and a d
   assert.match(f.containers[0].style.cssText, /visibility:hidden/)
   assert.equal(f.containers[0].removed, true)
   assert.equal(f.renders[0].text, 'flowchart TD\n A["中文"] --> B')
+})
+
+test('real Mermaid preflight applies frontmatter and init config and resets it for the next diagram', async t => {
+  const { default: mermaid } = await import('mermaid')
+  const { default: DOMPurify } = await import('dompurify')
+  // Node has no DOM. Only replace label sanitization for these trusted branch names;
+  // Mermaid's actual preprocessing, config protection and gitGraph parser still run.
+  const sanitize = Object.getOwnPropertyDescriptor(DOMPurify, 'sanitize')
+  DOMPurify.sanitize = text => String(text)
+  t.after(() => {
+    if (sanitize) Object.defineProperty(DOMPurify, 'sanitize', sanitize)
+    else delete DOMPurify.sanitize
+    mermaid.mermaidAPI.globalReset()
+  })
+  mermaid.mermaidAPI.globalReset()
+  const cases = [
+    { branch: 'master', source: '---\nconfig:\n  gitGraph:\n    mainBranchName: master\n  securityLevel: loose\n  htmlLabels: true\n  maxEdges: 10000\n---\ngitGraph\n  commit\n  checkout master\n  commit' },
+    { branch: 'trunk', source: '%%{init: {"gitGraph": {"mainBranchName": "trunk"}}}%%\ngitGraph\n  commit\n  checkout trunk\n  commit' },
+    { branch: 'main', source: 'gitGraph\n  commit\n  checkout main\n  commit' }
+  ]
+  const f = fixture(async (_id, text) => {
+    const expected = cases[f.renders.length - 1]
+    assert.equal(text, expected.source)
+    const config = mermaid.mermaidAPI.getConfig()
+    assert.equal(config.gitGraph.mainBranchName, expected.branch)
+    assert.equal(config.securityLevel, 'strict')
+    assert.equal(config.htmlLabels, false)
+    assert.equal(config.maxEdges, 500)
+    return { svg: '<svg />' }
+  }, undefined, mermaid)
+  for (const { source } of cases) {
+    assert.equal(await f.renderFocusMermaid(source, 'light', () => false), '<svg />')
+  }
+  assert.equal(f.renders.length, cases.length)
+  assert.ok(f.containers.every(container => container.removed))
 })
 
 test('concurrent diagrams serialize their configuration and use distinct SVG ids', async () => {

@@ -27,6 +27,10 @@ export function renderFocusMermaid(source: string, theme: AppTheme, cancelled: (
       secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'maxEdges',
         'suppressErrorRendering', 'htmlLabels', 'dompurifyConfig', 'themeCSS']
     })
+    // getDiagramFromText strips frontmatter/init directives without applying them.
+    // Parse first to reset previous directives and apply this diagram's secure config.
+    await mermaid.parse(source)
+    if (cancelled()) return null
     // Image-shaped nodes fetch resources during layout, even in strict mode, and
     // external resources cannot display inside the resulting SVG image. Check the
     // parsed nodes (including quoted/YAML attributes) before starting DOM layout.
