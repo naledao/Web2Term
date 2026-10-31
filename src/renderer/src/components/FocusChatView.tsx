@@ -10,7 +10,7 @@ import type { FocusChartData } from './FocusChart'
 import FocusSmartUi, { FocusSmartUiContext } from './FocusSmartUi'
 import FocusLayout from './FocusLayout'
 import FocusComposerModes from './FocusComposerModes'
-import FocusCodeBlock from './FocusCodeBlock'
+import FocusCodeBlock, { FocusCodeThemeContext } from './FocusCodeBlock'
 import FocusTokenUsage from './FocusTokenUsage'
 import FocusExecutionOutput from './FocusExecutionOutput'
 import OutputText from './OutputText'
@@ -227,12 +227,12 @@ const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: 
     blocks.push(source.slice(last, match.index), block)
     last = match.index + match[0].length
   }
-  if (!blocks.length) return <MDEditor.Markdown source={source} skipHtml disableCopy components={{ pre: FocusCodeBlock }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} />
+  if (!blocks.length) return <FocusCodeThemeContext.Provider value={theme}><MDEditor.Markdown source={source} skipHtml disableCopy components={{ pre: FocusCodeBlock }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /></FocusCodeThemeContext.Provider>
   blocks.push(source.slice(last))
-  return <>{blocks.map((block, index) => typeof block === 'string'
+  return <FocusCodeThemeContext.Provider value={theme}>{blocks.map((block, index) => typeof block === 'string'
     ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml disableCopy components={{ pre: FocusCodeBlock }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /> : null
     : block.kind === 'chart' ? <FocusChart key={index} data={block.data} /> : block.kind === 'layout'
-      ? <FocusLayout key={index} data={block.data} /> : <FocusSmartUi key={index} data={block.data} />)}</>
+      ? <FocusLayout key={index} data={block.data} /> : <FocusSmartUi key={index} data={block.data} />)}</FocusCodeThemeContext.Provider>
 })
 
 interface AskContext { range: Range; answer: HTMLElement; text: string; answerText: string; sourceMessageId: string; backward: boolean }

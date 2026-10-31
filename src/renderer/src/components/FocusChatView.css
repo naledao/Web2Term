@@ -114,6 +114,11 @@
 .focus-chat .wmde-markdown .focus-code-block pre{margin:0;padding:4px 20px 18px;border:0;border-radius:0;font:13px/1.8 Consolas,'Cascadia Code',monospace;white-space:pre;overflow-x:auto}
 .focus-chat .wmde-markdown .focus-code-block pre code{padding:0;border:0;background:transparent;font:inherit;white-space:inherit;word-break:normal;overflow-wrap:normal;overflow:visible;max-width:none}
 .focus-chat .wmde-markdown .focus-code-block[data-wrap=true] pre,.focus-chat .wmde-markdown .focus-code-block[data-wrap=true] pre code{white-space:pre-wrap;overflow-wrap:anywhere}
+.focus-mermaid__viewport{max-height:75vh;overflow:auto;overscroll-behavior:contain;padding:16px;background:var(--fc-bg)}
+.focus-mermaid__viewport:focus-visible{outline:2px solid var(--fc-accent);outline-offset:-2px}
+.focus-chat .wmde-markdown .focus-mermaid__image{display:block;width:100%;height:auto;margin:0}
+.focus-mermaid__status{margin:0;padding:8px 20px 16px;color:var(--fc-text);font-size:12px;line-height:1.7}
+.focus-mermaid__status button{margin-left:8px;padding:2px 6px;border:0;border-radius:4px;background:transparent;text-decoration:underline;text-underline-offset:3px}
 /* Tables follow ChatGPT's own look: full width, row rules only, no grid or zebra stripes,
    last column pushed to the right. An explicit Markdown alignment is an inline style and still wins. */
 .focus-chat .wmde-markdown table{display:table;width:100%;max-width:100%;border-collapse:collapse;font-size:14px;line-height:1.6}

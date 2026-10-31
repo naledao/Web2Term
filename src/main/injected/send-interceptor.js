@@ -1056,7 +1056,7 @@
       yml: 'yaml', md: 'markdown', 'plain text': 'text', plaintext: 'text', txt: 'text' }
     const languages = new Set(('java javascript typescript jsx tsx python c cpp csharp go rust ruby php kotlin swift scala groovy ' +
       'sql json xml html css scss bash powershell yaml markdown dockerfile text diff ini toml properties ' +
-      'r lua perl objective-c dart graphql makefile nginx apache console').split(' '))
+      'r lua perl objective-c dart graphql makefile nginx apache console mermaid').split(' '))
     const languageOf = (value, explicit = false) => {
       const text = String(value || '').trim().toLowerCase()
       const language = languageAliases[text] || text

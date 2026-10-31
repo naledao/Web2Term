@@ -49,6 +49,7 @@
     "https-proxy-agent": "^7.0.6",
     "ioredis": "^5.11.1",
     "katex": "^0.19.1",
+    "mermaid": "^12.2.0",
     "mysql2": "^3.24.5",
     "nodemailer": "^10.2.1",
     "react-avatar-editor": "^15.1.0",

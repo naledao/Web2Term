@@ -112,6 +112,22 @@ test('two cards retain independent languages and code with HTML stays escaped te
   assert.match(html, /&lt;/)
 })
 
+test('Mermaid toolbar labels survive extraction and select diagram rendering with intact source', () => {
+  const diagram = 'flowchart TD\n  A["输入分层网络"] --> B["Barycenter 初始布局"]\n  B --> C{"是否改善或持平？"}\n  C -->|是| D["接受新布局"]'
+  const markdown = extract(el('article', [el('p', ['整体结构：']), el('div', [header('Mermaid'), el('pre', [el('code', [diagram])])])]))
+  assert.match(markdown, /```mermaid\nflowchart TD/)
+  assert.doesNotMatch(markdown, /Mermaid|复制代码|自动换行/)
+  assert.ok(markdown.includes(diagram))
+  const html = render(markdown)
+  assert.match(html, /focus-code-block__language">Mermaid</)
+  assert.match(html, /aria-pressed="true">图表</)
+  assert.match(html, /aria-pressed="false">源码</)
+  assert.match(html, /正在生成图表/)
+  assert.match(html, /输入分层网络/)
+  assert.equal(codeExports.codeBlockText(React.createElement('code', null, diagram)), diagram)
+  assert.doesNotMatch(render('```text\n' + diagram + '\n```'), /focus-mermaid|>图表</)
+})
+
 test('copying the Prism token tree produces only original code and preserves whitespace', () => {
   const tokens = React.createElement('code', null, React.createElement('span', { className: 'token keyword' }, 'public'), ' class A {\n\n\n  ',
     React.createElement('span', { className: 'token string' }, '"<b>"'), '\n}')
