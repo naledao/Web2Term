@@ -1577,7 +1577,30 @@ export class ChatGptEmbed {
 
   async sendFocusUser(text: string): Promise<FocusSendOutcome> {
     if (!supportsFocusView(this.platform.id)) return 'unavailable'
-    return this.sendUserTask(text)
+    return this.sendUserTask(text, false, { fromFocus: true })
+  }
+
+  /** Press only this page's native Stop control; terminal task cancellation is separate. */
+  async stopFocusGeneration(): Promise<FocusSendOutcome> {
+    const contents = this.focusPage()
+    if (!contents) return 'unavailable'
+    let clicked = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const deadline = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 6500) })
+      const url = contents.getURL(), path = new URL(url).pathname
+      const point = await Promise.race([contents.executeJavaScript('window.__cmdTerminalInterceptor?.prepareFocusStop(' + JSON.stringify(path) + ')'), deadline])
+      if (contents.isDestroyed() || contents.getURL() !== url) return 'cancelled'
+      if (point?.outcome !== 'ok') return 'unavailable'
+      if (point.x === undefined && point.y === undefined) return 'ok'
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isSafeInteger(point.generation)) return 'unavailable'
+      this.clickAt(point.x, point.y)
+      clicked = true
+      const outcome = await Promise.race([contents.executeJavaScript('window.__cmdTerminalInterceptor?.finishFocusStop(' + JSON.stringify(path) + ',' + point.generation + ')'), deadline])
+      if (contents.isDestroyed() || contents.getURL() !== url) return 'cancelled'
+      return ['ok', 'cancelled', 'unknown'].includes(outcome) ? outcome : 'unknown'
+    } catch { return clicked ? 'unknown' : 'unavailable' }
+    finally { if (timer) clearTimeout(timer) }
   }
 
   private focusEditToken: string | null = null
@@ -1706,7 +1729,7 @@ export class ChatGptEmbed {
   }
 
   /** force: an explicit 继续原任务 — the page stops a streaming reply and ends a stale wait first. */
-  async sendUserTask(text: string, force = false): Promise<FocusSendOutcome> {
+  async sendUserTask(text: string, force = false, options?: { fromFocus: boolean }): Promise<FocusSendOutcome> {
     const contents = this.liveContents()
     if (!contents) return 'unavailable'
     let attempted = false
@@ -1714,8 +1737,9 @@ export class ChatGptEmbed {
       const url = new URL(contents.getURL())
       if (url.origin !== new URL(this.platform.homeUrl).origin) return 'unavailable'
       attempted = true
+      const sendOptions = { ...(force ? { force: true } : {}), ...(options?.fromFocus ? { fromFocus: true } : {}) }
       const result = await contents.executeJavaScript(
-        'window.__cmdTerminalInterceptor?.sendUser(' + JSON.stringify(text) + ', ' + JSON.stringify(url.pathname) + (force ? ', { force: true }' : '') + ') ?? "unavailable"'
+        'window.__cmdTerminalInterceptor?.sendUser(' + JSON.stringify(text) + ', ' + JSON.stringify(url.pathname) + (Object.keys(sendOptions).length ? ', ' + JSON.stringify(sendOptions) : '') + ') ?? "unavailable"'
       )
       return ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed', 'unavailable', 'invalid'].includes(result) ? result : 'stuck'
     } catch { return attempted ? 'stuck' : 'unavailable' }

@@ -39,7 +39,8 @@ function fixture() {
       replyProtocolPrefix: 'SHORT\n\n', replyProtocolVersion: 1, prefixIncludesReplyProtocol: true, replyProtocolFullLength: 6,
       injectedCount: 0, taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: null },
     USER_TEXT_SENTINEL, SEND_TIMEOUT_MS: 6000, SEND_BUTTON_GRACE_MS: 500,
-    fileSend: null, computerResultToken: null, scopedUserSend: null, userTurns: () => [], focusEditing: null, focusEditExcludedIds: new Set(), focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
+    fileSend: null, computerResultToken: null, scopedUserSend: null, userTurns: () => [], focusEditing: null, focusModeChanging: null,
+    nativeEditRetry: null, safetyLeak: { busy: false }, focusEditExcludedIds: new Set(), focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
     getComposer: () => composer, collapse: text => String(text).replace(/\s+/g, ' ').trim(),
     readComposer: node => node.draft, findStopButton: () => null,
     attachmentSnapshot: () => ({}), draftAttachmentEvidence: () => false, hasDraftImageAttachment: () => false,
@@ -47,7 +48,8 @@ function fixture() {
     insertText(node, text) { node.draft = text; return true },
     composerMatches: (node, text) => node.draft === text,
     submitWithRetry(...args) { calls.push(args) }, report: item => reports.push(item),
-    composerToolbarControls: () => [], queryAllAssistant: () => [], isAssistantTurn: () => true,
+    composerToolbarControls: () => [{ matches: () => true, querySelector: () => ({ getAttribute: () => 'M8.3125 0.980206' }) }],
+    queryAllAssistant: () => [], isAssistantTurn: () => true,
     latestReplyNode: nodes => nodes.at(-1), turnKeyOf: node => node.id,
     readReplyText: node => node.body || '', readReplyMarkdown: node => node.markdown || '', smartUiCardsOf: () => [], smartUiLayoutsOf: () => [], focusComposerModesOf: () => [],
     focusModelSettingsOf: () => ({ model: null, effort: null, models: [], efforts: [] }),
@@ -55,7 +57,7 @@ function fixture() {
     extractCommand: () => null, PAGE: DEEPSEEK_PAGE,
     queryAll: () => [], isVisibleElement: () => true, focusSendFailureOf: () => null
   })
-  for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'focusRowPosition', 'focusReplyAnchor', 'conversationPromptInHistory', 'userPromptInjection', 'reportUserInjection']) context[name] = arrow(name, context)
+  for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'focusRowPosition', 'focusReplyAnchor', 'focusGenerationState', 'conversationPromptInHistory', 'userPromptInjection', 'reportUserInjection']) context[name] = arrow(name, context)
   return { context, composer, calls, reports, send: method('sendUser', context), snapshot: method('focusSnapshot', context) }
 }
 
@@ -238,6 +240,35 @@ test('preserves native drafts, pending questions and uploads without attempting 
     assert.equal(await f.send('新消息', '/a/chat/s/one'), 'busy', condition)
     assert.equal(f.calls.length, 0, condition)
     if (condition === 'draft') assert.equal(f.composer.draft, '原网页草稿')
+  }
+})
+
+test('an explicit focus send follows native idle even while the previous task is waiting', async () => {
+  const f = fixture()
+  f.context.state.awaitingReplySince = 123
+  const pending = f.send('继续处理新要求', '/a/chat/s/one', { fromFocus: true })
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.context.state.awaitingReplySince, 123, 'the old wait is retained until the new send is confirmed')
+  f.calls[0][3]('ok')
+  assert.equal(await pending, 'ok')
+})
+
+test('a focus send never overrides a live native stream, unknown control, draft or native recovery', async () => {
+  for (const condition of ['active', 'unknown', 'draft', 'upload', 'recovery', 'question']) {
+    const f = fixture()
+    f.context.state.awaitingReplySince = 123
+    f.context.focusEditing = null; f.context.focusModeChanging = null
+    f.context.nativeEditRetry = null; f.context.safetyLeak = { busy: false }
+    if (condition === 'active' || condition === 'unknown') f.context.composerToolbarControls = () => [{
+      matches: () => true, querySelector: () => ({ getAttribute: () => condition === 'active' ? 'M2 4.88C2 3.68009' : 'spinner' })
+    }]
+    if (condition === 'draft') f.composer.draft = '原网页的草稿'
+    if (condition === 'upload') f.context.fileSend = { token: 'other' }
+    if (condition === 'recovery') f.context.nativeEditRetry = {}
+    if (condition === 'question') f.context.state.pendingQuestion = { messageId: 'question' }
+    assert.equal(await f.send('新消息', '/a/chat/s/one', { fromFocus: true }), 'busy', condition)
+    assert.equal(f.calls.length, 0, condition)
+    assert.equal(f.context.state.awaitingReplySince, 123, condition)
   }
 })
 
@@ -536,6 +567,15 @@ test('upload cannot borrow another draft, task generation or route', () => {
   assert.equal(f.api.begin('other', f.files, '问题', '/a/chat/s/other'), 'busy')
   f.context.state.pendingQuestion = { messageId: 'waiting' }
   assert.equal(f.api.begin('other', f.files, '问题', '/a/chat/s/one'), 'busy')
+})
+
+test('focus attachments follow native idle while retaining the old wait until submission', () => {
+  const f = uploadFixture()
+  f.context.state.awaitingReplySince = 123
+  assert.equal(f.api.begin('owned-file', f.files, '新附件', '/a/chat/s/one'), 'ok')
+  assert.equal(f.context.state.awaitingReplySince, 123)
+  f.context.composerToolbarControls = () => [{ matches: () => true, querySelector: () => ({ getAttribute: () => 'M2 4.88C2 3.68009' }) }]
+  assert.equal(f.api.begin('other', f.files, '新附件', '/a/chat/s/one'), 'busy')
 })
 
 test('confirmed attachment upload reports one human message and never sent-raw', () => {

@@ -44,6 +44,7 @@ export const IpcChannels = {
   embedGetState: 'embed:get-state',
   focusChatGet: 'focus-chat:get',
   focusChatSend: 'focus-chat:send',
+  focusChatStopGeneration: 'focus-chat:stop-generation',
   focusChatRetrySend: 'focus-chat:retry-send',
   focusChatEdit: 'focus-chat:edit',
   focusChatUiAction: 'focus-chat:ui-action',
@@ -2360,6 +2361,7 @@ export interface AppApi {
   pollFocusChat(owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null>
   readFocusExecutionOutput(owner: FocusOwner, messageId: string): Promise<string | null>
   sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome>
+  stopFocusGeneration(owner: FocusOwner): Promise<FocusSendOutcome>
   retryFocusSend(owner: FocusOwner, failureId: string): Promise<FocusSendOutcome>
   editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome>
   actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome>

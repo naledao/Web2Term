@@ -47,7 +47,6 @@ interface Props {
   onOpenTerminal(): void
   onRun(messageId: string): Promise<void>
   onSkip(messageId: string): Promise<void>
-  onStop(): Promise<void>
   onPreviewImage(source: string, name: string): void
   renderAttachment(attachment: ConversationAttachment): ReactNode
 }
@@ -602,6 +601,8 @@ function FocusChatView(props: Props): JSX.Element {
   const lastTurn = turns.at(-1)
   const sendFailure = state?.sendFailure
   const working = !sendFailure && (props.needsAnswer || state?.waiting === true || state?.generating === 'active' || lastTurn?.status === 'working')
+  const nativeGenerating = state?.generating === 'active'
+  const composerBusy = state?.generating !== 'idle'
   const ready = state?.ready === true
   // Computer use waits for its Windows helper; the composer keeps the draft meanwhile.
   const sendBlock = state?.sendBlock || ''
@@ -700,7 +701,7 @@ function FocusChatView(props: Props): JSX.Element {
     event.preventDefault()
     const text = draftRef.current
     const sourceFiles = filesRef.current
-    if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || working || sendFailure || !ready || state?.nativeDraft || sendBlock) return
+    if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || composerBusy || props.needsAnswer || sendFailure || !ready || state?.nativeDraft || sendBlock) return
     sendLock.current = true
     sendCancelled.current = false
     setSending(true)
@@ -744,8 +745,15 @@ function FocusChatView(props: Props): JSX.Element {
     if (stopping) return
     sendCancelled.current = true
     setStopping(true)
-    try { await props.onStop() }
-    catch { if (alive.current) setError('结束任务未确认，请打开执行控制查看当前状态。') }
+    try {
+      readEpoch.current++
+      const outcome = await window.api.stopFocusGeneration(owner)
+      readEpoch.current++
+      const next = await window.api.getFocusChat(owner)
+      if (alive.current && next && focusOwnerKey(next) === ownerKey) applySnapshot(next)
+      if (alive.current && outcome !== 'ok') setError('停止生成未确认，请到原始视图查看当前状态。')
+    }
+    catch { if (alive.current) setError('停止生成未确认，请到原始视图查看当前状态。') }
     finally { if (alive.current) setStopping(false) }
   }
   const editMessage = async (messageId: string, text: string): Promise<string | null> => {
@@ -992,15 +1000,15 @@ function FocusChatView(props: Props): JSX.Element {
             if (text) insertPastedText(input, text)
           }}
           onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}
-          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composing.current && event.keyCode !== 229) { event.preventDefault(); if (!working && !sending && ready && !sendBlock) event.currentTarget.form?.requestSubmit() } }} />
+          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composing.current && event.keyCode !== 229) { event.preventDefault(); if (!composerBusy && !sending && ready && !sendBlock) event.currentTarget.form?.requestSubmit() } }} />
         <input ref={fileInput} type="file" multiple hidden onChange={event => { addFiles([...event.currentTarget.files ?? []]); event.currentTarget.value = '' }} />
         <div className="focus-composer__tools"><div className="focus-composer__left">
           <button type="button" className="focus-composer__attachment" disabled={sending || !!editingId || changingMode !== null || settingPending !== null} onClick={() => fileInput.current?.click()} title="添加附件，也可直接粘贴截图或文件">＋ 附件</button>
           {owner.platformId === 'deepseek' ? <FocusComposerModes modes={state?.composerModes ?? []} disabled={sending || stopping || !!working || !!sendFailure || !!editingId || !ready}
             pending={changingMode} onChange={(id, active) => { void changeMode(id, active) }} /> : null}
         </div><span>{modelLabel}</span>
-          {working || sendFailure || stopping || (sending && draftFiles.length > 0) ? <button type="button" className="focus-composer__send" disabled={stopping} onClick={() => void stop()} aria-label="结束当前任务">{stopping ? <ComposerPendingIcon /> : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
-            <button type="submit" className="focus-composer__send" disabled={sending || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || !!sendBlock || (!draft.trim() && !draftFiles.length)} aria-label="发送消息" title={sendBlock || undefined}>{sending ? <ComposerPendingIcon /> : '↑'}</button>}
+          {nativeGenerating || stopping ? <button type="button" className="focus-composer__send" disabled={stopping || sending || !ready} onClick={() => void stop()} aria-label="停止生成">{stopping ? <ComposerPendingIcon /> : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
+            <button type="submit" className="focus-composer__send" disabled={composerBusy || sending || props.needsAnswer || !!sendFailure || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || !!sendBlock || (!draft.trim() && !draftFiles.length)} aria-label="发送消息" title={sendBlock || undefined}>{sending ? <ComposerPendingIcon /> : '↑'}</button>}
         </div>
       </form><p className="focus-composer__hint">Enter 发送 · Shift+Enter 换行</p>
     </div>

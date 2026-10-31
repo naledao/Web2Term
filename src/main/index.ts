@@ -1539,6 +1539,8 @@ function registerIpcHandlers(): void {
     if (!runtime || typeof request.text !== 'string' || request.text.length > 20000) return 'invalid'
     return runtime.sendFocusMessage(request)
   })
+  ipcMain.handle(IpcChannels.focusChatStopGeneration, (event, owner) =>
+    focusRuntime(event, owner)?.stopFocusGeneration(owner) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatAsk, (event, request) =>
     focusRuntime(event, request)?.askFocusSelection(request) ?? '当前会话已切换，请重新选择文字。')
   ipcMain.handle(IpcChannels.focusChatEdit, (event, request) => {

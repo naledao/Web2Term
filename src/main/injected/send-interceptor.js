@@ -1294,6 +1294,19 @@
   }
 
   const findStopButton = () => findComposerControl(PAGE.stopButtonSelectors)
+  /** The focus composer follows the native control, independently of the task's reply wait. */
+  const focusGenerationState = () => {
+    const rules = PAGE.focus
+    if (!rules) return 'unknown'
+    if (rules.generatingIcon) {
+      const { primaryControlSelector, generatingPrefixes, idlePrefixes } = rules.generatingIcon
+      const primary = [...composerToolbarControls()].reverse().find(control => control.matches(primaryControlSelector))
+      const icon = primary?.querySelector('svg path')?.getAttribute('d') || ''
+      return generatingPrefixes.some(prefix => icon.startsWith(prefix)) ? 'active' :
+        idlePrefixes.some(prefix => icon.startsWith(prefix)) ? 'idle' : 'unknown'
+    }
+    return findStopButton() ? 'active' : 'idle'
+  }
   const replyIsGenerating = (node) => {
     if (findStopButton()) return true
     // Claude can keep its turn explicitly streaming after the toolbar stop
@@ -5404,7 +5417,8 @@
     },
     beginFocusFileSend(token, files, text, expectedPath) {
       if (location.pathname !== expectedPath || typeof text !== 'string' || text.length > 20000 ||
-        !Array.isArray(files) || files.length < 1 || files.length > 3 || state.awaitingReplySince !== 0 || state.pendingQuestion) return 'busy'
+        !Array.isArray(files) || files.length < 1 || files.length > 3 || state.pendingQuestion || focusGenerationState() !== 'idle' ||
+        focusEditing || focusModeChanging || nativeEditRetry || safetyLeak.busy) return 'busy'
       if (state.enabled && state.promptInjectionEnabled && !state.prefix) return 'busy'
       const result = this.beginFileSend(token, files)
       if (result === 'ok' || result === 'resume') {
@@ -5907,7 +5921,12 @@
       if (options?.force === true) await clearForResume()
       if (state.programmatic) return busy('programmatic-send')
       if (fileSend) return busy('file-send')
-      if (state.awaitingReplySince !== 0 || state.pendingQuestion) return busy('awaiting-reply')
+      if (state.pendingQuestion) return busy('awaiting-reply')
+      // A human focus send has the same availability as the native composer. Other
+      // callers (scheduled goals/dialogs) still respect the outstanding task wait.
+      if (options?.fromFocus === true) {
+        if (focusGenerationState() !== 'idle' || focusEditing || focusModeChanging || nativeEditRetry || safetyLeak.busy) return busy('model-generating')
+      } else if (state.awaitingReplySince !== 0) return busy('awaiting-reply')
       if (findStopButton()) return busy('model-generating', { stopButtonFound: true })
       if (collapse(readComposer(element)) !== '') return busy('text-draft')
       const attachments = attachmentSnapshot()
@@ -6168,6 +6187,27 @@
       } finally { if (focusModeChanging === operation) focusModeChanging = null }
     },
 
+    /** Measure only the current page's native Stop for a trusted main-process click. */
+    prepareFocusStop(expectedPath) {
+      if (location.pathname !== expectedPath) return { outcome: 'unavailable' }
+      if (focusGenerationState() === 'idle') return { outcome: 'ok' }
+      const button = findStopButton()
+      if (!button || !isVisibleElement(button) || controlDisabled(button)) return { outcome: 'unavailable' }
+      try { button.scrollIntoView({ block: 'nearest' }) } catch (_) { /* measure its current position */ }
+      const rect = button.getBoundingClientRect()
+      const x = Math.round(rect.left + rect.width / 2), y = Math.round(rect.top + rect.height / 2)
+      const hit = document.elementFromPoint(x, y)
+      if (!hit || (hit !== button && !button.contains(hit))) return { outcome: 'unavailable' }
+      return { outcome: 'ok', x, y, generation: state.taskPromptGeneration }
+    },
+    async finishFocusStop(expectedPath, generation) {
+      const end = Date.now() + 5000
+      const current = () => location.pathname === expectedPath && state.taskPromptGeneration === generation
+      while (current() && focusGenerationState() !== 'idle' && Date.now() < end) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      return !current() ? 'cancelled' : focusGenerationState() === 'idle' ? 'ok' : 'unknown'
+    },
     /** Read-only view data. User text is exposed only through the scoped recovery read above. */
     focusSnapshot() {
       // Every page-specific read below comes from the platform's measured focus rules.
@@ -6200,17 +6240,7 @@
           return answer.length <= 250000 ? [{ sourceMessageId: messageIdOf(node), answer }] : []
         }) : []
       if (focusEditing) return { path: location.pathname, ready: !!composer, nativeDraft: false, waiting: true, generating: 'unknown', reply: null, smartReplies, composerModes, modelSettings, modelSettingsReady }
-      let generating = 'unknown'
-      if (rules.generatingIcon) {
-        const { primaryControlSelector, generatingPrefixes, idlePrefixes } = rules.generatingIcon
-        const primary = [...composerToolbarControls()].reverse().find(control => control.matches(primaryControlSelector))
-        const icon = primary?.querySelector('svg path')?.getAttribute('d') || ''
-        generating = generatingPrefixes.some(prefix => icon.startsWith(prefix)) ? 'active' :
-          idlePrefixes.some(prefix => icon.startsWith(prefix)) ? 'idle' : 'unknown'
-      } else if (PAGE.focus) {
-        // A measured stop control is shown exactly while a reply streams.
-        generating = findStopButton() ? 'active' : 'idle'
-      }
+      const generating = focusGenerationState()
       const rows = queryAllAssistant().filter(node => isAssistantTurn(node))
       let node = focusReplyPosition === null ? latestReplyNode(rows) :
         rows.find(item => focusReplyAnchor(item) === focusReplyPosition)

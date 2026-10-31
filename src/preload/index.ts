@@ -219,6 +219,7 @@ const api: AppApi = {
   pollFocusChat: (owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner, cursor),
   readFocusExecutionOutput: (owner: FocusOwner, messageId: string): Promise<string | null> => ipcRenderer.invoke(IpcChannels.focusExecutionOutput, owner, messageId),
   sendFocusMessage: (request: FocusSendRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatSend, request),
+  stopFocusGeneration: (owner: FocusOwner): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatStopGeneration, owner),
   retryFocusSend: (owner, failureId): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatRetrySend, owner, failureId),
   editFocusMessage: (request: FocusEditRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatEdit, request),
   actOnFocusUi: (request: FocusUiRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatUiAction, request),

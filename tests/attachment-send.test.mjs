@@ -230,6 +230,9 @@ test('DeepSeek confirms a focus upload when user and assistant messages share a 
     const app = fixture([file], { ...platformExports.DEEPSEEK_PAGE, sendButtonSelectors: ['button[aria-label="发送"]'] }, 'textarea')
     // Start the actual focus path so confirmation must report the original user text and owned token.
     app.controller.releaseFileSend(token)
+    // The focus sender also reads the native primary control's idle icon.
+    app.send.setAttribute('class', 'ds-button--primary ds-button--circle')
+    app.send.replaceChildren('发送', element('svg', {}, [element('path', { d: 'M8.3125 0.980206' })]))
     app.controller.configure({ prefix: 'SYSTEM\n\n' })
     const text = '请帮我检查图片中的配置管理用途。'
     assert.equal(app.controller.beginFocusFileSend(token, [file], text, '/c/offline-fixture'), 'ok')

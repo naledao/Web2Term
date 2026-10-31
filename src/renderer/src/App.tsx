@@ -2455,7 +2455,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               onQuestion={focusQuestion}
               onOriginal={focusOriginal}
               onOpenTerminal={focusOpenTerminal}
-              onRun={runExecution} onSkip={skipExecution} onStop={endTask}
+              onRun={runExecution} onSkip={skipExecution}
               onPreviewImage={openImagePreview}
               renderAttachment={focusAttachment} />
             </div>

@@ -1766,6 +1766,13 @@ export class SessionRuntime {
     return this.embed.recoverCommand(this.runner.canSendAutomaticResult(), true)
   }
 
+  async stopFocusGeneration(owner: FocusOwner): Promise<FocusSendOutcome> {
+    if (!this.ownsFocus(owner)) return 'unavailable'
+    const embed = this.embed
+    const outcome = await embed.stopFocusGeneration()
+    return this.ownsFocus(owner) && this.embed === embed ? outcome : 'cancelled'
+  }
+
   async sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome> {
     if (!this.ownsFocus(request)) return 'unavailable'
     if (typeof request.text !== 'string' || request.text.length > 20000 ||
