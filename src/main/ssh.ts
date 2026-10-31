@@ -401,7 +401,8 @@ export class SshManager {
   reconnect(): SshState | null {
     if (!this.state.attached || !this.connectionTarget) return null
     if (this.state.status === 'connecting') return this.getState()
-    const cwd = this.exec?.cwd || this.ptyCwd || this.reconnectCwd
+    // Disconnect clears exec, so its saved directory takes precedence over the independent PTY.
+    const cwd = this.exec?.cwd || this.reconnectCwd || this.ptyCwd
     const ptyCwd = this.ptyCwd || this.reconnectPtyCwd || cwd
     this.exec?.dispose(true)
     return this.connect(this.connectionTarget, cwd, ptyCwd, false, true)
