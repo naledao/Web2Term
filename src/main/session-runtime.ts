@@ -396,6 +396,7 @@ export class SessionRuntime {
   environment: EnvironmentInfo = nodeFallback()
   private readonly remoteRipgrep = new RemoteRipgrepSetup(state => this.send(IpcChannels.remoteRipgrepChanged, state))
   private remoteRipgrepProbePending = false
+  private remoteRipgrepSend: { connectionId: string; controller: AbortController } | null = null
   environmentScope: Pick<TerminalNotes, 'scope' | 'hostId' | 'label'> = {
     scope: 'local',
     hostId: '',
@@ -965,6 +966,7 @@ export class SessionRuntime {
         if (state.conversationId !== entry.conversationId) {
           const previousConversationId = entry.conversationId
           const createdNewChat = previousConversationId === null && state.conversationId !== null
+          if (!createdNewChat && isActive()) this.remoteRipgrepSend?.controller.abort()
           if (!createdNewChat) this.interruptTaskControl(platform.id)
           this.conversationTools.bind(platform.id, previousConversationId, state.conversationId)
           entry.conversationId = state.conversationId
@@ -1133,6 +1135,7 @@ export class SessionRuntime {
         writeInjectionLedgerDiagnostic(platform.id, 'injection-reset', conversationId === null ? 'draft' : 'saved', null)
       },
       onInterceptor: (status) => {
+        if (isActive() && (!status.enabled || !status.promptInjectionEnabled)) this.remoteRipgrepSend?.controller.abort()
         this.mailNotifications?.reconcile()
         this.toolPromptReads?.reconcile(); this.scheduledTaskTools?.reconcile()
         this.captureGoal(status.lastSentText)
@@ -1314,6 +1317,7 @@ export class SessionRuntime {
   }
 
   setActive(active: boolean): void {
+    if (!active) this.remoteRipgrepSend?.controller.abort()
     // Selecting another workspace hides this conversation, but does not replace its
     // terminal, target or send owner. Only desktop-tool authority needs that handover.
     if (!active && !this.canRunConversationInBackground()) {
@@ -1935,6 +1939,7 @@ export class SessionRuntime {
     this.refreshComputerUseCapabilities()
   }
   private stopAutomation(reason: TaskStopReason, allPlatforms: boolean): Promise<InterceptorStatus> {
+    this.remoteRipgrepSend?.controller.abort()
     this.mailNotifications?.cancel()
     this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel()
     this.taskEnded = true
@@ -3729,16 +3734,19 @@ export class SessionRuntime {
 
   /** A connection key changes on a reconnect, never on cwd changes or ordinary output. */
   private syncRemoteRipgrep(): void {
-    if (this.disposed) { this.remoteRipgrep.observe(null); return }
-    if (this.web2term) {
+    if (this.disposed) this.remoteRipgrep.observe(null)
+    else if (this.web2term) {
       const key = this.web2term.connectionKey
       this.remoteRipgrep.observe(key, { transport: 'web2term', hostId: this.web2term.hostId,
         name: this.web2term.binding.deviceName || this.web2term.binding.agentId, target: this.web2term.binding.agentId })
-      return
+    } else {
+      const ssh = this.ssh?.getState()
+      const key = ssh?.status === 'connected' ? this.ssh.connectionKey : null
+      this.remoteRipgrep.observe(key, ssh ? { transport: 'ssh', hostId: ssh.hostId, name: ssh.name, target: ssh.target } : undefined)
     }
-    const ssh = this.ssh?.getState()
-    const key = ssh?.status === 'connected' ? this.ssh.connectionKey : null
-    this.remoteRipgrep.observe(key, ssh ? { transport: 'ssh', hostId: ssh.hostId, name: ssh.name, target: ssh.target } : undefined)
+    if (this.remoteRipgrepSend && this.remoteRipgrep.getState()?.connectionId !== this.remoteRipgrepSend.connectionId) {
+      this.remoteRipgrepSend.controller.abort()
+    }
   }
 
   getRemoteRipgrepState(): RemoteRipgrepState | null {
@@ -3771,13 +3779,22 @@ export class SessionRuntime {
     }
     this.focusSending = true
     const embed = this.embed
+    const sending = { connectionId: request.connectionId, controller: new AbortController() }
+    this.remoteRipgrepSend = sending
+    const current = (): boolean => !this.disposed && this.active && this.embed === embed && request.platformId === this.activePlatformId &&
+      // A successful first send assigns the new conversation id while confirmation is pending.
+      (request.conversationId === null || request.conversationId === embed.getState().conversationId) &&
+      this.getRemoteRipgrepState()?.connectionId === request.connectionId
     try {
       return await this.remoteRipgrep.request(request.connectionId, async () => {
-        if (this.disposed || !this.active || this.embed !== embed || request.platformId !== this.activePlatformId ||
-          request.conversationId !== embed.getState().conversationId || this.getRemoteRipgrepState()?.connectionId !== request.connectionId) return 'cancelled'
-        return embed.sendUserTask(remoteRipgrepInstallPrompt(target, this.environment.osCaption, this.environment.architecture))
+        if (!current()) return 'cancelled'
+        return embed.sendScopedUserTask(remoteRipgrepInstallPrompt(target, this.environment.osCaption, this.environment.architecture), sending.controller.signal, current)
       })
-    } finally { this.focusSending = false; this.options.scheduledTasks?.wake() }
+    } finally {
+      if (this.remoteRipgrepSend === sending) this.remoteRipgrepSend = null
+      this.focusSending = false
+      this.options.scheduledTasks?.wake()
+    }
   }
 
   /** Recheck after an AI command releases the shell, including after installation. */
@@ -3845,6 +3862,7 @@ export class SessionRuntime {
   }
 
   dispose(): void {
+    this.remoteRipgrepSend?.controller.abort()
     this.mailNotifications?.cancel()
     this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel()
     this.scheduledSendAbort?.abort()

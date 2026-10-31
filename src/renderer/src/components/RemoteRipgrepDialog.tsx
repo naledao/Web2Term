@@ -4,14 +4,16 @@ import type { FocusOwner } from '@shared/focus-chat'
 import type { RemoteRipgrepState } from '@shared/remote-ripgrep'
 import './RemoteRipgrepDialog.css'
 
-export default function RemoteRipgrepDialog({ state, owner, container }: {
+export default function RemoteRipgrepDialog({ state, owner, container, onDefer }: {
   state: RemoteRipgrepState
   owner: FocusOwner
   container: HTMLElement
+  onDefer: () => void
 }) {
   const [pending, setPending] = useState(false)
   const [message, setMessage] = useState('')
   const [sendUncertain, setSendUncertain] = useState(false)
+  const [blocked, setBlocked] = useState(false)
   const actionPending = useRef(false)
   const cancelButton = useRef<HTMLButtonElement>(null)
   const busy = pending || state.prompt === 'sending'
@@ -35,6 +37,7 @@ export default function RemoteRipgrepDialog({ state, owner, container }: {
     setMessage('')
     try {
       const result = await window.api.requestRemoteRipgrepInstall(request)
+      setBlocked(result.status === 'blocked')
       if (result.status !== 'sent') setMessage(result.message)
     } catch { setSendUncertain(true); setMessage('发送结果尚未确认，请先查看 AI 对话，避免重复发送。') }
     finally { actionPending.current = false; setPending(false) }
@@ -43,7 +46,8 @@ export default function RemoteRipgrepDialog({ state, owner, container }: {
   return <Dialog.Root open disablePointerDismissal onOpenChange={(open, details) => {
     if (open) return
     if (busy) { details.cancel(); return }
-    void dismiss()
+    if (blocked && !uncertain) onDefer()
+    else void dismiss()
   }}>
     <Dialog.Portal container={container}>
       <Dialog.Backdrop className="remote-rg-backdrop" />
@@ -59,9 +63,10 @@ export default function RemoteRipgrepDialog({ state, owner, container }: {
           </dl>
           <p className="remote-rg-dialog__description">同意后会向当前 AI 对话发送安装要求，由 AI 使用已连接的远端终端安装并检查版本。你可以在对话中查看执行过程；暂不安装仍可继续使用终端。</p>
           {message || state.message ? <p className="remote-rg-dialog__message" role="alert">{message || state.message}</p> : null}
+          {blocked && !uncertain ? <p className="remote-rg-dialog__description">可先返回处理草稿、登录或终端设置，再点击顶部工具栏的“重试安装 rg”。</p> : null}
         </div>
         <div className="remote-rg-dialog__actions">
-          <Dialog.Close ref={cancelButton} type="button" disabled={busy}>{uncertain ? '我知道了' : '暂不安装'}</Dialog.Close>
+          <Dialog.Close ref={cancelButton} type="button" disabled={busy}>{uncertain ? '我知道了' : blocked ? '先处理，再重试' : '暂不安装'}</Dialog.Close>
           {!uncertain ? <button type="button" className="remote-rg-dialog__install" disabled={busy} onClick={() => void install()}>{busy ? '正在发送…' : '让 AI 安装'}</button> : null}
         </div>
       </Dialog.Popup>

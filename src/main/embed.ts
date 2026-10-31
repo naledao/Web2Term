@@ -1721,6 +1721,34 @@ export class ChatGptEmbed {
     } catch { return attempted ? 'stuck' : 'unavailable' }
   }
 
+  /** A dialog approval belongs to one live target, including throughout page-side retries. */
+  async sendScopedUserTask(text: string, signal: AbortSignal, isCurrent: () => boolean): Promise<FocusSendOutcome> {
+    const contents = this.liveContents()
+    if (!contents) return 'unavailable'
+    const token = randomUUID(), generation = this.taskPromptGeneration, epoch = this.computerPageEpoch
+    const current = (): boolean => !signal.aborted && isCurrent() && !contents.isDestroyed() &&
+      generation === this.taskPromptGeneration && epoch === this.computerPageEpoch
+    const cancel = (): void => {
+      if (!contents.isDestroyed()) void contents.executeJavaScript(
+        `window.__cmdTerminalInterceptor?.cancelScopedUser(${JSON.stringify(token)})`).catch(() => {})
+    }
+    signal.addEventListener('abort', cancel, { once: true })
+    let attempted = false
+    try {
+      if (!current()) return 'cancelled'
+      const url = new URL(contents.getURL())
+      if (url.origin !== new URL(this.platform.homeUrl).origin) return 'unavailable'
+      const allowNewConversation = this.platform.conversationIdFromPath(url.pathname) === null
+      attempted = true
+      const outcome: unknown = await contents.executeJavaScript(
+        `window.__cmdTerminalInterceptor?.sendScopedUser(${JSON.stringify(text)},${JSON.stringify(url.pathname)},${JSON.stringify(token)},${allowNewConversation}) ?? 'unavailable'`)
+      if (outcome === 'cancelled') return 'cancelled'
+      if (!current()) return 'unknown'
+      return ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed', 'unavailable', 'invalid'].includes(String(outcome)) ? outcome as FocusSendOutcome : 'unknown'
+    } catch { return attempted ? 'unknown' : 'cancelled' }
+    finally { signal.removeEventListener('abort', cancel) }
+  }
+
   /** A scheduled goal follows the user-task pipeline, with its own cancellable submission identity. */
   async sendScheduledUser(text: string, conversationId: string, runId: string, signal: AbortSignal, isCurrent: () => boolean): Promise<FocusSendOutcome> {
     const contents = this.liveContents()

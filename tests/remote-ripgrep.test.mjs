@@ -1,4 +1,4 @@
-// User-run only: node --test tests/remote-ripgrep.test.mjs tests/web2term-environment.test.mjs
+// User-run only: node --test tests/remote-ripgrep.test.mjs tests/focus-page.test.mjs tests/web2term-environment.test.mjs
 // Actual state machine, prompt and runtime methods with fake remote connections and AI pages.
 // No Electron, shell, package manager, SSH login, AI message or network is started.
 import assert from 'node:assert/strict'
@@ -115,7 +115,7 @@ const ast = ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url
 const cls = ast.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'SessionRuntime')
 const names = ['syncRemoteRipgrep', 'getRemoteRipgrepState', 'dismissRemoteRipgrep', 'requestRemoteRipgrepInstall', 'refreshRemoteRipgrep']
 const body = names.map(name => cls.members.find(node => node.name?.getText(ast) === name).getText(ast)).join('\n')
-const Runtime = new Script(compile(`class Runtime { ${body} }; Runtime`)).runInNewContext(shared)
+const Runtime = new Script(compile(`class Runtime { ${body} }; Runtime`)).runInNewContext({ ...shared, AbortController })
 function runtimeFixture() {
   const sends = [], runtime = new Runtime(), connection = {}, setup = new RemoteRipgrepSetup(() => {})
   const sshState = { status: 'connected', hostId: target.hostId, name: target.name, target: target.target }
@@ -125,7 +125,7 @@ function runtimeFixture() {
     runner: { hasInFlightWork: () => false }, taskRunning: () => false,
     embed: { getState: () => ({ conversationId: 'conversation-a' }),
       getInterceptorStatus: () => ({ installed: true, enabled: true, promptInjectionEnabled: true }),
-      sendUserTask: async text => { sends.push(text); return 'ok' } },
+      sendScopedUserTask: async text => { sends.push(text); return 'ok' } },
     environment: { osCaption: 'Linux', architecture: 'x86_64' }, options: {}
   })
   const state = runtime.getRemoteRipgrepState()
@@ -181,4 +181,157 @@ test('device terminals have their own connection checks, and verification waits 
   f.runtime.refreshRemoteRipgrep()
   await Promise.resolve()
   assert.equal(probes, 1)
+})
+
+test('SSH and device reconnects revoke an installation send before its next page retry', async () => {
+  for (const transport of ['ssh', 'web2term']) {
+    const f = runtimeFixture()
+    if (transport === 'web2term') {
+      f.runtime.web2term = { alive: true, connectionKey: {}, hostId: 'device-a', binding: { deviceName: 'Device A', agentId: 'agent-a' } }
+      const state = f.runtime.getRemoteRipgrepState()
+      f.setup.update(state.connectionId, 'missing')
+      f.request.connectionId = state.connectionId
+    }
+    let signal
+    f.runtime.embed.sendScopedUserTask = async (_text, abort, current) => {
+      signal = abort
+      assert.equal(current(), true)
+      return new Promise(resolve => abort.addEventListener('abort', () => resolve('cancelled'), { once: true }))
+    }
+    const pending = f.runtime.requestRemoteRipgrepInstall(f.request)
+    assert.equal(signal.aborted, false)
+    if (transport === 'web2term') f.runtime.web2term.connectionKey = {}
+    else f.runtime.ssh.connectionKey = {}
+    f.runtime.syncRemoteRipgrep()
+    assert.equal(signal.aborted, true)
+    const next = plain(f.setup.getState())
+    assert.equal((await pending).status, 'uncertain')
+    assert.deepEqual(plain(f.setup.getState()), next)
+    assert.equal(f.runtime.remoteRipgrepSend, null)
+    assert.equal(f.runtime.focusSending, false)
+  }
+})
+
+test('a scoped installation can bind its first conversation without treating it as a handover', async () => {
+  const f = runtimeFixture()
+  let conversationId = null
+  f.runtime.embed.getState = () => ({ conversationId })
+  f.request.conversationId = null
+  f.runtime.embed.sendScopedUserTask = async (_text, signal, current) => {
+    conversationId = 'created-by-this-send'
+    assert.equal(current(), true)
+    assert.equal(signal.aborted, false)
+    return 'ok'
+  }
+  assert.equal((await f.runtime.requestRemoteRipgrepInstall(f.request)).status, 'sent')
+})
+
+test('the embed forwards connection cancellation to the pending page send', async () => {
+  const embedPath = '../src/main/embed.ts'
+  const embedAst = ts.createSourceFile(embedPath, readFileSync(new URL(embedPath, import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
+  const embedClass = embedAst.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'ChatGptEmbed')
+  const method = embedClass.members.find(node => node.name?.getText(embedAst) === 'sendScopedUserTask').getText(embedAst)
+  const Embed = new Script(compile(`class Embed { ${method} }; Embed`)).runInNewContext({ randomUUID, URL })
+  const scripts = [], controller = new AbortController()
+  let finish
+  const contents = { isDestroyed: () => false, getURL: () => 'https://chat.example.invalid/chat-a', executeJavaScript(script) {
+    scripts.push(script)
+    if (script.includes('cancelScopedUser')) { finish('cancelled'); return Promise.resolve() }
+    return new Promise(resolve => { finish = resolve })
+  } }
+  const embed = Object.assign(new Embed(), { liveContents: () => contents, taskPromptGeneration: 1, computerPageEpoch: 1,
+    platform: { homeUrl: 'https://chat.example.invalid', conversationIdFromPath: () => 'chat-a' } })
+  const pending = embed.sendScopedUserTask('install rg', controller.signal, () => true)
+  controller.abort()
+  assert.equal(await pending, 'cancelled')
+  assert.equal(scripts.length, 2)
+  const token = scripts[0].match(/"([\w-]{36})"/)[1]
+  assert.ok(scripts[1].includes(JSON.stringify(token)), 'cancellation names the exact page operation')
+})
+
+test('AI and manual commands wait for one shared environment probe without interrupting the remote shell', async () => {
+  const runnerPath = '../src/main/commands.ts'
+  const runnerAst = ts.createSourceFile(runnerPath, readFileSync(new URL(runnerPath, import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
+  const runnerClass = runnerAst.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'CommandRunner')
+  const methods = ['runEnvironmentProbe', 'runOnShell', 'prepareExecutionShell'].map(name => runnerClass.members.find(node => node.name?.getText(runnerAst) === name).getText(runnerAst)).join('\n')
+  const Runner = new Script(compile(`class Runner { ${methods} }; Runner`)).runInNewContext({ summariseResult: () => ({}), MAX_RUNTIME_MS: 30000 })
+  for (const kind of ['ai', 'manual']) {
+    const calls = []
+    let finish
+    const result = output => ({ output, cwd: '/remote', exitCode: 0, rejected: false })
+    const shell = { alive: true, running: false, kind: 'posix', cwd: '/remote', probeCommand: 'probe', run(command) {
+      calls.push(command)
+      if (command !== 'probe') return Promise.resolve(result(command))
+      shell.running = true
+      return new Promise(resolve => { finish = () => { shell.running = false; resolve(result('report')) } })
+    } }
+    const runner = Object.assign(new Runner(), { activeShell: null, activeRunId: 0, localShell: null, disposed: false,
+      ensureShell: () => shell, deps: { remoteShell: () => shell }, appendLine() {}, flushTerminal() {},
+      interruptWithNotice() { assert.fail('background probe must not cause a shell reset') } })
+    const probe = runner.runEnvironmentProbe(), duplicate = runner.runEnvironmentProbe()
+    const next = kind === 'ai' ? runner.prepareExecutionShell().then(prepared => {
+      assert.equal(prepared, shell)
+      return runner.runOnShell(prepared, 'next-command')
+    }) : runner.runOnShell(shell, 'next-command')
+    assert.deepEqual(calls, ['probe'])
+    finish()
+    await Promise.all([probe, duplicate])
+    assert.equal((await next).output, 'next-command')
+    assert.deepEqual(calls, ['probe', 'next-command'])
+    assert.equal(runner.environmentProbe, null)
+
+    // A new backend gets a fresh report even while the previous probe is settling.
+    const previousProbe = runner.runEnvironmentProbe()
+    const replacement = { ...shell, run: async () => result('new-host-report') }
+    runner.ensureShell = () => replacement
+    const nextProbe = runner.runEnvironmentProbe()
+    finish()
+    await previousProbe
+    assert.equal((await nextProbe).result.output, 'new-host-report')
+
+    runner.ensureShell = () => shell
+    const finalProbe = runner.runEnvironmentProbe()
+    const cancelled = runner.runOnShell(shell, 'must-not-run-after-stop')
+    runner.disposed = true
+    finish()
+    await finalProbe
+    assert.equal((await cancelled).rejected, true)
+    assert.ok(!calls.includes('must-not-run-after-stop'))
+  }
+})
+
+test('a blocked dialog closes for corrective action without dismissing the connection recommendation', async () => {
+  const hooks = [], events = []
+  let hook = 0
+  const nextHook = initial => { const index = hook++; if (!(index in hooks)) hooks[index] = initial; return index }
+  const react = {
+    useState(initial) { const index = nextHook(initial); return [hooks[index], value => { hooks[index] = value }] },
+    useRef(initial) { return hooks[nextHook({ current: initial })] }
+  }
+  const jsx = (type, props) => ({ type, props })
+  const exports = {}
+  new Script(ts.transpileModule(readFileSync(new URL('../src/renderer/src/components/RemoteRipgrepDialog.tsx', import.meta.url), 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX }
+  }).outputText).runInNewContext({ exports, window: { api: {
+    requestRemoteRipgrepInstall: async () => ({ status: 'blocked', message: '请处理网页草稿后再试。' }),
+    dismissRemoteRipgrep: async () => { events.push('dismiss'); return true }
+  } }, require(name) {
+    if (name === 'react') return react
+    if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }
+    if (name === '@base-ui/react/dialog') return { Dialog: new Proxy({}, { get: (_target, key) => key }) }
+    if (name.endsWith('.css')) return {}
+    assert.fail('unexpected UI dependency: ' + name)
+  } })
+  const state = { ...target, connectionId: 'connection-a', availability: 'missing', prompt: 'pending', message: '' }
+  const render = () => { hook = 0; return exports.default({ state, owner: {}, container: {}, onDefer: () => events.push('defer') }) }
+  const descendants = node => !node || typeof node !== 'object' ? [] : Array.isArray(node)
+    ? node.flatMap(descendants) : [node, ...descendants(node.props?.children)]
+  let tree = render()
+  descendants(tree).find(node => node.type === 'button' && node.props.onClick).props.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  tree = render()
+  assert.ok(descendants(tree).some(node => node.props?.children === '先处理，再重试'))
+  tree.props.onOpenChange(false, { cancel() { assert.fail('blocked dialog should allow leaving') } })
+  assert.deepEqual(events, ['defer'])
+  assert.equal(state.prompt, 'pending')
 })

@@ -254,6 +254,8 @@
   let userSubmissionSerial = 0
   // Isolates desktop-result retries without changing the existing task prompt/protocol.
   let computerResultToken = null
+  // Object identity keeps cancelled dialog sends separate from any later user send.
+  let scopedUserSend = null
   const report = (payload) => {
     try {
       if (payload.event === 'user-message') computerResultToken = null
@@ -2361,12 +2363,13 @@
 
     const finish = (ok) => {
       if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
+          sendContext.scope?.cancelled === true ||
           (sendContext.computerResultToken !== undefined && sendContext.computerResultToken !== computerResultToken) ||
           (sendContext.path !== undefined && sendContext.path !== location.pathname)) {
         discardUserImageCapture(attachmentToken)
-        if (sendContext.taskPromptGeneration === state.taskPromptGeneration &&
+        if (!sendContext.scope?.cancelled && sendContext.taskPromptGeneration === state.taskPromptGeneration &&
             (sendContext.computerResultToken === undefined || sendContext.computerResultToken === computerResultToken)) state.programmatic = false
-        if (done) done('stuck')
+        if (done) done(sendContext.scope?.cancelled && !sendContext.scope.attempted ? 'cancelled' : 'stuck')
         return
       }
       const clarification = !isRaw && sendContext.question !== null
@@ -2428,6 +2431,7 @@
     // A task may end during the initial send delay, retry wait or confirmation poll.
     // Its old submission must never click Send or re-open the task afterwards.
     if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
+        sendContext.scope?.cancelled === true ||
         (sendContext.computerResultToken !== undefined && sendContext.computerResultToken !== computerResultToken) ||
         (sendContext.path !== undefined && sendContext.path !== location.pathname)) {
       finish(false)
@@ -2468,8 +2472,10 @@
       recovery < RECOVERY_ACTIONS.length && element !== null && Date.now() >= graceUntil
 
     if (button && !generating && !controlDisabled(button)) {
+      if (sendContext.scope) sendContext.scope.attempted = true
       pressButton(button)
     } else if (button === null && !generating && textControl) {
+      if (sendContext.scope) sendContext.scope.attempted = true
       pressEnter(element)
     } else if (button === null && !generating && fallbackDue) {
       /*
@@ -2500,6 +2506,7 @@
         attempt,
         ...diagnoseSendFailure(attempt, recoveryTried)
       })
+      if (sendContext.scope) sendContext.scope.attempted = true
       runRecovery(recoveryTried, element)
     } else {
       // The send button only enables once the editor has committed the edit, and it can
@@ -2518,6 +2525,7 @@
     const confirmStartedAt = Date.now()
     const confirm = () => {
       if (sendContext.taskPromptGeneration !== state.taskPromptGeneration ||
+          sendContext.scope?.cancelled === true ||
           (sendContext.computerResultToken !== undefined && sendContext.computerResultToken !== computerResultToken) ||
           (sendContext.path !== undefined && sendContext.path !== location.pathname)) {
         finish(false)
@@ -5781,17 +5789,40 @@
       if (injection.metadata.promptInjected && !state.prefix) return Promise.resolve('unavailable')
       const payload = injection.prefix ? injection.prefix + USER_TEXT_SENTINEL + normalizeLineEndings(text) : normalizeLineEndings(text)
       const sendContext = { taskPromptGeneration: state.taskPromptGeneration, ...injection.metadata, conversationPromptInjected,
+        ...(options?.scope ? { scope: options.scope, ...(!options.scope.allowNewConversation ? { path: expectedPath } : {}) } : {}),
         ...(options?.scheduledRunId ? { scheduledRunId: options.scheduledRunId, computerResultToken: options.computerResultToken, path: expectedPath } : {}) }
       state.programmatic = true
       if (!insertText(element, payload) || !composerMatches(element, payload)) {
         state.programmatic = false
         return Promise.resolve('insert-failed')
       }
+      if (options?.scope) options.scope.payload = payload
       reportUserInjection(injection)
       return new Promise(resolve => submitWithRetry(
         payload, 0, false, resolve, Date.now() + SEND_TIMEOUT_MS, 0,
         Date.now() + SEND_BUTTON_GRACE_MS, null, sendContext
       ))
+    },
+
+    sendScopedUser(text, expectedPath, token, allowNewConversation = false) {
+      if (typeof token !== 'string' || !/^[\w-]{1,128}$/.test(token)) return Promise.resolve('invalid')
+      if (scopedUserSend || state.programmatic) return Promise.resolve('busy')
+      const scope = { token, path: expectedPath, allowNewConversation, cancelled: false, attempted: false, payload: null }
+      scopedUserSend = scope
+      return this.sendUser(text, expectedPath, { scope }).finally(() => {
+        if (scopedUserSend === scope) scopedUserSend = null
+      })
+    },
+
+    cancelScopedUser(token) {
+      const scope = scopedUserSend
+      if (!scope || scope.token !== token) return
+      scope.cancelled = true
+      // Remove only our exact draft; never erase text the user has since edited.
+      const element = getComposer()
+      if (scope.payload && location.pathname === scope.path && element && composerMatches(element, scope.payload)) insertText(element, '')
+      scopedUserSend = null
+      state.programmatic = false
     },
 
     sendScheduledUser(text, expectedPath, runId, conversationPromptInjected = false) {

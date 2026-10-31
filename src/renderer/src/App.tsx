@@ -587,6 +587,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [cwdDraft, setCwdDraft] = useState<string | null>(null)
   const [ssh, setSsh] = useState<SshState | null>(null)
   const [remoteRipgrep, setRemoteRipgrep] = useState<RemoteRipgrepState | null>(null)
+  const [remoteRipgrepDeferred, setRemoteRipgrepDeferred] = useState<string | null>(null)
   const [sshHosts, setSshHosts] = useState<SshHost[]>([])
   /** Notes for the current machine and working directory. */
   const [notes, setNotes] = useState<TerminalNotes | null>(null)
@@ -1970,7 +1971,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * as is the pending-question widget, so both leave the chat page usable underneath.
    */
   const terminalModalOpen = terminalVisible && sshActive && sshFilesOpen
-  const remoteRipgrepVisible = remoteRipgrep?.availability === 'missing' && ['pending', 'sending', 'uncertain'].includes(remoteRipgrep.prompt) &&
+  const remoteRipgrepRetry = remoteRipgrep?.availability === 'missing' && remoteRipgrep.prompt === 'pending' && remoteRipgrepDeferred === remoteRipgrep.connectionId
+  const remoteRipgrepVisible = remoteRipgrep?.availability === 'missing' && ['pending', 'sending', 'uncertain'].includes(remoteRipgrep.prompt) && remoteRipgrepDeferred !== remoteRipgrep.connectionId &&
     !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen &&
     !(pendingQuestion && !questionMinimized && questionDialogVisible)
   const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen && !remoteRipgrepVisible
@@ -2365,6 +2367,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             A dropdown rather than a row of buttons: one-of-N is what a select is for, and the
             list is expected to grow.
           */}
+          {remoteRipgrepRetry ? <button type="button" className="remote-rg-retry"
+            title="处理网页草稿、登录或终端设置后，点击重新打开安装提示"
+            onClick={() => setRemoteRipgrepDeferred(null)}>重试安装 rg</button> : null}
           <div className="model-picker">
             <button
               type="button"
@@ -4074,6 +4079,7 @@ ${record.command}`
       {remoteRipgrepVisible && remoteRipgrep && appContainer ? <RemoteRipgrepDialog
         key={`${remoteRipgrep.connectionId}:${platformId}:${conversationId ?? ''}`}
         state={remoteRipgrep} owner={focusOwner} container={appContainer}
+        onDefer={() => setRemoteRipgrepDeferred(remoteRipgrep.connectionId)}
       /> : null}
       {sshDialogOpen && appContainer ? (
         <Dialog.Root open disablePointerDismissal={sshBusy} onOpenChange={(open, details) => {

@@ -393,6 +393,9 @@ export class CommandRunner {
   private readonly commandAdmissions = new Map<string, { record: ExecutionRecord; controller: AbortController; confirmed: boolean; started: boolean }>()
   /** The exact backend whose run() promise is currently in flight. */
   private activeShell: ExecutionShell | null = null
+  /** Commands wait for this internal read instead of interrupting its persistent shell. */
+  private environmentProbe: Promise<{ kind: EnvironmentKind; result: ShellResult }> | null = null
+  private environmentProbeShell: ExecutionShell | null = null
   /** Distinguishes consecutive runs that reuse the same persistent shell object. */
   private activeRunId = 0
   private disposed = false
@@ -1352,15 +1355,28 @@ export class CommandRunner {
    */
   async runEnvironmentProbe(): Promise<{ kind: EnvironmentKind; result: ShellResult }> {
     const shell = this.ensureShell()
+    if (this.environmentProbe) {
+      if (this.environmentProbeShell === shell) return this.environmentProbe
+      // A target switch must never reuse the previous machine's report.
+      await this.environmentProbe.catch(() => {})
+      return this.runEnvironmentProbe()
+    }
     this.appendLine({
       kind: 'notice',
       text: shell === this.localShell ? '探测本机环境' : '探测远端主机环境'
     })
     this.appendLine({ kind: 'command', text: shell.probeCommand })
-    const result = await this.runOnShell(shell, shell.probeCommand)
-    this.appendLine(summariseResult(result))
-    this.flushTerminal()
-    return { kind: shell.kind, result }
+    const probe = this.runOnShell(shell, shell.probeCommand, undefined, true).then(result => {
+      this.appendLine(summariseResult(result))
+      this.flushTerminal()
+      return { kind: shell.kind, result }
+    })
+    this.environmentProbe = probe
+    this.environmentProbeShell = shell
+    try { return await probe }
+    finally {
+      if (this.environmentProbe === probe) { this.environmentProbe = null; this.environmentProbeShell = null }
+    }
   }
 
   /**
@@ -1540,7 +1556,15 @@ export class CommandRunner {
   /* ---------------- internals ---------------- */
 
   /** Track the backend currently executing so it can be interrupted immediately. */
-  private async runOnShell(shell: ExecutionShell, command: string, timeoutSeconds?: number): Promise<ShellResult> {
+  private async runOnShell(shell: ExecutionShell, command: string, timeoutSeconds?: number, probing = false): Promise<ShellResult> {
+    const request = this.executionRequest
+    if (!probing && this.environmentProbe) {
+      while (this.environmentProbe) await this.environmentProbe.catch(() => {})
+      if (this.disposed || request !== this.executionRequest) return {
+        output: '等待环境探测期间任务已结束或终端已关闭，本条命令未执行。',
+        exitCode: null, timedOut: false, interrupted: false, rejected: true, sessionLost: false, cwd: shell.cwd
+      }
+    }
     // Never let a second helper call overwrite the identity of the command that
     // is actually in flight; that would make the 中断 button lose its target.
     if (this.activeShell) {
@@ -1602,6 +1626,7 @@ export class CommandRunner {
 
   /** Give a newly requested stored command priority over the command in flight. */
   private async prepareExecutionShell(): Promise<ExecutionShell | null> {
+    while (this.environmentProbe) await this.environmentProbe.catch(() => {})
     if (this.disposed) return null
     const active = this.activeShell
     if (!active || !active.running) {

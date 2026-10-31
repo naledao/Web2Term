@@ -49,3 +49,11 @@
 .remote-rg-dialog__actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .remote-rg-dialog__actions button:disabled { opacity: .55; cursor: default; }
 @media (pointer: coarse) { .remote-rg-dialog__actions button { min-height: 44px; } }
+
+.workspace:not(.workspace--manager) .toolbar button.remote-rg-retry {
+  flex: none;
+  width: auto;
+  padding-inline: 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}

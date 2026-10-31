@@ -39,7 +39,7 @@ function fixture() {
       replyProtocolPrefix: 'SHORT\n\n', replyProtocolVersion: 1, prefixIncludesReplyProtocol: true, replyProtocolFullLength: 6,
       injectedCount: 0, taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: null },
     USER_TEXT_SENTINEL, SEND_TIMEOUT_MS: 6000, SEND_BUTTON_GRACE_MS: 500,
-    fileSend: null, computerResultToken: null, userTurns: () => [], focusEditing: null, focusEditExcludedIds: new Set(), focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
+    fileSend: null, computerResultToken: null, scopedUserSend: null, userTurns: () => [], focusEditing: null, focusEditExcludedIds: new Set(), focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null,
     getComposer: () => composer, collapse: text => String(text).replace(/\s+/g, ' ').trim(),
     readComposer: node => node.draft, findStopButton: () => null,
     attachmentSnapshot: () => ({}), draftAttachmentEvidence: () => false, hasDraftImageAttachment: () => false,
@@ -58,6 +58,49 @@ function fixture() {
   for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'focusRowPosition', 'focusReplyAnchor', 'conversationPromptInHistory', 'userPromptInjection', 'reportUserInjection']) context[name] = arrow(name, context)
   return { context, composer, calls, reports, send: method('sendUser', context), snapshot: method('focusSnapshot', context) }
 }
+
+test('cancelling a dialog send stops actual retries and clears only its own draft', async () => {
+  for (const attempted of [false, true]) {
+    for (const edited of [false, true]) {
+      const f = fixture()
+      const controller = { sendUser: f.send, sendScopedUser: method('sendScopedUser', f.context), cancelScopedUser: method('cancelScopedUser', f.context) }
+      const pending = controller.sendScopedUser('install on the approved remote', '/a/chat/s/one', 'approval-a')
+      const call = f.calls[0], context = call.at(-1)
+      context.scope.attempted = attempted
+      if (edited) f.composer.draft = '用户自己的新草稿'
+      controller.cancelScopedUser('unrelated-approval')
+      assert.equal(context.scope.cancelled, false)
+      controller.cancelScopedUser('approval-a')
+      assert.equal(f.composer.draft, edited ? '用户自己的新草稿' : '')
+      Object.assign(f.context, {
+        lastAssistantId: () => null, computerBaselineOf: () => ({}), discardUserImageCapture() {},
+        findSendButton() { assert.fail('cancelled approval must never reach another click') }
+      })
+      // A later send may now own the page; an old callback must leave it alone.
+      f.context.state.programmatic = true
+      let outcome
+      arrow('submitWithRetry', f.context)(call[0], 0, false, value => { outcome = value }, 0, 0, 0, null, context)
+      assert.equal(outcome, attempted ? 'stuck' : 'cancelled')
+      assert.equal(f.context.state.programmatic, true)
+      assert.equal(f.reports.some(report => report.event === 'user-message'), false)
+      call[3](outcome)
+      assert.equal(await pending, outcome)
+    }
+  }
+})
+
+test('a scoped first send allows its new chat id, while an existing chat stays pinned', async () => {
+  for (const allowNewConversation of [false, true]) {
+    const f = fixture()
+    const controller = { sendUser: f.send, sendScopedUser: method('sendScopedUser', f.context) }
+    const pending = controller.sendScopedUser('install rg', '/a/chat/s/one', 'approval-a', allowNewConversation)
+    const call = f.calls[0]
+    assert.equal(call.at(-1).path, allowNewConversation ? undefined : '/a/chat/s/one')
+    call[3]('ok')
+    assert.equal(await pending, 'ok')
+    assert.equal(f.context.scopedUserSend, null)
+  }
+})
 
 test('the read-only focus snapshot exposes a later native send rejection and clears it when recovered', () => {
   const f = fixture()
