@@ -122,6 +122,7 @@ export class Web2termShell implements ExecutionShell {
 
   get alive(): boolean { return this.enabled && !this.disposed && this.state === 'ready' && this.matches() && this.connection.getState().status === 'connected' && Boolean(this.shell?.alive) }
   get running(): boolean { return this.shell?.running ?? false }
+  get connectionKey(): object | null { return this.alive ? this.shell : null }
   get needsConnection(): boolean { return !this.disposed && this.enabled && (this.wantOpen || Boolean(this.sessionId)) }
   get reconnectOnStartup(): boolean { return !this.disposed && this.resumeAfterRestart }
   persistentBinding(): Web2termSessionBinding { return { ...this.binding, reconnect: this.resumeAfterRestart, cwd: this.cwd } }

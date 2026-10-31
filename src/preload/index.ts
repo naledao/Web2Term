@@ -11,6 +11,7 @@ import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/b
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from '../shared/github'
 import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusModelSettingsResult } from '../shared/focus-chat'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
+import type { RemoteRipgrepRequest, RemoteRipgrepState, RemoteRipgrepTaskResult } from '../shared/remote-ripgrep'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { IpcChannels } from '../shared/types'
@@ -400,6 +401,16 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   },
 
   getEnvironment: (): Promise<EnvironmentInfo> => ipcRenderer.invoke(IpcChannels.environmentGet),
+  getRemoteRipgrepState: (sessionId: string): Promise<RemoteRipgrepState | null> => ipcRenderer.invoke(IpcChannels.remoteRipgrepGet, sessionId),
+  dismissRemoteRipgrep: (request: RemoteRipgrepRequest): Promise<boolean> => ipcRenderer.invoke(IpcChannels.remoteRipgrepDismiss, request),
+  requestRemoteRipgrepInstall: (request: RemoteRipgrepRequest): Promise<RemoteRipgrepTaskResult> => ipcRenderer.invoke(IpcChannels.remoteRipgrepInstall, request),
+  onRemoteRipgrepChanged: (listener: (state: RemoteRipgrepState | null) => void, sessionId: string): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: RemoteRipgrepState | null, sourceSessionId: string): void => {
+      if (sourceSessionId === sessionId) listener(state)
+    }
+    ipcRenderer.on(IpcChannels.remoteRipgrepChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.remoteRipgrepChanged, handler)
+  },
 
   onEnvironmentChanged: (listener: (info: EnvironmentInfo) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, info: EnvironmentInfo): void => listener(info)

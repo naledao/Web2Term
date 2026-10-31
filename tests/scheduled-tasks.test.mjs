@@ -429,7 +429,7 @@ test('runtime checks send availability and owner controls without waiting for AI
 
 test('a confirmed scheduled goal starts a fresh task without releasing human control; unowned acknowledgements are ignored', () => {
   let released = 0, submissions = 0
-  const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['embedHandlers'], {
+  const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['embedHandlers', 'refreshRemoteRipgrep'], {
     process: { platform: 'win32', arch: 'x64' }, supportsFocusView: () => false, taskPausedByInput: () => false
   })
   const marker = { task: { ...request, owner, target }, runId: 'run-a', text: 'scheduled goal', autonomousTaskId: null }

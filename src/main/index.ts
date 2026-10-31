@@ -1871,6 +1871,13 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.extraTerminalClose, (event, id: string): ExtraTerminalsState =>
     runtimeForEvent(event)?.extraTerminals.close(String(id ?? '')) ?? { terminals: [] })
   ipcMain.handle(IpcChannels.environmentGet, (event) =>({ ...(runtimeForEvent(event)?.environment ?? nodeFallback()) }))
+  ipcMain.handle(IpcChannels.remoteRipgrepGet, (event, sessionId: string) => {
+    const runtime = runtimeForEvent(event)
+    return runtime?.id === sessionId ? runtime.getRemoteRipgrepState() : null
+  })
+  ipcMain.handle(IpcChannels.remoteRipgrepDismiss, (event, request: unknown) => runtimeForEvent(event)?.dismissRemoteRipgrep(request) ?? false)
+  ipcMain.handle(IpcChannels.remoteRipgrepInstall, (event, request: unknown) => runtimeForEvent(event)?.requestRemoteRipgrepInstall(request)
+    ?? { status: 'blocked', message: '当前会话不可用，请重新打开远端对话。' })
   ipcMain.handle(IpcChannels.terminalNotesGet, (event): TerminalNotes => runtimeForEvent(event)?.currentNotes() ?? EMPTY_NOTES)
   ipcMain.handle(IpcChannels.terminalNotesSet, (event, text: string, owner: TerminalNotesOwner): TerminalNotes => {
     const runtime = runtimeForEvent(event)

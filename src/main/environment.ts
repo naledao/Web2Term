@@ -88,7 +88,7 @@ export const REMOTE_DETECT_COMMAND = [
   '|SHELLP=${SHELL:-/bin/sh}',
   '|SHELLV=$("${SHELL:-/bin/sh}" --version 2>/dev/null | head -n 1)',
   '|CWD=$PWD',
-  '|RG=$(if command -v rg >/dev/null 2>&1; then printf available; else printf missing; fi)"'
+  '|RG=$(if command -v rg >/dev/null 2>&1 && rg --version >/dev/null 2>&1; then printf available; else printf missing; fi)"'
 ].join('')
 
 /**

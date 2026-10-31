@@ -18,7 +18,7 @@ function actualClass(path, name, names, globals = {}) {
     console: { info() {}, warn() {} }, ...presentation, ...globals })
 }
 const Runtime = actualClass('../src/main/session-runtime.ts', 'SessionRuntime', [
-  'stopAutonomousTask', 'interruptTaskControl', 'canRunConversationInBackground', 'setActive', 'switchPlatform', 'embedHandlers'
+  'stopAutonomousTask', 'interruptTaskControl', 'canRunConversationInBackground', 'setActive', 'switchPlatform', 'embedHandlers', 'refreshRemoteRipgrep'
 ], { supportsFocusView: () => false, buildTerminalPromptParts: () => ({ prefix: 'unchanged', suffix: '' }),
   DEEPSEEK_PLATFORM: { id: 'deepseek' }, IpcChannels: { embedState: 'embed', interceptorEvent: 'interceptor', questionChatState: 'question' },
   process: { platform: 'win32', arch: 'x64' } })

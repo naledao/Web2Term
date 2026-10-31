@@ -63,9 +63,10 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
   const remote = { alive: true, cwd: '/home/fixture' }
   let probeCalls = 0
   Object.assign(runtime, {
+    remoteRipgrep: new progressVmModules['./remote-ripgrep'].RemoteRipgrepSetup(state => events.push({ channel: types.IpcChannels.remoteRipgrepChanged, payload: state })),
     computerUseTool: { definitions: () => [] },
     id: 'environment-fixture', disposed: false,
-    web2term: transport === 'web2term' ? { ...remote, hostId: 'web2term:fixture',
+    web2term: transport === 'web2term' ? { ...remote, connectionKey: remote, hostId: 'web2term:fixture',
       binding: { deviceName: 'Private device name', agentId: 'private-device-id' } } : null,
     remoteShell: transport === 'ssh' ? remote : null,
     environment: transport === 'local' ? environment.nodeFallback() : { ...types.FALLBACK_ENVIRONMENT, kind: 'posix', osCaption: 'Linux' },
@@ -75,7 +76,7 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
     runner: { runEnvironmentProbe: async () => { probeCalls++; return {
       kind: transport !== 'local' || desktop === 'darwin' ? 'posix' : 'windows', result: result(output, flags)
     } } },
-    ssh: { getState: () => ({ name: 'Private SSH name', target: 'private-ssh-address', hostId: 'ssh:fixture' }) },
+    ssh: { connectionKey: remote, getState: () => ({ status: transport === 'ssh' ? 'connected' : 'disconnected', name: 'Private SSH name', target: 'private-ssh-address', hostId: 'ssh:fixture' }) },
     currentNotes: () => ({ scope: transport === 'local' ? 'local' : 'ssh', hostId: 'fixture', directory: runtime.environment.workingDirectory,
       directoryKey: 'fixture', label: 'fixture', text: 'directory-specific guidance', legacyText: '' }),
     readRedisConnectionsState: () => ({ connections: [] }), broadcastConversations() {},

@@ -138,6 +138,9 @@ import type { GithubLoginTaskResult } from '../shared/github'
 import type { FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusToolKind, FocusToolObserver } from '../shared/focus-chat'
 import type { EmbedHandlers } from './embed'
 import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseWindowsEnvironment } from './environment'
+import { RemoteRipgrepSetup } from './remote-ripgrep'
+import { remoteRipgrepInstallPrompt, validRemoteRipgrepRequest } from '../shared/remote-ripgrep'
+import type { RemoteRipgrepState, RemoteRipgrepTaskResult } from '../shared/remote-ripgrep'
 import { ConversationShell, resolvePowerShell } from './shell'
 import type { ExecutionShell } from './shell'
 import { SshManager } from './ssh'
@@ -391,6 +394,8 @@ export class SessionRuntime {
 
   window: BrowserWindow | null = null
   environment: EnvironmentInfo = nodeFallback()
+  private readonly remoteRipgrep = new RemoteRipgrepSetup(state => this.send(IpcChannels.remoteRipgrepChanged, state))
+  private remoteRipgrepProbePending = false
   environmentScope: Pick<TerminalNotes, 'scope' | 'hostId' | 'label'> = {
     scope: 'local',
     hostId: '',
@@ -707,7 +712,7 @@ export class SessionRuntime {
           task_progress_control: this.taskCoordinator.progressSummary(context), task_completion_context: this.taskCoordinator.completionSummary(context),
           task_clarification_context: this.taskCoordinator.clarificationSummary(context), client_execution_settings: this.runner.getAutomation() })
       },
-      onIdle: () => { options.onAutomationSafetyChanged?.(); options.desktopCoordinator?.reconcile(); this.flushTaskTools(); void this.taskProgression.wake() },
+      onIdle: () => { options.onAutomationSafetyChanged?.(); options.desktopCoordinator?.reconcile(); this.flushTaskTools(); void this.taskProgression.wake(); this.refreshRemoteRipgrep() },
       fileContext: () => this.fileReadContext(),
       filePlatform: () => this.web2term || !this.toolPreferences().fileReadingEnabled ? null : fileReadingPlatform(this.activePlatform.id),
       prepareFiles: (request, signal) => prepareFiles(request, signal, (path, limit, abort) => this.ssh.readFileForModel(path, request.context.hostId, limit, abort), fileReadingPlatform(this.activePlatform.id)?.id),
@@ -759,6 +764,7 @@ export class SessionRuntime {
         }
       },
       onTaskCompleted: (description) => {
+        this.refreshRemoteRipgrep()
         if (!this.taskCoordinator.completionNotificationAllowed(this.activePlatformId, this.embed.getState().conversationId)) return
         void this.embed.endTask()
         this.notifyTaskCompleted(description.trim() || '任务已完成')
@@ -769,10 +775,12 @@ export class SessionRuntime {
       this.web2term.onOutput = chunk => this.runner.pushRemoteOutput(chunk)
       this.web2term.onChanged = message => {
         if (this.disposed) return
+        this.syncRemoteRipgrep()
         this.runner.refreshTerminal(message)
         this.options.onSummaryChanged()
       }
       this.web2term.onReady = () => {
+        this.syncRemoteRipgrep()
         this.environment = { ...this.environment, ripgrep: 'unknown' }
         this.refreshDirectoryNotes(true)
         void this.probeEnvironment()
@@ -787,6 +795,7 @@ export class SessionRuntime {
 
     this.ssh = new SshManager((state) => {
       if (this.web2term) return
+      this.syncRemoteRipgrep()
       this.send(IpcChannels.sshChanged, state)
       if (state.modelCwd !== '') this.sshCwd = state.modelCwd
       this.options.onSummaryChanged()
@@ -799,6 +808,7 @@ export class SessionRuntime {
       this.sshTerminalResetting = false
       if (next !== this.remoteShell) {
         this.remoteShell = next
+        this.syncRemoteRipgrep()
         // Do not carry local/previous-host search capabilities across a target switch.
         this.environment = { ...this.environment, ripgrep: 'unknown' }
         this.refreshDirectoryNotes(true)
@@ -1151,6 +1161,7 @@ export class SessionRuntime {
       onTaskQuestion: (question, source) => this.recordTaskQuestion(platform.id, question, source),
       onTaskCompleted: (messageId, source) => {
         if (!isActive()) return
+        this.refreshRemoteRipgrep()
         const capability = this.getComputerUseCapability(platform.id)
         if (capability.scopeSupported && capability.computerUseEnabled) {
           return this.completeComputerTaskFromModel(platform.id, messageId, source)
@@ -3716,14 +3727,80 @@ export class SessionRuntime {
     return this.ssh.connect({ hostId: id, name, host, port, username, password, proxy }, reconnectCwd)
   }
 
+  /** A connection key changes on a reconnect, never on cwd changes or ordinary output. */
+  private syncRemoteRipgrep(): void {
+    if (this.disposed) { this.remoteRipgrep.observe(null); return }
+    if (this.web2term) {
+      const key = this.web2term.connectionKey
+      this.remoteRipgrep.observe(key, { transport: 'web2term', hostId: this.web2term.hostId,
+        name: this.web2term.binding.deviceName || this.web2term.binding.agentId, target: this.web2term.binding.agentId })
+      return
+    }
+    const ssh = this.ssh?.getState()
+    const key = ssh?.status === 'connected' ? this.ssh.connectionKey : null
+    this.remoteRipgrep.observe(key, ssh ? { transport: 'ssh', hostId: ssh.hostId, name: ssh.name, target: ssh.target } : undefined)
+  }
+
+  getRemoteRipgrepState(): RemoteRipgrepState | null {
+    this.syncRemoteRipgrep()
+    return this.remoteRipgrep.getState()
+  }
+
+  dismissRemoteRipgrep(request: unknown): boolean {
+    if (!validRemoteRipgrepRequest(request) || this.disposed || !this.active || request.sessionId !== this.id) return false
+    this.syncRemoteRipgrep()
+    return this.remoteRipgrep.dismiss(request.connectionId)
+  }
+
+  async requestRemoteRipgrepInstall(request: unknown): Promise<RemoteRipgrepTaskResult> {
+    const blocked = (message: string): RemoteRipgrepTaskResult => ({ status: 'blocked', message })
+    if (!validRemoteRipgrepRequest(request) || this.disposed || !this.active || request.sessionId !== this.id ||
+      request.platformId !== this.activePlatformId || request.conversationId !== this.embed.getState().conversationId) {
+      return blocked('当前机器或 AI 对话已切换，请在当前连接的提示框中重新操作。')
+    }
+    const target = this.getRemoteRipgrepState()
+    if (!target || target.connectionId !== request.connectionId) return blocked('远端连接已变化，请等待当前连接检查完成。')
+    if (this.web2term ? !this.web2term.alive : !this.remoteShell?.alive) return blocked('远端命令终端尚未就绪，请等待连接恢复后再试。')
+    if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork() || this.taskRunning() ||
+      this.mailNotifications?.busy || this.toolPromptReads?.busy || this.scheduledTaskTools?.busy) {
+      return blocked('当前 AI 或终端正在处理任务，请结束后再点击“让 AI 安装”。')
+    }
+    const status = this.embed.getInterceptorStatus()
+    if (!status.installed || !status.enabled || !status.promptInjectionEnabled) {
+      return blocked('请先启用当前对话的终端模式和提示词注入，再让 AI 安装 rg。')
+    }
+    this.focusSending = true
+    const embed = this.embed
+    try {
+      return await this.remoteRipgrep.request(request.connectionId, async () => {
+        if (this.disposed || !this.active || this.embed !== embed || request.platformId !== this.activePlatformId ||
+          request.conversationId !== embed.getState().conversationId || this.getRemoteRipgrepState()?.connectionId !== request.connectionId) return 'cancelled'
+        return embed.sendUserTask(remoteRipgrepInstallPrompt(target, this.environment.osCaption, this.environment.architecture))
+      })
+    } finally { this.focusSending = false; this.options.scheduledTasks?.wake() }
+  }
+
+  /** Recheck after an AI command releases the shell, including after installation. */
+  private refreshRemoteRipgrep(): void {
+    const state = this.remoteRipgrep?.getState()
+    if (!state || state.availability === 'available' || (state.availability !== 'unknown' && state.prompt !== 'requested') ||
+      (this.web2term ? !this.web2term.alive : !this.remoteShell?.alive) ||
+      this.remoteRipgrepProbePending || this.focusSending || this.runner.hasInFlightWork()) return
+    this.remoteRipgrepProbePending = true
+    void this.probeEnvironment().finally(() => { this.remoteRipgrepProbePending = false })
+  }
+
   async probeEnvironment(): Promise<EnvironmentInfo> {
     if (this.web2term && !this.web2term.alive) return { ...this.environment }
     // Match CommandRunner's execution target: a web2term probe is remote even
     // though there is no SSH exec channel. Never parse it with the desktop OS fallback.
     const backend = this.web2term ?? this.remoteShell
+    const connectionId = this.getRemoteRipgrepState()?.connectionId
     try {
       const { kind, result } = await this.runner.runEnvironmentProbe()
+      this.syncRemoteRipgrep()
       if (this.disposed || backend !== (this.web2term ?? this.remoteShell) || (backend && !backend.alive)
+        || (backend && connectionId !== this.remoteRipgrep.getState()?.connectionId)
         || result.rejected || result.interrupted || result.timedOut || result.sessionLost) {
         return { ...this.environment }
       }
@@ -3744,6 +3821,7 @@ export class SessionRuntime {
           : { scope: 'local', hostId: '', label: '本机' }
 
       this.environment = info
+      if (backend && connectionId) this.remoteRipgrep.update(connectionId, info.ripgrep ?? 'unknown')
       try { this.send(IpcChannels.redisConnChanged, this.readRedisConnectionsState()) } catch {
         // Credential failures belong to the Redis page and must not abort environment updates.
         const hostId = this.environmentScope.scope === 'local' ? this.options.localMachineId : this.environmentScope.hostId
@@ -3772,6 +3850,7 @@ export class SessionRuntime {
     this.scheduledSendAbort?.abort()
     if (this.disposed) return
     this.disposed = true
+    this.remoteRipgrep.observe(null)
     this.options.desktopCoordinator?.releaseSession(this.id)
     this.unregisterComputerUseTools?.(); this.unregisterComputerUseTools = null
     this.unsubscribeWindowsHelper?.(); this.unsubscribeWindowsHelper = null
@@ -3967,7 +4046,7 @@ export class SessionRuntime {
   private send(channel: string, payload: unknown): void {
     const window = this.window
     if (!this.active || !window || window.isDestroyed()) return
-    if (channel === IpcChannels.mysqlConnChanged || channel === IpcChannels.redisConnChanged || channel === IpcChannels.nacosConnChanged || channel === IpcChannels.questionChatState || channel === IpcChannels.backgroundTasksChanged || channel === IpcChannels.scheduledTasksChanged) {
+    if (channel === IpcChannels.mysqlConnChanged || channel === IpcChannels.redisConnChanged || channel === IpcChannels.nacosConnChanged || channel === IpcChannels.questionChatState || channel === IpcChannels.backgroundTasksChanged || channel === IpcChannels.scheduledTasksChanged || channel === IpcChannels.remoteRipgrepChanged) {
       window.webContents.send(channel, payload, this.id)
     } else {
       window.webContents.send(channel, payload)

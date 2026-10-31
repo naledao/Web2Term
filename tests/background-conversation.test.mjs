@@ -9,7 +9,7 @@ import ts from 'typescript'
 const source = ts.createSourceFile('runtime.ts', readFileSync(new URL('../src/main/session-runtime.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
 const cls = source.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'SessionRuntime')
 const names = ['canRunConversationInBackground', 'setActive', 'scheduledTaskReady', 'scheduledOwnerCurrent', 'sendScheduledTask',
-  'mailNotificationCurrent', 'toolPromptReadCurrent', 'embedHandlers']
+  'mailNotificationCurrent', 'toolPromptReadCurrent', 'embedHandlers', 'refreshRemoteRipgrep']
 const body = names.map(name => cls.members.find(node => node.name?.getText(source) === name).getText(source)).join('\n')
 const Runtime = new Script(ts.transpileModule(`class Runtime { ${body} }; Runtime`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }

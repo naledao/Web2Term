@@ -214,6 +214,9 @@ export class SshManager {
     return this.exec !== null && this.exec.alive ? this.exec : null
   }
 
+  /** Stable across command-channel reopenings, new after every SSH reconnect. */
+  get connectionKey(): object | null { return this.client }
+
   /**
    * Open another command shell on the live connection, for a terminal the user
    * added from the panel. Its own exec channel: it shares nothing with the

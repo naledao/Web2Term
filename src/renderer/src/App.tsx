@@ -7,6 +7,8 @@ import { Dialog } from '@base-ui/react/dialog'
 import AvatarEditor from 'react-avatar-editor'
 import type { AvatarEditorRef } from 'react-avatar-editor'
 import SshDirectoryPicker from './components/SshDirectoryPicker'
+import RemoteRipgrepDialog from './components/RemoteRipgrepDialog'
+import type { RemoteRipgrepState } from '@shared/remote-ripgrep'
 import PdfPreviewDialog from './components/PdfPreviewDialog'
 import ImagePreviewDialog from './components/ImagePreviewDialog'
 import { useToolWindows, ToolWindowDock } from './components/ToolWindows'
@@ -584,6 +586,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   /** Non-null while the working directory is being edited inline. */
   const [cwdDraft, setCwdDraft] = useState<string | null>(null)
   const [ssh, setSsh] = useState<SshState | null>(null)
+  const [remoteRipgrep, setRemoteRipgrep] = useState<RemoteRipgrepState | null>(null)
   const [sshHosts, setSshHosts] = useState<SshHost[]>([])
   /** Notes for the current machine and working directory. */
   const [notes, setNotes] = useState<TerminalNotes | null>(null)
@@ -1967,7 +1970,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
    * as is the pending-question widget, so both leave the chat page usable underneath.
    */
   const terminalModalOpen = terminalVisible && sshActive && sshFilesOpen
-  const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen
+  const remoteRipgrepVisible = remoteRipgrep?.availability === 'missing' && ['pending', 'sending', 'uncertain'].includes(remoteRipgrep.prompt) &&
+    !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen &&
+    !(pendingQuestion && !questionMinimized && questionDialogVisible)
+  const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen && !remoteRipgrepVisible
   const nativeEmbedVisible = !placeholderToggle && !isFocusView && !leavingView && chatSurfaceVisible
   useEffect(() => {
     window.api.setEmbedVisible(nativeEmbedVisible)
@@ -1981,6 +1987,16 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   useEffect(() => setEmbedSnapshot(null), [sessionId, platformId])
 
   // SSH state and saved hosts.
+  useEffect(() => {
+    let cancelled = false
+    let pushed = false
+    const off = window.api.onRemoteRipgrepChanged(state => { pushed = true; setRemoteRipgrep(state) }, sessionId)
+    void window.api.getRemoteRipgrepState(sessionId).then(state => {
+      if (!cancelled && !pushed) setRemoteRipgrep(state)
+    }).catch(() => { /* A later connection probe can still publish its result. */ })
+    return () => { cancelled = true; off() }
+  }, [sessionId])
+
   useEffect(() => {
     let cancelled = false
 
@@ -4055,6 +4071,10 @@ ${record.command}`
           </div>
         </div>
       ) : null}
+      {remoteRipgrepVisible && remoteRipgrep && appContainer ? <RemoteRipgrepDialog
+        key={`${remoteRipgrep.connectionId}:${platformId}:${conversationId ?? ''}`}
+        state={remoteRipgrep} owner={focusOwner} container={appContainer}
+      /> : null}
       {sshDialogOpen && appContainer ? (
         <Dialog.Root open disablePointerDismissal={sshBusy} onOpenChange={(open, details) => {
           if (open) return

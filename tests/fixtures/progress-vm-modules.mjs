@@ -21,6 +21,8 @@ const clarification = load('../../src/shared/task-clarification.ts')
 const completionMain = load('../../src/main/task-completion.ts', { 'node:crypto': crypto, 'node:path': path,
   'node:fs/promises': { lstat: async () => { throw new Error('Synthetic fixture never reads actual artifacts') } } })
 export const progressVmModules = {
+  '../shared/remote-ripgrep': load('../../src/shared/remote-ripgrep.ts'),
+  './remote-ripgrep': load('../../src/main/remote-ripgrep.ts', { 'node:crypto': crypto }),
   '../shared/task-presentation': load('../../src/shared/task-presentation.ts'),
   './task-observation-preview': load('../../src/main/task-observation-preview.ts'),
   './task-clarification': clarification,

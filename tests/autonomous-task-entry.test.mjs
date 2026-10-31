@@ -207,7 +207,7 @@ function actualClass(path, className, methodNames, globals) {
 
 test('actual page-report and session handlers create goals only for current confirmed human sends', () => fixture(({ coordinator, store }) => {
   const silent = { info() {}, warn() {} }
-  const Runtime = actualClass('../src/main/session-runtime.ts', 'SessionRuntime', ['embedHandlers'], {
+  const Runtime = actualClass('../src/main/session-runtime.ts', 'SessionRuntime', ['embedHandlers', 'refreshRemoteRipgrep'], {
     process: { platform: 'win32', arch: 'x64' }, console: silent,
     supportsFocusView: id => id === 'deepseek', writeFocusDiagnostic() {}
   })

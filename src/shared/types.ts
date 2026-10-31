@@ -10,6 +10,7 @@ import type { TaskLease } from './autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from './task-presentation'
 import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo, FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from './focus-chat'
 import type { FocusUiRequest } from './focus-smart-ui'
+import type { RemoteRipgrepState, RemoteRipgrepRequest, RemoteRipgrepTaskResult } from './remote-ripgrep'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
 import type { BackgroundTasksState, BackgroundTaskStopResult, BackgroundCommandOptions } from './background-tasks'
@@ -141,6 +142,10 @@ export const IpcChannels = {
   workspaceShowWeb2term: 'workspace:show-web2term',
   environmentGet: 'environment:get',
   environmentChanged: 'environment:changed',
+  remoteRipgrepGet: 'remote-ripgrep:get',
+  remoteRipgrepChanged: 'remote-ripgrep:changed',
+  remoteRipgrepDismiss: 'remote-ripgrep:dismiss',
+  remoteRipgrepInstall: 'remote-ripgrep:install',
   automationGetState: 'automation:get-state',
   automationSetMode: 'automation:set-mode',
   automationSetPaused: 'automation:set-paused',
@@ -2632,6 +2637,10 @@ export interface AppApi {
 
   /** Saved SSH targets, newest first. */
   listSshHosts(): Promise<SshHost[]>
+  getRemoteRipgrepState(sessionId: string): Promise<RemoteRipgrepState | null>
+  dismissRemoteRipgrep(request: RemoteRipgrepRequest): Promise<boolean>
+  requestRemoteRipgrepInstall(request: RemoteRipgrepRequest): Promise<RemoteRipgrepTaskResult>
+  onRemoteRipgrepChanged(listener: (state: RemoteRipgrepState | null) => void, sessionId: string): () => void
   /** Connect (saving or updating the host first). */
   connectSsh(draft: SshHostDraft): Promise<SshState>
   disconnectSsh(): Promise<SshState>

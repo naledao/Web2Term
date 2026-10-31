@@ -190,7 +190,7 @@ test('recovery metadata is validated and malformed checkpoints cannot silently r
 // Extract actual runtime methods so recovery send/ack ordering is checked without Electron.
 const source = ts.createSourceFile('runtime.ts', readFileSync(new URL('../src/main/session-runtime.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
 const declaration = source.statements.find(n => ts.isClassDeclaration(n) && n.name?.text === 'SessionRuntime')
-const methods = ['resumeAutonomousTask', 'resumeAutonomousTaskNow', 'embedHandlers'].map(name => declaration.members.find(n => n.name?.getText(source) === name).getText(source)).join('\n')
+const methods = ['resumeAutonomousTask', 'resumeAutonomousTaskNow', 'embedHandlers', 'refreshRemoteRipgrep'].map(name => declaration.members.find(n => n.name?.getText(source) === name).getText(source)).join('\n')
 const Runtime = new Script(ts.transpileModule(`class Runtime { ${methods} }; Runtime`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
 }).outputText).runInNewContext({ structuredClone, process: { platform: 'win32', arch: 'x64' }, setTimeout,

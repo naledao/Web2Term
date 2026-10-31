@@ -4066,6 +4066,8 @@ body {
   flex-direction: column;
   width: min(1050px, calc(100vw - 56px));
   height: min(760px, calc(100vh - 56px));
+  min-height: 0;
+  max-height: calc(100dvh - 56px);
   overflow: hidden;
   border: 1px solid #dce3ed;
   border-radius: 14px;
@@ -4115,14 +4117,19 @@ body {
 .ssh-connect__content {
   display: grid;
   grid-template-columns: minmax(300px, 36%) minmax(0, 1fr);
+  /* Constrain the row itself, so a long host list cannot push the footer out. */
+  grid-template-rows: minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
 }
 
 .ssh-connect__sidebar {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   padding: 26px 20px 22px;
   border-right: 1px solid #e5e9f0;
   background: #fff;
@@ -4287,6 +4294,7 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   background: #fff;
 }
 
@@ -4296,6 +4304,13 @@ body {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 26px 28px 24px;
+}
+
+.ssh-connect__host-list,
+.ssh-connect__form-body {
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-muted) transparent;
 }
 
 .ssh-connect__field {
@@ -4449,8 +4464,8 @@ body {
 
 @media (max-width: 760px) {
   .ssh-connect-overlay { padding: 12px; }
-  .ssh-connect-modal { width: calc(100vw - 24px); height: calc(100vh - 24px); border-radius: 14px; }
-  .ssh-connect__content { grid-template-columns: 1fr; overflow-y: auto; }
+  .ssh-connect-modal { width: calc(100vw - 24px); height: calc(100vh - 24px); max-height: calc(100dvh - 24px); border-radius: 14px; }
+  .ssh-connect__content { grid-template-columns: 1fr; grid-template-rows: minmax(260px, auto) minmax(480px, auto); overflow-y: auto; }
   .ssh-connect__sidebar { min-height: 260px; border-right: 0; border-bottom: 1px solid #e5e9f0; }
   .ssh-connect__form { min-height: 480px; }
   .ssh-connect__row { gap: 10px; }
