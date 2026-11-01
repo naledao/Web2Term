@@ -47,7 +47,7 @@ function escapeXml(value: string): string {
 export function notificationToastXml(url: string, title: string, body: string): string {
   // Protocol activation avoids Electron's COM relaunch of a bare electron.exe in development.
   return `<toast activationType="protocol" launch="${escapeXml(url)}"><visual><binding template="ToastGeneric">` +
-    `<text>${escapeXml(title)}</text><text>${escapeXml(body)}</text></binding></visual></toast>`
+    `<text>${escapeXml(title)}</text><text>${escapeXml(body)}</text></binding></visual><audio silent="true"/></toast>`
 }
 
 /** Keep a cold-start click until the saved sessions and workspace selection have been restored. */

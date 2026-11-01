@@ -75,8 +75,33 @@ test('Windows notifications launch the captured target through the app protocol'
   f.api.showDesktopNotification(target, '有问题', '等待回答', () => assert.fail('Windows must use the URI route'))
   assert.equal(f.shown.length, 1)
   assert.match(f.shown[0].options.toastXml, /activationType="protocol"/)
+  assert.equal(f.shown[0].options.silent, true)
+  assert.ok(f.shown[0].options.toastXml.includes('<audio silent="true"/>'), 'custom XML must also mute the system sound')
   assert.ok(f.shown[0].options.toastXml.includes(url().replaceAll('&', '&amp;')))
   f.shown[0].emit('click') // Releases the object without invoking a second navigation callback.
+})
+
+test('Windows plays the selected sound once after successful delivery, never on a click or a failed toast', () => {
+  const f = desktop()
+  let sounds = 0
+  f.api.registerDesktopNotifications(() => { sounds++ })
+  f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
+  assert.equal(sounds, 0, 'constructing/showing a toast is not proof of delivery')
+  f.shown[0].emit('show')
+  f.shown[0].emit('show')
+  f.shown[0].emit('click')
+  assert.equal(sounds, 1)
+  f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
+  f.shown[1].emit('failed', {}, 'Unavailable')
+  assert.equal(sounds, 1)
+})
+
+test('a sound delivery failure leaves notification activation available', () => {
+  const f = desktop()
+  f.api.registerDesktopNotifications(() => { throw new Error('Renderer unavailable') })
+  f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
+  assert.doesNotThrow(() => f.shown[0].emit('show'))
+  assert.ok(f.shown[0].options.toastXml.includes(url().replaceAll('&', '&amp;')))
 })
 
 test('a failed protocol registration never posts a notification with a broken launch target', () => {

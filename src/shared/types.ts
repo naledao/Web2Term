@@ -26,6 +26,7 @@ import { MAX_READ_FILES } from './file-requests'
 export const IpcChannels = {
   toolboxInvoke: 'toolbox:invoke',
   getAppInfo: 'app:get-info',
+  notificationSound: 'notification:sound',
   releaseNotesList: 'release-notes:list',
   releaseNotesDetail: 'release-notes:detail',
   releaseNotesRead: 'release-notes:read',
@@ -2288,6 +2289,7 @@ export interface NacosSaveResult extends NacosConnectionsState {
  * renderer consumes it, so the two can never drift apart.
  */
 export interface AppApi {
+  onNotificationSound(listener: () => void): () => void
   listReleaseNotes(request?: ReleaseNotesPageRequest): Promise<ReleaseNotesResult<ReleaseNotesPage>>
   getReleaseNote(request: ReleaseNoteRequest): Promise<ReleaseNotesResult<ReleaseNoteDetail>>
   markReleaseNoteRead(request: ReleaseNoteRequest): Promise<ReleaseNotesResult<ReleaseNoteRead>>

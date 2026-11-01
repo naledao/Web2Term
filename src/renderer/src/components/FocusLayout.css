@@ -13,6 +13,8 @@
 .focus-layout__canvas .focus-layout__image-error{display:grid;place-items:center;min-height:120px;width:100%;padding:16px;background:var(--fc-soft);color:var(--fl-muted);text-align:center}
 .focus-layout__image-error small{display:block;margin-top:4px;font-size:12px}
 .focus-layout__canvas p,.focus-layout__canvas li{white-space:normal}
+/* Unframed metric labels touch the viewport edge; rounded overflow clips the first glyph. */
+.focus-layout--metrics .focus-layout__viewport{border-radius:0}
 .focus-layout--list .focus-layout__viewport{border-radius:0}
 .focus-layout--list ul,.focus-layout--list ol{list-style:none}
 .focus-layout--table .focus-layout__viewport{border-radius:0}

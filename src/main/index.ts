@@ -1209,7 +1209,9 @@ function createManagerWindow(): void {
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
-      backgroundThrottling: false
+      backgroundThrottling: false,
+      // Notification sounds must also play while the workspace is minimized or in the tray.
+      autoplayPolicy: 'no-user-gesture-required'
     }
   })
   managerWindow = window
@@ -2295,7 +2297,11 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     registerPdfAssetHandler()
-    registerDesktopNotifications()
+    registerDesktopNotifications(() => {
+      if (managerWindow && !managerWindow.isDestroyed() && !managerWindow.webContents.isDestroyed()) {
+        managerWindow.webContents.send(IpcChannels.notificationSound)
+      }
+    })
 
     if (appLogFile) {
       console.info(`[app] logging this run to ${appLogFile}`)

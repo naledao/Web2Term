@@ -4,10 +4,12 @@ import { notificationProtocol, notificationTargetUrl, notificationToastXml } fro
 import type { NotificationTarget } from './notification-target'
 
 let protocolRegistered = false
+let playNotificationSound: (() => void) | undefined
 const visibleNotifications = new Set<Notification>()
 
 /** Register before any session can send a notification. Only the primary instance calls this. */
-export function registerDesktopNotifications(): void {
+export function registerDesktopNotifications(onSound?: () => void): void {
+  playNotificationSound = onSound
   if (process.platform !== 'win32') return
   app.setAppUserModelId(app.isPackaged ? APP_ID : `${APP_ID}.development`)
   const protocol = notificationProtocol(app.isPackaged)
@@ -26,11 +28,17 @@ export function showDesktopNotification(
   const windows = process.platform === 'win32'
   if (windows && !protocolRegistered) return
   const notification = new Notification({ title, body,
-    ...(windows ? { toastXml: notificationToastXml(
+    ...(windows ? { silent: true, toastXml: notificationToastXml(
       notificationTargetUrl(notificationProtocol(app.isPackaged), target), title, body
     ) } : {}) })
   visibleNotifications.add(notification)
   const release = (): void => { visibleNotifications.delete(notification) }
+  // Play the chosen sound only after delivery succeeds, never for a failed toast
+  // or a later click on an existing notification in Action Center.
+  if (windows) notification.once('show', () => {
+    try { playNotificationSound?.() }
+    catch (error) { console.warn('[notification] could not request notification sound:', error) }
+  })
   // Windows opens the URI through second-instance/process.argv. Its native click
   // event only releases the reference, so it cannot race the URI and navigate twice.
   notification.once('click', () => { release(); if (!windows) onClick() })
