@@ -28,7 +28,9 @@ export function configureAppIdentity(): void {
     ?? candidates[0]
 
   mkdirSync(userData, { recursive: true })
-  app.setName(APP_NAME)
+  // Electron creates notification shortcuts from this name. A development run must
+  // not overwrite the installed Web2Term shortcut with node_modules/electron.exe.
+  app.setName(app.isPackaged ? APP_NAME : `${APP_NAME} (Development)`)
   app.setPath('userData', userData)
   app.setPath('sessionData', userData)
 }

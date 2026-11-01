@@ -1,0 +1,22 @@
+.focus-chat .focus-citation{display:inline}
+.focus-chat .focus-citation__trigger{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:2px 7px;border:0;border-radius:8px;background:var(--fc-soft);color:var(--fc-muted);font:inherit;font-size:11px;line-height:1.6;vertical-align:middle;cursor:pointer}
+.focus-citation__trigger span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.focus-chat .focus-citation__trigger:hover,.focus-chat .focus-citation__trigger[aria-expanded=true]{background:var(--fc-border);color:var(--fc-text)}
+.focus-citation svg{width:14px;height:14px;flex:none}
+.focus-citation-popover{--app-popover-background:var(--fc-bg);min-width:0;color:var(--fc-text);font-size:13px;line-height:1.6}
+.focus-citation__heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid var(--fc-border)}
+.focus-citation__heading button{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:6px;background:transparent}
+.focus-citation__heading button:hover{background:var(--fc-soft)}
+.focus-citation__heading svg{width:18px;height:18px}
+.focus-citation__sources{list-style:none;margin:0;padding:0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--fc-muted) transparent}
+.focus-citation__sources li+li{border-top:1px solid var(--fc-border)}
+.focus-citation__sources a{display:block;padding:12px 16px;color:var(--fc-text);text-decoration:none;overflow-wrap:anywhere}
+.focus-citation__sources a:hover{background:var(--fc-soft)}
+.focus-citation__sources a:focus-visible{outline:2px solid var(--fc-accent);outline-offset:-3px}
+.focus-citation__sources a strong{display:block;margin-top:4px;font-weight:500}
+.focus-citation__site{display:flex;align-items:center;gap:6px;color:var(--fc-muted);font-size:11px}
+.focus-citation__site svg{width:14px;height:14px;flex:none}
+.focus-citation__status,.focus-citation__error{margin:0;padding:14px 16px}
+.focus-citation__error p{margin:0 0 10px}
+.focus-citation__error>div{display:flex;flex-wrap:wrap;gap:8px}
+.focus-citation__error button{padding:5px 9px;border:1px solid var(--fc-border);border-radius:6px;background:var(--fc-soft)}

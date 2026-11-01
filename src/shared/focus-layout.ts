@@ -10,13 +10,13 @@ export interface FocusLayoutData {
   sourceMessageId: string
   label: string
   width: number
-  /** Lists, metric summaries and image cards wrap with the transcript. */
-  kind?: 'list' | 'metrics' | 'gallery'
+  /** Lists, metric summaries, image cards and icon tables wrap with the transcript. */
+  kind?: 'list' | 'metrics' | 'gallery' | 'table'
   root: FocusLayoutNode
 }
 
 const tags = new Set(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'small',
-  'ul', 'ol', 'li', 'hr', 'br', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'img', 'figure', 'figcaption',
+  'ul', 'ol', 'li', 'hr', 'br', 'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'code', 'a', 'img', 'figure', 'figcaption',
   'svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
 const geometry = new Set(['svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
 const enums: Record<string, string[]> = {
@@ -106,7 +106,7 @@ export function parseFocusLayout(json: string): FocusLayoutData | null {
     const item = JSON.parse(json) as FocusLayoutData
     if (!item || item.version !== 1 || typeof item.sourceMessageId !== 'string' || !/^[a-zA-Z0-9_:-]{1,160}$/.test(item.sourceMessageId) ||
       typeof item.label !== 'string' || item.label.length > 500 || !Number.isFinite(item.width) || item.width < 32 || item.width > 2000 ||
-      (item.kind !== undefined && item.kind !== 'list' && item.kind !== 'metrics' && item.kind !== 'gallery')) return null
+      (item.kind !== undefined && !['list', 'metrics', 'gallery', 'table'].includes(item.kind))) return null
     let nodes = 0, chars = 0, images = 0
     const read = (node: unknown, depth: number): string | FocusLayoutNode | null => {
       if (++nodes > 700 || depth > 24) return null

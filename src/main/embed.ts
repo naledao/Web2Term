@@ -33,6 +33,8 @@ import { writeReplyDiagnostic } from './reply-log'
 import { observeFocusEditRequest, observeFocusPageRequest } from './focus-edit-request'
 import { smartUiSubmission } from './focus-ui-request'
 import { dispatchFocusUiClick } from './focus-ui-click'
+import { readNativeFocusCitation } from './focus-citation-read'
+import type { FocusCitationTarget, FocusCitationResult } from '../shared/focus-citations'
 import { dispatchFocusModelClick } from './focus-model-click'
 import type { FocusUiAction, FocusUiRecovery } from '../shared/focus-smart-ui'
 import { parseReadFilesRequest } from '../shared/file-requests'
@@ -1604,6 +1606,16 @@ export class ChatGptEmbed {
   }
 
   private focusEditToken: string | null = null
+  async readFocusCitation(target: FocusCitationTarget, token: string, isCurrent: () => boolean): Promise<FocusCitationResult> {
+    const contents = this.focusPage()
+    if (!contents || !this.platform.page.focus?.citations || this.focusEditToken) return { outcome: 'unavailable', sources: [] }
+    this.focusEditToken = token
+    try {
+      return await readNativeFocusCitation(contents, target, token, () => isCurrent() && this.focusEditToken === token,
+        () => !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false))
+    } finally { if (this.focusEditToken === token) this.focusEditToken = null }
+  }
+
   async readFocusUiRecovery(sourceIds: string[]): Promise<FocusUiRecovery | null> {
     const contents = this.focusPage()
     if (!contents || this.platform.id !== 'chatgpt' || this.focusEditToken || !sourceIds.length) return null

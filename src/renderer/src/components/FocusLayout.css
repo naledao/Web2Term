@@ -15,6 +15,13 @@
 .focus-layout__canvas p,.focus-layout__canvas li{white-space:normal}
 .focus-layout--list .focus-layout__viewport{border-radius:0}
 .focus-layout--list ul,.focus-layout--list ol{list-style:none}
+.focus-layout--table .focus-layout__viewport{border-radius:0}
+.focus-layout__canvas table{width:100%;border-collapse:collapse;text-align:left}
+.focus-layout__canvas th,.focus-layout__canvas td{padding:8px 12px 8px 0;border-bottom:1px solid var(--fc-border);text-align:inherit;vertical-align:top}
+.focus-layout__canvas th{font-weight:600}
+.focus-layout__canvas th:last-child,.focus-layout__canvas td:last-child{padding-right:0}
+.focus-layout__canvas tbody tr:last-child td{border-bottom:0}
+.focus-layout__canvas code{padding:2px 5px;border-radius:5px;background:var(--fc-soft);font:0.9em/1.6 Consolas,'Cascadia Code',monospace;white-space:normal}
 .focus-layout--gallery{container:focus-gallery / inline-size}
 @container focus-gallery (max-width:560px){.focus-layout--gallery .focus-layout__canvas>:first-child{grid-template-columns:minmax(0,1fr)!important;flex-direction:column!important}.focus-layout--gallery .focus-layout__canvas>:first-child>*{width:100%!important;max-width:100%!important;flex-basis:auto!important}}
 .focus-layout__hint{margin:6px 0 0;color:var(--fl-muted);font-size:12px;line-height:1.6}

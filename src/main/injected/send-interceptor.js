@@ -231,6 +231,7 @@
   let focusReplyPosition = null
   let focusEditing = null
   let focusModeChanging = null
+  let focusCitationOperation = null
   let focusModelCache = null
   // Editing can remove the latest reply and temporarily expose an older one. It must
   // never be mistaken for the new reply or re-executed as a fresh command.
@@ -701,13 +702,13 @@
   // Reuse copies across focus polling; weak keys release them with their native image elements.
   const focusLayoutImageCopies = new WeakMap()
 
-  /** A bounded presentation tree, read from native DIL boxes, images, lists and vector icons. */
+  /** A bounded presentation tree, read from native DIL boxes, images, lists, tables and vector icons. */
   const smartUiLayoutsOf = node => {
     const rules = PAGE.focus?.smartUi, answer = rules ? replyRootOf(node) : null
     if (!answer) return []
     const roots = [...(answer.matches(rules.rootSelector) ? [answer] : []), ...answer.querySelectorAll(rules.rootSelector)]
     const allowed = new Set(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'small',
-      'ul', 'ol', 'li', 'hr', 'br', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'img', 'figure', 'figcaption',
+      'ul', 'ol', 'li', 'hr', 'br', 'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'code', 'a', 'img', 'figure', 'figcaption',
       'svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
     const ignored = new Set(['script', 'style', 'iframe', 'object', 'embed', 'video', 'audio', 'canvas', 'link', 'meta', 'foreignobject', 'use', 'animate', 'set'])
     const inlineImageOf = (value, limit) => {
@@ -867,6 +868,10 @@
       if (!sourceMessageId || sourceMessageId !== messageIdOf(node)) return []
       const candidates = [dil, ...dil.querySelectorAll('[data-d-component], ul, ol')]
       const lists = new Set(candidates.filter(iconList))
+      // Markdown has no representation for the native status SVGs. Keep the table
+      // boundary so icons and their labels stay in the same cell and column.
+      const tables = new Set([...(dil.tagName.toLowerCase() === 'table' ? [dil] : []), ...dil.querySelectorAll('table')]
+        .filter(element => element.querySelector('svg')))
       const galleries = new Set(candidates.filter(element => {
         if (!layoutGroup(element)) return false
         const children = visibleChildren(element)
@@ -884,7 +889,7 @@
           layoutGroup(children[2])
       }))
       let boxes = [...new Set([...(dil.matches(rules.cardSelector) ? [dil] : []), ...dil.querySelectorAll(rules.cardSelector),
-        ...lists, ...metrics, ...progress.keys(), ...candidates.filter(layoutGroup)])].filter(element =>
+        ...lists, ...tables, ...metrics, ...progress.keys(), ...candidates.filter(layoutGroup)])].filter(element =>
         element.closest(rules.rootSelector) === dil && !element.closest(rules.groupSelector) && !element.querySelector(rules.groupSelector) &&
         !(PAGE.answerCharts && (element.matches(PAGE.answerCharts.rootSelector) || element.querySelector(PAGE.answerCharts.rootSelector))))
       boxes = boxes.filter(element => !boxes.some(parent => parent !== element && parent.contains(element)))
@@ -918,7 +923,8 @@
           }
           const divider = separator(current)
           const href = nativeTag === 'a' ? urlOf(current.href || current.getAttribute('href')) : ''
-          const tag = nativeTag === 'a' && !href ? 'span' : allowed.has(nativeTag) ? nativeTag :
+          const tag = current.getAttribute('data-markdown-copy') === 'inline-code' ? 'code' :
+            nativeTag === 'a' && !href ? 'span' : allowed.has(nativeTag) ? nativeTag :
             nativeTag === 'button' || nativeTag === 'input' || nativeTag === 'textarea' ? 'span' : 'div'
           const result = { tag }, style = {}, attrs = {}
           const put = (key, value) => { if (value) style[key] = value }
@@ -973,7 +979,8 @@
           for (const key of ['fontSize', 'lineHeight']) if ((!parent || computed[key] !== parent[key]) && length(computed[key])) put(key, computed[key])
           if ((!parent || computed.fontWeight !== parent.fontWeight) && /^[1-9]00$/.test(computed.fontWeight)) put('fontWeight', computed.fontWeight)
           if (computed.fontStyle === 'italic') put('fontStyle', 'italic')
-          if (['center', 'right', 'end'].includes(computed.textAlign)) put('textAlign', computed.textAlign)
+          if (['center', 'right', 'end'].includes(computed.textAlign) ||
+            (['th', 'td'].includes(tag) && ['left', 'start'].includes(computed.textAlign))) put('textAlign', computed.textAlign)
           if (['pre-wrap', 'pre-line', 'nowrap'].includes(computed.whiteSpace)) put('whiteSpace', computed.whiteSpace)
           if (!parent || computed.color !== parent.color) {
             put('color', colorTone(computed.color, computed.color === baseColor ? '$text' : '$muted'))
@@ -1004,6 +1011,10 @@
             return { tag: 'img', attrs: { src, alt }, style }
           }
           if (['svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'].includes(tag)) {
+            // Some icons paint with a fixed fill/stroke instead of CSS color.
+            // Map that paint to a theme tone before normalizing it to currentColor.
+            const paint = [computed.stroke, computed.fill].find(value => value && !['none', 'transparent', 'currentColor'].includes(value) && !rgba(value).clear)
+            if (paint) put('color', colorTone(paint, colorTone(computed.color, '$text')))
             for (const [name, key] of Object.entries(geometry)) {
               const value = current.getAttribute(name)
               if (value === null) continue
@@ -1030,7 +1041,7 @@
         const data = { version: 1, sourceMessageId, label: collapse(element.getAttribute('aria-label') ||
           element.querySelector('h1, h2, h3, h4, strong, b')?.textContent).slice(0, 500) || '智能界面布局',
           width: Math.min(2000, Math.max(32, Math.round(element.getBoundingClientRect().width))),
-          ...(lists.has(element) ? { kind: 'list' } : galleries.has(element) ? { kind: 'gallery' } :
+          ...(lists.has(element) ? { kind: 'list' } : tables.has(element) ? { kind: 'table' } : galleries.has(element) ? { kind: 'gallery' } :
             metrics.has(element) || progress.has(element) ? { kind: 'metrics' } : {}), root }
         if (JSON.stringify(data).length > 180000) return []
         const bar = progress.get(element)
@@ -1044,11 +1055,59 @@
     layout.fallback.split('\n').map(line => '> ' + line).join('\n') + '\n\n'
 
   /** Preserve the rendered answer structure as Markdown for the app-owned transcript. */
+  /** Plain links only; popover HTML, handlers and page-private objects never cross the bridge. */
+  const focusCitationSourcesOf = root => {
+    const links = [...(root.matches?.('a[href]') ? [root] : []), ...root.querySelectorAll('a[href]')]
+    const seen = new Set(), sources = []
+    for (const link of links) {
+      try {
+        const raw = link.getAttribute('href') || ''
+        if (!raw || raw.length > 4096 || /[\s\u0000-\u001f\u007f]/.test(raw)) continue
+        const url = new URL(raw, location.href)
+        if (!['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password || seen.has(url.href)) continue
+        const title = collapse(link.getAttribute('title') || link.innerText || link.textContent).slice(0, 1000)
+        if (!title) continue
+        seen.add(url.href); sources.push({ title, url: url.href, site: url.hostname.slice(0, 200) })
+        if (sources.length > 40) return []
+      } catch (_) { /* An invalid link is not a citation destination. */ }
+    }
+    return sources
+  }
+  const focusCitationGroupsOf = node => {
+    const rules = PAGE.focus?.citations, root = rules ? replyRootOf(node) : null
+    const sourceMessageId = root ? messageIdOf(node) : ''
+    if (!root || !/^[a-zA-Z0-9_:-]{1,160}$/.test(sourceMessageId)) return []
+    const candidates = [...(root.matches(rules.triggerSelector) ? [root] : []), ...root.querySelectorAll(rules.triggerSelector)]
+      .filter(element => {
+        if (element.closest('pre, code') || !isVisibleElement(element)) return false
+        const label = collapse(element.textContent), sources = focusCitationSourcesOf(element)
+        const explicit = element.hasAttribute('data-citation-group') || element.hasAttribute('data-citation-index') ||
+          /citation/i.test(element.getAttribute('data-testid') || '')
+        return label && label.length <= 500 && (explicit || sources.length > 0 &&
+          (/\+\s*[1-9]\d?\s*$/.test(label) || element.hasAttribute('data-state') || element.hasAttribute('aria-describedby') ||
+            element.hasAttribute('aria-controls') || element.hasAttribute('aria-haspopup')))
+      })
+    return candidates.filter(element => !candidates.some(parent => parent !== element && parent.contains(element))).slice(0, 100)
+      .map((element, index) => {
+        const label = collapse(element.textContent), sources = focusCitationSourcesOf(element)
+        const identity = JSON.stringify([label, sources.map(source => source.url)])
+        let hash = 2166136261
+        for (let at = 0; at < identity.length; at++) hash = Math.imul(hash ^ identity.charCodeAt(at), 16777619)
+        return { element, sources, expected: Math.max(sources.length, Number(label.match(/\+\s*(\d+)\s*$/)?.[1] || 0) + 1),
+          data: { sourceMessageId, index, signature: (hash >>> 0).toString(16).padStart(8, '0'), label } }
+      })
+  }
+  const focusCitationMarkdown = data => {
+    const payload = encodeURIComponent(JSON.stringify(data)).replace(/[!'()*]/g, value => '%' + value.charCodeAt(0).toString(16).toUpperCase())
+    return '[' + data.label.replace(/[\\\[\]]/g, '\\$&') + '](#web2term-citation=' + payload + ')'
+  }
+
   const readReplyMarkdown = (node) => {
     const root = replyRootOf(node)
     if (!root) return ''
     const smartCards = PAGE.focus?.smartUi ? smartUiCardsOf(node) : []
     const layouts = PAGE.focus?.smartUi ? smartUiLayoutsOf(node) : []
+    const citations = PAGE.focus?.citations ? focusCitationGroupsOf(node) : []
     const codeCards = new Map()
     const codeMarkdown = []
     const languageAliases = { 'c++': 'cpp', 'c#': 'csharp', cs: 'csharp', js: 'javascript', ts: 'typescript',
@@ -1117,6 +1176,8 @@
       const element = current
       const codeCard = codeCards.get(element)
       if (codeCard) return renderCode(codeCard.code, codeCard.language)
+      const citation = citations.find(item => item.element === element)
+      if (citation) return focusCitationMarkdown(citation.data)
       const smart = smartCards.find(card => card.element === element)
       if (smart) return smartUiMarkdown(smart.data)
       const layout = layouts.find(item => item.element === element)
@@ -6200,6 +6261,97 @@
         }
         return current() ? 'unknown' : 'cancelled'
       } finally { if (focusModeChanging === operation) focusModeChanging = null }
+    },
+
+    /** Arm a read of one reply's citation trigger, without changing the composer or task state. */
+    prepareFocusCitation(request, expectedPath) {
+      if (!PAGE.focus?.citations || !request || typeof request.token !== 'string' || request.token.length > 100 ||
+        !/^[a-zA-Z0-9_:-]{1,160}$/.test(request.sourceMessageId || '') ||
+        !Number.isSafeInteger(request.index) || request.index < 0 || request.index >= 100 ||
+        !/^[a-f0-9]{8}$/.test(request.signature || '') || location.pathname !== expectedPath) return null
+      if (focusCitationOperation || focusEditing || focusModeChanging || state.programmatic || fileSend) return { outcome: 'busy', sources: [] }
+      const locate = () => {
+        const nodes = queryAllAssistant().filter(node => messageIdOf(node) === request.sourceMessageId && isVisibleElement(node))
+        return nodes.length === 1 ? focusCitationGroupsOf(nodes[0]).find(group =>
+          group.data.index === request.index && group.data.signature === request.signature) : null
+      }
+      const group = locate()
+      if (!group || group.expected > 40) return null
+      if (group.sources.length >= group.expected) return { outcome: 'ok', sources: group.sources }
+      const operation = { token: request.token, path: expectedPath, generation: state.taskPromptGeneration, group, locate,
+        before: new Set([...document.querySelectorAll(PAGE.focus.citations.popupSelector)].filter(isVisibleElement)), popup: null, clicked: false }
+      operation.current = () => focusCitationOperation === operation && location.pathname === operation.path &&
+        state.taskPromptGeneration === operation.generation && operation.locate()?.element === group.element
+      operation.point = () => {
+        if (!operation.current()) return null
+        const target = group.element
+        try { target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' }) } catch (_) {}
+        const rect = target.getBoundingClientRect(), x = rect.left + rect.width / 2, y = rect.top + rect.height / 2
+        const hit = document.elementFromPoint(x, y)
+        return rect.width > 0 && rect.height > 0 && hit && (hit === target || target.contains(hit)) ? { x, y } : null
+      }
+      // Opening a source list must never navigate the hidden control conversation.
+      operation.inputEvents = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']
+      operation.guard = event => {
+        const hit = event.target === group.element || group.element.contains(event.target)
+        if (operation.clickArmed && (!operation.current() || !hit)) {
+          operation.clickInvalid = true
+          event.preventDefault(); event.stopImmediatePropagation()
+          return
+        }
+        if (hit && event.type === 'click' && event.target.closest?.('a[href]')) event.preventDefault()
+      }
+      focusCitationOperation = operation
+      const point = operation.point()
+      if (!point) { focusCitationOperation = null; return null }
+      for (const type of operation.inputEvents) document.addEventListener(type, operation.guard, true)
+      return { outcome: 'pending', ...point }
+    },
+    prepareFocusCitationClick(token) {
+      const operation = focusCitationOperation
+      if (!operation || operation.token !== token || operation.clicked) return null
+      operation.clicked = true
+      const point = operation.point()
+      if (point) operation.clickArmed = true
+      return point
+    },
+    async finishFocusCitation(token, waitMs) {
+      const operation = focusCitationOperation
+      if (!operation || operation.token !== token) return { outcome: 'cancelled', sources: [] }
+      const end = Date.now() + Math.min(2200, Math.max(0, Number(waitMs) || 0))
+      do {
+        if (!operation.current()) return { outcome: 'cancelled', sources: [] }
+        if (operation.clickInvalid) return { outcome: 'unavailable', sources: [] }
+        const target = operation.group.element
+        const ids = ['aria-describedby', 'aria-controls'].flatMap(key => String(target.getAttribute(key) || '').split(/\s+/).filter(Boolean))
+        const linked = ids.map(id => document.getElementById(id)).filter(element => element && isVisibleElement(element))
+        const fresh = [...document.querySelectorAll(PAGE.focus.citations.popupSelector)].filter(element =>
+          isVisibleElement(element) && !operation.before.has(element))
+        const roots = [...new Set([...linked, ...fresh])]
+        const matches = roots.flatMap(element => {
+          const sources = focusCitationSourcesOf(element)
+          if (sources.length < operation.group.expected || (!linked.includes(element) &&
+            !operation.group.sources.some(known => sources.some(source => source.url === known.url)))) return []
+          return [{ element, sources }]
+        }).filter(item => !roots.some(parent => parent !== item.element && parent.contains(item.element) &&
+          focusCitationSourcesOf(parent).length >= operation.group.expected))
+        if (matches.length === 1) {
+          operation.popup = matches[0].element
+          return { outcome: 'ok', sources: matches[0].sources }
+        }
+        if (Date.now() >= end) break
+        await new Promise(resolve => setTimeout(resolve, 50))
+      } while (true)
+      return { outcome: 'unavailable', sources: [] }
+    },
+    closeFocusCitation(token) {
+      const operation = focusCitationOperation
+      if (!operation || operation.token !== token) return
+      for (const type of operation.inputEvents) document.removeEventListener(type, operation.guard, true)
+      if (operation.current() && operation.popup?.isConnected) {
+        operation.popup.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }))
+      }
+      focusCitationOperation = null
     },
 
     /** Measure only the current page's native Stop for a trusted main-process click. */

@@ -10,6 +10,7 @@ import type { TaskLease } from './autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from './task-presentation'
 import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo, FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from './focus-chat'
 import type { FocusUiRequest } from './focus-smart-ui'
+import type { FocusCitationRequest, FocusCitationResult } from './focus-citations'
 import type { RemoteRipgrepState, RemoteRipgrepRequest, RemoteRipgrepTaskResult } from './remote-ripgrep'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
@@ -48,6 +49,7 @@ export const IpcChannels = {
   focusChatRetrySend: 'focus-chat:retry-send',
   focusChatEdit: 'focus-chat:edit',
   focusChatUiAction: 'focus-chat:ui-action',
+  focusChatCitation: 'focus-chat:citation',
   focusChatComposerMode: 'focus-chat:composer-mode',
   focusChatModelSettings: 'focus-chat:model-settings',
   focusChatAsk: 'focus-chat:ask',
@@ -2365,6 +2367,7 @@ export interface AppApi {
   retryFocusSend(owner: FocusOwner, failureId: string): Promise<FocusSendOutcome>
   editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome>
   actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome>
+  readFocusCitation(request: FocusCitationRequest): Promise<FocusCitationResult>
   setFocusComposerMode(request: FocusComposerModeRequest): Promise<FocusSendOutcome>
   updateFocusModelSettings(request: FocusModelSettingsRequest): Promise<FocusModelSettingsResult>
   /** Ask about a focus-view selection in the side chat; '' once it is open, otherwise the message to show. */

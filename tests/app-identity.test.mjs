@@ -43,7 +43,7 @@ function configure({ packaged = true, existing = [] } = {}) {
     return modules[name]
   } })
   module.exports.configureAppIdentity()
-  assert.deepEqual(calls[1], ['name', 'Web2Term'])
+  assert.deepEqual(calls[1], ['name', packaged ? 'Web2Term' : 'Web2Term (Development)'])
   assert.equal(paths.get('sessionData'), paths.get('userData'), 'cookies and the database must share the selected profile')
   return paths.get('userData')
 }

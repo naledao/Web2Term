@@ -540,6 +540,122 @@ test('Markdown table cells retain native emphasis and escape literal pipes', () 
   assert.match(f.markdown({}), /\| 界面 \| \*\*Vue 3\*\* \\\| TypeScript \|/)
 })
 
+function serviceTable() {
+  const icons = []
+  const statuses = ['运行中，端口 10088', '正常', '正常', '正在监听', '正在监听', '失败']
+  const services = ['web2term-backend', 'Nginx', 'SSH', 'frps', 'sing-box', 'bvcheckiprule.service']
+  const cell = (tag, children) => new Element(tag, {}, children,
+    { display: 'table-cell', textAlign: 'left', paddingTop: '8px', paddingBottom: '8px', paddingRight: '12px', borderBottomWidth: '1px' })
+  const rows = statuses.map((status, index) => {
+    const danger = index === 5, color = danger ? 'rgb(239, 68, 68)' : 'rgb(0, 166, 62)'
+    const icon = new Element('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2',
+      'stroke-linecap': 'round', 'stroke-linejoin': 'round', onload: 'do not run' },
+    danger ? [new Element('path', { d: 'M12 3 2 21h20L12 3z M12 9v4 M12 17h.01' })] :
+      [new Element('circle', { cx: '12', cy: '12', r: '9' }), new Element('path', { d: 'm8 12 3 3 5-6' })],
+    { display: 'inline-block', width: '16px', height: '16px', color, fill: 'none', stroke: color, flexShrink: '0' })
+    for (const shape of icon.children) Object.assign(shape.css, { color, fill: 'none', stroke: color })
+    icons.push(icon)
+    const label = new Element('span', {}, [icon, status], { display: 'inline-flex', alignItems: 'center', columnGap: '6px' })
+    const name = index === 0 ? ['Go 后端 ', new Element('span', { 'data-markdown-copy': 'inline-code' }, [services[index]])] :
+      danger ? [new Element('code', {}, [services[index]])] : [services[index]]
+    return new Element('tr', {}, [cell('td', name), cell('td', [label])], { display: 'table-row' })
+  })
+  const table = new Element('table', {}, [new Element('thead', {}, [
+    new Element('tr', {}, [cell('th', ['服务']), cell('th', ['状态'])], { display: 'table-row' })]),
+  new Element('tbody', {}, rows)], { display: 'table', width: '760px' })
+  return { table, icons }
+}
+
+test('native status tables retain every SVG, color, label, inline code and column alignment', () => {
+  const f = fixture(), { table } = serviceTable()
+  f.dil.childNodes = []
+  append(f.dil, new Element('h2', {}, ['主要服务']), table, new Element('h2', {}, ['需要关注']), new Element('p', {}, ['检查失败服务的日志。']))
+  const layouts = f.layouts({})
+  assert.equal(layouts.length, 1, 'one table, without swallowing adjacent headings or prose')
+  assert.equal(layouts[0].element, table)
+  const data = parseFocusLayout(JSON.stringify(layouts[0].data))
+  assert.ok(data)
+  assert.equal(data.kind, 'table')
+  const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+  assert.match(html, /focus-layout--table/)
+  assert.match(html, /<table/)
+  assert.equal((html.match(/<svg/g) ?? []).length, 6)
+  assert.equal((html.match(/<circle/g) ?? []).length, 5)
+  assert.match(html, /var\(--fl-success\)/)
+  assert.match(html, /var\(--fc-danger\)/)
+  assert.match(html, /width:16px;height:16px/)
+  assert.match(html, /column-gap:6px/)
+  assert.match(html, /<code[^>]*>web2term-backend<\/code>/)
+  assert.match(html, /<code[^>]*>bvcheckiprule\.service<\/code>/)
+  assert.match(html, /text-align:left/)
+  assert.doesNotMatch(html, /text-align:right|min-width:560px|onload|do not run/)
+  const markdown = f.markdown({})
+  assert.equal((markdown.match(/<!--focus-layout /g) ?? []).length, 1)
+  assert.match(markdown, /^## 一、整体产品形态\s+## 主要服务\s+<!--focus-layout /)
+  assert.match(markdown, /## 需要关注\s+检查失败服务的日志。\s+## 二、核心功能模块$/)
+  const fallback = cleanFocusAnswer(markdown).replace(/<!--focus-layout [^\n]* -->\n?/g, '')
+  assert.doesNotMatch(fallback, /<!--focus-layout|<svg|"tag"/)
+  assert.equal((fallback.match(/运行中，端口 10088/g) ?? []).length, 1)
+  assert.equal((fallback.match(/bvcheckiprule\.service/g) ?? []).length, 1)
+})
+
+test('status SVGs preserve fixed paint colors even when their CSS text color is neutral', () => {
+  const f = fixture(), { table, icons } = serviceTable()
+  f.dil.childNodes = []; append(f.dil, table)
+  for (const icon of icons) {
+    icon.css.color = 'rgb(13, 13, 13)'
+    for (const shape of icon.children) shape.css.color = 'rgb(13, 13, 13)'
+  }
+  const data = parseFocusLayout(JSON.stringify(f.layouts({})[0].data))
+  assert.ok(data)
+  const svg = []
+  const visit = node => {
+    if (typeof node === 'string') return
+    if (node.tag === 'svg') svg.push(node)
+    ;(node.children ?? []).forEach(visit)
+  }
+  visit(data.root)
+  assert.deepEqual(svg.map(node => node.style.color), ['$success', '$success', '$success', '$success', '$success', '$danger'])
+  const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+  assert.match(html, /color:var\(--fl-success\)/)
+  assert.match(html, /color:var\(--fc-danger\)/)
+})
+
+test('an icon table at the native message root keeps the same table presentation', () => {
+  const f = fixture(), { table } = serviceTable()
+  table.attrs['data-dil-message-id'] = 'answer-layout'
+  f.answer.childNodes = []; append(f.answer, table)
+  const layouts = f.layouts({})
+  assert.equal(layouts.length, 1)
+  assert.equal(layouts[0].element, table)
+  assert.equal(layouts[0].data.kind, 'table')
+  assert.ok(parseFocusLayout(JSON.stringify(layouts[0].data)))
+})
+
+test('plain tables stay Markdown while status tables inside an existing layout are not duplicated', () => {
+  const f = fixture(), { table } = serviceTable()
+  append(f.outer, table)
+  assert.equal(f.layouts({}).length, 1)
+  assert.equal((f.markdown({}).match(/<!--focus-layout /g) ?? []).length, 1)
+  const g = fixture()
+  g.dil.childNodes = []
+  append(g.dil, new Element('table', {}, [new Element('tr', {}, [new Element('th', {}, ['服务']), new Element('th', {}, ['状态'])]),
+    new Element('tr', {}, [new Element('td', {}, ['SSH']), new Element('td', {}, ['正常'])])]))
+  assert.equal(g.layouts({}).length, 0)
+  assert.match(g.markdown({}), /\| SSH \| 正常 \|/)
+})
+
+test('status tables keep a readable Markdown fallback when the presentation tree exceeds its limit', () => {
+  const f = fixture(), { table } = serviceTable()
+  f.dil.childNodes = []; append(f.dil, table)
+  append(table, new Element('tbody', {}, Array.from({ length: 601 }, () => new Element('tr', {}, [new Element('td', {}, ['额外服务'])]))))
+  assert.equal(f.layouts({}).length, 0)
+  const markdown = f.markdown({})
+  assert.doesNotMatch(markdown, /<!--focus-layout/)
+  assert.match(markdown, /\| Go 后端 `web2term-backend` \| 运行中，端口 10088 \|/)
+  assert.match(markdown, /\| `bvcheckiprule\.service` \| 失败 \|/)
+})
+
 test('an unbordered icon list beside a bordered dashboard keeps rows, SVG, bold titles and background dividers', () => {
   const f = fixture(), list = stageList()
   append(f.dil, new Element('h2', {}, ['四、第一版开发范围']), new Element('p', {}, ['不建议一开始把几十个功能全部做完。']),

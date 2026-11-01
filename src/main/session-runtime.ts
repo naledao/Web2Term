@@ -39,6 +39,8 @@ import { taskToolResultContext, parseTaskToolContext, taskPausedByInput } from '
 import { pendingTaskQuestion, validTaskQuestionRequest } from '../shared/task-clarification'
 import type { TaskQuestion, TaskQuestionSource, TaskQuestionRequest } from '../shared/task-clarification'
 import { validFocusUiAction } from '../shared/focus-smart-ui'
+import { validFocusCitationTarget } from '../shared/focus-citations'
+import type { FocusCitationRequest, FocusCitationResult } from '../shared/focus-citations'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
 import type { FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
 import { validFocusModelSettingsRequest } from '../shared/focus-chat'
@@ -48,7 +50,9 @@ import { writeFile } from 'node:fs/promises'
 import { createConnection } from 'mysql2/promise'
 import { formatMysqlCell } from './mysql-field-value'
 import type { Connection } from 'mysql2/promise'
-import { app, BrowserWindow, dialog, Notification, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, dialog, safeStorage, shell } from 'electron'
+import { showDesktopNotification } from './desktop-notifications'
+import type { NotificationTarget } from './notification-target'
 import { writeCommandDiagnostic } from './command-log'
 import type { CommandDiagnostic } from './command-log'
 import {
@@ -1442,6 +1446,19 @@ export class SessionRuntime {
     return true
   }
 
+  focusNotification(target: NotificationTarget): boolean {
+    if (this.disposed || target.sessionId !== this.id || !this.focus()) return false
+    if (target.platformId !== this.activePlatformId) {
+      if (this.taskRunning() || !this.switchPlatform(target.platformId)) return false
+    }
+    if (target.conversationId && this.embed.getState().conversationId !== target.conversationId) {
+      // A stale notification must not replace a different conversation's running task.
+      if (this.taskRunning()) return false
+      this.navigateEmbed(this.activePlatform.conversationUrl(target.conversationId))
+    }
+    return true
+  }
+
   setTitle(title: string): void {
     this.customTitle = title.trim()
     this.options.onSummaryChanged()
@@ -1850,6 +1867,19 @@ export class SessionRuntime {
       const resolved: FocusModelSettingsResult = this.ownsFocus(request) ? result : { outcome: 'cancelled', settings: null }
       writeFocusDiagnostic(request, { event: 'model-setting-outcome', setting: request.kind, outcome: resolved.outcome, reason: resolved.reason })
       return resolved
+    } finally { this.focusSending = false }
+  }
+
+  async readFocusCitation(request: FocusCitationRequest): Promise<FocusCitationResult> {
+    if (!this.ownsFocus(request) || request.platformId !== 'chatgpt' || !request.conversationId || !validFocusCitationTarget(request)) {
+      return { outcome: 'unavailable', sources: [] }
+    }
+    if (this.focusSending || this.focusRevision) return { outcome: 'busy', sources: [] }
+    const embed = this.embed
+    this.focusSending = true
+    try {
+      const result = await embed.readFocusCitation(request, randomUUID(), () => this.ownsFocus(request) && this.embed === embed)
+      return this.ownsFocus(request) && this.embed === embed ? result : { outcome: 'cancelled', sources: [] }
     } finally { this.focusSending = false }
   }
 
@@ -4072,15 +4102,11 @@ export class SessionRuntime {
     if (this.taskEnded || this.options.automationBlocked?.()) return
     const window = this.window
     if (this.active && window && !window.isDestroyed() && window.isFocused()) return
-    if (!Notification.isSupported()) return
     const summary = question.replace(/\s+/g, ' ').trim()
     const excerpt = summary.length > 140 ? `${summary.slice(0, 137)}...` : summary
-    const notification = new Notification({
-      title: '有问题等待回答',
-      body: count > 1 ? `共 ${count} 个问题：${excerpt}` : excerpt
-    })
-    notification.on('click', () => this.focus())
-    notification.show()
+    const target = this.notificationTarget()
+    showDesktopNotification(target, '有问题等待回答', count > 1 ? `共 ${count} 个问题：${excerpt}` : excerpt,
+      () => { this.focusNotification(target) })
   }
   private notifyTaskCompleted(body: string): void {
     if (this.taskEnded || this.options.automationBlocked?.()) return
@@ -4095,10 +4121,13 @@ export class SessionRuntime {
     const window = this.window
     this.options.onTaskCompleted(this.id)
     if (this.active && window && !window.isDestroyed() && window.isFocused()) return
-    if (!Notification.isSupported()) return
-    const notification = new Notification({ title: 'Web2Term', body })
-    notification.on('click', () => this.focus())
-    notification.show()
+    const target = this.notificationTarget()
+    showDesktopNotification(target, 'Web2Term', body, () => { this.focusNotification(target) })
+  }
+
+  private notificationTarget(): NotificationTarget {
+    return { sessionId: this.id, platformId: this.activePlatformId,
+      conversationId: this.embed.getState().conversationId }
   }
 
   private send(channel: string, payload: unknown): void {

@@ -14,7 +14,9 @@ import { join, posix } from 'node:path'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, Tray } from 'electron'
-import { APP_ID, APP_NAME, configureAppIdentity } from './app-identity'
+import { APP_NAME, configureAppIdentity } from './app-identity'
+import { registerDesktopNotifications } from './desktop-notifications'
+import { NotificationActivationRouter, notificationProtocol } from './notification-target'
 import { taskbarCountIcon } from './taskbar-badge'
 import { LINUX_AGENT_FILE_NAME, LinuxAgentDownloader } from './linux-agent-download'
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
@@ -194,6 +196,9 @@ let web2termConnection: Web2termConnection | null = null
 let localMachineId = ''
 let settings: AppSettings = { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: DEFAULT_BACKEND_URL, forceDefaultBackendUrl: true, softwareProxy: DEFAULT_SOFTWARE_PROXY, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW }
 const runtimes = new Map<string, SessionRuntime>()
+const notificationActivations = new NotificationActivationRouter(notificationProtocol(app.isPackaged),
+  target => runtimes.get(target.sessionId)?.focusNotification(target) ?? false,
+  () => createManagerWindow())
 const releaseNotes = new ReleaseNotesService(() => ({ backendUrl: settings.backendUrl, machineId: localMachineId }), softwareFetch)
 function invalidateReleaseNotes(): void {
   releaseNotes.invalidate()
@@ -1552,6 +1557,8 @@ function registerIpcHandlers(): void {
   })
     ipcMain.handle(IpcChannels.focusChatUiAction, (event, request) =>
       focusRuntime(event, request)?.actOnFocusUi(request) ?? 'unavailable')
+  ipcMain.handle(IpcChannels.focusChatCitation, (event, request) =>
+    focusRuntime(event, request)?.readFocusCitation(request) ?? { outcome: 'unavailable', sources: [] })
   ipcMain.handle(IpcChannels.focusChatComposerMode, (event, request) =>
     focusRuntime(event, request)?.setFocusComposerMode(request) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatModelSettings, (event, request) =>
@@ -2281,11 +2288,14 @@ function registerIpcHandlers(): void {
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', () => createManagerWindow())
+  notificationActivations.handleCommandLine(process.argv)
+  app.on('second-instance', (_event, argv) => {
+    if (!notificationActivations.handleCommandLine(argv)) createManagerWindow()
+  })
 
   void app.whenReady().then(async () => {
     registerPdfAssetHandler()
-    if (process.platform === 'win32') app.setAppUserModelId(APP_ID)
+    registerDesktopNotifications()
 
     if (appLogFile) {
       console.info(`[app] logging this run to ${appLogFile}`)
@@ -2415,6 +2425,7 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     restoreWorkspaceSelection(savedWorkspaceSessionId, savedWorkspaceOpenSshDialog)
+    notificationActivations.markReady()
     scheduledTasks.start()
 
     if (web2termConnection) {

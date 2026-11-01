@@ -254,6 +254,8 @@ export interface PageAdapter {
  * `assistantSelectors`; these are the parts only the focus view uses.
  */
 export interface FocusPageRules {
+  /** Citation popovers are read only after an explicit focus-view click. */
+  citations?: { triggerSelector: string; popupSelector: string }
   /** Native error text observed below a failed user message, outside its content. */
   sendFailure?: { messages: string[]; retryLabels: string[]; controlSelector: string }
   modelSettings?: {
@@ -729,6 +731,10 @@ export const CHATGPT_PAGE: PageAdapter = {
     },
     // User-run smart-ui probe 2026-10-24: DIL cards inside the answer, Radix radio
     // buttons, separate state saves, and a native next request with state snapshots.
+    citations: {
+      triggerSelector: 'a[href], [data-citation-group], [data-citation-index], [data-testid*="citation"], [role="button"][data-state], button[aria-haspopup]',
+      popupSelector: '[role="tooltip"], [role="dialog"], [data-radix-popper-content-wrapper], [data-state="open"][id]'
+    },
     smartUi: {
       rootSelector: '[data-dil-message-id]', sourceIdAttr: 'data-dil-message-id',
       cardSelector: '[data-d-has-border]', groupSelector: '[role="radiogroup"][data-d-component]',

@@ -11,6 +11,7 @@ import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/b
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from '../shared/github'
 import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusModelSettingsResult } from '../shared/focus-chat'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
+import type { FocusCitationRequest, FocusCitationResult } from '../shared/focus-citations'
 import type { RemoteRipgrepRequest, RemoteRipgrepState, RemoteRipgrepTaskResult } from '../shared/remote-ripgrep'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
@@ -223,6 +224,7 @@ const api: AppApi = {
   retryFocusSend: (owner, failureId): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatRetrySend, owner, failureId),
   editFocusMessage: (request: FocusEditRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatEdit, request),
   actOnFocusUi: (request: FocusUiRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatUiAction, request),
+  readFocusCitation: (request: FocusCitationRequest): Promise<FocusCitationResult> => ipcRenderer.invoke(IpcChannels.focusChatCitation, request),
   setFocusComposerMode: (request): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatComposerMode, request),
   updateFocusModelSettings: (request): Promise<FocusModelSettingsResult> => ipcRenderer.invoke(IpcChannels.focusChatModelSettings, request),
   /** '' once the side chat is open, otherwise the message to show. */

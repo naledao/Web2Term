@@ -9,6 +9,7 @@ import FocusChart, { parseFocusChart } from './FocusChart'
 import type { FocusChartData } from './FocusChart'
 import FocusSmartUi, { FocusSmartUiContext } from './FocusSmartUi'
 import FocusLayout from './FocusLayout'
+import FocusCitationLink, { cleanFocusCitationCopy, FocusCitationContext } from './FocusCitationLink'
 import FocusComposerModes from './FocusComposerModes'
 import FocusCodeBlock, { FocusCodeThemeContext } from './FocusCodeBlock'
 import FocusTokenUsage from './FocusTokenUsage'
@@ -226,10 +227,10 @@ const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: 
     blocks.push(source.slice(last, match.index), block)
     last = match.index + match[0].length
   }
-  if (!blocks.length) return <FocusCodeThemeContext.Provider value={theme}><MDEditor.Markdown source={source} skipHtml disableCopy components={{ pre: FocusCodeBlock }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /></FocusCodeThemeContext.Provider>
+  if (!blocks.length) return <FocusCodeThemeContext.Provider value={theme}><MDEditor.Markdown source={source} skipHtml disableCopy components={{ pre: FocusCodeBlock, a: FocusCitationLink }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /></FocusCodeThemeContext.Provider>
   blocks.push(source.slice(last))
   return <FocusCodeThemeContext.Provider value={theme}>{blocks.map((block, index) => typeof block === 'string'
-    ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml disableCopy components={{ pre: FocusCodeBlock }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /> : null
+    ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml disableCopy components={{ pre: FocusCodeBlock, a: FocusCitationLink }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /> : null
     : block.kind === 'chart' ? <FocusChart key={index} data={block.data} /> : block.kind === 'layout'
       ? <FocusLayout key={index} data={block.data} /> : <FocusSmartUi key={index} data={block.data} />)}</FocusCodeThemeContext.Provider>
 })
@@ -513,6 +514,7 @@ function FocusChatView(props: Props): JSX.Element {
     }
   }
   const transcriptRef = useRef<HTMLDivElement>(null)
+  const citationRoot = useRef<HTMLElement>(null)
   useEffect(() => { alive.current = true; return () => {
     alive.current = false
   } }, [])
@@ -685,6 +687,8 @@ function FocusChatView(props: Props): JSX.Element {
   const smartUiContext = useMemo(() => ({ disabled: working || sending || stopping || !!editingId || !ready || !!state?.nativeDraft,
     liveSources: new Set((state?.smartReplies ?? []).map(reply => reply.sourceMessageId)), act: actOnUi, onOriginal: props.onOriginal }),
   [working, sending, stopping, editingId, ready, state?.nativeDraft, state?.smartReplies, actOnUi, props.onOriginal])
+  const citationContext = useMemo(() => ({ owner, ownerKey, visible, containerRef: citationRoot, onOriginal: props.onOriginal }),
+    [ownerKey, visible, props.onOriginal])
   const setDraftText = (text: string): void => {
     draftRef.current = text
     setDraft(text)
@@ -792,7 +796,7 @@ function FocusChatView(props: Props): JSX.Element {
     finally { if (alive.current) setActionId(null) }
   }
   const copy = async (id: string, text: string): Promise<void> => {
-    try { await navigator.clipboard.writeText(cleanFocusAnswer(text).replace(CHART_MARKER, '')); setCopiedId(id); setTimeout(() => { if (alive.current) setCopiedId(current => current === id ? null : current) }, 2000) }
+    try { await navigator.clipboard.writeText(cleanFocusCitationCopy(cleanFocusAnswer(text).replace(CHART_MARKER, ''))); setCopiedId(id); setTimeout(() => { if (alive.current) setCopiedId(current => current === id ? null : current) }, 2000) }
     catch { setError('复制失败，可以选择正文手动复制。') }
   }
   const retrySend = async (): Promise<void> => {
@@ -933,7 +937,7 @@ function FocusChatView(props: Props): JSX.Element {
           </article>)}
       </ConversationTranscript>,
   [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, working, sending, stopping, editingId, settingPending, props.renderAttachment, props.onOpenTerminal, props.onRun, props.onSkip])
-  return <FocusSmartUiContext.Provider value={smartUiContext}><section className="focus-chat" aria-label="专注对话" data-theme={theme}>
+  return <FocusCitationContext.Provider value={citationContext}><FocusSmartUiContext.Provider value={smartUiContext}><section ref={citationRoot} className="focus-chat" aria-label="专注对话" data-theme={theme}>
     <header className="focus-chat__header">
       <span>{modelIcon ? <img className="focus-chat__brand-icon" src={modelIcon} alt={modelLabel} /> : <strong>{modelLabel}</strong>}</span>
       <button type="button" className="focus-chat__new-chat" aria-label="新建对话" title="新建对话"
@@ -1012,7 +1016,7 @@ function FocusChatView(props: Props): JSX.Element {
         </div>
       </form><p className="focus-composer__hint">Enter 发送 · Shift+Enter 换行</p>
     </div>
-  </section></FocusSmartUiContext.Provider>
+  </section></FocusSmartUiContext.Provider></FocusCitationContext.Provider>
 }
 
 export default memo(FocusChatView)
