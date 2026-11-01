@@ -645,6 +645,83 @@ test('plain tables stay Markdown while status tables inside an existing layout a
   assert.match(g.markdown({}), /\| SSH \| 正常 \|/)
 })
 
+function riskTable({ direct = false, modernColor = false } = {}) {
+  const rows = [
+    ['应用缓存', '低', '优先清理，可能需要重新加载'], ['下载目录、旧 APK、ZIP', '低', '确认无用后删除'],
+    ['应用离线资源、媒体缓存', '中', '优先使用应用自带清理功能'], ['大型日志、临时文件', '中', '确认来源及是否仍被使用'],
+    ['不再使用的应用', '中', '正常卸载，必要时先备份'], ['Magisk 模块', '中', '使用 Magisk 管理器卸载'],
+    ['Linux 环境镜像、容器数据', '高', '先确认挂载位置和用途'], ['Android 系统数据目录', '极高', '不直接删除']
+  ]
+  const colored = []
+  const cell = (tag, children, css = {}) => new Element(tag, {}, children,
+    { display: 'table-cell', textAlign: 'left', paddingTop: '8px', paddingBottom: '8px', borderBottomWidth: '1px', ...css })
+  const body = rows.map(([name, risk, advice]) => {
+    const color = risk === '低' ? modernColor ? 'color(srgb 0 0.65 0.24)' : 'rgb(0, 166, 62)' :
+      risk === '极高' ? modernColor ? 'color(srgb 0.94 0.27 0.27)' : 'rgb(239, 68, 68)' : 'rgb(13, 13, 13)'
+    const value = direct ? cell('td', [risk], { color }) : new Element('span', {}, [risk], { color })
+    if (risk === '低' || risk === '极高') colored.push(value)
+    return new Element('tr', {}, [cell('td', [name]), direct ? value : cell('td', [value]), cell('td', [advice])], { display: 'table-row' })
+  })
+  return { colored, table: new Element('table', {}, [new Element('thead', {}, [new Element('tr', {},
+    ['清理对象', '风险', '建议'].map(label => cell('th', [label], { fontWeight: '600' })), { display: 'table-row' })]),
+  new Element('tbody', {}, body)], { display: 'table', width: '760px' }) }
+}
+
+test('risk tables without SVG preserve green/red text and native left alignment in every column', () => {
+  for (const direct of [false, true]) {
+    for (const modernColor of [false, true]) {
+      const f = fixture(), { table } = riskTable({ direct, modernColor })
+      f.dil.childNodes = []
+      append(f.dil, new Element('h2', {}, ['安全清理方案']), table, new Element('p', {}, ['清除存储数据可能永久删除应用数据。']))
+      assert.equal(table.querySelector('svg'), null)
+      const layouts = f.layouts({})
+      assert.equal(layouts.length, 1)
+      assert.equal(layouts[0].element, table)
+      const data = parseFocusLayout(JSON.stringify(layouts[0].data))
+      assert.ok(data)
+      assert.equal(data.kind, 'table')
+      const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+      assert.equal((html.match(/color:var\(--fl-success\)/g) ?? []).length, 2)
+      assert.equal((html.match(/color:var\(--fc-danger\)/g) ?? []).length, 1)
+      assert.match(html, /text-align:left/)
+      assert.doesNotMatch(html, /text-align:right|<svg|min-width:560px/)
+      assert.match(html, /确认来源及是否仍被使用/)
+      assert.match(html, /不直接删除/)
+      const markdown = f.markdown({})
+      assert.equal((markdown.match(/<!--focus-layout /g) ?? []).length, 1)
+      assert.match(markdown, /## 安全清理方案\s+<!--focus-layout /)
+      assert.match(markdown, /清除存储数据可能永久删除应用数据。/)
+    }
+  }
+})
+
+test('hidden colored text, neutral text and ordinary links do not turn plain tables into presentation layouts', () => {
+  const f = fixture()
+  const table = new Element('table', {}, [new Element('tr', {}, [new Element('th', {}, ['项目']), new Element('th', {}, ['说明'])]),
+    new Element('tr', {}, [new Element('td', {}, ['普通文字']), new Element('td', {}, [
+      new Element('span', {}, ['中性次要文字'], { color: 'rgb(110, 110, 110)' }),
+      new Element('span', {}, ['隐藏警告'], { color: 'rgb(239, 68, 68)', display: 'none' }),
+      new Element('a', { href: 'https://example.com/docs' }, ['文档'], { color: 'rgb(0, 80, 200)' })])])])
+  f.dil.childNodes = []; append(f.dil, table)
+  assert.equal(f.layouts({}).length, 0)
+  assert.match(f.markdown({}), /\[文档\]\(https:\/\/example.com\/docs\)/)
+})
+
+test('a colored risk table stays inside its existing outer layout and becomes Markdown if oversized', () => {
+  const f = fixture(), { table } = riskTable()
+  append(f.outer, table)
+  assert.equal(f.layouts({}).length, 1)
+  assert.equal((f.markdown({}).match(/<!--focus-layout /g) ?? []).length, 1)
+  const g = fixture(), large = riskTable().table
+  append(large, new Element('tbody', {}, Array.from({ length: 601 }, () => new Element('tr', {}, [new Element('td', {}, ['额外行'])]))))
+  g.dil.childNodes = []; append(g.dil, large)
+  assert.equal(g.layouts({}).length, 0)
+  const markdown = g.markdown({})
+  assert.doesNotMatch(markdown, /<!--focus-layout/)
+  assert.match(markdown, /\| 应用缓存 \| 低 \| 优先清理，可能需要重新加载 \|/)
+  assert.match(markdown, /\| Android 系统数据目录 \| 极高 \| 不直接删除 \|/)
+})
+
 test('status tables keep a readable Markdown fallback when the presentation tree exceeds its limit', () => {
   const f = fixture(), { table } = serviceTable()
   f.dil.childNodes = []; append(f.dil, table)

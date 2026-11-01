@@ -1,9 +1,10 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import type { ComponentProps, JSX, RefObject } from 'react'
+import { Popover } from '@base-ui/react/popover'
 import type { FocusOwner } from '@shared/focus-chat'
 import { cleanFocusCitationCopy, parseFocusCitationHref, parseFocusCitationSources } from '@shared/focus-citations'
 import type { FocusCitation, FocusCitationSource } from '@shared/focus-citations'
-import AppPopover from './AppPopover'
+import './AppPopover.css'
 import './FocusCitationLink.css'
 
 interface CitationContext {
@@ -22,40 +23,49 @@ function SourceIcon(): JSX.Element {
   </svg>
 }
 function CitationControl({ data, context }: { data: FocusCitation; context: CitationContext | null }): JSX.Element {
-  const trigger = useRef<HTMLButtonElement>(null)
   const epoch = useRef(0)
+  const loading = useRef<number | null>(null)
+  const cachedSources = useRef<FocusCitationSource[]>([])
   const [open, setOpen] = useState(false)
   const [pending, setPending] = useState(false)
   const [sources, setSources] = useState<FocusCitationSource[]>([])
   const [error, setError] = useState('')
   useEffect(() => {
-    if (!context?.visible) { epoch.current++; setOpen(false); setPending(false) }
-    return () => { epoch.current++ }
+    if (!context?.visible) { epoch.current++; loading.current = null; setOpen(false); setPending(false) }
+    return () => { epoch.current++; loading.current = null }
   }, [context?.visible])
   const load = async (): Promise<void> => {
-    if (!context || !context.visible || pending) return
+    if (!context || !context.visible || loading.current !== null || cachedSources.current.length) return
     const id = ++epoch.current
+    loading.current = id
     setPending(true); setError('')
     try {
       const result = await window.api.readFocusCitation({ ...context.owner, sourceMessageId: data.sourceMessageId,
         index: data.index, signature: data.signature })
       if (id !== epoch.current) return
       const links = result.outcome === 'ok' ? parseFocusCitationSources(result.sources) : null
-      if (links) setSources(links)
+      if (links) { cachedSources.current = links; setSources(links) }
       else setError(result.outcome === 'busy' ? '网页正在处理其他操作，请稍后重试。' : '这组来源尚未载入，请重试或在原始视图中查看。')
     } catch { if (id === epoch.current) setError('读取来源失败，请重试或在原始视图中查看。') }
-    finally { if (id === epoch.current) setPending(false) }
+    finally { if (loading.current === id) { loading.current = null; if (id === epoch.current) setPending(false) } }
   }
-  const close = (): void => { epoch.current++; setPending(false); setOpen(false) }
-  return <span className="focus-citation">
-    <button ref={trigger} type="button" className="focus-citation__trigger" aria-expanded={open} aria-haspopup="dialog"
-      onClick={() => { if (open) close(); else { setOpen(true); if (!sources.length) void load() } }}>
+  // Closing a hover card keeps its in-flight read: the next hover can reuse the
+  // result instead of racing another native read. Owner changes still revoke it.
+  const close = (): void => { setOpen(false) }
+  return <span className="focus-citation"><Popover.Root open={open && context?.visible !== false} modal={false}
+    onOpenChange={next => { setOpen(next); if (next) void load() }}>
+    <Popover.Trigger type="button" className="focus-citation__trigger" openOnHover delay={200} closeDelay={300}>
       <SourceIcon /><span>{data.label}</span>
-    </button>
-    <AppPopover open={open} onClose={close} anchor={trigger.current} containerRef={context?.containerRef}
-      className="focus-citation-popover" aria-label="引用来源" style={{ width: 360 }}>
+    </Popover.Trigger>
+    <Popover.Portal container={context?.containerRef}
+      className={'app-popover-portal' + (context?.containerRef ? ' app-popover-portal--bounded' : '')}>
+      <Popover.Positioner positionMethod="fixed" side="bottom" align="start" sideOffset={8} collisionPadding={12}
+        collisionBoundary={context?.containerRef.current ?? undefined}
+        collisionAvoidance={{ side: 'flip', align: 'shift', fallbackAxisSide: 'none' }} className="app-popover-positioner">
+    <Popover.Popup className="app-popover focus-citation-popover" aria-label="引用来源" style={{ width: 360 }}
+      finalFocus={() => context?.visible === true}>
       <div className="focus-citation__heading"><strong>引用来源{sources.length ? ` · ${sources.length}` : ''}</strong>
-        <button type="button" onClick={close} aria-label="关闭来源列表"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" /></svg></button>
+        <Popover.Close type="button" aria-label="关闭来源列表"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" /></svg></Popover.Close>
       </div>
       {pending ? <p className="focus-citation__status" role="status">正在读取来源…</p> : null}
       {sources.length ? <ul className="focus-citation__sources">{sources.map(source => <li key={source.url}>
@@ -67,8 +77,10 @@ function CitationControl({ data, context }: { data: FocusCitation; context: Cita
         {context ? <div><button type="button" disabled={pending} onClick={() => void load()}>重试</button>
           <button type="button" onClick={() => { close(); context.onOriginal() }}>查看原始来源</button></div> : null}
       </div> : null}
-    </AppPopover>
-  </span>
+    </Popover.Popup>
+      </Popover.Positioner>
+    </Popover.Portal>
+  </Popover.Root></span>
 }
 
 /** Reserved citation links become local source lists; ordinary Markdown links remain links. */

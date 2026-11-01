@@ -868,10 +868,25 @@
       if (!sourceMessageId || sourceMessageId !== messageIdOf(node)) return []
       const candidates = [dil, ...dil.querySelectorAll('[data-d-component], ul, ol')]
       const lists = new Set(candidates.filter(iconList))
-      // Markdown has no representation for the native status SVGs. Keep the table
-      // boundary so icons and their labels stay in the same cell and column.
+      // Markdown loses both SVGs and native text colors. Preserve tables with
+      // meaningful colored text, as well as icon tables, with their column alignment.
+      const coloredTableText = element => {
+        const baseline = getComputedStyle(dil).color
+        const pending = [...element.querySelectorAll('th, td')]
+        let count = 0
+        while (pending.length && ++count <= 600) {
+          const current = pending.pop(), tag = current.tagName.toLowerCase()
+          if (['a', 'svg', 'script', 'style'].includes(tag) || current.hasAttribute('hidden')) continue
+          const computed = getComputedStyle(current)
+          if (computed.display === 'none' || ['hidden', 'collapse'].includes(computed.visibility)) continue
+          const ownText = [...current.childNodes].some(child => child.nodeType === Node.TEXT_NODE && String(child.nodeValue || '').trim())
+          if (ownText && computed.color !== baseline && !rgba(computed.color).clear && colorTone(computed.color, '$text') !== '$text') return true
+          pending.push(...current.children)
+        }
+        return false
+      }
       const tables = new Set([...(dil.tagName.toLowerCase() === 'table' ? [dil] : []), ...dil.querySelectorAll('table')]
-        .filter(element => element.querySelector('svg')))
+        .filter(element => element.querySelector('svg') || coloredTableText(element)))
       const galleries = new Set(candidates.filter(element => {
         if (!layoutGroup(element)) return false
         const children = visibleChildren(element)
