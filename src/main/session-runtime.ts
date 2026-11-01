@@ -219,6 +219,10 @@ export const EMPTY_SSH_STATE: SshState = {
   lines: []
 }
 
+function defaultTerminalSendDelaySeconds(platformId: string): number {
+  return platformId === 'deepseek' ? 6 : 3
+}
+
 export interface SessionRuntimeOptions {
   qqMail?: QqMailService
   scheduledTasks?: ScheduledTasks
@@ -253,6 +257,7 @@ export interface SessionRuntimeOptions {
   initialSshReconnect?: boolean
   initialSshCwd?: string
   initialSendDelaySeconds?: number
+  initialSendDelayCustomized?: boolean
   store: ConversationStore
   localMachineId: string
   initialMode: ExecutionMode
@@ -422,6 +427,7 @@ export class SessionRuntime {
   private readonly embeds = new Map<string, PlatformEmbed>()
   private activePlatformId: string
   private preferredSendDelaySeconds: number
+  private sendDelayCustomized: boolean
   private promptInjectionEnabled: boolean
   private remoteShell: RemoteShell | null = null
   private sshTerminalResetting = false
@@ -622,7 +628,14 @@ export class SessionRuntime {
     this.sshCwd = options.initialSshCwd?.trim() ?? ''
     this.lastPersistedLocalCwd = options.initialLocalCwd?.trim() ?? ''
     this.activePlatformId = options.platform.id
-    this.preferredSendDelaySeconds = options.initialSendDelaySeconds ?? 0
+    // Older sessions stored only the value, including defaults carried across a
+    // platform switch. Treat their 3/6-second values as automatic; retain other
+    // saved values (especially zero) as custom waits.
+    this.sendDelayCustomized = options.initialSendDelayCustomized ??
+      (options.initialSendDelaySeconds !== undefined && ![3, 6].includes(options.initialSendDelaySeconds))
+    this.preferredSendDelaySeconds = this.sendDelayCustomized
+      ? options.initialSendDelaySeconds ?? defaultTerminalSendDelaySeconds(this.activePlatformId)
+      : defaultTerminalSendDelaySeconds(this.activePlatformId)
     this.promptInjectionEnabled = options.initialPromptInjectionEnabled ?? true
 
     this.computerUseTool.register(COMPLETE_TASK_ACTION, {
@@ -1362,6 +1375,7 @@ export class SessionRuntime {
     this.interruptTaskControl(this.activePlatformId)
     this.activePlatformId = platformId
     this.syncWindowsHelperDemand()
+    if (!this.sendDelayCustomized) this.preferredSendDelaySeconds = defaultTerminalSendDelaySeconds(platformId)
     this.runner.setSendDelay(this.preferredSendDelaySeconds)
     // Created here on first switch, and kept alive after that so its conversation survives.
     const created = this.ensureEmbed(platformId)
@@ -1454,6 +1468,7 @@ export class SessionRuntime {
     sshReconnect: boolean
     sshCwd: string
     sendDelaySeconds: number
+    sendDelayCustomized: boolean
     createdAt: number
   } {
     const automation = this.runner.getAutomation()
@@ -1481,6 +1496,7 @@ export class SessionRuntime {
       sshReconnect: sshState.attached && sshState.status !== 'disconnected',
       sshCwd: this.sshCwd,
       sendDelaySeconds: this.preferredSendDelaySeconds,
+      sendDelayCustomized: this.sendDelayCustomized,
       createdAt: this.createdAt
     }
   }
@@ -3002,6 +3018,7 @@ export class SessionRuntime {
   setTerminalSendDelay(seconds: number): TerminalState {
     const value = Number.isFinite(seconds) ? Math.min(Math.max(Math.floor(seconds), 0), 600) : 0
     this.preferredSendDelaySeconds = value
+    this.sendDelayCustomized = true
     const state = this.runner.setSendDelay(value)
     this.options.onSummaryChanged()
     return state

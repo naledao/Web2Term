@@ -317,6 +317,7 @@ CREATE TABLE IF NOT EXISTS managed_sessions (
   ssh_reconnect   INTEGER NOT NULL DEFAULT 0,
   ssh_cwd         TEXT NOT NULL DEFAULT '',
   send_delay_seconds INTEGER NOT NULL DEFAULT 0,
+  send_delay_customized INTEGER,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -447,6 +448,8 @@ export interface ManagedSessionRecord {
   sshReconnect: boolean
   sshCwd: string
   sendDelaySeconds: number
+  /** Undefined for legacy sessions whose saved wait predates this distinction. */
+  sendDelayCustomized?: boolean
   createdAt: number
   updatedAt: number
 }
@@ -585,7 +588,8 @@ export class ConversationStore {
       ['ssh_attached', 'INTEGER NOT NULL DEFAULT 0'],
       ['ssh_reconnect', 'INTEGER NOT NULL DEFAULT 0'],
       ['ssh_cwd', "TEXT NOT NULL DEFAULT ''"],
-      ['send_delay_seconds', 'INTEGER NOT NULL DEFAULT 0']
+      ['send_delay_seconds', 'INTEGER NOT NULL DEFAULT 0'],
+      ['send_delay_customized', 'INTEGER']
     ]
     for (const [name, definition] of managedSessionMigrations) {
       if (!managedSessionColumns.some((column) => column.name === name)) {
@@ -1762,7 +1766,7 @@ export class ConversationStore {
   listManagedSessions(): ManagedSessionRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT id, title, url, conversation_id, platform_id, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, created_at, updated_at
+        `SELECT id, title, url, conversation_id, platform_id, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, send_delay_customized, created_at, updated_at
            FROM managed_sessions ORDER BY created_at ASC`
       )
       .all() as unknown as Array<{
@@ -1780,6 +1784,7 @@ export class ConversationStore {
       ssh_reconnect: number
       ssh_cwd: string
       send_delay_seconds: number
+      send_delay_customized: number | null
       created_at: number
       updated_at: number
     }>
@@ -1799,6 +1804,7 @@ export class ConversationStore {
       sshReconnect: row.ssh_reconnect !== 0,
       sshCwd: row.ssh_cwd,
       sendDelaySeconds: row.send_delay_seconds,
+      sendDelayCustomized: row.send_delay_customized === null ? undefined : row.send_delay_customized !== 0,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     }))
@@ -1808,8 +1814,8 @@ export class ConversationStore {
     const now = Date.now()
     this.db
       .prepare(
-        `INSERT INTO managed_sessions (id, title, url, conversation_id, platform_id, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO managed_sessions (id, title, url, conversation_id, platform_id, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, send_delay_customized, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -1824,6 +1830,7 @@ export class ConversationStore {
            ssh_reconnect = excluded.ssh_reconnect,
            ssh_cwd = excluded.ssh_cwd,
            send_delay_seconds = excluded.send_delay_seconds,
+           send_delay_customized = excluded.send_delay_customized,
            updated_at = excluded.updated_at`
       )
       .run(
@@ -1841,6 +1848,7 @@ export class ConversationStore {
         record.sshReconnect ? 1 : 0,
         record.sshCwd,
         record.sendDelaySeconds,
+        record.sendDelayCustomized === undefined ? null : record.sendDelayCustomized ? 1 : 0,
         record.createdAt,
         now
       )

@@ -135,3 +135,37 @@ test('legacy databases gain explicit nullable membership without changing existi
   assert.equal(restored.projectId, null)
   assert.deepEqual(plain(context.store.listWorkspaceProjects()), [])
 }))
+
+test('terminal wait values and automatic/custom mode survive database inserts, updates and restart', () => fixture(context => {
+  context.store.upsertManagedSession(session('automatic', { sendDelaySeconds: 6, sendDelayCustomized: false }))
+  context.store.upsertManagedSession(session('custom', { sendDelaySeconds: 3, sendDelayCustomized: true }))
+  context.store.upsertManagedSession(session('legacy', { sendDelaySeconds: 0 }))
+  context.reopen()
+  let rows = new Map(context.store.listManagedSessions().map(row => [row.id, row]))
+  assert.equal(rows.get('automatic').sendDelaySeconds, 6)
+  assert.equal(rows.get('automatic').sendDelayCustomized, false)
+  assert.equal(rows.get('custom').sendDelaySeconds, 3)
+  assert.equal(rows.get('custom').sendDelayCustomized, true)
+  assert.equal(rows.get('legacy').sendDelaySeconds, 0)
+  assert.equal(rows.get('legacy').sendDelayCustomized, undefined)
+
+  context.store.upsertManagedSession({ ...rows.get('automatic'), sendDelaySeconds: 0, sendDelayCustomized: true })
+  context.store.upsertManagedSession({ ...rows.get('custom'), sendDelaySeconds: 6, sendDelayCustomized: false })
+  context.reopen()
+  rows = new Map(context.store.listManagedSessions().map(row => [row.id, row]))
+  assert.equal(rows.get('automatic').sendDelaySeconds, 0)
+  assert.equal(rows.get('automatic').sendDelayCustomized, true)
+  assert.equal(rows.get('custom').sendDelaySeconds, 6)
+  assert.equal(rows.get('custom').sendDelayCustomized, false)
+}))
+
+test('legacy databases gain a nullable wait mode without overwriting their saved wait', () => fixture(context => {
+  context.store.upsertManagedSession(session('legacy', { sendDelaySeconds: 6 }))
+  const db = new DatabaseSync(context.file)
+  try { db.exec('ALTER TABLE managed_sessions DROP COLUMN send_delay_customized') }
+  finally { db.close() }
+  context.reopen()
+  const restored = context.store.listManagedSessions()[0]
+  assert.equal(restored.sendDelaySeconds, 6)
+  assert.equal(restored.sendDelayCustomized, undefined)
+}))
