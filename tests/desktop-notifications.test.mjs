@@ -49,6 +49,7 @@ function desktop({ platform = 'win32', packaged = false, registered = true, supp
       setAsDefaultProtocolClient(...args) { calls.push(['protocol', ...plain(args)]); return registered }
     } },
     './app-identity': { APP_ID: 'com.example.gptweb2codexterminal' },
+    './windows-notification-shortcuts': { repairWindowsNotificationShortcuts() { calls.push(['shortcuts']) } },
     './notification-target': targets
   }, { process: { platform, execPath: 'C:\\work with spaces\\Web2Term\\node_modules\\electron\\dist\\electron.exe' },
     performance: { now: () => clock } })
@@ -60,6 +61,7 @@ test('development activation includes the absolute app entry and has a separate 
   f.api.registerDesktopNotifications()
   assert.deepEqual(f.calls, [
     ['identity', 'com.example.gptweb2codexterminal.development'],
+    ['shortcuts'],
     ['protocol', 'web2term-dev', 'C:\\work with spaces\\Web2Term\\node_modules\\electron\\dist\\electron.exe',
       ['C:\\work with spaces\\Web2Term']]
   ])
@@ -68,7 +70,7 @@ test('development activation includes the absolute app entry and has a separate 
 test('installed activation preserves the app identity and uses its own executable', () => {
   const f = desktop({ packaged: true })
   f.api.registerDesktopNotifications()
-  assert.deepEqual(f.calls, [['identity', 'com.example.gptweb2codexterminal'], ['protocol', 'web2term']])
+  assert.deepEqual(f.calls, [['identity', 'com.example.gptweb2codexterminal'], ['shortcuts'], ['protocol', 'web2term']])
 })
 
 test('Windows notifications launch the captured target through the app protocol', () => {

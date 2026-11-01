@@ -1,5 +1,6 @@
 import { app, Notification } from 'electron'
 import { APP_ID } from './app-identity'
+import { repairWindowsNotificationShortcuts } from './windows-notification-shortcuts'
 import { notificationProtocol, notificationTargetUrl, notificationToastXml } from './notification-target'
 import type { NotificationTarget } from './notification-target'
 
@@ -13,6 +14,7 @@ export function registerDesktopNotifications(sound?: string): void {
   notificationSound = sound ?? 'ms-winsoundevent:Notification.Default'
   if (process.platform !== 'win32') return
   app.setAppUserModelId(app.isPackaged ? APP_ID : `${APP_ID}.development`)
+  repairWindowsNotificationShortcuts()
   const protocol = notificationProtocol(app.isPackaged)
   // Windows must receive an absolute application entry in development. Launching just
   // process.execPath opens Electron's welcome page instead of loading Web2Term.

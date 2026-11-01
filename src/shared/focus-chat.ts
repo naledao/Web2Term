@@ -329,10 +329,10 @@ export function cleanFocusAnswer(text: string): string {
   try { value = JSON.parse(body) }
   catch {
     // Never flash an unfinished transport request while its code block streams.
-    return /^\{\s*(?:"command"\s*:|"type"\s*:\s*"(?:questions?|read_files|scheduled_task|send_email|read_tool_prompt)"(?:\s*[,}]|\s*$))/.test(body) ? '' : answer
+    return /^\{\s*(?:"command"\s*:|"type"\s*:\s*"(?:questions?|read_files|scheduled_task|send_email|read_tool_prompt|computer)"(?:\s*[,}]|\s*$))/.test(body) ? '' : answer
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return answer
-  if (typeof value.command === 'string' || value.type === 'read_files' || value.type === 'send_email') return ''
+  if (typeof value.command === 'string' || value.type === 'read_files' || value.type === 'send_email' || value.type === 'computer') return ''
   if (value.type === 'read_tool_prompt') {
     const tools = Array.isArray(value.tools) ? value.tools.filter((name): name is string => typeof name === 'string' && /^[a-z_]{1,40}$/.test(name)) : []
     return tools.length ? `正在读取工具说明：${tools.join('、')}` : ''

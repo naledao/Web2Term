@@ -29,6 +29,10 @@ const historyExports = {}
 new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-history.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText).runInNewContext({ exports: historyExports, require: () => ({}) })
+const focusExports = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-chat.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: focusExports })
 
 function fixture({ records = [], richAnswers = new Map() } = {}) {
   const exports = {}, copies = []
@@ -37,6 +41,7 @@ function fixture({ records = [], richAnswers = new Map() } = {}) {
     groupFocusExecutions: historyExports.groupFocusExecutions, ownerKey: 'test-owner', EMPTY_RECORDS: [], EMPTY_TOOL_CALLS: [], sendFailure: null, lastTurn: null,
     OutputText: ({ text, className }) => React.createElement('pre', { className }, text),
     ProcessHint: () => null, richAnswers, recordsById: new Map(records.map(record => [record.messageId, record])),
+    cleanFocusAnswer: focusExports.cleanFocusAnswer,
     messagesById: new Map(), focusDelivery: (_record, delivery) => delivery,
     userContent: (_id, text) => React.createElement('p', null, text),
     renderExecution: record => React.createElement('div', { 'data-execution': record.messageId }),
@@ -171,6 +176,29 @@ test('known legacy command answers stay hidden while independent prose in the sa
   current.executionCycles = { 'execution-1': 1 }
   const f = fixture()
   assert.deepEqual(answerTexts(f.render(current)), ['目录已确认。'])
+})
+
+test('legacy computer JSON stays out of rendered and copied answers while its process card remains visible', () => {
+  const request = action => 'JSON\n\n```json\n' + JSON.stringify({ type: 'computer', version: 1,
+    action, step_token: 'cu_' + 'a'.repeat(32), description: '检查当前电脑状态' }) + '\n```'
+  const final = '窗口检查完成。'
+  const current = turn([segment(0, ''), segment(1, request('list_apps')), segment(2, request('list_windows')),
+    segment(3, '旧版保存的回复'), segment(4, final)])
+  current.toolCalls = [{ id: 'computer:reply-0', sourceMessageId: 'reply-0', tool: 'computer', title: '电脑操作',
+    request: 'observe', cycle: 0, status: 'done', delivery: 'sent', result: '观察完成', createdAt: 1, updatedAt: 2 }]
+  const f = fixture({ richAnswers: new Map([['reply-0', request('observe')], ['reply-3', request('list_apps')]]) })
+  for (const status of ['working', 'stopped', 'blocked', 'answered']) {
+    current.status = status
+    const tree = f.render(current), html = renderToStaticMarkup(tree)
+    assert.deepEqual(answerTexts(tree), [final], status)
+    assert.doesNotMatch(html, /step_token|list_apps|list_windows|```json/)
+    assert.ok(inProcess(elements(tree).find(({ node }) => node.props['data-tool-name'] === 'computer')))
+    assert.match(html, /电脑操作/)
+    if (status !== 'working') {
+      elements(tree).find(({ node }) => node.type === 'button' && node.props.children === '复制回答').node.props.onClick()
+      assert.deepEqual(f.copies.at(-1), ['turn-1', final])
+    }
+  }
 })
 
 test('an authoritative empty answer stays empty while prose with ordinary code examples remains visible', () => {

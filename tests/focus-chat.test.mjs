@@ -147,13 +147,54 @@ test('execution and file-request protocols, including partial streamed blocks, s
   assert.equal(shared.cleanFocusAnswer('```json\n{"type":"questions","questions":['), '')
 })
 
+test('computer requests and unfinished streamed blocks stay hidden even without a tool history record', () => {
+  for (const action of ['observe', 'list_apps', 'list_windows']) {
+    const payload = JSON.stringify({ type: 'computer', version: 1, action,
+      step_token: 'cu_' + 'a'.repeat(32), description: '检查当前电脑状态' })
+    for (const text of [payload, '```json\n' + payload + '\n```', 'JSON\n\n```\n' + payload + '\n```',
+      'JSON\r\n\r\n```JSON\r\n' + payload + '\r\n```', '~~~~json\n' + payload + '\n~~~~']) {
+      assert.equal(shared.cleanFocusAnswer(text), '')
+      assert.equal(shared.cleanFocusUserText(text), text)
+    }
+  }
+  assert.equal(shared.cleanFocusAnswer('{"version":1,"action":"observe","type":"computer"}'), '')
+  for (const partial of ['{"type":"computer"', '{"type":"computer","version":1,"action":"list_',
+    '{"type":"computer","version":1,"step_token":"cu_']) {
+    for (const text of [partial, '```json\n' + partial, 'JSON\n\n```json\n' + partial + '\n```']) {
+      assert.equal(shared.cleanFocusAnswer(text), '')
+    }
+  }
+})
+
 test('ordinary JSON, nested data and protocol examples inside prose retain their formatting', () => {
   for (const content of ['{"cpu":12.5,"memory":50}', '{"type":"report","questions":[]}',
-    '{"example":{"type":"questions","questions":[]}}']) {
+    '{"example":{"type":"questions","questions":[]}}', '{"example":{"type":"computer","action":"observe"}}',
+    '{"type":"computer_result","ok":true}']) {
     for (const text of [content, '```json\n' + content + '\n```']) assert.equal(shared.cleanFocusAnswer(text), text)
   }
   for (const text of ['下面是协议示例：\n\n```json\n{"type":"questions","questions":[]}\n```',
-    '```json\n{"command":"Get-Date"}\n```\n\n以上只是格式说明。']) assert.equal(shared.cleanFocusAnswer(text), text)
+    '```json\n{"command":"Get-Date"}\n```\n\n以上只是格式说明。',
+    '电脑操作协议示例：\n\n```json\n{"type":"computer","action":"observe"}\n```',
+    '```json\n{"type":"computer","action":"observe"}\n```\n\n以上只是格式说明。']) assert.equal(shared.cleanFocusAnswer(text), text)
+})
+
+test('computer snapshots and settled replies are hidden on both focus platforms before a tool record arrives', () => {
+  const payload = 'JSON\n\n```json\n{"type":"computer","version":1,"action":"list_windows"}\n```'
+  for (const platform of ['chatgpt', 'deepseek']) {
+    const { chat, store, rows } = fixture()
+    const id = chat.begin(platform, 'chat-1', '检查窗口')
+    chat.snapshot(platform, chat.token(platform), page('computer-reply', payload))
+    assert.equal(chat.turns(platform, 'chat-1')[0].segments[0].answer, '')
+    chat.settled(platform, 'computer-reply', payload)
+    assert.equal(rows.get(id).turn.segments[0].answer, '')
+    // Old versions may already have saved raw protocol text without a matching tool call.
+    rows.get(id).turn.status = 'stopped'
+    rows.get(id).turn.segments[0].answer = payload
+    const restored = new FocusChat('workspace-1', store).turns(platform, 'chat-1')[0]
+    assert.equal(shared.cleanFocusAnswer(restored.segments[0].answer), '')
+    assert.equal(restored.status, 'stopped')
+    assert.equal(restored.toolCalls, undefined)
+  }
 })
 
 test('clarification snapshots and settled answers are normalized, including raw JSON kept by older versions', () => {
