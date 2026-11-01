@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, Tray } from 'electron'
 import { APP_NAME, configureAppIdentity } from './app-identity'
 import { registerDesktopNotifications } from './desktop-notifications'
+import { registerNotificationSound } from './notification-sound'
 import { NotificationActivationRouter, notificationProtocol } from './notification-target'
 import { taskbarCountIcon } from './taskbar-badge'
 import { LINUX_AGENT_FILE_NAME, LinuxAgentDownloader } from './linux-agent-download'
@@ -1209,9 +1210,7 @@ function createManagerWindow(): void {
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
-      backgroundThrottling: false,
-      // Notification sounds must also play while the workspace is minimized or in the tray.
-      autoplayPolicy: 'no-user-gesture-required'
+      backgroundThrottling: false
     }
   })
   managerWindow = window
@@ -2297,11 +2296,7 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     registerPdfAssetHandler()
-    registerDesktopNotifications(() => {
-      if (managerWindow && !managerWindow.isDestroyed() && !managerWindow.webContents.isDestroyed()) {
-        managerWindow.webContents.send(IpcChannels.notificationSound)
-      }
-    })
+    registerDesktopNotifications(await registerNotificationSound())
 
     if (appLogFile) {
       console.info(`[app] logging this run to ${appLogFile}`)

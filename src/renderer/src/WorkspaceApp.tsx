@@ -3,8 +3,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import type { AppTheme, ManagedSessionSummary, SshTransferTask, UpdateStatus, WorkspaceState, WorkspaceProject } from '../../shared/types'
 import brandIcon from './assets/brand-icon.png'
-import notificationSoundUrl from './assets/notification-wood-drop.wav?url'
-import { NotificationSoundPlayer } from './notification-sound'
 import WorkspaceNavigation from './components/WorkspaceNavigation'
 import WorkspaceProjectDialog from './components/WorkspaceProjectDialog'
 import App from './App'
@@ -59,12 +57,6 @@ function formatTransferDuration(seconds: number): string {
 
 
 export default function WorkspaceApp(): ReactElement {
-  useEffect(() => {
-    const sound = new NotificationSoundPlayer(notificationSoundUrl)
-    const off = window.api.onNotificationSound(() => { void sound.play() })
-    return () => { off(); sound.dispose() }
-  }, [])
-
   const [workspace, setWorkspace] = useState<WorkspaceState>(INITIAL_WORKSPACE)
   const [sessions, setSessions] = useState<ManagedSessionSummary[]>([])
   const [projects, setProjects] = useState<WorkspaceProject[]>([])

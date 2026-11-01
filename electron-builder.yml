@@ -45,6 +45,8 @@ win:
   # Merged with the top-level extraResources for Windows only; macOS/Linux packages carry no helper.
   # Produced offline by `npm run helper:publish` (self-contained win-x64, no separate .NET install).
   extraResources:
+    - from: build/notification-wood-drop.wav
+      to: notification-wood-drop.wav
     - from: out/windows-helper-package
       to: windows-helper
       filter:

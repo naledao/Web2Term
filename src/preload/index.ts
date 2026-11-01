@@ -104,11 +104,6 @@ import type {
  * changing a signature here fails the typecheck instead of breaking the UI.
  */
 const api: AppApi = {
-  onNotificationSound: listener => {
-    const handler = (): void => listener()
-    ipcRenderer.on(IpcChannels.notificationSound, handler)
-    return () => ipcRenderer.removeListener(IpcChannels.notificationSound, handler)
-  },
   listReleaseNotes: request => ipcRenderer.invoke(IpcChannels.releaseNotesList, request),
   getReleaseNote: request => ipcRenderer.invoke(IpcChannels.releaseNotesDetail, request),
   markReleaseNoteRead: request => ipcRenderer.invoke(IpcChannels.releaseNotesRead, request),

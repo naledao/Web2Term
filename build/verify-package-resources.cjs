@@ -21,5 +21,10 @@ module.exports = async function verifyPackageResources(context) {
   for (const license of ['LICENSE-vscode-ripgrep.txt', 'LICENSE-ripgrep.txt', 'LICENSE-PCRE2.txt']) {
     if (!readFileSync(join(directory, license), 'utf8').trim()) throw new Error(`Missing ripgrep notice: ${license}`)
   }
+  if (platform === 'win32') {
+    const sound = readFileSync(join(resources, 'notification-wood-drop.wav'))
+    const source = readFileSync(join(__dirname, 'notification-wood-drop.wav'))
+    if (!sound.equals(source)) throw new Error('Packaged notification sound is missing or corrupt.')
+  }
   await verifyWindowsHelper(context)
 }

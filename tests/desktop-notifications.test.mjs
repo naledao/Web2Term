@@ -35,6 +35,7 @@ const url = (value = target, protocol = 'web2term-dev') => targets.notificationT
 
 function desktop({ platform = 'win32', packaged = false, registered = true, supported = true } = {}) {
   const calls = [], shown = []
+  let clock = 10000
   class Notification extends EventEmitter {
     static isSupported() { return supported }
     constructor(options) { super(); this.options = options; shown.push(this) }
@@ -49,8 +50,9 @@ function desktop({ platform = 'win32', packaged = false, registered = true, supp
     } },
     './app-identity': { APP_ID: 'com.example.gptweb2codexterminal' },
     './notification-target': targets
-  }, { process: { platform, execPath: 'C:\\work with spaces\\Web2Term\\node_modules\\electron\\dist\\electron.exe' } })
-  return { api, calls, shown }
+  }, { process: { platform, execPath: 'C:\\work with spaces\\Web2Term\\node_modules\\electron\\dist\\electron.exe' },
+    performance: { now: () => clock } })
+  return { api, calls, shown, time(value) { clock = value } }
 }
 
 test('development activation includes the absolute app entry and has a separate identity', () => {
@@ -75,33 +77,61 @@ test('Windows notifications launch the captured target through the app protocol'
   f.api.showDesktopNotification(target, '有问题', '等待回答', () => assert.fail('Windows must use the URI route'))
   assert.equal(f.shown.length, 1)
   assert.match(f.shown[0].options.toastXml, /activationType="protocol"/)
-  assert.equal(f.shown[0].options.silent, true)
-  assert.ok(f.shown[0].options.toastXml.includes('<audio silent="true"/>'), 'custom XML must also mute the system sound')
+  assert.equal(f.shown[0].options.silent, false)
+  assert.ok(f.shown[0].options.toastXml.includes('<audio src="ms-winsoundevent:Notification.Default" loop="false"/>'),
+    'Windows must control sound delivery and its notification mute policies')
   assert.ok(f.shown[0].options.toastXml.includes(url().replaceAll('&', '&amp;')))
   f.shown[0].emit('click') // Releases the object without invoking a second navigation callback.
 })
 
-test('Windows plays the selected sound once after successful delivery, never on a click or a failed toast', () => {
+test('Windows receives the selected sound event without any independent renderer playback', () => {
   const f = desktop()
-  let sounds = 0
-  f.api.registerDesktopNotifications(() => { sounds++ })
+  f.api.registerDesktopNotifications('ms-winsoundevent:Notification.Web2Term.WoodDrop')
   f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
-  assert.equal(sounds, 0, 'constructing/showing a toast is not proof of delivery')
-  f.shown[0].emit('show')
+  assert.ok(f.shown[0].options.toastXml.includes('<audio src="ms-winsoundevent:Notification.Web2Term.WoodDrop" loop="false"/>'))
+  assert.equal(f.shown[0].listenerCount('show'), 0, 'a show event is not permission to bypass Windows mute settings')
+  const options = plain(f.shown[0].options)
   f.shown[0].emit('show')
   f.shown[0].emit('click')
-  assert.equal(sounds, 1)
-  f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
-  f.shown[1].emit('failed', {}, 'Unavailable')
-  assert.equal(sounds, 1)
+  assert.deepEqual(plain(f.shown[0].options), options)
 })
 
-test('a sound delivery failure leaves notification activation available', () => {
+test('bursts keep every notification but request native audio only once per second', () => {
   const f = desktop()
-  f.api.registerDesktopNotifications(() => { throw new Error('Renderer unavailable') })
+  f.api.registerDesktopNotifications('ms-winsoundevent:Notification.Web2Term.WoodDrop')
   f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
-  assert.doesNotThrow(() => f.shown[0].emit('show'))
-  assert.ok(f.shown[0].options.toastXml.includes(url().replaceAll('&', '&amp;')))
+  f.time(10700)
+  f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
+  assert.equal(f.shown.length, 2)
+  assert.equal(f.shown[1].options.silent, true)
+  assert.ok(f.shown[1].options.toastXml.includes('<audio silent="true"/>'))
+  assert.ok(f.shown[1].options.toastXml.includes(url().replaceAll('&', '&amp;')))
+  f.time(11000)
+  f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
+  assert.equal(f.shown[2].options.silent, false)
+  assert.match(f.shown[2].options.toastXml, /ms-winsoundevent:Notification.Web2Term.WoodDrop/)
+})
+
+test('a failed toast lets a later notification request native sound again', () => {
+  const f = desktop()
+  f.api.registerDesktopNotifications()
+  f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
+  f.shown[0].emit('failed', {}, 'Unavailable')
+  f.time(10050)
+  f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
+  assert.equal(f.shown[1].options.silent, false)
+})
+
+test('a late failure of an older toast does not clear the latest sound reservation', () => {
+  const f = desktop()
+  f.api.registerDesktopNotifications()
+  f.api.showDesktopNotification(target, 'First', 'Body', () => {})
+  f.time(11000)
+  f.api.showDesktopNotification(target, 'Second', 'Body', () => {})
+  f.shown[0].emit('failed', {}, 'Unavailable')
+  f.time(11050)
+  f.api.showDesktopNotification(target, 'Third', 'Body', () => {})
+  assert.equal(f.shown[2].options.silent, true)
 })
 
 test('a failed protocol registration never posts a notification with a broken launch target', () => {
@@ -149,6 +179,8 @@ test('notification text is escaped without allowing XML attributes or elements t
   assert.ok(xml.includes('<text>A &amp; &quot;B&quot;</text>'))
   assert.ok(xml.includes('&lt;text&gt;&apos;内容&apos;&lt;/text&gt;'))
   assert.ok(!xml.includes('\u0000') && !xml.includes('\u000b'))
+  const audio = targets.notificationToastXml(url(), 'Title', 'Body', 'ms-winsoundevent:test"/><audio src="other')
+  assert.ok(audio.includes('src="ms-winsoundevent:test&quot;/&gt;&lt;audio src=&quot;other"'))
 })
 
 test('a notification received during startup opens after session restoration and only once', () => {

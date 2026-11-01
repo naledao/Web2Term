@@ -44,10 +44,13 @@ function escapeXml(value: string): string {
   })[char]!)
 }
 
-export function notificationToastXml(url: string, title: string, body: string): string {
+export function notificationToastXml(
+  url: string, title: string, body: string, sound: string | null = 'ms-winsoundevent:Notification.Default'
+): string {
   // Protocol activation avoids Electron's COM relaunch of a bare electron.exe in development.
   return `<toast activationType="protocol" launch="${escapeXml(url)}"><visual><binding template="ToastGeneric">` +
-    `<text>${escapeXml(title)}</text><text>${escapeXml(body)}</text></binding></visual><audio silent="true"/></toast>`
+    `<text>${escapeXml(title)}</text><text>${escapeXml(body)}</text></binding></visual>` +
+    (sound === null ? '<audio silent="true"/>' : `<audio src="${escapeXml(sound)}" loop="false"/>`) + '</toast>'
 }
 
 /** Keep a cold-start click until the saved sessions and workspace selection have been restored. */
