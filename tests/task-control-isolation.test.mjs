@@ -10,18 +10,19 @@ import { progressVmModules } from './fixtures/progress-vm-modules.mjs'
 
 const presentation = progressVmModules['../shared/task-presentation']
 const compile = text => ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
-function actualClass(path, name, names, globals = {}) {
+function actualClass(path, name, names, globals = {}, helpers = []) {
   const source = ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
   const cls = source.statements.find(n => ts.isClassDeclaration(n) && n.name?.text === name)
   const body = names.map(name => cls.members.find(n => n.name?.getText(source) === name).getText(source)).join('\n')
-  return new Script(compile(`class Subject { ${body} }; Subject`)).runInNewContext({ URL, AbortController, structuredClone,
+  const declarations = helpers.map(name => source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name).getText(source)).join('\n')
+  return new Script(compile(`${declarations}\nclass Subject { ${body} }; Subject`)).runInNewContext({ URL, AbortController, structuredClone,
     console: { info() {}, warn() {} }, ...presentation, ...globals })
 }
 const Runtime = actualClass('../src/main/session-runtime.ts', 'SessionRuntime', [
   'stopAutonomousTask', 'interruptTaskControl', 'canRunConversationInBackground', 'setActive', 'switchPlatform', 'embedHandlers', 'refreshRemoteRipgrep'
 ], { supportsFocusView: () => false, buildTerminalPromptParts: () => ({ prefix: 'unchanged', suffix: '' }),
   DEEPSEEK_PLATFORM: { id: 'deepseek' }, IpcChannels: { embedState: 'embed', interceptorEvent: 'interceptor', questionChatState: 'question' },
-  process: { platform: 'win32', arch: 'x64' } })
+  process: { platform: 'win32', arch: 'x64' } }, ['defaultTerminalSendDelaySeconds'])
 
 function runtime(f) {
   const calls = [], runtime = new Runtime(), mutable = { conversationId: 'chat-a' }
@@ -31,14 +32,14 @@ function runtime(f) {
   const next = { ...embed, getState: () => ({ conversationId: 'chat-b' }) }
   const deepseek = { id: 'deepseek', label: 'DeepSeek' }, chatgpt = { id: 'chatgpt', label: 'ChatGPT' }
   Object.assign(runtime, { id: f.first.sessionId, active: true, disposed: false, activePlatformId: 'deepseek', taskEnded: false, focusSending: false,
-    taskCoordinator: f.coordinator, taskProgression: f.loop, computerUseTool: {}, environment: { workingDirectory: 'C:\\work' }, preferredSendDelaySeconds: 4,
+    taskCoordinator: f.coordinator, taskProgression: f.loop, computerUseTool: {}, environment: { workingDirectory: 'C:\\work' }, preferredSendDelaySeconds: 4, sendDelayCustomized: true,
     taskBackgroundWait: { reconcile: () => calls.push('wait-reconcile') },
     embeds: new Map([['deepseek', { platform: deepseek, conversationId: 'chat-a', embed }], ['chatgpt', { platform: chatgpt, conversationId: 'chat-b', embed: next }]]),
     deferredCommands: new Map([['pending', {}]]),
     options: { store: f.store, localMachineId: 'machine-a', onSummaryChanged() {},
       computerUseObservations: { invalidateInput: (_tool, lease) => calls.push(['invalidate', lease]) }, desktopCoordinator: { reconcile: () => calls.push('desktop-reconcile') } },
     backgroundTaskResults: { cancel: owner => calls.push(['cancel-result', owner]) }, backgroundTasks: { cancelNotifications: owner => calls.push(['cancel-notification', owner]) },
-    runner: { reconcileTaskTools: () => calls.push('runner-reconcile'), setSendDelay() {}, getAutomation: () => ({ mode: 'manual' }), getTerminalState: () => ({ cwd: 'C:\\work' }) },
+    runner: { reconcileTaskTools: () => calls.push('runner-reconcile'), setSendDelay: seconds => calls.push(['send-delay', seconds]), getAutomation: () => ({ mode: 'manual' }), getTerminalState: () => ({ cwd: 'C:\\work' }) },
     focusChat: { begin: () => 'original-history-turn' }, syncWindowsHelperDemand() {}, applyVisibility() {}, send() {}, toolPrompt: () => 'original tools',
     syncAutonomousTask: (platform, conversation) => f.coordinator.context(platform, conversation), taskRunning: () => true,
     getComputerUseCapability: platform => ({ scopeSupported: true, computerUseEnabled: true, context: { sessionId: f.first.sessionId, platformId: platform } }),
@@ -59,13 +60,22 @@ test('session handover cancels the owned queues, input bindings and page generat
   assert.equal(f.coordinator.current('deepseek'), null); assert.equal(g.runtime.taskEnded, true)
 })
 
-test('a task-associated model switch interrupts the old task before selecting the new platform', t => {
-  const f = fixture(t), g = runtime(f)
-  assert.equal(g.runtime.switchPlatform('chatgpt'), true)
-  assert.equal(JSON.parse(f.payload()).status, 'interrupted'); assert.equal(g.runtime.activePlatformId, 'chatgpt')
-  assert.equal(g.runtime.taskEnded, true); assert.equal(f.executions.length, 0)
-  assert.ok(g.calls.includes('revoke-page-generation'))
-})
+for (const { mode, customized, seconds, expected } of [
+  { mode: 'automatic', customized: false, seconds: 6, expected: 3 },
+  { mode: 'custom', customized: true, seconds: 4, expected: 4 }
+]) {
+  test(`a task-associated model switch interrupts the old task before selecting the new platform (${mode} wait)`, t => {
+    const f = fixture(t), g = runtime(f)
+    Object.assign(g.runtime, { sendDelayCustomized: customized, preferredSendDelaySeconds: seconds })
+    assert.equal(g.runtime.switchPlatform('chatgpt'), true)
+    assert.equal(JSON.parse(f.payload()).status, 'interrupted'); assert.equal(g.runtime.activePlatformId, 'chatgpt')
+    assert.equal(g.runtime.taskEnded, true); assert.equal(f.executions.length, 0)
+    assert.ok(g.calls.includes('revoke-page-generation'))
+    assert.equal(g.runtime.preferredSendDelaySeconds, expected)
+    assert.equal(g.runtime.sendDelayCustomized, customized)
+    assert.deepEqual(g.calls.find(call => Array.isArray(call) && call[0] === 'send-delay'), ['send-delay', expected])
+  })
+}
 
 test('switching remains blocked for an unassociated legacy task or a human message still being submitted', t => {
   const f = fixture(t), g = runtime(f)
