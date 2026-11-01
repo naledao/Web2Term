@@ -71,6 +71,12 @@ function fixture() {
   ])
   const unrelated = new Element('div', {}, [link('https://unrelated.example/one', '另一个来源'), link('https://unrelated.example/two', '二'), link('https://unrelated.example/three', '三')])
   const listeners = new Map()
+  const dismissals = []
+  for (const element of [popup, unrelated]) element.dispatchEvent = event => {
+    dismissals.push({ element, event })
+    if (event.type === 'keydown' && event.key === 'Escape') open = false
+    return true
+  }
   const context = createContext({
     PAGE: { focus: { citations: CHATGPT_PAGE.focus.citations } }, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
     location: { pathname: '/c/one', href: 'https://chatgpt.com/c/one' }, state: { taskPromptGeneration: 1, programmatic: false },
@@ -89,8 +95,12 @@ function fixture() {
   for (const name of ['focusCitationSourcesOf', 'focusCitationGroupsOf', 'focusCitationMarkdown']) context[name] = actual(name, context)
   const api = Object.fromEntries(['prepareFocusCitation', 'prepareFocusCitationClick', 'finishFocusCitation', 'closeFocusCitation'].map(name => [name, actual(name, context, true)]))
   const data = context.focusCitationGroupsOf(answer)[0].data
-  return { context, group, ordinary, answer, popup, listeners, api, data,
-    open(value = true, useLinked = false) { open = value; linked = useLinked; if (linked) group.attrs['aria-describedby'] = 'citation-popup' },
+  return { context, group, ordinary, answer, popup, unrelated, listeners, dismissals, api, data, isOpen: () => open,
+    open(value = true, useLinked = false) {
+      open = value; linked = useLinked
+      if (linked) group.attrs['aria-describedby'] = 'citation-popup'
+      else delete group.attrs['aria-describedby']
+    },
     wrong() { wrongPopup = true; open = true }, request: { ...data, token: 'read-token' } }
 }
 
@@ -122,6 +132,8 @@ test('a source list reads all three native destinations and cleans up its naviga
   f.api.closeFocusCitation('read-token')
   assert.equal(f.listeners.size, 0)
   assert.equal(f.context.focusCitationOperation, null)
+  assert.equal(f.isOpen(), false)
+  assert.equal(f.dismissals.length, 1)
 })
 
 test('an unrelated popup, a changed reply and a changed conversation cannot supply sources', async () => {
@@ -170,7 +182,7 @@ test('a layout shift between measurement and native input cannot click another p
   assert.equal(f.listeners.size, 0)
 })
 
-function nativeFixture({ hover = false, cancelAfterPrepare = false } = {}) {
+function nativeFixture({ hover = false, linked = false, cancelAfterPrepare = false } = {}) {
   const f = fixture(), inputs = [], calls = []
   let current = true, focused = true
   const contents = {
@@ -180,13 +192,20 @@ function nativeFixture({ hover = false, cancelAfterPrepare = false } = {}) {
       const method = code.match(/\?\.([A-Za-z]+)\(/)[1]
       let result
       if (method === 'prepareFocusCitation') { result = f.api.prepareFocusCitation(f.request, '/c/one'); if (cancelAfterPrepare) current = false }
-      else if (method === 'finishFocusCitation') result = await f.api.finishFocusCitation('read-token', 0)
+      else if (method === 'finishFocusCitation') {
+        const args = JSON.parse('[' + code.slice(code.indexOf('(') + 1, -1) + ']')
+        result = await f.api.finishFocusCitation(...args)
+      }
       else if (method === 'prepareFocusCitationClick') result = f.api.prepareFocusCitationClick('read-token')
       else if (method === 'closeFocusCitation') result = f.api.closeFocusCitation('read-token')
       else assert.fail(method)
       return result
     },
-    sendInputEvent(event) { inputs.push(event); if (event.type === 'mouseMove' && hover || event.type === 'mouseUp') f.open() }
+    sendInputEvent(event) {
+      inputs.push(event)
+      if (event.type === 'mouseMove' && hover && (event.x !== 0 || event.y !== 0)) f.open(true, linked)
+      if (event.type === 'mouseUp') f.open(!f.isOpen(), linked)
+    }
   }
   return { f, inputs, calls, run: () => readNativeFocusCitation(contents, f.data, 'read-token', () => current, () => focused),
     unfocus() { focused = false } }
@@ -202,6 +221,55 @@ test('the native coordinator handles hover and click-only lists with scaled, sin
     assert.equal(f.inputs[0].x, 120)
     assert.equal(f.inputs[0].y, 60)
     assert.equal(f.f.listeners.size, 0)
+  }
+})
+
+test('a timed-out click-only list is dismissed so a retry can read all sources', async () => {
+  for (const linked of [false, true]) {
+    const native = nativeFixture({ linked }), f = native.f
+    const complete = f.popup.childNodes
+    f.popup.childNodes = [complete[0]]
+    assert.equal((await native.run()).outcome, 'unavailable')
+    assert.equal(f.isOpen(), false, 'a partial native list must close on failure')
+    assert.equal(f.dismissals.length, 1)
+    assert.equal(f.dismissals[0].element, f.popup)
+    assert.equal(f.listeners.size, 0)
+    assert.equal(f.context.focusCitationOperation, null)
+
+    f.popup.childNodes = complete
+    const retry = await native.run()
+    assert.equal(retry.outcome, 'ok')
+    assert.equal(retry.sources.length, 3)
+    assert.equal(native.inputs.filter(event => event.type === 'mouseDown').length, 2, 'one click per attempt')
+    assert.equal(f.isOpen(), false)
+    assert.equal(f.dismissals.length, 2)
+    assert.equal(f.listeners.size, 0)
+  }
+})
+
+test('an ARIA-linked loading popup is dismissed even before it exposes any links', async () => {
+  const f = fixture()
+  f.popup.childNodes = []
+  f.api.prepareFocusCitation(f.request, '/c/one')
+  f.open(true, true)
+  assert.equal((await f.api.finishFocusCitation('read-token', 2200)).outcome, 'unavailable')
+  f.api.closeFocusCitation('read-token')
+  assert.equal(f.isOpen(), false)
+  assert.equal(f.dismissals.length, 1)
+  assert.equal(f.listeners.size, 0)
+})
+
+test('failed reads leave unrelated and already-open unlinked popups untouched', async () => {
+  for (const preexisting of [false, true]) {
+    const f = fixture()
+    if (preexisting) f.open()
+    f.api.prepareFocusCitation(f.request, '/c/one')
+    if (!preexisting) f.wrong()
+    assert.equal((await f.api.finishFocusCitation('read-token', 2200)).outcome, 'unavailable')
+    f.api.closeFocusCitation('read-token')
+    assert.equal(f.isOpen(), true)
+    assert.equal(f.dismissals.length, 0)
+    assert.equal(f.listeners.size, 0)
   }
 })
 

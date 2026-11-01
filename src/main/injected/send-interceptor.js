@@ -6328,15 +6328,18 @@
         const fresh = [...document.querySelectorAll(PAGE.focus.citations.popupSelector)].filter(element =>
           isVisibleElement(element) && !operation.before.has(element))
         const roots = [...new Set([...linked, ...fresh])]
-        const matches = roots.flatMap(element => {
+        // Ownership does not depend on all links having loaded. Keep an identified
+        // partial list available for cleanup when this read times out.
+        const candidates = roots.flatMap(element => {
           const sources = focusCitationSourcesOf(element)
-          if (sources.length < operation.group.expected || (!linked.includes(element) &&
-            !operation.group.sources.some(known => sources.some(source => source.url === known.url)))) return []
+          if (!linked.includes(element) &&
+            !operation.group.sources.some(known => sources.some(source => source.url === known.url))) return []
           return [{ element, sources }]
-        }).filter(item => !roots.some(parent => parent !== item.element && parent.contains(item.element) &&
-          focusCitationSourcesOf(parent).length >= operation.group.expected))
-        if (matches.length === 1) {
-          operation.popup = matches[0].element
+        })
+        const matches = candidates.filter(item => !candidates.some(parent =>
+          parent.element !== item.element && parent.element.contains(item.element)))
+        operation.popup = matches.length === 1 ? matches[0].element : null
+        if (operation.popup && matches[0].sources.length >= operation.group.expected) {
           return { outcome: 'ok', sources: matches[0].sources }
         }
         if (Date.now() >= end) break
