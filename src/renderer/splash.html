@@ -7,8 +7,9 @@
   /*
    * Pick the palette BEFORE the stylesheet is parsed.
    *
-   * The splash can paint before the saved application theme is read. Start with
-   * the current native preference and follow its change when app settings load.
+   * Bootstrap passes the saved application theme before this window is created.
+   * Use it for the first frame; native preference is a fallback for a standalone
+   * preview, and its change event follows later application theme changes.
    *
    * Synchronous and inline on purpose: a deferred script would let the first frame paint in
    * the wrong palette, which is exactly the flash this page exists to prevent.
@@ -44,7 +45,6 @@
   --halo: rgba(76, 141, 255, 0.6);
   --logo-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 18px 40px -16px rgba(76, 141, 255, 0.75);
   --bar-track: rgba(255, 255, 255, 0.07);
-  --edge: none;
 }
 :root[data-theme="light"] {
   --bg-a: #eef3fc;
@@ -58,22 +58,16 @@
   --halo: rgba(76, 114, 242, 0.5);
   --logo-shadow: 0 0 0 1px rgba(32, 56, 88, 0.06), 0 18px 40px -18px rgba(76, 114, 242, 0.6);
   --bar-track: rgba(32, 56, 88, 0.08);
-  /*
-   * A white card on a white desktop has no edge. Transparent windows cannot cast a shadow
-   * outside their own bounds (the shadow is clipped), so the border has to be drawn INSIDE
-   * the card. That is the only reliable way to keep it visible.
-   */
-  --edge: inset 0 0 0 1px rgba(32, 56, 88, 0.08);
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 /*
- * Keep both root backgrounds transparent: a body's background can propagate to the
- * document canvas and fill the native window's square corners. Paint only the child
- * card, whose rounded edge Chromium antialiases without a native window-region clip.
+ * Fill the opaque native window edge to edge. The OS owns the outer rounded
+ * corners; a second CSS radius or inset border would leave a nested outline.
  */
 html, body {
   height: 100%;
-  background: transparent;
+  background: var(--bg-b);
+  overflow: hidden;
 }
 body {
   color: var(--text);
@@ -86,9 +80,9 @@ body {
 }
 .splash {
   height: 100%;
-  border-radius: 16px;
+  border-radius: 0;
   background: radial-gradient(120% 90% at 50% -10%, var(--bg-a) 0%, var(--bg-b) 55%), var(--bg-b);
-  box-shadow: var(--edge);
+  box-shadow: none;
   display: flex;
   flex-direction: column;
   align-items: center;

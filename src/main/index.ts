@@ -104,6 +104,7 @@ import type {
 } from '../shared/types'
 import { embedAuthState, importCookieSet, importSessionToken, previewSessionImport } from './session-import'
 import { ConversationStore } from './db'
+import { readStartupTheme } from './startup-theme'
 import { workspaceProjectDraft, workspaceSessionOptions } from './workspace-projects'
 import { EMPTY_SSH_STATE, SessionRuntime } from './session-runtime'
 import { installAppLog, installNetLog } from './app-log'
@@ -288,8 +289,24 @@ function recordPendingQuestions(id: string, platformId: string, count: number): 
   refreshTaskbarCount()
 }
 
+function restoreUnseenCompletedCount(id: string): void {
+  try {
+    const count = Number(store?.getSetting(`unseenCompletedCount:${id}`))
+    if (Number.isSafeInteger(count) && count > 0) unseenCompletedTasks.set(id, count)
+    else unseenCompletedTasks.delete(id)
+  } catch { console.warn('[notification] failed to restore unread completion count') }
+}
+
+function setUnseenCompletedCount(id: string, count: number): void {
+  try { store?.setSetting(`unseenCompletedCount:${id}`, String(count)) }
+  catch { console.warn('[notification] failed to save unread completion count') }
+  if (count > 0) unseenCompletedTasks.set(id, count)
+  else unseenCompletedTasks.delete(id)
+}
+
 function markSessionViewed(id: string | null): void {
-  if (id && unseenCompletedTasks.delete(id)) {
+  if (id && unseenCompletedTasks.has(id)) {
+    setUnseenCompletedCount(id, 0)
     refreshTaskbarCount()
     broadcastManagedSessions()
   }
@@ -297,7 +314,7 @@ function markSessionViewed(id: string | null): void {
 
 function recordCompletedTask(id: string): void {
   if (id === currentSessionId && managerWindow && !managerWindow.isDestroyed() && managerWindow.isFocused()) return
-  unseenCompletedTasks.set(id, (unseenCompletedTasks.get(id) ?? 0) + 1)
+  setUnseenCompletedCount(id, Math.min(Number.MAX_SAFE_INTEGER, (unseenCompletedTasks.get(id) ?? 0) + 1))
   broadcastManagedSessions()
   refreshTaskbarCount()
 }
@@ -511,10 +528,15 @@ function createSplashWindow(): Promise<void> {
     title: '',
     titleBarStyle: 'hidden',
     titleBarOverlay: false,
-    // The page's rounded card supplies per-pixel alpha. A native setShape()
-    // region would hard-clip its antialiased edge, especially at high DPI.
-    transparent: true,
-    backgroundColor: '#00000000',
+    // Use an opaque native surface even before Chromium paints the card. Native
+    // rounded corners do not require a transparent, per-pixel-alpha window.
+    // The page fills these bounds without drawing another rounded border.
+    // Do not set `opacity`, even to 1: Electron 44's Windows implementation
+    // enables WS_EX_LAYERED whenever that constructor option is supplied.
+    transparent: false,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0b0e14' : '#ffffff',
+    backgroundMaterial: 'none',
+    roundedCorners: true,
     hasShadow: false,
     resizable: false,
     minimizable: false,
@@ -554,20 +576,24 @@ function createSplashWindow(): Promise<void> {
     closeSplashWindow(true)
   }, SPLASH_FIRST_PAINT_MAX_MS)
 
-  // `showInactive` so the splash never takes focus from the window that is still loading
-  // behind it: stealing focus would make the main window's first paint look like a flash.
-  // Some transparent Windows builds do not emit `ready-to-show`, so `did-finish-load` is
-  // also a valid reveal signal. The guard makes the two events harmless when both fire.
+  // Document load completion does not imply that Chromium has rendered a frame.
+  // Show only after `ready-to-show`; if it never arrives, the deadline above
+  // closes the hidden splash and lets initialization continue without exposing it.
   const revealSplash = (): void => {
     if (splashWindow !== window || window.isDestroyed() || splashReady) return
     splashReady = true
     splashShownAt = Date.now()
+    console.info('[splash] first frame ready; showing opaque startup window')
     window.showInactive()
     finishFirstPaint()
     if (splashCloseRequested) closeSplashWindow()
   }
   window.once('ready-to-show', revealSplash)
-  window.webContents.once('did-finish-load', revealSplash)
+  window.webContents.once('did-finish-load', () => {
+    if (splashWindow === window && !window.isDestroyed()) {
+      console.info(splashReady ? '[splash] document loaded after first frame' : '[splash] document loaded; waiting for first frame')
+    }
+  })
   window.on('focus', () => markSessionViewed(currentSessionId))
   window.on('closed', () => {
     finishFirstPaint()
@@ -580,10 +606,11 @@ function createSplashWindow(): Promise<void> {
   const splashPath = isDev
     ? join(app.getAppPath(), 'src/renderer/splash.html')
     : join(__dirname, '../renderer/splash.html')
-  console.info(`[splash] opening separate ${SPLASH_WIDTH}x${SPLASH_HEIGHT} window`)
-  // The first frame follows the system theme without opening the database. The
-  // static page follows nativeTheme changes when the saved application theme loads.
-  void window.loadFile(splashPath).catch(error => {
+  console.info(`[splash] opening separate opaque ${SPLASH_WIDTH}x${SPLASH_HEIGHT} window; waiting for ready-to-show`)
+  console.info(`[splash] local page: ${splashPath}`)
+  // Bootstrap already applied the saved theme before this native window existed.
+  // Pin the HTML's first palette as well, before its inline stylesheet is parsed.
+  void window.loadFile(splashPath, { query: { theme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light' } }).catch(error => {
     console.warn('[splash] could not load the startup page:', error)
     finishFirstPaint()
     closeSplashWindow(true)
@@ -603,7 +630,7 @@ function armSplashFallback(): void {
 }
 
 /**
- * Fade the splash out and destroy it.
+ * Keep the splash opaque until it is destroyed.
  *
  * Idempotent, and safe to call when no splash exists: the only cost of a spurious call is
  * that a later `createSplashWindow` finds nothing to close.
@@ -649,51 +676,13 @@ function closeSplashWindow(force = false): void {
   splashWindow = null
   splashFirstPaint = null
 
-  /*
-   * Fade, then destroy.
-   *
-   * `setOpacity` is a no-op on a transparent window under some Windows builds, which is why
-   * the fade is best-effort and the destroy below is unconditional - a splash that refuses
-   * to leave is worse than one that leaves abruptly.
-   */
-  const startedAt = Date.now()
-  const duration = 220
-  const startOpacity = (() => {
-    try {
-      return window.getOpacity()
-    } catch {
-      return 1
-    }
-  })()
-
-  const timer = setInterval(() => {
-    if (window.isDestroyed()) {
-      clearInterval(timer)
-      splashClosing = false
-      showManagerWhenReady()
-      return
-    }
-    const progress = Math.min(1, (Date.now() - startedAt) / duration)
-    try {
-      window.setOpacity(startOpacity * (1 - progress))
-    } catch {
-      /* opacity unsupported here; fall through to the destroy below */
-    }
-    if (progress >= 1) {
-      clearInterval(timer)
-      window.destroy()
-    }
-  }, 16)
+  // Close in one step after the existing minimum animation time. A window-wide
+  // opacity fade would reintroduce translucency over other applications.
   window.once('closed', () => {
-    clearInterval(timer)
-    /*
-     * The splash is genuinely gone now, so the 'in transition' flag has to be cleared.
-     * Leaving it set would make every LATER reveal (a tray click, a macOS activate) look
-     * like a startup that is still animating, and the main window would never show again.
-     */
     splashClosing = false
     showManagerWhenReady()
   })
+  window.destroy()
 }
 
 /*
@@ -851,6 +840,9 @@ function managerTitleBarOverlay(theme: AppTheme): Electron.TitleBarOverlay {
  */
 function applyAppTheme(theme: AppTheme): void {
   nativeTheme.themeSource = theme
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#0b0e14' : '#ffffff')
+  }
   if (process.platform !== 'darwin' && managerWindow && !managerWindow.isDestroyed()) {
     managerWindow.setTitleBarOverlay(managerTitleBarOverlay(theme))
   }
@@ -1112,6 +1104,7 @@ function createSession(
     onEmbedReady: () => closeSplashWindow()
   })
   runtimes.set(runtime.id, runtime)
+  restoreUnseenCompletedCount(runtime.id)
   emergencyStop.sessionAdded(runtime)
   if (runtime.web2term && web2termConnection) {
     const shell = runtime.web2term
@@ -1258,8 +1251,7 @@ function createManagerWindow(): void {
     managerReadyToShow = true
     // Keep the main window completely hidden while the separate, frameless splash
     // window is visible. This prevents its native title bar from flashing first.
-    // Wait for the fade to finish, not merely for the window to be destroyed: the main
-    // window appearing under a half-faded splash is the same flash, just slower.
+    // Reveal it only after the splash's close has completed.
     if (!splashWindow && !splashClosing) showManagerWhenReady()
   })
   window.on('close', (event) => {
@@ -2506,6 +2498,8 @@ async function initializeApplication(): Promise<void> {
 }
 
 async function startApplication(): Promise<void> {
+  settings = { ...settings, theme: readStartupTheme(join(app.getPath('userData'), 'conversations.db')) }
+  applyAppTheme(settings.theme)
   await createSplashWindow()
   if (quitting) return
   await initializeApplication()

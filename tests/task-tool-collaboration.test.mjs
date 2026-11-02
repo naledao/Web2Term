@@ -30,7 +30,12 @@ const background = load('../src/shared/background-tasks.ts', { './autonomous-tas
 const { TaskCoordinator } = load('../src/main/task-coordinator.ts', { 'node:crypto': crypto })
 const { TaskProgression } = load('../src/main/task-progression.ts', { 'node:crypto': crypto })
 const { DesktopCoordinator } = load('../src/main/desktop-coordinator.ts')
-const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['taskToolMachine', 'taskToolCurrent', 'routeTaskCommand', 'flushTaskTools', 'advanceComputerUse', 'noteAutonomousReply', 'keepDesktopLease'])
+const { supportsComputerUsePlatform } = load('../src/shared/computer-use.ts', {
+  './computer-progress': progressVmModules['../shared/computer-progress'],
+  './computer-use-protocol': load('../src/shared/computer-use-protocol.ts')
+})
+const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['taskToolMachine', 'taskToolCurrent', 'routeTaskCommand', 'flushTaskTools', 'advanceComputerUse', 'noteAutonomousReply', 'keepDesktopLease', 'canRunConversationInBackground', 'completeComputerTaskFromModel'],
+  { ...progressVmModules['../shared/task-presentation'], supportsComputerUsePlatform })
 const Embed = methods('../src/main/embed.ts', 'ChatGptEmbed', ['taskActionSource'])
 const plain = value => JSON.parse(JSON.stringify(value))
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
@@ -101,7 +106,7 @@ function fixture(t, options = {}) {
   const embed = { getState: () => ({ conversationId: activeConversation }), getInterceptorStatus: () => ({ enabled }) }
   runtime = Object.assign(new Runtime(), { id: 'session-a', active: true, disposed: false, activePlatformId: 'deepseek', options: { store, localMachineId: 'machine-a' },
     environment: { workingDirectory: 'C:\\work' }, lastPersistedLocalCwd: 'C:\\work', runner, taskCoordinator: coordinator, pendingTaskCommand: null, pendingTaskComputer: null, pendingTaskReply: null,
-    backgroundTaskResults: { isSending: false },
+    deferredCommands: new Map(), backgroundTaskResults: { isSending: false, cancel() {} }, backgroundTasks: { cancelNotifications() {} },
     embed, embeds: new Map([['deepseek', { platform, embed, conversationId: 'chat-a' }]]), getComputerUseCapability: capability,
     toolPreferences: () => toolPreferences })
   const progression = new TaskProgression({ coordinator, isCurrent: () => runtime.active && !runtime.disposed, canRun: () => runner.canSendAutomaticResult(),
@@ -130,6 +135,59 @@ function fixture(t, options = {}) {
     async settled() { for (let n = 0; n < 30; n++) { await new Promise(resolve => setImmediate(resolve)); if (!runner.hasInFlightWork()) break } }
   }
 }
+
+test('a local command already running keeps its result and subsequent steps when its workspace becomes hidden', async t => {
+  const held = deferred(), f = fixture(t, { run: () => held.promise })
+  f.route(f.command('running-local'))
+  await new Promise(resolve => setImmediate(resolve))
+  f.runtime.active = false
+  assert.equal(f.runtime.canRunConversationInBackground(), true)
+  held.resolve({ output: 'background terminal result', exitCode: 0 })
+  await f.settled()
+  assert.equal(f.records.get('running-local').status, 'done')
+  assert.equal(f.sends.length, 1)
+  assert.equal(f.sends[0].context.conversationId, 'chat-a')
+  f.route(f.command('next-local'))
+  await f.settled()
+  assert.equal(f.runs.length, 2)
+  assert.equal(f.sends.length, 2)
+})
+
+test('hidden local file results and the live completion marker stay on the original task', async t => {
+  const f = fixture(t)
+  f.runtime.active = false
+  f.route(f.command('hidden-files', { type: 'read_files', files: [{ path: 'report.xlsx' }] }))
+  await f.settled()
+  assert.equal(f.uploads.length, 1)
+  const task = f.coordinator.current('deepseek')
+  assert.equal(f.runtime.completeComputerTaskFromModel('deepseek', 'done-hidden', {
+    sourceSubmissionId: task.sourceSubmissionId, taskPromptGeneration: 7, pagePath: path
+  }), true)
+  assert.equal(f.runtime.taskEnded, true)
+  assert.equal(f.store.latestAutonomousTask('session-a', 'deepseek', 'chat-a').status, 'completed')
+})
+
+test('a computer request arriving in a hidden terminal task waits for selection and never executes in the background', async t => {
+  const acknowledgement = deferred(), f = fixture(t, { send: () => acknowledgement.promise })
+  f.route(f.command('before-desktop'))
+  await new Promise(resolve => setImmediate(resolve))
+  f.runtime.active = false
+  const request = f.computer()
+  assert.equal(f.runtime.advanceComputerUse(request), 'deferred')
+  assert.equal(f.runtime.advanceComputerUse(request), 'duplicate')
+  assert.equal(f.runtime.canRunConversationInBackground(), true, 'the terminal result in flight keeps its owner until acknowledged')
+  acknowledgement.resolve('ok')
+  await f.settled()
+  assert.equal(f.records.get('before-desktop').status, 'done')
+  assert.equal(f.desktop.length, 0)
+  assert.equal(f.coordinator.current('deepseek').status, 'recorded')
+  assert.equal(f.runtime.advanceComputerUse({ ...request, taskId: 'another-task' }), 'inactive')
+  f.runtime.active = true
+  f.runtime.flushTaskTools()
+  await f.runtime.taskProgression.wake()
+  assert.equal(f.desktop.length, 1)
+  assert.equal(f.runtime.pendingTaskComputer, null)
+})
 
 test('conversation switches reject disabled task tools before reserving a step, while ordinary commands still work', async t => {
   const f = fixture(t, { tools: { fileReadingEnabled: false, backgroundTasksEnabled: false } })

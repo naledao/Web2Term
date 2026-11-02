@@ -608,6 +608,9 @@ function actualClass(path, className, names, globals = {}) {
 }
 const Runtime = actualClass('../src/main/session-runtime.ts', 'SessionRuntime', ['receiveComputerUseRequest', 'syncAutonomousTask', 'advanceComputerUse', 'completeComputerTaskFromModel'], {
   computerUseProtocol: protocol.computerUseProtocol,
+  supportsComputerUsePlatform: load('../src/shared/computer-use.ts', {
+    './computer-progress': progressVmModules['../shared/computer-progress'], './computer-use-protocol': protocol
+  }).supportsComputerUsePlatform,
   taskPresentationLease: load('../src/shared/task-presentation.ts').taskPresentationLease
 })
 const Embed = actualClass('../src/main/embed.ts', 'ChatGptEmbed', ['handlePageReport', 'taskActionSource', 'invalidateComputerDocument', 'getComputerUsePageEpoch',
@@ -643,6 +646,7 @@ function mainFixture(conversationId = 'chat-A') {
   const goal = submit()
   const entry = { platform: platforms.DEEPSEEK_PLATFORM, conversationId, embed: { getState: () => ({ conversationId: 'chat-A' }), getComputerUsePageEpoch: () => 'document-a' } }
   const runtime = Object.assign(new Runtime(), { id: 'session-A', active: true, disposed: false, activePlatformId: 'deepseek',
+    options: {}, runner: { refreshTerminal() {} },
     embeds: new Map([['deepseek', entry]]), taskCoordinator: coordinator, backgroundTaskResults: { isSending: false }, getComputerUseCapability: () => capability,
     invokeComputerUseTool() { assert.fail('raw wire JSON must not invoke a desktop action') } })
   progression = new TaskProgression({ coordinator, isCurrent: lease => runtime.active && coordinator.owns(lease), canRun: () => true,
@@ -841,14 +845,11 @@ test('the bridge rejects stale generations, routes, origins, history events and 
   assert.equal(f.writes.length, 1)
 })
 
-test('task ownership rejects a superseded source, inactive session, stopped goal or unsupported environment', () => {
+test('task ownership rejects a superseded source, stopped goal or unsupported environment', () => {
   const f = mainFixture()
   f.submit('user:page:2')
   f.report()
   assert.equal(f.coordinator.current('deepseek').progress.computerRequest, undefined)
-  f.runtime.active = false
-  f.report({ sourceSubmissionId: 'user:page:2' })
-  f.runtime.active = true
   f.coordinator.stop('deepseek')
   f.report({ sourceSubmissionId: 'user:page:2' })
   assert.equal(f.records.get(f.goal.id).status, 'superseded')
@@ -857,6 +858,16 @@ test('task ownership rejects a superseded source, inactive session, stopped goal
   g.runtime.getComputerUseCapability = () => ({ scopeSupported: false, computerUseEnabled: true })
   g.report()
   assert.equal(g.coordinator.current('deepseek').progress.computerRequest, undefined)
+})
+
+test('a valid first desktop request in a hidden conversation is retained without admitting execution', () => {
+  const f = mainFixture()
+  f.runtime.active = false
+  f.report()
+  assert.equal(f.coordinator.current('deepseek').status, 'recorded')
+  assert.equal(f.coordinator.current('deepseek').progress.computerRequest, undefined)
+  assert.equal(f.runtime.pendingTaskComputer.sourceMessageId, f.event.messageId)
+  assert.equal(f.runtime.pendingTaskComputer.taskId, f.goal.id)
 })
 
 test('a first SPA reply binds the existing goal once, without restoring a different conversation', () => {

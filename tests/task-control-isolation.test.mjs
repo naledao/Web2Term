@@ -35,12 +35,12 @@ function runtime(f) {
     taskCoordinator: f.coordinator, taskProgression: f.loop, computerUseTool: {}, environment: { workingDirectory: 'C:\\work' }, preferredSendDelaySeconds: 4, sendDelayCustomized: true,
     taskBackgroundWait: { reconcile: () => calls.push('wait-reconcile') },
     embeds: new Map([['deepseek', { platform: deepseek, conversationId: 'chat-a', embed }], ['chatgpt', { platform: chatgpt, conversationId: 'chat-b', embed: next }]]),
-    deferredCommands: new Map([['pending', {}]]),
+    deferredCommands: new Map([['pending', {}]]), lastSubmissions: new Map(),
     options: { store: f.store, localMachineId: 'machine-a', onSummaryChanged() {},
       computerUseObservations: { invalidateInput: (_tool, lease) => calls.push(['invalidate', lease]) }, desktopCoordinator: { reconcile: () => calls.push('desktop-reconcile') } },
     backgroundTaskResults: { cancel: owner => calls.push(['cancel-result', owner]) }, backgroundTasks: { cancelNotifications: owner => calls.push(['cancel-notification', owner]) },
     runner: { reconcileTaskTools: () => calls.push('runner-reconcile'), setSendDelay: seconds => calls.push(['send-delay', seconds]), getAutomation: () => ({ mode: 'manual' }), getTerminalState: () => ({ cwd: 'C:\\work' }) },
-    focusChat: { begin: () => 'original-history-turn' }, syncWindowsHelperDemand() {}, applyVisibility() {}, send() {}, toolPrompt: () => 'original tools',
+    focusChat: { begin: () => 'original-history-turn' }, syncWindowsHelperDemand() {}, applyVisibility() {}, flushTaskTools() {}, send() {}, toolPrompt: () => 'original tools',
     syncAutonomousTask: (platform, conversation) => f.coordinator.context(platform, conversation), taskRunning: () => true,
     getComputerUseCapability: platform => ({ scopeSupported: true, computerUseEnabled: true, context: { sessionId: f.first.sessionId, platformId: platform } }),
     ensureEmbed: platform => runtime.embeds.get(platform) })
@@ -49,6 +49,7 @@ function runtime(f) {
 
 test('session handover cancels the owned queues, input bindings and page generation without resuming on return', t => {
   const f = fixture(t), g = runtime(f), lease = f.lease(), controller = new AbortController()
+  assert.equal(f.loop.enqueue(f.request()), 'accepted')
   Object.assign(g.runtime, { pendingTaskCommand: { lease }, pendingTaskComputer: lease, pendingTaskReply: { lease },
     taskRecoverySend: { request: lease }, legacyToolSend: { context: lease, abort: controller } })
   g.runtime.setActive(false)
@@ -105,6 +106,7 @@ test('the SPA assigning the first conversation preserves the confirmed pending g
 
 test('late confirmed sends from inactive, switched or disposed control pages cannot reopen the task', t => {
   const f = fixture(t), g = runtime(f)
+  assert.equal(f.loop.enqueue(f.request()), 'accepted')
   g.runtime.setActive(false)
   const generation = f.store.autonomousTaskGeneration(f.first.sessionId)
   for (const patch of [{ active: false, disposed: false, activePlatformId: 'deepseek' }, { active: true, disposed: false, activePlatformId: 'chatgpt' }, { active: true, disposed: true, activePlatformId: 'deepseek' }]) {

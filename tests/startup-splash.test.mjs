@@ -1,5 +1,5 @@
 // User-run offline regressions. These mocks never launch Electron or load a website.
-// Run: node --test tests/startup-splash.test.mjs
+// Run: node --test tests/startup-splash.test.mjs tests/startup-theme.test.mjs
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
@@ -12,7 +12,7 @@ const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'u
 const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.ES2022, true)
 const names = [
   'createSplashWindow', 'armSplashFallback', 'closeSplashWindow', 'destroySplashWindow',
-  'showManagerWhenReady', 'startApplication', 'handleStartupFailure', 'handleSecondInstance'
+  'showManagerWhenReady', 'startApplication', 'handleStartupFailure', 'handleSecondInstance', 'applyAppTheme'
 ]
 const code = names.map(name => {
   const declaration = ast.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === name)
@@ -21,8 +21,9 @@ const code = names.map(name => {
 }).join('\n')
 const compiled = ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 
-function fixture({ packaged = false } = {}) {
+function fixture({ packaged = false, dark = false, savedTheme = 'light' } = {}) {
   const events = []
+  const themeReads = []
   const windows = []
   const timers = new Map()
   let timerId = 0
@@ -38,6 +39,8 @@ function fixture({ packaged = false } = {}) {
     constructor(options) {
       super()
       this.options = options
+      this.opacity = options.opacity ?? 1
+      this.backgroundColor = options.backgroundColor
       windows.push(this)
       events.push('splash-created')
     }
@@ -45,11 +48,13 @@ function fixture({ packaged = false } = {}) {
     setBounds() {}
     setResizable() {}
     setMaximizable() {}
+    setBackgroundColor(value) { this.backgroundColor = value }
     showInactive() { events.push('splash-shown') }
-    getOpacity() { return 1 }
-    setOpacity() {}
-    loadFile(path) {
+    getOpacity() { return this.opacity }
+    setOpacity(value) { this.opacity = value; events.push(['splash-opacity', value]) }
+    loadFile(path, options) {
       this.path = path
+      this.loadOptions = options
       return new Promise((resolve, reject) => { this.loaded = resolve; this.failed = reject })
     }
     destroy() {
@@ -61,7 +66,14 @@ function fixture({ packaged = false } = {}) {
   }
   const context = {
     Error, BrowserWindow: Window, join, __dirname: '/app/out/main', isDev: !packaged,
-    app: { getAppPath: () => '/app', quit: () => events.push('quit') },
+    process: { platform: 'win32' }, runtimes: new Map(), nacosViews: new Map(),
+    nativeTheme: { themeSource: dark ? 'dark' : 'light', get shouldUseDarkColors() { return this.themeSource === 'dark' } },
+    settings: { theme: 'light' },
+    readStartupTheme: path => { themeReads.push(path); return savedTheme },
+    app: { getAppPath: () => '/app', getPath: name => {
+      assert.equal(name, 'userData')
+      return '/profile'
+    }, quit: () => events.push('quit') },
     screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }) },
     console: { info() {}, warn: (...args) => events.push(['warning', ...args]), error: (...args) => events.push(['error', ...args]) },
     dialog: { showErrorBox: (...args) => events.push(['dialog', ...args]) },
@@ -101,19 +113,43 @@ function fixture({ packaged = false } = {}) {
     }
     context.managerReadyToShow = true
   }
-  return { actions, context, events, windows, timers, advance, prepareManager }
+  return { actions, context, events, windows, timers, advance, prepareManager, themeReads }
 }
 
-for (const signal of ['ready-to-show', 'did-finish-load']) {
-  test(`startup shows the standalone splash before initialization via ${signal}`, async () => {
+test('saved application theme is applied before the native window and HTML are loaded, even when the system differs', async () => {
+  for (const savedTheme of ['dark', 'light']) {
+    const app = fixture({ dark: savedTheme === 'light', savedTheme })
+    const starting = app.actions.startApplication(), window = app.windows[0]
+    assert.deepEqual(app.themeReads, [join('/profile', 'conversations.db')])
+    assert.equal(app.context.settings.theme, savedTheme)
+    assert.equal(app.context.nativeTheme.themeSource, savedTheme)
+    assert.equal(window.options.backgroundColor, savedTheme === 'dark' ? '#0b0e14' : '#ffffff')
+    assert.equal(window.loadOptions.query.theme, savedTheme)
+    assert.equal(app.events.includes('initialize'), false)
+    window.emit('ready-to-show')
+    await starting
+    assert.equal(window.backgroundColor, window.options.backgroundColor, 'workspace initialization does not need to correct the first palette')
+  }
+})
+
+for (const documentFirst of [false, true]) {
+  test(`startup waits for the first rendered frame before initialization (document first: ${documentFirst})`, async () => {
     const app = fixture()
     const starting = app.actions.startApplication()
     const window = app.windows[0]
     assert.equal(window.path, join('/app', 'src/renderer/splash.html'))
     assert.equal(window.options.show, false)
+    assert.equal(window.options.transparent, false)
+    assert.equal(Object.hasOwn(window.options, 'opacity'), false, 'an explicit opacity would enable Windows layered-window mode')
     assert.deepEqual(app.events, ['splash-created'])
-    if (signal === 'ready-to-show') window.emit(signal)
-    else window.webContents.emit(signal)
+    if (documentFirst) {
+      window.webContents.emit('did-finish-load')
+      await Promise.resolve()
+      assert.deepEqual(app.events, ['splash-created'], 'document load alone cannot reveal the window or start heavy initialization')
+      assert.equal(app.context.splashReady, false)
+      assert.equal(app.context.splashShownAt, null)
+    }
+    window.emit('ready-to-show')
     await starting
     assert.deepEqual(app.events, ['splash-created', 'splash-shown', 'initialize'])
     window.emit('ready-to-show')
@@ -122,6 +158,20 @@ for (const signal of ['ready-to-show', 'did-finish-load']) {
     assert.equal(app.timers.size, 0)
   })
 }
+
+test('the native splash has an opaque backing in both themes and follows a saved theme change', async () => {
+  for (const dark of [false, true]) {
+    const app = fixture({ dark })
+    const painted = app.actions.createSplashWindow(), window = app.windows[0]
+    assert.equal(window.options.backgroundColor, dark ? '#0b0e14' : '#ffffff')
+    assert.equal(window.options.backgroundMaterial, 'none')
+    assert.equal(window.options.roundedCorners, true)
+    app.actions.applyAppTheme(dark ? 'light' : 'dark')
+    assert.equal(window.backgroundColor, dark ? '#ffffff' : '#0b0e14')
+    window.emit('ready-to-show')
+    await painted
+  }
+})
 
 test('packaged startup loads the built local splash without waiting for the workspace renderer', async () => {
   const app = fixture({ packaged: true })
@@ -138,10 +188,17 @@ test('a missing splash or first-frame timeout cannot strand initialization', asy
     const app = fixture()
     const starting = app.actions.startApplication()
     if (failure === 'load') app.windows[0].failed(new Error('missing splash'))
-    else app.advance(3000)
+    else {
+      app.windows[0].webContents.emit('did-finish-load')
+      app.advance(2999)
+      assert.equal(app.events.includes('splash-shown'), false)
+      assert.equal(app.events.includes('initialize'), false)
+      app.advance(1)
+    }
     await starting
     assert.equal(app.events.includes('initialize'), true)
     assert.equal(app.context.splashWindow, null)
+    assert.equal(app.events.includes('splash-shown'), false, 'an unpainted page is discarded without showing it')
     app.advance(240)
     assert.equal(app.windows[0].isDestroyed(), true)
     assert.equal(app.timers.size, 0)
@@ -177,7 +234,7 @@ test('the chat-load timeout starts when armed after workspace creation', async (
   assert.equal(app.timers.size, 0)
 })
 
-test('normal startup preserves the minimum animation time and releases the ready manager', async () => {
+test('normal startup stays opaque for the minimum animation time, then closes before showing the manager', async () => {
   const app = fixture()
   const starting = app.actions.startApplication()
   app.windows[0].emit('ready-to-show')
@@ -189,10 +246,33 @@ test('normal startup preserves the minimum animation time and releases the ready
   app.advance(2999)
   assert.equal(app.events.includes('manager-shown'), false)
   assert.equal(app.windows[0].isDestroyed(), false)
-  app.advance(241)
+  assert.equal(app.windows[0].getOpacity(), 1)
+  app.advance(1)
   assert.equal(app.windows[0].isDestroyed(), true)
   assert.equal(app.events.includes('manager-shown'), true)
+  assert.ok(app.events.indexOf('splash-destroyed') < app.events.indexOf('manager-shown'))
+  assert.equal(app.events.some(event => Array.isArray(event) && event[0] === 'splash-opacity' && event[1] < 1), false)
+  assert.equal(app.context.splashClosing, false)
   assert.equal(app.timers.size, 0)
+})
+
+test('a forced splash close never leaves a translucent window or delays the ready workspace', async () => {
+  const app = fixture()
+  const starting = app.actions.startApplication()
+  app.windows[0].emit('ready-to-show')
+  await starting
+  app.prepareManager()
+  app.actions.armSplashFallback()
+  app.actions.closeSplashWindow(true)
+  assert.equal(app.windows[0].isDestroyed(), true)
+  assert.equal(app.windows[0].getOpacity(), 1)
+  assert.equal(app.events.some(event => Array.isArray(event) && event[0] === 'splash-opacity' && event[1] < 1), false)
+  assert.ok(app.events.indexOf('splash-destroyed') < app.events.indexOf('manager-shown'))
+  assert.equal(app.context.splashClosing, false)
+  assert.equal(app.timers.size, 0)
+  app.actions.closeSplashWindow(true)
+  assert.equal(app.events.filter(event => event === 'splash-destroyed').length, 1)
+  assert.equal(app.events.filter(event => event === 'manager-shown').length, 1)
 })
 
 test('a second launch waits for initialization while notification arguments still reach the router', () => {
@@ -253,5 +333,21 @@ test('the first splash palette uses the native theme and follows the saved appli
     assert.deepEqual(themes, [initiallyDark ? 'dark' : 'light'])
     changed({ matches: !initiallyDark })
     assert.deepEqual(themes, initiallyDark ? ['dark', 'light'] : ['light', 'dark'])
+  }
+})
+
+test('the HTML uses the explicit saved palette before styles, regardless of the preview system preference', () => {
+  const html = readFileSync(new URL('../src/renderer/splash.html', import.meta.url), 'utf8')
+  const script = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1]
+  assert.ok(script)
+  assert.ok(html.indexOf('<script>') < html.indexOf('<style>'))
+  for (const theme of ['dark', 'light']) {
+    const themes = []
+    new Script(script).runInNewContext({
+      window: { location: { search: '?theme=' + theme },
+        matchMedia: () => ({ matches: theme === 'light', addEventListener() {} }) },
+      document: { documentElement: { setAttribute: (_name, value) => themes.push(value) } }
+    })
+    assert.deepEqual(themes, [theme])
   }
 })

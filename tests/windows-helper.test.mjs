@@ -695,7 +695,7 @@ test('actual session lifecycle acquires demand only for an active enabled local 
   const runtime = Object.assign(new Runtime(), {
     id: 'session-A', activePlatformId: 'deepseek', active: false, disposed: false, web2term: null, remoteShell: null,
     options: { settings: () => saved, windowsHelper: { getState: () => fixture().manager.getState(), setDemand: (owner, enabled) => demands.push({ owner, enabled }) } },
-    ssh: { getState: () => ({ attached }) }, computerUseTool: { definitions: () => [] }, applyVisibility() {}, interruptTaskControl() {}
+    ssh: { getState: () => ({ attached }) }, computerUseTool: { definitions: () => [] }, applyVisibility() {}, flushTaskTools() {}, interruptTaskControl() {}
   })
   runtime.setActive(true); assert.equal(demands.at(-1).enabled, true)
   attached = true; runtime.syncWindowsHelperDemand(); assert.equal(demands.at(-1).enabled, false)

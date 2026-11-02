@@ -36,13 +36,13 @@ function fixture() {
     options: { localMachineId: target.machineId, scheduledTasks: { wake: () => { state.wakes++ }, store: { get: () => task } },
       desktopCoordinator: { getState: () => ({ humanControl: state.human }), canReleaseHumanControl: () => !state.human } },
     runner: { getAutomation: () => ({ paused: state.paused }), hasInFlightWork: () => false, getTerminalState: () => ({ cwd: '/root' }) },
-    taskCoordinator: { latest: () => null, waitingForUser: () => false, context: () => ({ task: null }),
+    taskCoordinator: { latest: () => state.task ?? null, waitingForUser: () => false, context: () => ({ task: null }),
       submit(input) { state.submissions++; assert.equal(input.capability.scopeSupported, false); return null } },
     focusChat: { begin(_platform, _conversation, text) { turns.push(text); return 'turn-a' } },
     mailNotifications: { busy: false, cancel: () => cancellations.push('mail') },
     toolPromptReads: { busy: false, cancel: () => cancellations.push('tools') },
     scheduledTaskTools: { busy: false, cancel: () => cancellations.push('plans') }, backgroundTaskResults: { isSending: false },
-    syncWindowsHelperDemand() {}, applyVisibility() {}, interruptTaskControl() { state.interrupted++ },
+    syncWindowsHelperDemand() {}, applyVisibility() {}, flushTaskTools() {}, interruptTaskControl() { state.interrupted++ },
     taskProgression: { reconcile() {}, wake: async () => {} } })
   embed.sendScheduledUser = async (text, conversationId, runId, signal, current) => {
     assert.equal(current(), true)
@@ -73,6 +73,24 @@ test('switching workspace preserves a terminal send and its tool replies without
   assert.equal(f.state.interrupted, 0)
   assert.equal(f.state.wakes, 2)
   assert.deepEqual(f.sent, [], 'selecting a workspace wakes the scheduler without directly resending anything')
+})
+
+test('default-enabled computer use does not end a local task that has not entered desktop operations', () => {
+  for (const step of [null, { tool: 'command', action: 'command' }, { tool: 'read_files', action: 'read_files' }]) {
+    const f = fixture(), abort = new AbortController()
+    f.state.desktop = true
+    f.state.task = { status: 'recorded', progress: { currentStep: step } }
+    f.runtime.scheduledSendAbort = abort
+    f.runtime.setActive(false)
+    assert.equal(f.state.interrupted, 0)
+    assert.equal(f.runtime.taskEnded, false)
+    assert.equal(abort.signal.aborted, false)
+    assert.deepEqual(f.cancellations, [])
+    assert.equal(f.runtime.scheduledTaskReady(f.task, f.run), null)
+    const call = { conversationId: f.owner.conversationId, pageEpoch: 'page-a', sourceSubmissionId: 'user:first' }
+    assert.equal(f.runtime.mailNotificationCurrent(call), true)
+    assert.equal(f.runtime.toolPromptReadCurrent(call), true)
+  }
 })
 
 test('a background scheduled send records its user turn and reopens its own terminal loop after an ended task', async () => {
@@ -120,6 +138,7 @@ test('hidden conversations retain pause, takeover, target, revision and conversa
 test('desktop-tool tasks still cancel on workspace handover and wait for selection', () => {
   const f = fixture(), abort = new AbortController()
   f.state.desktop = true; f.runtime.scheduledSendAbort = abort
+  f.state.task = { status: 'recorded', progress: { currentStep: { tool: 'computer', action: 'observe' } } }
   f.runtime.setActive(false)
   assert.equal(abort.signal.aborted, true)
   assert.equal(f.state.interrupted, 1)
@@ -129,4 +148,15 @@ test('desktop-tool tasks still cancel on workspace handover and wait for selecti
   const call = { conversationId: f.owner.conversationId, pageEpoch: 'page-a', sourceSubmissionId: 'user:first' }
   assert.equal(f.runtime.mailNotificationCurrent(call), false)
   assert.equal(f.runtime.toolPromptReadCurrent(call), false)
+})
+
+test('desktop receipts remain a selection requirement through later terminal steps', () => {
+  const f = fixture()
+  f.state.desktop = true
+  f.state.task = { status: 'recorded', progress: { computerRequest: {}, currentStep: { tool: 'command', action: 'command' } } }
+  assert.equal(f.runtime.canRunConversationInBackground(), false)
+  f.state.task.status = 'interrupted'
+  assert.equal(f.runtime.canRunConversationInBackground(), false, 'late desktop-page sends cannot reopen an interrupted task while hidden')
+  f.state.task = { status: 'completed', progress: f.state.task.progress }
+  assert.equal(f.runtime.canRunConversationInBackground(), true, 'a completed desktop history cannot block a new ordinary conversation')
 })

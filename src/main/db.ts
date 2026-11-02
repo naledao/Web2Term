@@ -1861,6 +1861,7 @@ export class ConversationStore {
     this.contextUsage.invalidate()
     this.db.prepare('DELETE FROM background_tasks WHERE session_id = ?').run(id)
     this.db.prepare('DELETE FROM managed_sessions WHERE id = ?').run(id)
+    this.db.prepare('DELETE FROM settings WHERE key = ?').run(`unseenCompletedCount:${id}`)
   }
   /* ---------------- settings ---------------- */
 

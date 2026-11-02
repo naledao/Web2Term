@@ -385,7 +385,7 @@ export class SessionRuntime {
     canSend: (owner, task) => {
       if (this.disposed || this.activePlatformId !== owner.platformId || !this.runner.canSendAutomaticResult()) return false
       if (this.focusSending || this.mailNotifications?.busy || this.toolPromptReads?.busy || this.scheduledTaskTools?.busy || this.runner.hasInFlightWork()) return false
-      if (task.taskContext && (!this.active || !this.getComputerUseCapability(owner.platformId).scopeSupported ||
+      if (task.taskContext && ((!this.active && !this.canRunConversationInBackground(owner.platformId)) || !this.getComputerUseCapability(owner.platformId).scopeSupported ||
         !['waiting-model', 'responded'].includes(this.taskCoordinator.current(owner.platformId)?.progress?.phase ?? ''))) return false
       const embed = this.embeds.get(owner.platformId)?.embed
       return Boolean(embed && embed.getState().conversationId === owner.conversationId
@@ -393,7 +393,7 @@ export class SessionRuntime {
     },
     send: (text, owner, task, signal) => task.taskContext
       ? this.embeds.get(owner.platformId)!.embed!.sendTaskResult(text, owner.conversationId, signal,
-        () => this.active && !this.taskEnded && this.activePlatformId === owner.platformId && this.backgroundNotificationCurrent(task, owner))
+        () => (this.active || this.canRunConversationInBackground(owner.platformId)) && !this.taskEnded && this.activePlatformId === owner.platformId && this.backgroundNotificationCurrent(task, owner))
       : this.embeds.get(owner.platformId)!.embed!.sendRaw(text, { conversationId: owner.conversationId, requireIdle: true }),
     onStatus: (id, status, message, kind) => this.backgroundTasks.setDelivery(id, status, message, kind),
     onOutcome: (task, outcome) => {
@@ -563,7 +563,7 @@ export class SessionRuntime {
     this.conversationTools = new ConversationTools(this.id, options.store)
     this.computerUseTool = new ComputerUseTool(() => this.refreshComputerUseCapabilities(), options.desktopCoordinator)
     this.focusChat = new FocusChat(this.id, options.store)
-    this.taskCoordinator = new TaskCoordinator(this.id, options.store, state => {
+    this.taskCoordinator = new TaskCoordinator(this.id, options.store, (state, completedNow) => {
       this.recordFocusComputer(state)
       if (state.task) this.computerOverlayLifetime.update(state.task)
       this.taskProgression?.reconcile()
@@ -576,7 +576,7 @@ export class SessionRuntime {
       this.refreshComputerUseStepContext(state.platformId)
       if (state.task?.status === 'completed') {
         void this.embeds.get(state.platformId)?.embed?.endTask()
-        if (state.platformId === this.activePlatformId) this.notifyTaskCompleted(state.task.modelCompletion ? '任务已完成' : state.task.completion?.report?.summary ?? '任务已完成')
+        if (completedNow && state.platformId === this.activePlatformId) this.notifyTaskCompleted(state.task.modelCompletion ? '任务已完成' : state.task.completion?.report?.summary ?? '任务已完成')
       }
       if (state.platformId === this.activePlatformId) this.send(IpcChannels.autonomousTaskChanged, state)
     })
@@ -1376,7 +1376,7 @@ export class SessionRuntime {
     this.active = active
     this.syncWindowsHelperDemand()
     this.taskProgression?.reconcile()
-    if (active) void this.taskProgression?.wake()
+    if (active) { this.flushTaskTools(); void this.taskProgression?.wake() }
     this.applyVisibility()
     this.options.scheduledTasks?.wake()
   }
@@ -2332,7 +2332,7 @@ export class SessionRuntime {
 
   private taskToolCurrent(context: TaskToolContext): boolean {
     const capability = this.getComputerUseCapability(context.platformId)
-    return !this.disposed && !this.taskEnded && this.active && this.activePlatformId === context.platformId && context.sessionId === this.id &&
+    return !this.disposed && !this.taskEnded && (this.active || this.canRunConversationInBackground(context.platformId)) && this.activePlatformId === context.platformId && context.sessionId === this.id &&
       (context.tool !== 'read_files' || this.toolPreferences(context.platformId).fileReadingEnabled) &&
       this.embeds.get(context.platformId)?.embed?.getState().conversationId === context.conversationId &&
       capability.scopeSupported && capability.computerUseEnabled && capability.context.connection === 'local' &&
@@ -2348,7 +2348,7 @@ export class SessionRuntime {
     if (typeof command.messageId !== 'string' || !command.messageId.trim() || command.messageId.length > 512) return true
     const platformId = this.activePlatformId, entry = this.embeds.get(platformId), source = command.taskSource
     const capability = this.getComputerUseCapability(platformId)
-    if (!command.live || this.disposed || !this.active || !supportsComputerUsePlatform(platformId) || !entry?.embed || !capability.scopeSupported || !capability.computerUseEnabled) return true
+    if (!command.live || this.disposed || (!this.active && !this.canRunConversationInBackground(platformId)) || !supportsComputerUsePlatform(platformId) || !entry?.embed || !capability.scopeSupported || !capability.computerUseEnabled) return true
     const conversationId = entry.platform.conversationIdFromPath(source.pagePath)
     let task = this.taskCoordinator.current(platformId)
     if (!task || task.sourceSubmissionId !== source.sourceSubmissionId || !conversationId || entry.embed.getState().conversationId !== conversationId) return true
@@ -2374,8 +2374,9 @@ export class SessionRuntime {
     if (this.pendingTaskComputer && !this.taskCoordinator.owns(this.pendingTaskComputer)) this.pendingTaskComputer = null
     if (this.pendingTaskReply && !this.taskCoordinator.owns(this.pendingTaskReply.lease)) this.pendingTaskReply = null
     const task = this.taskCoordinator.current(this.activePlatformId)
-    if (!this.active || !task?.progress || !['waiting-model', 'responded'].includes(task.progress.phase) || this.runner?.hasInFlightWork() || this.backgroundTaskResults.isSending) return
+    if ((!this.active && !this.canRunConversationInBackground()) || !task?.progress || !['waiting-model', 'responded'].includes(task.progress.phase) || this.runner?.hasInFlightWork() || this.backgroundTaskResults.isSending) return
     const command = this.pendingTaskCommand, computer = this.pendingTaskComputer
+    if (computer && (!this.active || !computer.result && !this.getComputerUseCapability(computer.platformId).available)) return
     this.pendingTaskCommand = null; this.pendingTaskComputer = null
     const reply = this.pendingTaskReply; this.pendingTaskReply = null
     if (reply) this.noteAutonomousReply(reply.lease.platformId, reply.messageId, reply.kind)
@@ -2424,8 +2425,19 @@ export class SessionRuntime {
 
   /** Internal, owned live requests only. The raw page parser/protocol adapters are separate. */
   advanceComputerUse(request: ComputerUseStepRequest): StepAcceptance {
-    if (this.disposed || this.taskEnded || !this.active || request.sessionId !== this.id || request.platformId !== this.activePlatformId) return 'inactive'
+    if (this.disposed || this.taskEnded || request.sessionId !== this.id || request.platformId !== this.activePlatformId) return 'inactive'
     const capability = this.getComputerUseCapability(request.platformId)
+    if (!this.active) {
+      if (!capability.scopeSupported || !capability.computerUseEnabled || !this.taskCoordinator.owns(request)) return 'inactive'
+      if (this.pendingTaskComputer?.sourceMessageId === request.sourceMessageId) return 'duplicate'
+      if (this.pendingTaskCommand || this.pendingTaskComputer) return 'busy'
+      // A hidden conversation may ask to enter desktop mode after a terminal step.
+      // Retain the owned request, but never admit desktop execution until selected.
+      this.pendingTaskComputer = structuredClone(request)
+      this.runner.refreshTerminal('电脑操作请求已保留，切回原对话后继续。')
+      this.options.onSummaryChanged?.()
+      return 'deferred'
+    }
     if (request.result ? !capability.scopeSupported || !capability.computerUseEnabled : !capability.available) return 'inactive'
     const step = this.taskCoordinator.current(request.platformId)?.progress?.currentStep
     if (this.taskCoordinator.owns(request) && (this.backgroundTaskResults.isSending || step?.tool && step.tool !== 'computer' && step.delivery === 'sending')) {
@@ -2439,7 +2451,7 @@ export class SessionRuntime {
 
   /** Page output is always re-parsed here; its claimed validity never authorizes dispatch. */
   private receiveComputerUseRequest(platformId: string, request: ComputerUsePageRequest): boolean {
-    if (this.disposed || !this.active || !supportsComputerUsePlatform(platformId) || this.activePlatformId !== platformId) return false
+    if (this.disposed || !supportsComputerUsePlatform(platformId) || this.activePlatformId !== platformId) return false
     const capability = this.getComputerUseCapability(platformId)
     if (!capability.scopeSupported || !capability.computerUseEnabled) return false
     const entry = this.embeds.get(platformId)
@@ -2525,7 +2537,7 @@ export class SessionRuntime {
 
   private completeComputerTaskFromModel(platformId: string, messageId?: string, source?: import('../shared/types').TaskActionSource): boolean {
     const entry = this.embeds.get(platformId), task = this.taskCoordinator.current(platformId)
-    if (this.disposed || !this.active || this.taskEnded || platformId !== this.activePlatformId || !task || !source || !messageId ||
+    if (this.disposed || (!this.active && !this.canRunConversationInBackground(platformId)) || this.taskEnded || platformId !== this.activePlatformId || !task || !source || !messageId ||
       task.sourceSubmissionId !== source.sourceSubmissionId || task.conversationId !== entry?.platform.conversationIdFromPath(source.pagePath) ||
       task.conversationId !== entry?.embed?.getState().conversationId) return false
     const lease = taskPresentationLease(task)
@@ -2583,7 +2595,7 @@ export class SessionRuntime {
 
   private recordTaskQuestion(platformId: string, question: TaskQuestion, source: TaskQuestionSource): void {
     const entry = this.embeds.get(platformId), capability = this.getComputerUseCapability(platformId)
-    if (this.disposed || !this.active || this.taskEnded || this.options.automationBlocked?.() || platformId !== this.activePlatformId ||
+    if (this.disposed || (!this.active && !this.canRunConversationInBackground(platformId)) || this.taskEnded || this.options.automationBlocked?.() || platformId !== this.activePlatformId ||
       !capability.scopeSupported || !capability.computerUseEnabled || !entry?.embed || entry.embed.getComputerUsePageEpoch() !== source.pageEpoch) return
     const conversationId = entry.platform.conversationIdFromPath(source.pagePath)
     if (!conversationId) return
@@ -2808,6 +2820,7 @@ export class SessionRuntime {
     }
     this.taskProgression?.reconcile()
     this.runner?.reconcileTaskTools()
+    if (this.active && this.pendingTaskComputer) queueMicrotask(() => this.flushTaskTools())
     this.send(IpcChannels.computerUseCapabilityChanged, this.getComputerUseCapability())
     if (this.embeds.has(this.activePlatformId)) this.send(IpcChannels.conversationToolsChanged, this.getConversationTools())
   }
@@ -2853,10 +2866,17 @@ export class SessionRuntime {
     if (this.options.scheduledTasks) this.send(IpcChannels.scheduledTasksChanged, this.options.scheduledTasks.store.snapshot(this.id))
   }
 
-  /** Hidden terminal conversations keep their own send loop; desktop-tool tasks require selection. */
+  /** Enabling a skill is not desktop activity. Only an actual desktop request requires selection. */
   private canRunConversationInBackground(platformId = this.activePlatformId): boolean {
     const capability = this.getComputerUseCapability(platformId)
-    return !capability.scopeSupported || !capability.computerUseEnabled
+    if (!capability.scopeSupported || !capability.computerUseEnabled) return true
+    const task = this.taskCoordinator?.latest(platformId)
+    if (!task || task.status === 'completed') return true
+    const progress = task.progress, step = progress?.currentStep
+    // A computer receipt remains a restriction through later mixed-tool steps and interruption.
+    // Legacy desktop steps had no `tool` field; command/read_files are never desktop input.
+    return !progress?.computerRequest && (!step || step.tool !== 'computer' &&
+      (step.tool !== undefined || step.action === 'command' || step.action === 'read_files'))
   }
 
   private mailNotificationCurrent(call: MailNotificationCall): boolean {

@@ -34,7 +34,7 @@ export class TaskCoordinator {
   private paused = false
 
   constructor(private readonly sessionId: string, private readonly store: AutonomousTaskStore,
-    private readonly changed: (state: AutonomousTaskState) => void,
+    private readonly changed: (state: AutonomousTaskState, completedNow: boolean) => void,
     private readonly timing: { now?(): number } = {}) {}
 
   setDispatchBlocked(blocked: boolean): void { this.dispatchBlocked = blocked; if (blocked) this.computerTokens.clear() }
@@ -592,13 +592,18 @@ export class TaskCoordinator {
   }
 
   private publish(state: AutonomousTaskState): AutonomousTaskState {
+    const previous = this.entries.get(state.platformId)
+    // Restoring or revisiting a completed history row is not another completion.
+    const completedNow = !state.error && state.task?.status === 'completed' &&
+      previous?.task?.id === state.task.id && previous?.task?.generation === state.task.generation &&
+      previous?.task?.status === 'recorded'
     for (const id of this.clocks.keys()) if (id !== state.task?.id && ![...this.entries.values()].some(s => s.platformId !== state.platformId && s.task?.id === id && s.task.status === 'recorded')) {
       this.clocks.delete(id)
     }
     this.entries.set(state.platformId, structuredClone(state))
     if (state.task?.status === 'recorded' && !state.error) this.control(state.task)
     else if (state.task) this.clocks.delete(state.task.id)
-    this.changed(structuredClone(state))
+    this.changed(structuredClone(state), completedNow)
     return structuredClone(state)
   }
 }

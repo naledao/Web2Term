@@ -52,7 +52,11 @@ function fixture(run) {
   db.exec(schema) // Safe on an upgraded database too; no destructive table replacement.
   const store = new Store(db)
   const events = []
-  const coordinator = new TaskCoordinator('session-A', store, state => events.push(state))
+  const completions = []
+  const coordinator = new TaskCoordinator('session-A', store, (state, completedNow) => {
+    events.push(state)
+    if (completedNow) completions.push(state.task.id)
+  })
   let serial = 0
   const submit = (overrides = {}) => coordinator.submit({
     platformId: 'deepseek', conversationId: 'conversation-A', submission: { id: `send-${++serial}`, kind: 'goal' },
@@ -60,8 +64,29 @@ function fixture(run) {
     machine: { id: 'machine-A', label: '本机', platform: 'win32', arch: 'x64', connection: 'local', workingDirectory: 'C:\\reports' },
     capability: capability(), ...overrides
   })
-  try { run({ db, store, coordinator, submit, events }) } finally { db.close() }
+  try { run({ db, store, coordinator, submit, events, completions }) } finally { db.close() }
 }
+
+test('only a live task transition emits completion; restarting and revisiting completed history never emits it again', () => fixture(({ store, coordinator, submit, completions }) => {
+  const first = submit()
+  const lease = task => ({ sessionId: task.sessionId, platformId: task.platformId, conversationId: task.conversationId,
+    taskId: task.id, generation: task.generation })
+  assert.equal(coordinator.completeFromModel(lease(first), 'done-first'), true)
+  assert.deepEqual(completions, [first.id])
+  const restoredCompletions = []
+  const restored = new TaskCoordinator('session-A', store, (state, completedNow) => {
+    if (completedNow) restoredCompletions.push(state.task.id)
+  })
+  assert.equal(restored.context('deepseek', 'conversation-A').task.status, 'completed')
+  restored.context('deepseek', 'another-conversation')
+  assert.equal(restored.context('deepseek', 'conversation-A').task.id, first.id)
+  assert.deepEqual(restoredCompletions, [])
+  assert.equal(coordinator.completeFromModel(lease(first), 'duplicate-first'), false)
+  assert.deepEqual(completions, [first.id])
+  const second = submit()
+  assert.equal(coordinator.completeFromModel(lease(second), 'done-second'), true)
+  assert.deepEqual(completions, [first.id, second.id])
+}))
 
 test('confirmed goals preserve the complete request and machine without requiring a plan or extracted intent', () => fixture(({ submit, store }) => {
   const text = '必要条件：不能修改原始文件。\n预期产物：C:\\报表\\十月.xlsx\n' + '中文与完整明细🗂️\n'.repeat(100)
