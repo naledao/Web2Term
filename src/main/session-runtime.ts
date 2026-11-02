@@ -1,4 +1,10 @@
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
+import { ConversationCompaction } from './conversation-compaction'
+import type { StoredCompaction } from './conversation-compaction'
+import { CompactionPage } from './compaction-page'
+import { ConversationContinuity } from './conversation-continuity'
+import type { CompactionAction, CompactionRequest, CompactionState } from '../shared/conversation-compaction'
 import type { ScheduledTasks } from './scheduled-tasks'
 import { sameScheduledTarget } from './scheduled-task-target'
 import type { ScheduledDelivery } from './scheduled-tasks'
@@ -39,20 +45,21 @@ import { taskToolResultContext, parseTaskToolContext, taskPausedByInput } from '
 import { pendingTaskQuestion, validTaskQuestionRequest } from '../shared/task-clarification'
 import type { TaskQuestion, TaskQuestionSource, TaskQuestionRequest } from '../shared/task-clarification'
 import { validFocusUiAction } from '../shared/focus-smart-ui'
-import { validFocusCitationTarget } from '../shared/focus-citations'
-import type { FocusCitationRequest, FocusCitationResult } from '../shared/focus-citations'
-import { validFocusFileLinkTarget } from '../shared/focus-file-links'
-import type { FocusFileLinkRequest } from '../shared/focus-file-links'
+import { validFocusCitationTarget, validFocusCitationSourceTarget } from '../shared/focus-citations'
+import type { FocusCitationRequest, FocusCitationResult, FocusCitationOpenRequest } from '../shared/focus-citations'
+import { validFocusFileLinkTarget, validFocusFilePreviewToken } from '../shared/focus-file-links'
+import type { FocusFileLinkRequest, FocusFilePreviewRequest, FocusFilePreviewHandle, FocusFilePreviewResult } from '../shared/focus-file-links'
+import type { CapturedFocusFile } from './focus-file-preview'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
 import type { FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
 import { validFocusModelSettingsRequest } from '../shared/focus-chat'
-import { focusPromptInjectionState } from '../shared/focus-token-usage'
+import { focusPromptInjectionState, estimateFocusConversation } from '../shared/focus-token-usage'
 import type { ContextUsageEntry } from '../shared/context-usage'
 import { writeFile } from 'node:fs/promises'
 import { createConnection } from 'mysql2/promise'
 import { formatMysqlCell } from './mysql-field-value'
 import type { Connection } from 'mysql2/promise'
-import { app, BrowserWindow, dialog, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, safeStorage, shell } from 'electron'
 import { showDesktopNotification } from './desktop-notifications'
 import type { NotificationTarget } from './notification-target'
 import { writeCommandDiagnostic } from './command-log'
@@ -85,6 +92,7 @@ import type {
   ConversationImageAttachmentInput,
   EmbedBounds,
   EmbedCommand,
+  EmbedState,
   EnvironmentInfo,
   ExecutionMode,
   InterceptorStatus,
@@ -230,6 +238,8 @@ function defaultTerminalSendDelaySeconds(platformId: string): number {
 }
 
 export interface SessionRuntimeOptions {
+  onCompactionTarget?: (job: StoredCompaction, summary: string) => string
+  onCompactionTargetOpen?: (id: string) => void
   qqMail?: QqMailService
   scheduledTasks?: ScheduledTasks
   windowsHelper?: WindowsHelperManager
@@ -349,6 +359,9 @@ function normalizeProxy(raw: string): string {
 }
 
 export class SessionRuntime {
+  private readonly continuity: ConversationContinuity
+  private pendingCompaction: { conversationId: string; url: string } | null = null
+  private compaction: ConversationCompaction | null = null
   private readonly conversationTools: ConversationTools
   /** Main-process backends register only the desktop actions they can actually execute. */
   readonly computerUseTool: ComputerUseTool
@@ -486,6 +499,8 @@ export class SessionRuntime {
   private pendingTaskReply: { lease: TaskLease; messageId: string; kind: 'response' | 'question' } | null = null
   private legacyToolSend: { context: TaskToolContext; abort: AbortController } | null = null
   private focusSending = false
+  private focusFileRequest: { token: string; ownerKey: string } | null = null
+  private focusFileCache: { token: string; ownerKey: string; file: CapturedFocusFile } | null = null
   private readonly mailNotifications = new MailNotifications({
     observe: call => this.observeFocusTool('send_email', call),
     mail: () => this.options.qqMail,
@@ -543,6 +558,7 @@ export class SessionRuntime {
       this.environmentScope = { scope: 'ssh', hostId: this.web2term.hostId, label: this.web2term.binding.deviceName || this.web2term.binding.agentId }
     }
     this.id = options.id ?? randomUUID()
+    this.continuity = new ConversationContinuity(this.id, options.store)
     this.conversationTools = new ConversationTools(this.id, options.store)
     this.computerUseTool = new ComputerUseTool(() => this.refreshComputerUseCapabilities(), options.desktopCoordinator)
     this.focusChat = new FocusChat(this.id, options.store)
@@ -958,6 +974,14 @@ export class SessionRuntime {
       },
       onState: (state) => {
         if (this.disposed) return
+        if (isActive() && this.pendingCompaction && state.conversationId !== this.pendingCompaction.conversationId) {
+          if (isActive()) this.send(IpcChannels.embedState, this.getEmbedState())
+          return
+        }
+        if (isActive() && this.pendingCompaction) {
+          this.pendingCompaction = null
+          this.refreshComputerUseCapabilities()
+        }
         const entry = record()
         /*
          * Remember the URL ONLY when it is one a restart should reopen.
@@ -980,7 +1004,7 @@ export class SessionRuntime {
          * `embed:state` would overwrite the address bar and status line of the view the
          * user is actually looking at.
          */
-        if (isActive()) this.send(IpcChannels.embedState, state)
+        if (isActive()) this.send(IpcChannels.embedState, this.continuity.decorate(state, platform.id))
 
         if (state.conversationId !== entry.conversationId) {
           const previousConversationId = entry.conversationId
@@ -1336,7 +1360,9 @@ export class SessionRuntime {
   }
 
   setActive(active: boolean): void {
+    if (!active) this.compaction?.hide()
     if (!active) this.remoteRipgrepSend?.controller.abort()
+    if (!active) { this.focusFileRequest = null; this.focusFileCache = null }
     // Selecting another workspace hides this conversation, but does not replace its
     // terminal, target or send owner. Only desktop-tool authority needs that handover.
     if (!active && !this.canRunConversationInBackground()) {
@@ -1361,6 +1387,7 @@ export class SessionRuntime {
    * reads the theme from settings.
    */
   setTheme(theme: AppTheme): void {
+    this.compaction?.setTheme(theme)
     for (const entry of this.embeds.values()) entry.embed?.setTheme(theme)
   }
 
@@ -1378,6 +1405,8 @@ export class SessionRuntime {
     const entry = this.embeds.get(platformId)
     if (!entry || platformId === this.activePlatformId) return false
     if (this.focusSending || this.taskRunning() && !this.taskCoordinator.current(this.activePlatformId)) return false
+    this.compaction?.hide()
+    this.pendingCompaction = null
     this.interruptTaskControl(this.activePlatformId)
     this.activePlatformId = platformId
     this.syncWindowsHelperDemand()
@@ -1415,7 +1444,7 @@ export class SessionRuntime {
      * is already loaded and idle emits nothing, so the address bar and the interceptor panel
      * would keep describing the platform that is no longer on screen.
      */
-    this.send(IpcChannels.embedState, embed.getState())
+    this.send(IpcChannels.embedState, this.getEmbedState())
     this.send(IpcChannels.interceptorEvent, embed.getInterceptorStatus())
     this.send(IpcChannels.questionChatState, embed.getQuestionChatState())
     this.syncAutonomousTask(platformId, embed.getState().conversationId)
@@ -1592,17 +1621,131 @@ export class SessionRuntime {
 
   sendEmbedCommand(command: EmbedCommand): void {
     if (this.taskRunning() && command !== 'stop') return
+    if (command !== 'stop') this.pendingCompaction = null
     this.embed.command(command)
   }
 
   navigateEmbed(url: string): void {
     if (this.taskRunning()) return
+    this.pendingCompaction = null
     this.embed.navigate(url)
   }
 
   private ownsFocus(owner: FocusOwner): boolean {
     return !this.disposed && owner.sessionId === this.id && supportsFocusView(owner.platformId) &&
       this.activePlatformId === owner.platformId && this.embed.getState().conversationId === owner.conversationId
+  }
+
+  getEmbedState(): EmbedState {
+    const state = this.embed.getState()
+    return this.continuity.decorate(this.pendingCompaction
+      ? { ...state, ...this.pendingCompaction, isLoading: true } : state, this.activePlatformId)
+  }
+  visibleConversationMessages(conversationId: string): import('../shared/types').ConversationMessage[] {
+    return conversationId === this.activeEmbed().conversationId
+      ? this.continuity.displayMessages(this.activePlatformId, conversationId) : this.options.store.listConversationMessages(conversationId)
+  }
+  adoptCompaction(job: StoredCompaction, summary: string): string {
+    const owner = job.state.owner, target = job.handoffUrl && selectionQuestionConversation(owner.platformId, job.handoffUrl)
+    const entry = this.activeEmbed()
+    if (this.disposed || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId || !target ||
+        entry.conversationId !== owner.conversationId && entry.conversationId !== target.id) throw new Error('来源会话已变化，暂未切换压缩上下文。')
+    if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork()) throw new Error('请等待当前操作结束后继续承接压缩上下文。')
+    this.options.store.upsert({ id: target.id, url: job.handoffUrl!, title: this.customTitle || job.seed.session.title })
+    this.continuity.install(job, summary)
+    this.conversationTools.update(owner.platformId, target.id, job.seed.preferences)
+    if (entry.conversationId === target.id) return this.id
+    this.interruptTaskControl(owner.platformId)
+    this.embed.resetTaskPrompt()
+    this.focusChat.flush(owner.platformId)
+    this.customTitle = this.customTitle || job.seed.session.title
+    entry.conversationId = target.id
+    entry.url = job.handoffUrl!
+    this.focusChat.context(owner.platformId, target.id)
+    this.pendingCompaction = { conversationId: target.id, url: job.handoffUrl! }
+    // Persist C before navigation so a restart cannot reopen A after adoption.
+    this.options.onSummaryChanged()
+    this.send(IpcChannels.embedState, this.getEmbedState())
+    this.embed.navigate(job.handoffUrl!)
+    return this.id
+  }
+
+  private compactionService(): ConversationCompaction {
+    if (!this.compaction) this.compaction = new ConversationCompaction({
+      sessionId: this.id, directory: join(app.getPath('userData'), 'exports', 'compactions'), store: this.options.store,
+      canWork: owner => this.active && this.ownsFocus(owner) && !this.options.automationBlocked?.(),
+      makePage: (platformId, url, onUrl) => {
+        if (!this.window || this.window.isDestroyed()) throw new Error('应用窗口不可用。')
+        const platform = this.embeds.get(platformId)?.platform
+        if (!platform) throw new Error('压缩平台不可用。')
+        return new CompactionPage(this.window, platform, this.options.settings().theme, url, onUrl, this.lastBounds ?? undefined)
+      },
+      createTarget: (job, summary) => {
+        if (!this.options.onCompactionTarget) throw new Error('无法创建承接会话。')
+        return this.options.onCompactionTarget(job, summary)
+      },
+      onComplete: id => this.options.onCompactionTargetOpen?.(id),
+      isAdopted: job => this.continuity.owns(job.state.owner.platformId, this.activeEmbed().conversationId, job.state.id)
+    })
+    return this.compaction
+  }
+  getCompaction(owner: FocusOwner): CompactionState | null {
+    return this.ownsFocus(owner) ? this.compactionService().state(owner) : null
+  }
+  async startCompaction(owner: FocusOwner): Promise<CompactionState> {
+    if (!this.active || !this.ownsFocus(owner) || !owner.conversationId) throw new Error('请打开需要压缩的已有会话。')
+    return this.compactionService().start(owner, async () => {
+      if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending ||
+          this.mailNotifications?.busy || this.toolPromptReads?.busy || this.scheduledTaskTools?.busy || this.embed.getInterceptorStatus().pendingQuestion) {
+        throw new Error('当前正在发送、执行工具或等待回答，请处理完成后再压缩。')
+      }
+      const page = await this.embed.readFocusSnapshot()
+      if (!this.ownsFocus(owner) || !page?.ready || page.generating !== 'idle' || page.waiting || page.sendFailure || page.nativeDraft ||
+          this.focusChat.turns(owner.platformId, owner.conversationId!).at(-1)?.status === 'working') throw new Error('请等待当前回答结束，并处理原网页草稿或发送失败后再压缩。')
+      this.focusChat.flush(owner.platformId)
+      const conversationId = owner.conversationId!
+      const hidden = this.focusChat.hiddenMessageIds(owner.platformId, conversationId)
+      const superseded = this.focusChat.supersededExecutionIds(owner.platformId, conversationId)
+      const source = { owner: { ...owner }, title: this.embed.getState().title, capturedAt: Date.now(),
+        environment: JSON.stringify({ projectId: this.projectId, project: this.currentConversationProject(),
+          localCwd: this.runner.getTerminalState().cwd, sshCwd: this.sshCwd, sshHostId: this.ssh.getState().hostId,
+          connection: this.web2term ? 'web2term' : this.ssh.getState().attached ? 'ssh' : 'local', directoryNotes: this.currentNotes().text }),
+        messages: this.options.store.listConversationMessages(conversationId),
+        turns: this.focusChat.turns(owner.platformId, conversationId), hiddenMessageIds: hidden,
+        executions: this.options.store.listExecutions(conversationId).filter(record => !superseded.has(record.messageId)) }
+      const contextTokens = estimateFocusConversation({ messages: this.continuity.visibleCurrent(owner.platformId, conversationId),
+        turns: this.continuity.visibleTurns(owner.platformId, conversationId, source.turns), executions: source.executions,
+        hiddenMessageIds: hidden, smartReplies: page.smartReplies,
+        contextUsage: this.options.store.contextUsage.summary(owner.platformId, conversationId) }).estimatedTokens
+      return { source, contextTokens, view: this.continuity.capture(owner, source.messages, source.turns, source.executions, hidden),
+        seed: { session: { ...this.persistentState(), title: this.summary().title }, preferences: this.conversationTools.read(owner.platformId, conversationId),
+          ...(this.web2term ? { binding: this.web2term.persistentBinding() } : {}) } }
+    })
+  }
+  async compactionAction(request: CompactionRequest, action: CompactionAction): Promise<void> {
+    const service = this.compactionService(), state = service.state(request)
+    if (!this.ownsFocus(request) || !state || state.id !== request.jobId) throw new Error('压缩任务已切换。')
+    if (action === 'cancel') service.cancel()
+    if (action === 'copy-recovery') clipboard.writeText(service.recoveryPrompt())
+    if (action === 'show-page') service.showPage()
+    if (action === 'hide-page') service.hide()
+    if (action === 'resume') {
+      if (this.options.automationBlocked?.()) throw new Error('请先解除全局急停，再点“继续检查”。')
+      service.hide()
+      void service.resume(request); return
+    }
+    if (action === 'target' && state.targetSessionId) this.options.onCompactionTargetOpen?.(state.targetSessionId)
+    if (action === 'source' || action === 'summary') {
+      const path = service.file(action === 'source' ? 'source.md' : 'summary.md')
+      if (path) shell.showItemInFolder(path)
+    }
+    if (action === 'compression') {
+      const url = service.compressionUrl()
+      if (url) await shell.openExternal(url)
+    }
+  }
+  setCompactionViewport(request: CompactionRequest, bounds: unknown, visible: boolean): void {
+    if (this.ownsFocus(request)) this.compaction?.setViewport(request, request.jobId, bounds, visible && this.active)
   }
 
   /** Reconcile one missed native card send from rendered history; never replay its action. */
@@ -1710,20 +1853,24 @@ export class SessionRuntime {
       reasoningCount: page?.reply?.parts.filter(part => part.kind === 'reasoning').length ?? 0,
       searchCount: page?.reply?.parts.filter(part => part.kind === 'search').length ?? 0 })
     const archivedExecutions = this.focusChat.supersededExecutionIds(owner.platformId, owner.conversationId)
+    const inherited = owner.conversationId ? this.continuity.history(owner.platformId, owner.conversationId) : null
     const historyCursor: FocusHistoryCursor = { ownerKey: focusOwnerKey(owner),
+      presentation: inherited?.revision ?? '',
       turns: this.focusChat.version(owner.platformId, owner.conversationId),
       executions: JSON.stringify([this.options.store.getExecutionRevision(owner.conversationId ?? ''), ...archivedExecutions]) }
     const sameOwner = cursor?.ownerKey === historyCursor.ownerKey
-    const sameTurns = sameOwner && cursor?.turns === historyCursor.turns
-    const sameExecutions = sameOwner && cursor?.executions === historyCursor.executions
+    const sameHistory = cursor?.presentation === historyCursor.presentation
+    const sameTurns = sameOwner && sameHistory && cursor?.turns === historyCursor.turns
+    const sameExecutions = sameOwner && sameHistory && cursor?.executions === historyCursor.executions
     let contextUsage: import('../shared/context-usage').ContextUsageSummary | undefined
     try { contextUsage = owner.conversationId ? this.options.store.contextUsage?.summary(owner.platformId, owner.conversationId) : undefined }
     catch { /* Optional statistics must not prevent the conversation from opening. */ }
     return { ...owner, ready: page?.ready === true, nativeDraft: page?.nativeDraft === true,
+      compactions: inherited?.compactions ?? [],
       historyCursor,
       sendFailure: page?.sendFailure ?? null,
       generating: page?.generating ?? 'unknown', waiting: page?.waiting === true,
-      turns: sameTurns ? undefined : this.focusChat.turns(owner.platformId, owner.conversationId),
+      turns: sameTurns ? undefined : [...(inherited?.turns ?? []), ...this.continuity.visibleTurns(owner.platformId, owner.conversationId, this.focusChat.turns(owner.platformId, owner.conversationId))],
       hiddenMessageIds: sameTurns ? undefined : this.focusChat.hiddenMessageIds(owner.platformId, owner.conversationId),
       smartReplies: page?.smartReplies ?? [],
       composerModes: page?.composerModes ?? [],
@@ -1733,14 +1880,17 @@ export class SessionRuntime {
         this.conversationTools.injectionLedger(owner.platformId, owner.conversationId), this.embed.getInterceptorStatus()),
       contextUsage,
       sendBlock: computerUseSendBlock(this.getComputerUseCapability(owner.platformId)),
-      executions: sameExecutions ? undefined : owner.conversationId ? this.options.store.listExecutions(owner.conversationId, false).filter(record => !archivedExecutions.has(record.messageId)) : [] }
+      executions: sameExecutions ? undefined : [...(inherited?.executions ?? []), ...(owner.conversationId ? this.options.store.listExecutions(owner.conversationId, false).filter(record => !archivedExecutions.has(record.messageId)) : [])] }
   }
 
   readFocusExecutionOutput(owner: FocusOwner, messageId: string): string | null {
     if (!this.ownsFocus(owner) || !owner.conversationId || typeof messageId !== 'string' || !messageId || messageId.length > 512) return null
     const record = this.options.store.getExecution(messageId)
-    if (!record || record.conversationId !== owner.conversationId ||
-      this.focusChat.supersededExecutionIds(owner.platformId, owner.conversationId).has(messageId)) return null
+    if (!record) return null
+    if (record.conversationId !== owner.conversationId) {
+      return this.continuity.history(owner.platformId, owner.conversationId).executions.some(item => item.messageId === messageId && item.conversationId === record.conversationId) ? record.output : null
+    }
+    if (this.focusChat.supersededExecutionIds(owner.platformId, owner.conversationId).has(messageId)) return null
     return record.output
   }
 
@@ -1872,6 +2022,57 @@ export class SessionRuntime {
     } finally { this.focusSending = false }
   }
 
+  async previewFocusFile(request: FocusFilePreviewRequest): Promise<FocusFilePreviewResult> {
+    if (!this.active || !this.ownsFocus(request) || request.platformId !== 'chatgpt' || !request.conversationId) return { outcome: 'unavailable' }
+    if (!validFocusFileLinkTarget(request) || !validFocusFilePreviewToken(request.token)) return { outcome: 'invalid' }
+    if (this.focusSending || this.focusRevision) return { outcome: 'busy' }
+    const embed = this.embed, ownerKey = focusOwnerKey(request)
+    this.focusFileRequest = { token: request.token, ownerKey }; this.focusFileCache = null
+    this.focusSending = true
+    writeFocusDiagnostic(request, { event: 'file-preview-request', messageId: request.sourceMessageId })
+    const current = (): boolean => this.active && this.ownsFocus(request) && this.embed === embed && this.focusFileRequest?.token === request.token
+    try {
+      const result = await embed.previewFocusFile(request, current, details =>
+        writeFocusDiagnostic(request, { event: 'file-preview-page', messageId: request.sourceMessageId, ...details }))
+      if (!current()) return { outcome: 'cancelled' }
+      writeFocusDiagnostic(request, { event: 'file-preview-outcome', outcome: result.outcome, fileStage: result.fileStage, reason: result.reason, messageId: request.sourceMessageId })
+      if (result.outcome !== 'ok' || !result.file) return { outcome: result.outcome, reason: result.reason, fileStage: result.fileStage }
+      const file = result.file, extension = file.fileName.split('.').at(-1)?.toLowerCase()
+      const kind = extension && ['html', 'htm'].includes(extension) ? 'html' :
+        extension && ['txt', 'md', 'json', 'csv', 'sql', 'js', 'ts', 'css', 'xml', 'log', 'yaml', 'yml'].includes(extension) ? 'text' : 'unsupported'
+      this.focusFileCache = { token: request.token, ownerKey, file }
+      return { outcome: 'ok', preview: { token: request.token, fileName: file.fileName, sizeBytes: file.bytes.length,
+        kind, text: kind === 'unsupported' ? '' : file.bytes.toString('utf8').replace(/^\uFEFF/, '') } }
+    } catch {
+      writeFocusDiagnostic(request, { event: 'file-preview-outcome', outcome: 'unavailable', messageId: request.sourceMessageId })
+      return { outcome: current() ? 'unavailable' : 'cancelled', reason: 'file-unavailable' }
+    } finally { this.focusSending = false }
+  }
+
+  releaseFocusFilePreview(owner: FocusFilePreviewHandle): void {
+    if (!validFocusFilePreviewToken(owner.token)) return
+    const key = focusOwnerKey(owner)
+    if (this.focusFileRequest?.token === owner.token && this.focusFileRequest.ownerKey === key) this.focusFileRequest = null
+    if (this.focusFileCache?.token === owner.token && this.focusFileCache.ownerKey === key) this.focusFileCache = null
+  }
+
+  async saveFocusFilePreview(owner: FocusFilePreviewHandle): Promise<FocusSendOutcome> {
+    const cache = this.focusFileCache
+    const current = (): boolean => this.active && this.ownsFocus(owner) && validFocusFilePreviewToken(owner.token)
+      && this.focusFileCache === cache && !!cache && cache.token === owner.token && cache.ownerKey === focusOwnerKey(owner)
+    if (!cache || !current()) return 'unavailable'
+    try {
+      const options = { title: '下载文件', defaultPath: cache.file.fileName }
+      const window = this.window
+      const result = window && !window.isDestroyed() ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options)
+      if (result.canceled || !result.filePath) return 'cancelled'
+      if (!current()) return 'cancelled'
+      await writeFile(result.filePath, cache.file.bytes)
+      writeFocusDiagnostic(owner, { event: 'file-preview-saved', outcome: 'ok' })
+      return 'ok'
+    } catch { return 'unavailable' }
+  }
+
   async openFocusFileLink(request: FocusFileLinkRequest): Promise<FocusSendOutcome> {
     if (!this.ownsFocus(request) || request.platformId !== 'chatgpt' || !request.conversationId) return 'unavailable'
     if (!validFocusFileLinkTarget(request)) return 'invalid'
@@ -1895,6 +2096,24 @@ export class SessionRuntime {
       const result = await embed.readFocusCitation(request, randomUUID(), () => this.ownsFocus(request) && this.embed === embed)
       return this.ownsFocus(request) && this.embed === embed ? result : { outcome: 'cancelled', sources: [] }
     } finally { this.focusSending = false }
+  }
+
+  async openFocusCitationSource(request: FocusCitationOpenRequest): Promise<FocusCitationResult['outcome']> {
+    if (!this.active || !this.ownsFocus(request) || request.platformId !== 'chatgpt' || !request.conversationId ||
+      !validFocusCitationTarget(request) || !validFocusCitationSourceTarget(request.source)) return 'unavailable'
+    if (this.focusSending || this.focusRevision) return 'busy'
+    const embed = this.embed
+    const current = (): boolean => this.active && this.ownsFocus(request) && this.embed === embed
+    this.focusSending = true
+    writeFocusDiagnostic(request, { event: 'citation-open-request', messageId: request.sourceMessageId, sourceIndex: request.source.index })
+    try {
+      const result = await embed.openFocusCitationSource(request, randomUUID(), current, details =>
+        writeFocusDiagnostic(request, { event: 'citation-open-page', messageId: request.sourceMessageId, sourceIndex: request.source.index, ...details }))
+      const outcome = current() ? result : 'cancelled'
+      writeFocusDiagnostic(request, { event: 'citation-open-outcome', messageId: request.sourceMessageId, sourceIndex: request.source.index, outcome })
+      return outcome
+    } catch { return current() ? 'unavailable' : 'cancelled' }
+    finally { this.focusSending = false }
   }
 
   async actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome> {
@@ -1996,10 +2215,11 @@ export class SessionRuntime {
   }
 
   emergencyStop(): Promise<InterceptorStatus> {
+    this.compaction?.pauseTask('全局急停已暂停压缩。解除急停后，需点“继续检查”显式恢复。')
     this.taskCoordinator.setDispatchBlocked(true)
     return this.stopAutomation('global-emergency', true)
   }
-  isAutomationDraining(): boolean { return !!this.stoppingTask || this.runner.hasInFlightWork() }
+  isAutomationDraining(): boolean { return !!this.stoppingTask || this.runner.hasInFlightWork() || !!this.compaction?.busy }
   releaseEmergencyStop(): void {
     this.taskCoordinator.setDispatchBlocked(false)
     // taskEnded remains set. Only a new confirmed human send or explicit recovery may start work.
@@ -3946,6 +4166,8 @@ export class SessionRuntime {
   }
 
   dispose(): void {
+    this.compaction?.dispose()
+    this.focusFileRequest = null; this.focusFileCache = null
     this.remoteRipgrepSend?.controller.abort()
     this.mailNotifications?.cancel()
     this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel()

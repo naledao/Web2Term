@@ -11,6 +11,10 @@ const source = readFileSync(new URL('../src/main/app-identity.ts', import.meta.u
 const code = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText
+const identity = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/app-identity.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: identity })
 const root = join('synthetic', 'app-data')
 const modern = join(root, 'Web2Term')
 const legacyProduct = join(root, 'GPT Web to Codex Terminal')
@@ -32,6 +36,7 @@ function configure({ packaged = true, existing = [] } = {}) {
   } }
   const modules = {
     electron,
+    '../shared/app-identity': identity,
     'node:path': { join },
     'node:fs': {
       existsSync(path) { return existing.includes(path) },

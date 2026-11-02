@@ -6,8 +6,9 @@ import type { ExecutionRecord } from './types'
 export function mergeFocusChatUpdate(previous: FocusChatState | null, update: FocusChatUpdate): FocusChatState | null {
   const current = previous && focusOwnerKey(previous) === focusOwnerKey(update) ? previous : null
   if (!current && (!update.turns || !update.executions)) return null
-  const sameTurns = !!current?.historyCursor && current.historyCursor.turns === update.historyCursor?.turns
-  const sameExecutions = !!current?.historyCursor && current.historyCursor.executions === update.historyCursor?.executions
+  const samePresentation = current?.historyCursor?.presentation === update.historyCursor?.presentation
+  const sameTurns = samePresentation && !!current?.historyCursor && current.historyCursor.turns === update.historyCursor?.turns
+  const sameExecutions = samePresentation && !!current?.historyCursor && current.historyCursor.executions === update.historyCursor?.executions
   const { turns, executions, hiddenMessageIds, ...metadata } = update
   const next: FocusChatState = { ...metadata,
     turns: sameTurns ? current!.turns : turns ?? current!.turns,

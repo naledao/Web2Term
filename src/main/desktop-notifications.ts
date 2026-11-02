@@ -1,6 +1,7 @@
 import { app, Notification } from 'electron'
 import { APP_ID } from './app-identity'
 import { repairWindowsNotificationShortcuts } from './windows-notification-shortcuts'
+import { registerWindowsDevelopmentNotificationIdentity } from './windows-notification-identity'
 import { notificationProtocol, notificationTargetUrl, notificationToastXml } from './notification-target'
 import type { NotificationTarget } from './notification-target'
 
@@ -10,11 +11,13 @@ let lastSoundRequestedAt = -Infinity
 const visibleNotifications = new Set<Notification>()
 
 /** Register before any session can send a notification. Only the primary instance calls this. */
-export function registerDesktopNotifications(sound?: string): void {
+export async function registerDesktopNotifications(sound?: string): Promise<void> {
   notificationSound = sound ?? 'ms-winsoundevent:Notification.Default'
   if (process.platform !== 'win32') return
+  protocolRegistered = false
   app.setAppUserModelId(app.isPackaged ? APP_ID : `${APP_ID}.development`)
   repairWindowsNotificationShortcuts()
+  if (!app.isPackaged) await registerWindowsDevelopmentNotificationIdentity()
   const protocol = notificationProtocol(app.isPackaged)
   // Windows must receive an absolute application entry in development. Launching just
   // process.execPath opens Electron's welcome page instead of loading Web2Term.
@@ -27,9 +30,9 @@ export function registerDesktopNotifications(sound?: string): void {
 export function showDesktopNotification(
   target: NotificationTarget, title: string, body: string, onClick: () => void
 ): void {
-  if (!Notification.isSupported()) return
   const windows = process.platform === 'win32'
   if (windows && !protocolRegistered) return
+  if (!Notification.isSupported()) return
   const requestedAt = performance.now()
   const silent = windows && requestedAt - lastSoundRequestedAt < 1000
   const notification = new Notification({ title, body,

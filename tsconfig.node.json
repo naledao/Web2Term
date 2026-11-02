@@ -1,5 +1,5 @@
 {
-  "include": ["electron.vite.config.ts", "src/main/**/*", "src/preload/**/*", "src/shared/**/*"],
+  "include": ["electron.vite.config.ts", "build/windows-dev-runtime.ts", "src/main/**/*", "src/preload/**/*", "src/shared/**/*"],
   "compilerOptions": {
     "composite": true,
     "target": "ES2022",

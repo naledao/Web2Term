@@ -6,12 +6,16 @@
   "description": "React + Electron desktop application (electron-vite + TypeScript)",
   "license": "MIT",
   "main": "./out/main/index.js",
+  "config": {
+    "electron_mirror": "https://npmmirror.com/mirrors/electron/",
+    "electron_builder_binaries_mirror": "https://npmmirror.com/mirrors/electron-builder-binaries/"
+  },
   "scripts": {
     "predev": "npm run ripgrep:prepare && npm run electron:install",
     "dev": "electron-vite dev",
     "predev:watch": "npm run ripgrep:prepare && npm run electron:install",
     "dev:watch": "electron-vite dev --watch",
-    "electron:install": "node node_modules/electron/install.js",
+    "electron:install": "node build/install-electron.mjs",
     "prepreview": "npm run ripgrep:prepare && npm run electron:install",
     "ripgrep:prepare": "node build/prepare-ripgrep.mjs",
     "build": "npm run typecheck && npm run ripgrep:prepare && electron-vite build && node build/build-windows-helper.mjs",
@@ -76,6 +80,7 @@
     "electron-vite": "^5.0.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
+    "resedit": "1.7.2",
     "typescript": "^5.9.3",
     "vite": "^7.3.6"
   }

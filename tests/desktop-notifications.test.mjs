@@ -33,7 +33,7 @@ const target = { sessionId: '11111111-2222-4333-8444-555555555555', platformId: 
 const other = { ...target, sessionId: '22222222-2222-4333-8444-555555555555' }
 const url = (value = target, protocol = 'web2term-dev') => targets.notificationTargetUrl(protocol, value)
 
-function desktop({ platform = 'win32', packaged = false, registered = true, supported = true } = {}) {
+function desktop({ platform = 'win32', packaged = false, registered = true, supported = true, branding } = {}) {
   const calls = [], shown = []
   let clock = 10000
   class Notification extends EventEmitter {
@@ -50,32 +50,48 @@ function desktop({ platform = 'win32', packaged = false, registered = true, supp
     } },
     './app-identity': { APP_ID: 'com.example.gptweb2codexterminal' },
     './windows-notification-shortcuts': { repairWindowsNotificationShortcuts() { calls.push(['shortcuts']) } },
+    './windows-notification-identity': { registerWindowsDevelopmentNotificationIdentity() { calls.push(['branding']); return branding } },
     './notification-target': targets
   }, { process: { platform, execPath: 'C:\\work with spaces\\Web2Term\\node_modules\\electron\\dist\\electron.exe' },
     performance: { now: () => clock } })
   return { api, calls, shown, time(value) { clock = value } }
 }
 
-test('development activation includes the absolute app entry and has a separate identity', () => {
+test('development activation includes the absolute app entry and has a separate identity', async () => {
   const f = desktop()
-  f.api.registerDesktopNotifications()
+  await f.api.registerDesktopNotifications()
   assert.deepEqual(f.calls, [
     ['identity', 'com.example.gptweb2codexterminal.development'],
     ['shortcuts'],
+    ['branding'],
     ['protocol', 'web2term-dev', 'C:\\work with spaces\\Web2Term\\node_modules\\electron\\dist\\electron.exe',
       ['C:\\work with spaces\\Web2Term']]
   ])
 })
 
-test('installed activation preserves the app identity and uses its own executable', () => {
+test('installed activation preserves the app identity and uses its own executable', async () => {
   const f = desktop({ packaged: true })
-  f.api.registerDesktopNotifications()
+  await f.api.registerDesktopNotifications()
   assert.deepEqual(f.calls, [['identity', 'com.example.gptweb2codexterminal'], ['shortcuts'], ['protocol', 'web2term']])
 })
 
-test('Windows notifications launch the captured target through the app protocol', () => {
+test('development finishes registering its header assets before enabling the first notification', async () => {
+  let finishBranding
+  const branding = new Promise(resolve => { finishBranding = resolve })
+  const f = desktop({ branding })
+  const ready = f.api.registerDesktopNotifications()
+  assert.deepEqual(f.calls, [['identity', 'com.example.gptweb2codexterminal.development'], ['shortcuts'], ['branding']])
+  f.api.showDesktopNotification(target, 'Web2Term', '任务已完成', () => {})
+  assert.equal(f.shown.length, 0)
+  finishBranding()
+  await ready
+  f.api.showDesktopNotification(target, 'Web2Term', '任务已完成', () => {})
+  assert.equal(f.shown.length, 1)
+})
+
+test('Windows notifications launch the captured target through the app protocol', async () => {
   const f = desktop()
-  f.api.registerDesktopNotifications()
+  await f.api.registerDesktopNotifications()
   f.api.showDesktopNotification(target, '有问题', '等待回答', () => assert.fail('Windows must use the URI route'))
   assert.equal(f.shown.length, 1)
   assert.match(f.shown[0].options.toastXml, /activationType="protocol"/)
@@ -86,9 +102,9 @@ test('Windows notifications launch the captured target through the app protocol'
   f.shown[0].emit('click') // Releases the object without invoking a second navigation callback.
 })
 
-test('Windows receives the selected sound event without any independent renderer playback', () => {
+test('Windows receives the selected sound event without any independent renderer playback', async () => {
   const f = desktop()
-  f.api.registerDesktopNotifications('ms-winsoundevent:Notification.Web2Term.WoodDrop')
+  await f.api.registerDesktopNotifications('ms-winsoundevent:Notification.Web2Term.WoodDrop')
   f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
   assert.ok(f.shown[0].options.toastXml.includes('<audio src="ms-winsoundevent:Notification.Web2Term.WoodDrop" loop="false"/>'))
   assert.equal(f.shown[0].listenerCount('show'), 0, 'a show event is not permission to bypass Windows mute settings')
@@ -98,9 +114,9 @@ test('Windows receives the selected sound event without any independent renderer
   assert.deepEqual(plain(f.shown[0].options), options)
 })
 
-test('bursts keep every notification but request native audio only once per second', () => {
+test('bursts keep every notification but request native audio only once per second', async () => {
   const f = desktop()
-  f.api.registerDesktopNotifications('ms-winsoundevent:Notification.Web2Term.WoodDrop')
+  await f.api.registerDesktopNotifications('ms-winsoundevent:Notification.Web2Term.WoodDrop')
   f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
   f.time(10700)
   f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
@@ -114,9 +130,9 @@ test('bursts keep every notification but request native audio only once per seco
   assert.match(f.shown[2].options.toastXml, /ms-winsoundevent:Notification.Web2Term.WoodDrop/)
 })
 
-test('a failed toast lets a later notification request native sound again', () => {
+test('a failed toast lets a later notification request native sound again', async () => {
   const f = desktop()
-  f.api.registerDesktopNotifications()
+  await f.api.registerDesktopNotifications()
   f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
   f.shown[0].emit('failed', {}, 'Unavailable')
   f.time(10050)
@@ -124,9 +140,9 @@ test('a failed toast lets a later notification request native sound again', () =
   assert.equal(f.shown[1].options.silent, false)
 })
 
-test('a late failure of an older toast does not clear the latest sound reservation', () => {
+test('a late failure of an older toast does not clear the latest sound reservation', async () => {
   const f = desktop()
-  f.api.registerDesktopNotifications()
+  await f.api.registerDesktopNotifications()
   f.api.showDesktopNotification(target, 'First', 'Body', () => {})
   f.time(11000)
   f.api.showDesktopNotification(target, 'Second', 'Body', () => {})
@@ -136,18 +152,18 @@ test('a late failure of an older toast does not clear the latest sound reservati
   assert.equal(f.shown[2].options.silent, true)
 })
 
-test('a failed protocol registration never posts a notification with a broken launch target', () => {
+test('a failed protocol registration never posts a notification with a broken launch target', async () => {
   const f = desktop({ registered: false })
-  f.api.registerDesktopNotifications()
+  await f.api.registerDesktopNotifications()
   f.api.showDesktopNotification(target, 'Title', 'Body', () => {})
   assert.equal(f.shown.length, 0)
 })
 
-test('other operating systems retain the native click handler without registering a Windows protocol', () => {
+test('other operating systems retain the native click handler without registering a Windows protocol', async () => {
   for (const platform of ['darwin', 'linux']) {
     const f = desktop({ platform })
     let clicks = 0
-    f.api.registerDesktopNotifications()
+    await f.api.registerDesktopNotifications()
     f.api.showDesktopNotification(target, 'Title', 'Body', () => { clicks++ })
     assert.equal(f.shown[0].options.toastXml, undefined)
     assert.equal(f.calls.some(call => call[0] === 'protocol'), false)

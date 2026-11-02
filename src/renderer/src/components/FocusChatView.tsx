@@ -11,8 +11,11 @@ import FocusSmartUi, { FocusSmartUiContext } from './FocusSmartUi'
 import FocusLayout from './FocusLayout'
 import { cleanFocusCitationCopy, FocusCitationContext } from './FocusCitationLink'
 import FocusMessageLink from './FocusMessageLink'
-import { rehypeFocusFileLinks } from '@shared/focus-file-links'
+import { rehypeFocusFileLinks, cleanFocusFileLinkCopy } from '@shared/focus-file-links'
+import FocusFilePreviewProvider from './FocusFilePreview'
 import FocusComposerModes from './FocusComposerModes'
+import FocusCompaction, { useConversationCompaction } from './FocusCompaction'
+import { compactionSkillQuery } from '@shared/conversation-compaction'
 import FocusCodeBlock, { FocusCodeThemeContext } from './FocusCodeBlock'
 import FocusTokenUsage from './FocusTokenUsage'
 import FocusExecutionOutput from './FocusExecutionOutput'
@@ -38,6 +41,7 @@ import './FocusChatView.css'
 
 interface Props {
   owner: FocusOwner
+  viewConversationId?: string | null
   theme: AppTheme
   visible: boolean
   messages: ConversationMessage[]
@@ -483,10 +487,17 @@ function EditableUser({ text, children, editable, open, disabled, onOpen, onClos
 function FocusChatView(props: Props): JSX.Element {
   const { owner, visible, theme, messages, messagesReady } = props
   const ownerKey = focusOwnerKey(owner)
+  // UI state follows the continuous chat; API calls retain the physical page owner.
+  const viewOwner = { ...owner, conversationId: props.viewConversationId ?? owner.conversationId }
+  const viewOwnerKey = focusOwnerKey(viewOwner)
   const modelLabel = focusPlatformLabel(owner.platformId)
   const modelIcon = FOCUS_ICONS[owner.platformId]
   const [state, setState] = useState<FocusChatState | null>(null)
-  const [draft, setDraft] = useState(() => readDraft(owner))
+  const [draft, setDraft] = useState(() => readDraft(viewOwner))
+  const compaction = useConversationCompaction(owner, visible)
+  const [skillCaret, setSkillCaret] = useState(draft.length)
+  const [skillsDismissed, setSkillsDismissed] = useState(false)
+  const skillQuery = compactionSkillQuery(draft, skillCaret)
   const [sending, setSending] = useState(false)
   const [changingMode, setChangingMode] = useState<FocusComposerModeId | null>(null)
   const [settingPending, setSettingPending] = useState<FocusModelSettingKind | null>(null)
@@ -495,9 +506,10 @@ function FocusChatView(props: Props): JSX.Element {
   const modelReadAttempted = useRef(false)
   const modelReadAttempts = useRef(0)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const skillsOpen = !!skillQuery && !skillsDismissed && !editingId
   const readEpoch = useRef(0)
   const [stopping, setStopping] = useState(false)
-  const [draftFiles, setDraftFiles] = useState<DraftFile[]>(() => fileDrafts.get(ownerKey) ?? [])
+  const [draftFiles, setDraftFiles] = useState<DraftFile[]>(() => fileDrafts.get(viewOwnerKey) ?? [])
   const filesRef = useRef<DraftFile[]>(draftFiles)
   const fileInput = useRef<HTMLInputElement>(null)
   const sendLock = useRef(false)
@@ -523,16 +535,16 @@ function FocusChatView(props: Props): JSX.Element {
   } }, [])
   useEffect(() => {
     const update = (): void => {
-      const files = fileDrafts.get(ownerKey) ?? []
+      const files = fileDrafts.get(viewOwnerKey) ?? []
       filesRef.current = files
       setDraftFiles(files)
     }
-    const listeners = fileDraftListeners.get(ownerKey) ?? new Set<() => void>()
+    const listeners = fileDraftListeners.get(viewOwnerKey) ?? new Set<() => void>()
     listeners.add(update)
-    fileDraftListeners.set(ownerKey, listeners)
+    fileDraftListeners.set(viewOwnerKey, listeners)
     update()
-    return () => { listeners.delete(update); if (!listeners.size) fileDraftListeners.delete(ownerKey) }
-  }, [ownerKey])
+    return () => { listeners.delete(update); if (!listeners.size) fileDraftListeners.delete(viewOwnerKey) }
+  }, [viewOwnerKey])
   const addFiles = (incoming: File[]): void => {
     if (!incoming.length || sendLock.current) return
     const current = filesRef.current
@@ -541,14 +553,14 @@ function FocusChatView(props: Props): JSX.Element {
     if ([...current.map(item => item.file), ...incoming].reduce((sum, file) => sum + file.size, 0) > FOCUS_MAX_BATCH_BYTES) { setError('本条消息的附件合计不能超过 25 MB。'); return }
     const added = incoming.map(file => ({ id: crypto.randomUUID(), file }))
     filesRef.current = [...current, ...added]
-    saveFileDraft(ownerKey, filesRef.current)
+    saveFileDraft(viewOwnerKey, filesRef.current)
     setDraftFiles(filesRef.current)
     setError('')
   }
   const removeFile = (id: string): void => {
     if (sendLock.current) return
     filesRef.current = filesRef.current.filter(file => file.id !== id)
-    saveFileDraft(ownerKey, filesRef.current)
+    saveFileDraft(viewOwnerKey, filesRef.current)
     setDraftFiles(filesRef.current)
   }
 
@@ -585,25 +597,27 @@ function FocusChatView(props: Props): JSX.Element {
     const sources = new Set<string>()
     for (const turn of turns) {
       if (turn.userMessageId) ids.add(turn.userMessageId)
-      for (const segment of turn.segments) if (segment.sourceMessageId) sources.add(segment.sourceMessageId)
-      for (const call of turn.toolCalls ?? []) sources.add(call.sourceMessageId)
+      for (const segment of turn.segments) if (segment.sourceMessageId) sources.add(JSON.stringify([!!turn.archived, segment.sourceMessageId]))
+      for (const call of turn.toolCalls ?? []) sources.add(JSON.stringify([!!turn.archived, call.sourceMessageId]))
     }
     return { ids, sources }
   }, [turns])
   // Only explicitly associated rows are merged. Unknown old history stays readable.
   const hiddenMessageIds = useMemo(() => new Set(state?.hiddenMessageIds ?? []), [state?.hiddenMessageIds])
+  const compactionBoundaries = state?.compactions
   const entries = useMemo(() => {
     const history = messages.filter(message => !represented.ids.has(message.id) &&
     !hiddenMessageIds.has(message.id) &&
-    !(message.sourceMessageId && represented.sources.has(message.sourceMessageId)) &&
+    !(message.sourceMessageId && represented.sources.has(JSON.stringify([!!message.archived, message.sourceMessageId]))) &&
     (message.role !== 'assistant' || !!cleanFocusAnswer(message.content).trim() || message.attachments.length > 0) &&
     !(message.role === 'assistant' && message.sourceMessageId && recordsById.has(message.sourceMessageId)) &&
     !message.sourceMessageId?.startsWith('read-files:'))
-    return [...history.map(message => ({ at: message.createdAt, message, turn: null as FocusTurn | null })),
-    ...turns.map(turn => ({ at: turn.createdAt, turn, message: null as ConversationMessage | null }))]
+    return [...history.map(message => ({ at: message.createdAt, message, turn: null as FocusTurn | null, compaction: null })),
+    ...turns.map(turn => ({ at: turn.createdAt, turn, message: null as ConversationMessage | null, compaction: null })),
+    ...(compactionBoundaries ?? []).map(compaction => ({ at: compaction.createdAt, compaction, turn: null, message: null }))]
     .sort((a, b) => a.at - b.at)
-  }, [messages, represented, hiddenMessageIds, recordsById, turns])
-  const lastTurn = turns.at(-1)
+  }, [messages, represented, hiddenMessageIds, recordsById, turns, compactionBoundaries])
+  const lastTurn = turns.filter(turn => !turn.archived).at(-1)
   const sendFailure = state?.sendFailure
   const working = !sendFailure && (props.needsAnswer || state?.waiting === true || state?.generating === 'active' || lastTurn?.status === 'working')
   const nativeGenerating = state?.generating === 'active'
@@ -695,7 +709,25 @@ function FocusChatView(props: Props): JSX.Element {
   const setDraftText = (text: string): void => {
     draftRef.current = text
     setDraft(text)
-    try { localStorage.setItem(draftKey(owner), text) } catch { /* Keep the in-memory draft. */ }
+    try { localStorage.setItem(draftKey(viewOwner), text) } catch { /* Keep the in-memory draft. */ }
+  }
+  const compactionDisabled = !owner.conversationId ? '请先开始一个对话，再压缩已有记录。' :
+    working || sending || stopping || !!editingId || settingPending !== null || !ready || !!state?.nativeDraft || !!sendFailure
+      ? '请等待当前回答、发送或编辑结束后再压缩。' : compaction.blocked ? '正在处理压缩任务。' :
+        compaction.state && !['completed', 'cancelled'].includes(compaction.state.phase) ? '请先继续检查或取消已有压缩任务。' : ''
+  const startCompaction = async (): Promise<void> => {
+    if (compactionDisabled || sendLock.current || !skillQuery?.matches) return
+    const original = draftRef.current, query = { ...skillQuery }
+    sendLock.current = true
+    try {
+      if (await compaction.start()) {
+        setSkillsDismissed(true)
+        if (alive.current && draftRef.current === original) {
+          setDraftText(original.slice(0, query.start) + original.slice(query.end))
+          setSkillCaret(query.start)
+        }
+      }
+    } finally { sendLock.current = false }
   }
   // Through the editing pipeline, so Ctrl+Z still undoes the paste; a direct write is the fallback.
   const insertPastedText = (input: HTMLTextAreaElement, text: string): void => {
@@ -708,7 +740,7 @@ function FocusChatView(props: Props): JSX.Element {
     event.preventDefault()
     const text = draftRef.current
     const sourceFiles = filesRef.current
-    if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || composerBusy || props.needsAnswer || sendFailure || !ready || state?.nativeDraft || sendBlock) return
+    if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || composerBusy || props.needsAnswer || sendFailure || !ready || state?.nativeDraft || sendBlock || compaction.blocked) return
     sendLock.current = true
     sendCancelled.current = false
     setSending(true)
@@ -722,8 +754,8 @@ function FocusChatView(props: Props): JSX.Element {
       // when its exact value still belongs to this confirmed submission.
       if (result === 'ok') {
         const submittedIds = new Set(sourceFiles.map(item => item.id))
-        saveFileDraft(ownerKey, (fileDrafts.get(ownerKey) ?? []).filter(item => !submittedIds.has(item.id)))
-        try { if (localStorage.getItem(draftKey(owner)) === text) localStorage.removeItem(draftKey(owner)) } catch { /* Optional draft persistence. */ }
+        saveFileDraft(viewOwnerKey, (fileDrafts.get(viewOwnerKey) ?? []).filter(item => !submittedIds.has(item.id)))
+        try { if (localStorage.getItem(draftKey(viewOwner)) === text) localStorage.removeItem(draftKey(viewOwner)) } catch { /* Optional draft persistence. */ }
         if (alive.current && draftRef.current === text) setDraftText('')
         if (alive.current) {
           filesRef.current = []
@@ -786,8 +818,9 @@ function FocusChatView(props: Props): JSX.Element {
       return null
     } finally { sendLock.current = false; if (alive.current) setSending(false) }
   }
-  const userContent = (messageId: string | null, text: string, attachments: boolean, children?: ReactNode): JSX.Element =>
-    <EditableUser text={text} editable={supportsFocusEdit(owner.platformId) && !!owner.conversationId && !!messageId && !!text.trim() && !attachments}
+  const userContent = (messageId: string | null, text: string, attachments: boolean, children?: ReactNode, archived = false): JSX.Element =>
+    <EditableUser text={text} editable={!archived && supportsFocusEdit(owner.platformId) && !!owner.conversationId && !!messageId && !!text.trim() && !attachments &&
+      !messagesById.get(messageId)?.sourceMessageId?.startsWith('compaction:')}
       open={!!messageId && editingId === messageId} disabled={working || sending || stopping || settingPending !== null || !ready || !!state?.nativeDraft}
       onOpen={() => { if (!sendLock.current && messageId) setEditingId(messageId) }} onClose={() => setEditingId(null)}
       onSend={text => editMessage(messageId!, text)}>{children}</EditableUser>
@@ -799,7 +832,7 @@ function FocusChatView(props: Props): JSX.Element {
     finally { if (alive.current) setActionId(null) }
   }
   const copy = async (id: string, text: string): Promise<void> => {
-    try { await navigator.clipboard.writeText(cleanFocusCitationCopy(cleanFocusAnswer(text).replace(CHART_MARKER, ''))); setCopiedId(id); setTimeout(() => { if (alive.current) setCopiedId(current => current === id ? null : current) }, 2000) }
+    try { await navigator.clipboard.writeText(cleanFocusFileLinkCopy(cleanFocusCitationCopy(cleanFocusAnswer(text).replace(CHART_MARKER, '')))); setCopiedId(id); setTimeout(() => { if (alive.current) setCopiedId(current => current === id ? null : current) }, 2000) }
     catch { setError('复制失败，可以选择正文手动复制。') }
   }
   const retrySend = async (): Promise<void> => {
@@ -838,7 +871,7 @@ function FocusChatView(props: Props): JSX.Element {
     <div className={'focus-execution' + (executionNeedsAction(record, delivery) ? ' focus-execution--attention' : '')} key={record.messageId}>
       <div className="focus-execution__head"><strong>{record.description || (record.kind === 'read_files' ? '读取文件' : '执行命令')}</strong><span>{labels[record.status] || record.status}</span></div>
       {actionable && ['pending', 'blocked'].includes(record.status) ? <pre>{record.command}</pre> : null}
-      <FocusDetails ownerKey={ownerKey} stateKey={'exec:' + record.messageId} summary={<>查看命令与输出{record.exitCode !== null ? ' · 退出码 ' + record.exitCode : ''}</>}>{() => <><pre>{record.command}</pre><FocusExecutionOutput owner={owner} record={record} />
+      <FocusDetails ownerKey={viewOwnerKey} stateKey={'exec:' + record.messageId} summary={<>查看命令与输出{record.exitCode !== null ? ' · 退出码 ' + record.exitCode : ''}</>}>{() => <><pre>{record.command}</pre><FocusExecutionOutput owner={owner} record={record} />
         <div className="focus-execution__meta">{record.startedAt && record.finishedAt ? ((record.finishedAt - record.startedAt) / 1000).toFixed(1) + ' 秒 · ' : ''}{delivery === 'sent' ? '结果已回传' : delivery === 'background' ? '已交由后台任务处理，创建、就绪和结束结果单独回传' : delivery === 'pending' && record.status === 'done' ? '等待结果回传' : delivery === 'blocked' || delivery === 'failed' ? '结果尚未回传' : delivery === 'superseded' ? '结果未回传：已由后续执行接替' : ''}</div>
       </>}</FocusDetails>
       {actionable && ['pending', 'blocked'].includes(record.status) ? <div className="focus-chat__actions"><button type="button" disabled={!!actionId} onClick={() => void action(record.messageId)}>{actionId === record.messageId ? '处理中…' : '运行'}</button><button type="button" disabled={!!actionId} onClick={() => void action(record.messageId, true)}>跳过</button></div> : null}
@@ -852,23 +885,24 @@ function FocusChatView(props: Props): JSX.Element {
       key={call.id} data-tool-name={call.tool}>
       <div className="focus-execution__head"><strong>{call.title}</strong><span>{statuses[call.status]}</span></div>
       {call.request ? <p className="focus-chat__muted">{call.request}</p> : null}
-      <FocusDetails ownerKey={ownerKey} stateKey={'tool:' + call.id} summary="查看调用详情">{() => <>
+      <FocusDetails ownerKey={viewOwnerKey} stateKey={'tool:' + call.id} summary="查看调用详情">{() => <>
         {call.result ? <OutputText className="focus-execution__output" text={call.result} /> : <p className="focus-chat__muted">{call.status === 'running' ? '正在等待工具返回结果。' : '暂无结果摘要。'}</p>}
         <div className="focus-execution__meta">{delivery[call.delivery]}</div>
       </>}</FocusDetails>
     </div>
   }
   const renderTurn = (turn: FocusTurn): JSX.Element => {
+    const turnWorking = !turn.archived && turn.status === 'working'
     const sendBlocked = !!sendFailure && turn === lastTurn
     // Only explicit turn ownership belongs in this process. Unlinked history stays in the terminal.
     const { executions, byCycle, unassigned, toolsByCycle, unassignedTools } = groupFocusExecutions(turn, recordsById)
     const executionIds = new Set(turn.executionIds)
     const toolSources = new Set((turn.toolCalls ?? []).map(call => call.sourceMessageId))
     const deliveryOf = (record: ExecutionRecord): FocusDelivery | undefined => focusDelivery(record, turn.deliveries[record.messageId])
-    const running = executions.some(record => record.status === 'running')
-    const toolRunning = turn.status === 'working' && turn.toolCalls?.some(call => call.status === 'running')
-    const pending = executions.some(record => ['pending', 'blocked'].includes(record.status))
-    const deliveryPending = turn.status === 'working' && (executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending') ||
+    const running = !turn.archived && executions.some(record => record.status === 'running')
+    const toolRunning = turnWorking && turn.toolCalls?.some(call => call.status === 'running')
+    const pending = !turn.archived && executions.some(record => ['pending', 'blocked'].includes(record.status))
+    const deliveryPending = turnWorking && (executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending') ||
       turn.toolCalls?.some(call => call.status === 'done' && call.delivery === 'pending'))
     // A new tool/result cycle must not move earlier prose into the process panel.
     const answers = turn.segments.flatMap(segment => {
@@ -877,51 +911,51 @@ function FocusChatView(props: Props): JSX.Element {
       if (!segment.answer.trim() ||
         (segment.sourceMessageId && (executionIds.has(segment.sourceMessageId) || toolSources.has(segment.sourceMessageId)))) return []
       // Older versions saved raw question JSON; normalize it at display time too.
-      const text = cleanFocusAnswer((segment.sourceMessageId ? richAnswers.get(segment.sourceMessageId) : '') || segment.answer)
+      const text = cleanFocusAnswer((!turn.archived && segment.sourceMessageId ? richAnswers.get(segment.sourceMessageId) : '') || segment.answer)
       return text.trim() ? [{ cycle: segment.cycle, sourceMessageId: segment.sourceMessageId, text }] : []
     })
     const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.toolCalls?.length || !!turn.parseFailures?.length
-    const label = sendBlocked ? '消息发送失败 · 等待重试' : turn.commandRecovery ? (turn.status === 'working' ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : toolRunning ? '正在调用工具…' : deliveryPending ? '正在回传执行结果…' :
-      turn.status === 'stopped' ? '已停止 · 已有内容保留' : turn.status === 'working' ? '正在处理…' : '已回复'
+    const label = sendBlocked ? '消息发送失败 · 等待重试' : turn.commandRecovery && !turn.archived ? (turnWorking ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : toolRunning ? '正在调用工具…' : deliveryPending ? '正在回传执行结果…' :
+      turn.status === 'stopped' ? '已停止 · 已有内容保留' : turnWorking ? '正在处理…' : '已回复'
     const userMessage = turn.userMessageId ? messagesById.get(turn.userMessageId) : null
     return <article className="focus-turn" data-message-id={turn.id} key={turn.id}>
       <div className={'focus-user' + (turn.userMessageId && editingId === turn.userMessageId ? ' focus-user--editing' : '')}>
         {userContent(turn.userMessageId, turn.userText, !!userMessage?.attachments.length || !!turn.userAttachments?.length, <>
           {userMessage?.attachments.map(props.renderAttachment)}
           {turn.userAttachments?.map((file, index) => <div className="focus-file-sent" key={index}>📎 {file.fileName}<span>{fileSize(file.sizeBytes)}</span></div>)}
-        </>)}</div>
+        </>, turn.archived)}</div>
       <div className="focus-assistant">
         <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}<span>{modelLabel}</span></div>
-        <FocusDetails className="focus-process" ownerKey={ownerKey} stateKey={'process:' + turn.id} defaultOpen summary={<><span className={turn.status === 'working' && !sendBlocked ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{sendBlocked ? '!' : turn.status === 'working' ? '' : turn.status === 'blocked' ? '!' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <ProcessHint /> : null}</>}>{() =>
-          <ProcessScroll scrollKey={ownerKey + ':turn:' + turn.id} follow={turn.status === 'working' && !sendBlocked}>
+        <FocusDetails className="focus-process" ownerKey={viewOwnerKey} stateKey={'process:' + turn.id} defaultOpen summary={<><span className={turnWorking && !sendBlocked ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{sendBlocked ? '!' : turnWorking ? '' : turn.status === 'blocked' ? '!' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <ProcessHint /> : null}</>}>{() =>
+          <ProcessScroll scrollKey={viewOwnerKey + ':turn:' + turn.id} follow={turnWorking && !sendBlocked}>
           {turn.segments.map(segment => {
             const segmentExecutions = byCycle.get(segment.cycle) ?? EMPTY_RECORDS
             const segmentTools = toolsByCycle.get(segment.cycle) ?? EMPTY_TOOL_CALLS
             // Empty cycles have margins and padding too; they must not push the placeholder down.
             if (!segment.parts.length && !segmentExecutions.length && !segmentTools.length) return null
             return <div className="focus-process__cycle" key={segment.cycle}>
-              {segment.parts.map((part, index) => part.kind === 'reasoning' ? <FocusDetails className="focus-reasoning" key={index} ownerKey={ownerKey} stateKey={'reasoning:' + turn.id + ':' + segment.cycle + ':' + index} summary="思考过程">{() => <Markdown text={part.text} theme={theme} />}</FocusDetails> :
+              {segment.parts.map((part, index) => part.kind === 'reasoning' ? <FocusDetails className="focus-reasoning" key={index} ownerKey={viewOwnerKey} stateKey={'reasoning:' + turn.id + ':' + segment.cycle + ':' + index} summary="思考过程">{() => <Markdown text={part.text} theme={theme} />}</FocusDetails> :
                 <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
-              {segmentExecutions.map(record => renderExecution(record, deliveryOf(record), true))}
+              {segmentExecutions.map(record => renderExecution(record, deliveryOf(record), !turn.archived))}
               {segmentTools.map(renderToolCall)}
             </div>
           })}
-          {unassigned.map(record => renderExecution(record, deliveryOf(record), true))}
+          {unassigned.map(record => renderExecution(record, deliveryOf(record), !turn.archived))}
           {unassignedTools.map(renderToolCall)}
           {turn.parseFailures?.map(failure => <details className="focus-execution" key={'parse:' + failure.messageId}>
             <summary>指令格式错误 · 未执行</summary><pre>{failure.text}</pre>
           </details>)}
-          {!hasProcess ? <p className="focus-chat__muted focus-process__empty">{sendBlocked ? '消息尚未发送成功。' : turn.status === 'working' ? '正在思考…' : '本轮没有额外执行步骤。'}</p> : null}
+          {!hasProcess ? <p className="focus-chat__muted focus-process__empty">{sendBlocked ? '消息尚未发送成功。' : turnWorking ? '正在思考…' : '本轮没有额外执行步骤。'}</p> : null}
           </ProcessScroll>
         }</FocusDetails>
         {turn.notice === 'parse-failed' ? <div className="focus-chat__error" role="alert">
           {turn.commandRecovery?.message || '指令格式无效，本条请求未执行。'}
-          {turn.commandRecovery && ['blocked', 'failed'].includes(turn.commandRecovery.status) && turn === state?.turns.at(-1)
+          {!turn.archived && turn.commandRecovery && ['blocked', 'failed'].includes(turn.commandRecovery.status) && turn === lastTurn
             ? <button type="button" disabled={!!actionId} onClick={() => void retryFormat(turn.commandRecovery!.token)}>重试修正</button> : null}
-          <button type="button" onClick={props.onOpenTerminal}>查看执行控制</button>
+          {!turn.archived ? <button type="button" onClick={props.onOpenTerminal}>查看执行控制</button> : null}
         </div> : null}
-        {answers.map(answer => <div className="focus-answer" key={answer.cycle} data-question-answer={answer.sourceMessageId ?? ''}><Markdown text={answer.text} theme={theme} /></div>)}
-        {answers.length > 0 && turn.status !== 'working' ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(turn.id, answers.map(answer => answer.text).join('\n\n'))}>{copiedId === turn.id ? '已复制' : '复制回答'}</button></div> : null}
+        {answers.map(answer => <div className="focus-answer" key={answer.cycle} data-question-answer={turn.archived ? undefined : answer.sourceMessageId ?? ''}><Markdown text={answer.text} theme={theme} /></div>)}
+        {answers.length > 0 && !turnWorking ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(turn.id, answers.map(answer => answer.text).join('\n\n'))}>{copiedId === turn.id ? '已复制' : '复制回答'}</button></div> : null}
       </div>
     </article>
   }
@@ -931,20 +965,24 @@ function FocusChatView(props: Props): JSX.Element {
    * stutter in a long task; it depends only on the values listed here, never on the draft.
    */
   const transcript = useMemo(() =>
-      <ConversationTranscript scrollKey={'focus:' + ownerKey} ready={messagesReady && state !== null}>
-        {entries.length === 0 ? <div className="focus-chat__empty">{modelIcon ? <img src={modelIcon} alt="" /> : null}<h2>从一个目标开始</h2><p>说说你想解决的问题，一起找到下一步。</p></div> : entries.map(entry => entry.turn ? renderTurn(entry.turn) :
+      <ConversationTranscript scrollKey={'focus:' + viewOwnerKey} ready={messagesReady && state !== null}>
+        {entries.length === 0 ? <div className="focus-chat__empty">{modelIcon ? <img src={modelIcon} alt="" /> : null}<h2>从一个目标开始</h2><p>说说你想解决的问题，一起找到下一步。</p></div> : entries.map(entry => entry.compaction ?
+          <div className="focus-chat__compacted" role="note" aria-label="会话已压缩" data-message-id={entry.compaction.id} key={entry.compaction.id}>
+            <span aria-hidden="true">✓</span><span>会话已压缩</span>
+          </div> : entry.turn ? renderTurn(entry.turn) :
           <article className={'focus-history focus-history--' + entry.message!.role + (editingId === entry.message!.id ? ' focus-user--editing' : '')} data-message-id={entry.message!.id} key={entry.message!.id}>
             {entry.message!.role === 'assistant' ? <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}{modelLabel}</div> : null}
-            {entry.message!.role === 'assistant' ? <>{entry.message!.attachments.map(props.renderAttachment)}<div data-question-answer={entry.message!.sourceMessageId ?? ''}><Markdown text={richAnswers.get(entry.message!.sourceMessageId ?? '') || entry.message!.content} theme={theme} /></div></>
-              : userContent(entry.message!.id, cleanFocusUserText(entry.message!.content), entry.message!.attachments.length > 0, entry.message!.attachments.map(props.renderAttachment))}
+            {entry.message!.role === 'assistant' ? <>{entry.message!.attachments.map(props.renderAttachment)}<div data-question-answer={entry.message!.archived ? undefined : entry.message!.sourceMessageId ?? ''}><Markdown text={(!entry.message!.archived && richAnswers.get(entry.message!.sourceMessageId ?? '')) || entry.message!.content} theme={theme} /></div></>
+              : userContent(entry.message!.id, cleanFocusUserText(entry.message!.content), entry.message!.attachments.length > 0, entry.message!.attachments.map(props.renderAttachment), entry.message!.archived)}
           </article>)}
       </ConversationTranscript>,
-  [state, messages, messagesReady, theme, ownerKey, actionId, copiedId, working, sending, stopping, editingId, settingPending, props.renderAttachment, props.onOpenTerminal, props.onRun, props.onSkip])
+  [state, messages, messagesReady, theme, ownerKey, viewOwnerKey, actionId, copiedId, working, sending, stopping, editingId, settingPending, props.renderAttachment, props.onOpenTerminal, props.onRun, props.onSkip])
   return <FocusCitationContext.Provider value={citationContext}><FocusSmartUiContext.Provider value={smartUiContext}><section ref={citationRoot} className="focus-chat" aria-label="专注对话" data-theme={theme}>
+    <FocusFilePreviewProvider key={ownerKey} owner={owner} visible={visible}>
     <header className="focus-chat__header">
       <span>{modelIcon ? <img className="focus-chat__brand-icon" src={modelIcon} alt={modelLabel} /> : <strong>{modelLabel}</strong>}</span>
       <button type="button" className="focus-chat__new-chat" aria-label="新建对话" title="新建对话"
-        disabled={props.newChatDisabled || working || sending || stopping || !!editingId || settingPending !== null} onClick={startNewChat}>
+        disabled={props.newChatDisabled || working || sending || stopping || !!editingId || settingPending !== null || compaction.blocked} onClick={startNewChat}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
           <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
           <path d="M18.375 2.625a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4Z" />
@@ -955,7 +993,7 @@ function FocusChatView(props: Props): JSX.Element {
         <dt>思考强度</dt><dd>high</dd>
       </dl> : null}
       {owner.platformId === 'chatgpt' ? <FocusModelSettings settings={state?.modelSettings ?? null}
-        disabled={working || sending || stopping || !!editingId || !ready} pending={settingPending}
+        disabled={working || sending || stopping || !!editingId || !ready || compaction.blocked} pending={settingPending}
         waiting={ready && !state?.modelSettings?.model && !modelReadAttempted.current && settingPending === null}
         onChange={(kind, value) => { void updateModelSettings(kind, value) }} onRefresh={() => { void updateModelSettings('read') }} /> : null}
       <FocusTokenUsage usage={tokenUsage} injection={state?.promptInjection} loading={!messagesReady || state === null} />
@@ -980,14 +1018,29 @@ function FocusChatView(props: Props): JSX.Element {
       </div> : null}
       {settingError ? <div className="focus-chat__error" role="alert">{settingError}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       {error ? <div className="focus-chat__error" role="alert">{error}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
+      <FocusCompaction owner={owner} visible={visible} state={compaction.state} pending={compaction.pending} error={compaction.error} act={compaction.act} />
       <form className="focus-composer" onSubmit={event => void submit(event)}>
+        {skillsOpen ? <div className="focus-skills" id={'focus-skills-' + owner.sessionId} role="listbox" aria-label="选择技能">
+          <div className="focus-skills__label">技能 · Enter 选择 · Esc 关闭</div>
+          {skillQuery?.matches ? <button type="button" role="option" aria-selected="true" id={'focus-skill-compact-' + owner.sessionId}
+            className="focus-skills__item" disabled={!!compactionDisabled} onMouseDown={event => event.preventDefault()}
+            onClick={() => void startCompaction()}>
+            <span className="focus-skills__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" /><path d="m4 7.5 8 4.5 8-4.5M12 12v9M8 5.3l8 4.5" /></svg></span>
+            <span className="focus-skills__body"><strong>压缩会话</strong><small>{compactionDisabled || '整理当前会话，生成交接摘要并开启承接聊天'}</small></span>
+            <span className="focus-skills__key">↵</span>
+          </button> : <div className="focus-skills__empty">没有匹配的技能</div>}
+        </div> : null}
         {draftFiles.length ? <div className="focus-composer__files" aria-label="待发送附件">{draftFiles.map(item =>
           <div className="focus-draft-file" key={item.id}>
             <FilePreview file={item.file} onPreview={props.onPreviewImage} />
             <span className="focus-draft-file__name" title={item.file.name}>{item.file.name}<small>{fileSize(item.file.size)} · {sending ? '上传并发送中…' : '待发送'}</small></span>
             <button type="button" disabled={sending} aria-label={'移除附件 ' + item.file.name} onClick={() => removeFile(item.id)}>×</button>
           </div>)}</div> : null}
-        <textarea value={draft} disabled={!!editingId} maxLength={20000} rows={2} aria-label="消息" placeholder="描述你想完成的任务…" onChange={event => setDraftText(event.target.value)}
+        <textarea value={draft} disabled={!!editingId || compaction.blocked} maxLength={20000} rows={2} aria-label="消息" placeholder="描述你想完成的任务… 输入 // 选择技能"
+          aria-expanded={skillsOpen} aria-controls={skillsOpen ? 'focus-skills-' + owner.sessionId : undefined}
+          aria-activedescendant={skillsOpen && skillQuery?.matches ? 'focus-skill-compact-' + owner.sessionId : undefined}
+          onSelect={event => setSkillCaret(event.currentTarget.selectionStart)}
+          onChange={event => { setDraftText(event.target.value); setSkillCaret(event.currentTarget.selectionStart); setSkillsDismissed(false) }}
           onPaste={event => {
             const files = [...event.clipboardData.files]
             const pastedFiles = files.length ? files : [...event.clipboardData.items].filter(item => item.kind === 'file').flatMap(item => { const file = item.getAsFile(); return file ? [file] : [] })
@@ -1007,19 +1060,30 @@ function FocusChatView(props: Props): JSX.Element {
             if (text) insertPastedText(input, text)
           }}
           onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}
-          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composing.current && event.keyCode !== 229) { event.preventDefault(); if (!composerBusy && !sending && ready && !sendBlock) event.currentTarget.form?.requestSubmit() } }} />
+          onKeyDown={event => {
+            if (event.nativeEvent.isComposing || composing.current || event.keyCode === 229) return
+            if (skillsOpen) {
+              if (['ArrowUp', 'ArrowDown', 'Escape', 'Enter'].includes(event.key) && !event.shiftKey) {
+                event.preventDefault()
+                if (event.key === 'Escape') setSkillsDismissed(true)
+                if (event.key === 'Enter' && !event.repeat) void startCompaction()
+                return
+              }
+            }
+            if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!composerBusy && !sending && ready && !sendBlock && !compaction.blocked) event.currentTarget.form?.requestSubmit() }
+          }} />
         <input ref={fileInput} type="file" multiple hidden onChange={event => { addFiles([...event.currentTarget.files ?? []]); event.currentTarget.value = '' }} />
         <div className="focus-composer__tools"><div className="focus-composer__left">
-          <button type="button" className="focus-composer__attachment" disabled={sending || !!editingId || changingMode !== null || settingPending !== null} onClick={() => fileInput.current?.click()} title="添加附件，也可直接粘贴截图或文件">＋ 附件</button>
-          {owner.platformId === 'deepseek' ? <FocusComposerModes modes={state?.composerModes ?? []} disabled={sending || stopping || !!working || !!sendFailure || !!editingId || !ready}
+          <button type="button" className="focus-composer__attachment" disabled={sending || !!editingId || changingMode !== null || settingPending !== null || compaction.blocked} onClick={() => fileInput.current?.click()} title="添加附件，也可直接粘贴截图或文件">＋ 附件</button>
+          {owner.platformId === 'deepseek' ? <FocusComposerModes modes={state?.composerModes ?? []} disabled={sending || stopping || !!working || !!sendFailure || !!editingId || !ready || compaction.blocked}
             pending={changingMode} onChange={(id, active) => { void changeMode(id, active) }} /> : null}
         </div><span>{modelLabel}</span>
           {nativeGenerating || stopping ? <button type="button" className="focus-composer__send" disabled={stopping || sending || !ready} onClick={() => void stop()} aria-label="停止生成">{stopping ? <ComposerPendingIcon /> : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
-            <button type="submit" className="focus-composer__send" disabled={composerBusy || sending || props.needsAnswer || !!sendFailure || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || !!sendBlock || (!draft.trim() && !draftFiles.length)} aria-label="发送消息" title={sendBlock || undefined}>{sending ? <ComposerPendingIcon /> : '↑'}</button>}
+            <button type="submit" className="focus-composer__send" disabled={composerBusy || sending || props.needsAnswer || !!sendFailure || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || !!sendBlock || compaction.blocked || skillsOpen || (!draft.trim() && !draftFiles.length)} aria-label="发送消息" title={sendBlock || undefined}>{sending ? <ComposerPendingIcon /> : '↑'}</button>}
         </div>
       </form><p className="focus-composer__hint">Enter 发送 · Shift+Enter 换行</p>
     </div>
-  </section></FocusSmartUiContext.Provider></FocusCitationContext.Provider>
+    </FocusFilePreviewProvider></section></FocusSmartUiContext.Provider></FocusCitationContext.Provider>
 }
 
 export default memo(FocusChatView)

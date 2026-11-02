@@ -24,15 +24,18 @@ function load(path, dependencies = {}, globals = {}) {
   return exports
 }
 const shared = load('../src/shared/focus-file-links.ts')
-const native = load('../src/main/focus-file-link.ts', { '../shared/focus-file-links': shared })
+const native = load('../src/main/focus-file-link.ts', { '../shared/focus-file-links': shared,
+  'node:crypto': { randomUUID: () => '11111111-2222-4333-8444-555555555555' } })
 const owner = { sessionId: 'session-1', platformId: 'chatgpt', conversationId: 'chat-1' }
 const href = 'sandbox:/mnt/data/article-views-ii-replica.html'
 const marker = '#web2term-file=' + encodeURIComponent(href)
 const target = { sourceMessageId: 'answer-1', href, label: '下载完整 HTML 页面' }
 const CitationContext = React.createContext(null)
+const PreviewContext = React.createContext(null)
 const citation = { FocusCitationContext: CitationContext,
   default: props => React.createElement('a', { href: props.href, title: props.title }, props.children) }
-const dependencies = { react: React, 'react/jsx-runtime': jsxRuntime, '@shared/focus-file-links': shared, './FocusCitationLink': citation }
+const dependencies = { react: React, 'react/jsx-runtime': jsxRuntime, '@shared/focus-file-links': shared, './FocusCitationLink': citation,
+  './FocusFilePreview': { FocusFilePreviewContext: PreviewContext } }
 const messageLinks = load('../src/renderer/src/components/FocusMessageLink.tsx', dependencies)
 const context = { owner, ownerKey: 'session-1:chatgpt:chat-1', visible: true, onOriginal() {} }
 const render = markdown => renderToStaticMarkup(React.createElement(CitationContext.Provider, { value: context },
@@ -71,6 +74,12 @@ function method(path, name) {
   assert.ok(found, name)
   return compile('({' + found.getText(ast) + '}).' + name)
 }
+function pageHelper(name, context) {
+  const text = readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8')
+  const ast = ts.createSourceFile('page.js', text, ts.ScriptTarget.Latest, true)
+  const find = node => ts.isVariableDeclaration(node) && node.name.getText(ast) === name ? node.initializer : ts.forEachChild(node, find)
+  return new Script('(' + find(ast).getText(ast) + ')').runInContext(context)
+}
 const pageAction = method('../src/main/injected/send-interceptor.js', 'openFocusFileLink')
 function page() {
   const clicks = [], navigation = [], listeners = new Map()
@@ -91,6 +100,7 @@ function page() {
     collapse: value => String(value || '').replace(/\s+/g, ' ').trim(), queryAllAssistant: () => nodes,
     messageIdOf: node => node.id, isVisibleElement: node => node.visible, replyRootOf: node => node.root,
     document: { addEventListener: (type, listener) => listeners.set(type, listener), removeEventListener: type => listeners.delete(type) } })
+  sandbox.focusFileLinkElement = pageHelper('focusFileLinkElement', sandbox)
   const open = new Script(pageAction).runInContext(sandbox)
   sandbox.window = { __cmdTerminalInterceptor: { openFocusFileLink: open } }
   return { sandbox, nodes, links, clicks, navigation, listeners, link, open: (request = target, path = '/c/one') => open(request, path) }
@@ -172,7 +182,8 @@ function fileControl(label = target.label) {
   let cursor = 0, pendingEffects = []
   const slots = [], requests = [], responses = [], exports = {}
   const ctx = { ...context, onOriginal() { ctx.originals++ }, originals: 0 }
-  const hooks = { useContext: () => ctx,
+  const preview = { open(target) { requests.push({ ...ctx.owner, ...target }); return new Promise(resolve => responses.push(resolve)) } }
+  const hooks = { useContext: token => token === PreviewContext ? preview : ctx,
     useRef(initial) { return (slots[cursor++] ??= { current: initial }) },
     useState(initial) { const at = cursor++; slots[at] ??= { value: initial }; return [slots[at].value, value => { slots[at].value = value }] },
     useEffect(callback, deps) {
@@ -219,11 +230,11 @@ test('hiding the view discards a late file-action result', async () => {
   assert.equal(f.requests.length, 1)
 })
 
-test('a native preview is revealed while downloading keeps the focus view open', async () => {
+test('all file labels open the focus preview without switching to the original view', async () => {
   for (const label of [target.label, '查看页面预览', 'Preview HTML']) {
     const f = fileControl(label)
     f.click(); f.responses[0]('ok'); await flush(); f.render()
-    assert.equal(f.ctx.originals, label === target.label ? 0 : 1)
+    assert.equal(f.ctx.originals, 0)
     assert.equal(f.elements().some(node => node.props.role === 'alert'), false)
   }
 })

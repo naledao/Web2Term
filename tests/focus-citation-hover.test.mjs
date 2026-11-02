@@ -7,6 +7,7 @@ import { Script } from 'node:vm'
 import { test } from 'node:test'
 import * as React from 'react'
 import * as jsxRuntime from 'react/jsx-runtime'
+import { renderToStaticMarkup } from 'react-dom/server'
 import ts from 'typescript'
 
 const compile = (source, fileName = 'module.ts') => ts.transpileModule(source, {
@@ -29,7 +30,7 @@ const flush = async () => { await Promise.resolve(); await Promise.resolve() }
 
 function fixture() {
   let cursor = 0, mounted = true, lateWrites = 0, pendingEffects = []
-  const slots = [], calls = [], responses = [], exports = {}
+  const slots = [], calls = [], responses = [], openCalls = [], openResponses = [], exports = {}
   const hooks = {
     createContext: React.createContext, useContext: () => null,
     useRef(initial) { const at = cursor++; return (slots[at] ??= { value: { current: initial } }).value },
@@ -48,9 +49,10 @@ function fixture() {
     }
   }
   const context = { owner: { sessionId: 'session-1', platformId: 'chatgpt', conversationId: 'chat-1' },
-    ownerKey: 'session-1:chatgpt:chat-1', visible: true, containerRef: { current: { id: 'focus-container' } }, onOriginal() {} }
+    ownerKey: 'session-1:chatgpt:chat-1', visible: true, containerRef: { current: { id: 'focus-container' } }, originals: 0, onOriginal() { this.originals++ } }
   new Script(component).runInNewContext({ exports, window: { api: {
-    readFocusCitation(request) { calls.push(request); return new Promise(resolve => responses.push(resolve)) }
+    readFocusCitation(request) { calls.push(request); return new Promise(resolve => responses.push(resolve)) },
+    openFocusCitationSource(request) { openCalls.push(request); return new Promise(resolve => openResponses.push(resolve)) }
   } }, require(name) {
     if (name === 'react') return hooks
     if (name === 'react/jsx-runtime') return jsxRuntime
@@ -69,10 +71,12 @@ function fixture() {
   }
   const part = name => elements(tree).find(node => node.type === Popover[name])
   render()
-  return { context, calls, responses, render, part,
+  return { context, calls, responses, openCalls, openResponses, render, part,
     open(reason = 'trigger-hover') { part('Root').props.onOpenChange(true, { reason }); render() },
     close(reason = 'trigger-hover') { part('Root').props.onOpenChange(false, { reason }); render() },
     links: () => elements(tree).filter(node => node.type === 'a'),
+    cards: () => elements(tree).filter(node => node.props.className === 'focus-citation__preview-card'),
+    original: () => elements(tree).find(node => node.type === 'button' && node.props.children === '查看原始来源'),
     loading: () => elements(tree).some(node => node.props.role === 'status'),
     lateWrites: () => lateWrites,
     unmount() { for (const slot of slots) slot?.cleanup?.(); mounted = false }
@@ -120,6 +124,56 @@ test('closing during a read caches its result for the next hover without reopeni
   assert.equal(f.links().length, 2)
   f.close('outside-press')
   assert.equal(f.part('Root').props.open, false)
+})
+
+test('a button-only source shows its title, site, description and images without inventing a link', async () => {
+  const f = fixture()
+  f.open()
+  f.responses[0](ok([{ kind: 'preview', title: 'Models & Pricing', site: 'DeepSeek API Docs', description: 'Total lines: 98',
+    icon: 'https://images.example.com/favicon.png', image: 'https://images.example.com/thumbnail.png' }]))
+  await flush(); f.render()
+  assert.equal(f.loading(), false)
+  assert.equal(f.part('Root').props.open, true)
+  assert.equal(f.links().length, 0)
+  assert.equal(f.cards().length, 1)
+  const html = renderToStaticMarkup(f.cards()[0].props.children)
+  assert.match(html, /DeepSeek API Docs[\s\S]*Models &amp; Pricing[\s\S]*Total lines: 98/)
+  assert.match(html, /class="focus-citation__favicon"/)
+  assert.match(html, /class="focus-citation__thumbnail"/)
+  assert.doesNotMatch(html, /href=/)
+  f.original().props.onClick(); f.render()
+  assert.equal(f.context.originals, 1)
+  assert.equal(f.part('Root').props.open, false)
+})
+
+test('clicking a native source sends its owner and exact card identity once, then closes after opening', async () => {
+  const f = fixture(), native = { index: 1, signature: '1234abcd' }
+  f.open()
+  f.responses[0](ok([{ kind: 'preview', title: 'Second source', site: 'Google AI for Developers', native }]))
+  await flush(); f.render()
+  assert.equal(f.cards()[0].type, 'button')
+  f.cards()[0].props.onClick(); f.cards()[0].props.onClick(); f.render()
+  assert.equal(f.openCalls.length, 1)
+  assert.deepEqual(JSON.parse(JSON.stringify(f.openCalls[0])), { ...f.context.owner,
+    sourceMessageId: 'reply-1', index: 0, signature: '12345678', source: native })
+  assert.equal(f.cards()[0].props.disabled, true)
+  assert.equal(f.cards()[0].props['aria-busy'], true)
+  f.openResponses[0]('ok'); await flush(); f.render()
+  assert.equal(f.part('Root').props.open, false)
+  assert.equal(f.context.originals, 0)
+})
+
+test('an unsuccessful source open can refresh metadata and a late open cannot write to an unmounted card', async () => {
+  const f = fixture(), preview = { kind: 'preview', title: 'Source', site: 'Site', native: { index: 0, signature: '1234abcd' } }
+  f.open(); f.responses[0](ok([preview])); await flush(); f.render()
+  f.cards()[0].props.onClick(); f.openResponses[0]('unavailable'); await flush(); f.render()
+  assert.equal(f.part('Root').props.open, true)
+  assert.equal(f.cards()[0].props.disabled, false)
+  f.close(); f.open()
+  assert.equal(f.calls.length, 2)
+  f.responses[1](ok([preview])); await flush(); f.render()
+  f.cards()[0].props.onClick(); f.unmount(); f.openResponses[1]('ok'); await flush()
+  assert.equal(f.lateWrites(), 0)
 })
 
 test('hiding the view revokes old results, and an old completion cannot clear a newer loading state', async () => {

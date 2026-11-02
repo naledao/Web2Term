@@ -1,0 +1,12 @@
+.focus-file-preview{position:absolute;inset:0;z-index:40;display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--fc-bg);color:var(--fc-text);overflow:hidden}
+.focus-file-preview__header{display:flex;align-items:center;gap:10px;flex:none;min-height:54px;padding:8px 16px;border-bottom:1px solid var(--fc-border);background:var(--fc-bg)}
+.focus-file-preview__header>div{display:flex;align-items:baseline;gap:10px;min-width:0;margin-right:auto}
+.focus-file-preview__header strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}
+.focus-file-preview__header small,.focus-file-preview__save-status{flex:none;color:var(--fc-muted);font-size:12px}
+.focus-chat .focus-file-preview__download{display:inline-flex;align-items:center;gap:6px;flex:none;padding:7px 12px;border:1px solid var(--fc-border);border-radius:7px;background:var(--fc-soft);color:var(--fc-text);font:inherit;font-size:13px}
+.focus-file-preview__download svg{width:16px;height:16px}
+.focus-chat .focus-file-preview__close{flex:none;width:32px;height:32px;padding:0;border:0;border-radius:6px;background:transparent;font-size:24px;line-height:1}
+.focus-chat .focus-file-preview__close:hover,.focus-chat .focus-file-preview__download:hover:not(:disabled){background:var(--fc-border)}
+.focus-file-preview__frame{flex:1;min-width:0;min-height:0;width:100%;border:0;background:#fff}
+.focus-file-preview__text{flex:1;min-height:0;overflow:auto;margin:0;padding:20px;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.7 monospace}
+.focus-file-preview__message{display:grid;flex:1;place-content:center;padding:24px;color:var(--fc-muted);font-size:14px;text-align:center}

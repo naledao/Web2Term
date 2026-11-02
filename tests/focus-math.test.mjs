@@ -65,9 +65,15 @@ new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-file-lin
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText).runInNewContext({ exports: fileLinks, URL })
 const codeExports = {}
+const htmlPreviewExports = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-html-preview.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: htmlPreviewExports })
 new Script(ts.transpileModule(readFileSync(new URL('../src/renderer/src/components/FocusCodeBlock.tsx', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX }
-}).outputText).runInNewContext({ exports: codeExports, require })
+}).outputText).runInNewContext({ exports: codeExports, require(name) {
+  return name === '@shared/focus-html-preview' ? htmlPreviewExports : require(name)
+} })
 const declarations = ['RICH_BLOCK', 'CHART_MARKER', 'mathRemarkPlugins', 'mathRehypePlugins', 'Markdown']
 const normalizeMath = view.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'normalizeMathDelimiters').getText(view)
 new Script(ts.transpileModule(normalizeMath + '\n' + declarations.map(name => `const ${name} = ${initializer(view, name)};`).join('\n') + '\nexports.Markdown = Markdown;', {

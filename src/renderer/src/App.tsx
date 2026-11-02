@@ -324,6 +324,7 @@ function conversationMessagesEqual(left: ConversationMessage[], right: Conversat
       message.sourceMessageId !== other.sourceMessageId ||
       message.content !== other.content ||
       message.createdAt !== other.createdAt ||
+      message.archived !== other.archived ||
       message.attachments.length !== other.attachments.length
     ) {
       return false
@@ -2447,7 +2448,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           aria-labelledby={'chat-view-tab-' + (isFocusView ? 'focus' : placeholderToggle ? 'local' : 'original')}>
           {showFocusView ? (
             <div className={'stage__view' + (isFocusView ? '' : ' stage__view--leaving')}>
-            <FocusChatView key={transcriptScrollKey} owner={focusOwner} theme={theme}
+            <FocusChatView key={transcriptScrollKey} owner={focusOwner} theme={theme} viewConversationId={embed.viewConversationId ?? conversationId}
               visible={chatSurfaceVisible} messages={conversationMessages} messagesReady={conversationMessagesReady}
               needsAnswer={!!pendingQuestion}
               newChatDisabled={taskRunning || embed.isLoading || switchingPlatform}
@@ -2462,7 +2463,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           ) : null}
           {showLocalView ? (
             <div className={'stage__alternate-card' + (placeholderToggle ? '' : ' stage__alternate-card--leaving')} aria-label="会话摘要视图">
-              <ConversationTranscript key={transcriptScrollKey} scrollKey={transcriptScrollKey} ready={conversationMessagesReady}>
+              <ConversationTranscript key={transcriptScrollKey} scrollKey={conversationScrollKey(sessionId, platformId, embed.viewConversationId ?? conversationId)} ready={conversationMessagesReady}>
                 {!conversationMessagesReady ? (
                   <div className="conversation-transcript__empty">正在加载对话记录…</div>
                 ) : conversationMessages.length === 0 ? (

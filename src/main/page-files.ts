@@ -109,7 +109,7 @@ export async function sendPageFiles(
   token: string,
   isCurrent: () => boolean,
   signal: AbortSignal,
-  options: { caption?: string; allowNewConversation?: boolean; userText?: string; computerResult?: { path: string; generation: number } } = {}
+  options: { caption?: string; allowNewConversation?: boolean; userText?: string; computerResult?: { path: string; generation: number }; beforeSubmit?: () => void } = {}
 ): Promise<FileSendOutcome> {
   const debuggerApi = contents.debugger
   let attached = false
@@ -339,6 +339,8 @@ export async function sendPageFiles(
       if (!ready) return finish('upload-failed', 'caption-ready-timeout')
     }
     stage = 'submit'
+    // Durable workflows must record the ambiguous-send boundary before any click.
+    options.beforeSubmit?.()
     // From this point, a context loss is ambiguous; never automatically click again.
     submitted = true
     const clicked = await call('submitFileSend', token)

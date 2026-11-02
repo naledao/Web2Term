@@ -48,19 +48,20 @@ export function estimateFocusText(text: string): FocusTextUsage {
 
 /** Count the active transcript once even when a saved row is also represented by a live focus turn. */
 export function estimateFocusConversation(input: {
-  messages: Pick<ConversationMessage, 'id' | 'role' | 'sourceMessageId' | 'content' | 'createdAt' | 'attachments'>[]
+  messages: Pick<ConversationMessage, 'id' | 'role' | 'sourceMessageId' | 'content' | 'createdAt' | 'attachments' | 'archived'>[]
   turns: FocusTurn[]
-  executions: Pick<ExecutionRecord, 'messageId' | 'command' | 'description' | 'output'>[]
+  executions: Pick<ExecutionRecord, 'messageId' | 'command' | 'description' | 'output' | 'archived'>[]
   hiddenMessageIds?: string[]
   smartReplies?: { sourceMessageId: string; answer: string }[]
   contextUsage?: ContextUsageSummary
 }): FocusContextUsage {
   const recorded = input.contextUsage ?? emptyContextUsage()
-  const turns = input.turns.filter(turn => !turn.supersededBy)
+  const messages = input.messages.filter(message => !message.archived)
+  const turns = input.turns.filter(turn => !turn.supersededBy && !turn.archived)
   const users = new Set(turns.flatMap(turn => turn.userMessageId ? [turn.userMessageId] : []))
   const sources = new Set(turns.flatMap(turn => turn.segments.flatMap(segment => segment.sourceMessageId ? [segment.sourceMessageId] : [])))
   const hidden = new Set(input.hiddenMessageIds ?? [])
-  const executions = new Map(input.executions.map(record => [record.messageId, record]))
+  const executions = new Map(input.executions.filter(record => !record.archived).map(record => [record.messageId, record]))
   const rich = new Map((input.smartReplies ?? []).map(reply => [reply.sourceMessageId, reply.answer]))
   const requests = new Set(recorded.requestSourceIds)
   const total = { estimatedTokens: 0, characters: 0 }
@@ -73,7 +74,7 @@ export function estimateFocusConversation(input: {
     const usage = estimateFocusText(text)
     total.estimatedTokens += usage.estimatedTokens; total.characters += usage.characters
   }
-  for (const message of input.messages) {
+  for (const message of messages) {
     if (hidden.has(message.id) || users.has(message.id) || message.sourceMessageId?.startsWith('read-files:') ||
       message.sourceMessageId && (sources.has(message.sourceMessageId) || executions.has(message.sourceMessageId) || requests.has(message.sourceMessageId))) continue
     add(message.role === 'user' ? cleanFocusUserText(message.content) : cleanFocusAnswer(rich.get(message.sourceMessageId ?? '') || message.content))
@@ -82,7 +83,7 @@ export function estimateFocusConversation(input: {
   const counted = new Set<string>()
   for (const turn of turns) {
     add(cleanFocusUserText(turn.userText))
-    const saved = input.messages.find(message => message.id === turn.userMessageId)
+    const saved = messages.find(message => message.id === turn.userMessageId)
     countFiles(turn.userAttachments?.length ? turn.userAttachments : saved?.attachments)
     for (const segment of turn.segments) {
       if (segment.sourceMessageId && counted.has(segment.sourceMessageId)) continue
@@ -100,7 +101,7 @@ export function estimateFocusConversation(input: {
   for (const usage of [recorded.injections, recorded.toolDefinitions, recorded.toolResults, recorded.toolRequests]) {
     total.estimatedTokens += usage.estimatedTokens; total.characters += usage.characters
   }
-  const dates = [...input.messages.filter(message => !hidden.has(message.id)).map(message => message.createdAt), ...turns.map(turn => turn.createdAt)].filter(Number.isFinite)
+  const dates = [...messages.filter(message => !hidden.has(message.id)).map(message => message.createdAt), ...turns.map(turn => turn.createdAt)].filter(Number.isFinite)
   const earliest = dates.reduce((first, time) => Math.min(first, time), Infinity)
   const incompleteHistory = dates.length > 0 && (recorded.observedSince === null || earliest < recorded.observedSince - 1000)
   return { ...total, details: { conversation, recorded, visibleReasoning, images, files, incompleteHistory } }

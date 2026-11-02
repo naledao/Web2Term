@@ -1,7 +1,8 @@
 import { createElement, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, JSX, ReactNode } from 'react'
 import type { FocusLayoutData, FocusLayoutNode } from '@shared/focus-layout'
-import { parseFocusFileHref } from '@shared/focus-file-links'
+import { parseFocusFileHref, parseFocusNativeFileHref } from '@shared/focus-file-links'
+import { parseFocusCitationHref } from '@shared/focus-citations'
 import FocusMessageLink from './FocusMessageLink'
 import './FocusLayout.css'
 
@@ -34,7 +35,7 @@ function draw(node: string | FocusLayoutNode, key: number): ReactNode {
   if (divider) Object.assign(style, { boxSizing: 'content-box', backgroundClip: 'content-box',
     height: '1px', minHeight: '1px', maxHeight: '1px', borderWidth: 0,
     flexGrow: 0, flexShrink: 0, flexBasis: 'auto', backgroundColor: tones.$border })
-  const component = node.tag === 'a' && parseFocusFileHref(node.attrs?.href) ? FocusMessageLink : node.tag
+  const component = node.tag === 'a' && (parseFocusFileHref(node.attrs?.href) || parseFocusNativeFileHref(node.attrs?.href) || parseFocusCitationHref(node.attrs?.href)) ? FocusMessageLink : node.tag
   return createElement(component, { ...node.attrs, style, key,
     ...(node.tag === 'a' ? { target: '_blank', rel: 'noopener noreferrer' } : {}),
     ...(node.tag === 'svg' ? { 'aria-hidden': true, focusable: false } : {}) },

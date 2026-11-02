@@ -487,6 +487,7 @@ function recoveryRuntimeFixture() {
     listConversationMessages: () => messages, listExecutions: () => [], getExecutionRevision: () => 0 }
   const runtime = new exports.Runtime(), owner = { sessionId: 'session', platformId: 'chatgpt', conversationId: 'one' }
   Object.assign(runtime, { focusSending: false, focusRevision: null, focusUiRecovering: false, focusUiRecoveredTurn: null,
+    continuity: { history: () => ({ revision: '', turns: [], executions: [] }), visibleTurns: (_platform, _conversation, turns) => turns },
     ownsFocus: () => true, getComputerUseCapability: () => ({}), options: { store }, runner: { hasInFlightWork: () => false }, focusChat: new FocusChat('session', store),
     conversationTools: { injectionLedger: () => null } })
   const page = { path: '/c/one', ready: true, nativeDraft: false, waiting: false, generating: 'active',

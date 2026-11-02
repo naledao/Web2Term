@@ -54,9 +54,15 @@ const extract = new Script('(' + initializer(source, 'readReplyMarkdown') + ')')
   PAGE: { focus: null }, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, replyRootOf: node => node
 })
 const codeExports = {}
+const htmlPreviewExports = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-html-preview.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: htmlPreviewExports })
 new Script(ts.transpileModule(readFileSync(new URL('../src/renderer/src/components/FocusCodeBlock.tsx', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX }
-}).outputText).runInNewContext({ exports: codeExports, require })
+}).outputText).runInNewContext({ exports: codeExports, require(name) {
+  return name === '@shared/focus-html-preview' ? htmlPreviewExports : require(name)
+} })
 const render = markdown => renderToStaticMarkup(React.createElement(ReactMarkdown, {
   skipHtml: true, rehypePlugins: [[prism, { ignoreMissing: true }]], components: { pre: codeExports.default }
 }, markdown))
@@ -132,4 +138,18 @@ test('copying the Prism token tree produces only original code and preserves whi
   const tokens = React.createElement('code', null, React.createElement('span', { className: 'token keyword' }, 'public'), ' class A {\n\n\n  ',
     React.createElement('span', { className: 'token string' }, '"<b>"'), '\n}')
   assert.equal(codeExports.codeBlockText(tokens), 'public class A {\n\n\n  "<b>"\n}')
+})
+
+test('HTML preview is available in shared code cards without platform metadata and never auto-runs', () => {
+  for (const markdown of ['```html\n<button onclick="this.textContent=123">运行</button>\n```',
+    '```\n<!DOCTYPE html><html><body>完整网页</body></html>\n```', '```text\n<div>HTML 片段</div>\n```']) {
+    const html = render(markdown)
+    assert.match(html, /aria-label="运行 HTML 预览"/)
+    assert.match(html, /运行预览/)
+    assert.doesNotMatch(html, /<iframe|<script|<button onclick=/)
+  }
+  for (const [language, text] of [['javascript', 'const html = "<div>示例</div>"'], ['jsx', '<div>组件</div>'],
+    ['xml', '<svg></svg>'], ['css', 'body { color: red }'], ['html', '']]) {
+    assert.doesNotMatch(render('```' + language + '\n' + text + '\n```'), /运行 HTML 预览/)
+  }
 })

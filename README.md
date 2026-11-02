@@ -331,6 +331,10 @@ npm run dev
 
 **开发运行统一使用 `npm run dev`**，由 electron-vite 启动 Vite 与 Electron。
 
+启动前会补齐 Electron 运行时：优先使用 `HTTP_PROXY`／`HTTPS_PROXY`（也支持小写及 npm 代理配置）；未配置时，仅在本机 `127.0.0.1:7897` 端口可连接的情况下使用该代理，否则直连。代理设置只传给安装进程。默认从 npmmirror 下载，失败后尝试 GitHub 官方源；已安装完整且版本匹配时直接复用，不访问网络。可通过 `ELECTRON_MIRROR` 指定其他源。镜像默认值在 `package.json` 的 `config` 中，不再使用 npm 11 警告的自定义 `.npmrc` 键。
+
+安装失败时，终端会显示下载源及底层网络错误。安装流程的离线回归测试由开发者手动运行 `node --test tests/electron-install.test.mjs`，测试不会启动 Electron 或访问网络。
+
 | 命令 | 用途 |
 | --- | --- |
 | `npm run dev` | 开发模式及热更新。 |
@@ -569,6 +573,8 @@ npm run dev
 ```
 
 Use `npm run dev` to run the client. `npm run build` performs type checks and builds main/preload/renderer into `out/` without starting the application. `npm run dist:win` and `npm run dist:mac` produce installers in `release/`; the Windows installer embeds a self-contained computer use helper and needs a one-time networked `npm run helper:restore` on the build machine; `npm run dist:linux` remains an AppImage packaging option outside the current automatic release workflow.
+
+Before development starts, the runtime installer honors HTTP(S) proxy environment variables (including lowercase and npm settings). Without explicit settings, it uses `127.0.0.1:7897` only if that local port accepts connections, otherwise it connects directly. These settings apply only to the installer. The default npmmirror source falls back to GitHub; a complete matching installation skips network access. Set `ELECTRON_MIRROR` to override the source. Mirror defaults live in `package.json` under `config`, avoiding unsupported npm 11 `.npmrc` keys. Installation failures include the source and underlying network error. Developers can run the offline regression suite with `node --test tests/electron-install.test.mjs`; it does not launch Electron or access the network.
 
 The Linux tool requires Go 1.27.0 or later, as declared in its module:
 

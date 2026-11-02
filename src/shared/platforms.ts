@@ -254,8 +254,13 @@ export interface PageAdapter {
  * `assistantSelectors`; these are the parts only the focus view uses.
  */
 export interface FocusPageRules {
-  /** Citation popovers are read only after an explicit focus-view click. */
-  citations?: { triggerSelector: string; popupSelector: string }
+  files?: { nativeLinkSelector: string; viewerSelector: string; headerSelector: string; downloadLabel: string; closeLabel: string }
+  /** Citation popovers are read after the user hovers or opens the focus trigger. */
+  citations?: {
+    triggerSelector: string; popupSelector: string
+    native?: { triggerSelector: string; badgeSelector: string; sourceSelector: string; titleSelector: string;
+      rowSelector: string; textSelector: string; descriptionSelector: string; iconSelector: string; imageSelector: string }
+  }
   /** Native error text observed below a failed user message, outside its content. */
   sendFailure?: { messages: string[]; retryLabels: string[]; controlSelector: string }
   modelSettings?: {
@@ -717,6 +722,11 @@ export const CHATGPT_PAGE: PageAdapter = {
     captionSelector: 'p.line-clamp-2'
   },
   focus: {
+    // User-run file-preview probe 2026-11-02: pressable spans without href, a file
+    // tabpanel with viewer-header, and its 下载 button producing the original Blob.
+    files: { nativeLinkSelector: 'span[data-d-component="pressable"][role="link"][tabindex="0"]',
+      viewerSelector: '[role="tabpanel"][data-app-shell-tab-panel-controller]', headerSelector: '[data-testid="viewer-header"]',
+      downloadLabel: '下载', closeLabel: '关闭' },
     // User-run model-settings probes 2026-10-24T16-38 and T16-43:
     // one shared Radix menu, hidden model track with aria-checked, visible
     // reasoning slider 0..2, and the trigger's selected effort even when closed.
@@ -733,7 +743,16 @@ export const CHATGPT_PAGE: PageAdapter = {
     // buttons, separate state saves, and a native next request with state snapshots.
     citations: {
       triggerSelector: 'a[href], [data-citation-group], [data-citation-index], [data-testid*="citation"], [role="button"][data-state], button[aria-haspopup]',
-      popupSelector: '[role="tooltip"], [role="dialog"], [data-radix-popper-content-wrapper], [data-state="open"][id]'
+      popupSelector: '[role="tooltip"], [role="dialog"], [data-radix-popper-content-wrapper], [data-state="open"][id]',
+      // User-run citation probe 2026-11-02T06-20: href-less inline badge trigger;
+      // aria-controls identifies a dialog containing pressable source previews.
+      native: {
+        triggerSelector: 'span[data-d-inline-text][role="button"][aria-haspopup="dialog"][tabindex="0"]',
+        badgeSelector: '[data-d-component="badge"][data-pill]', sourceSelector: 'button[data-d-component="pressable"][aria-label]',
+        titleSelector: '[data-d-component="text"][data-d-weight]', rowSelector: '[data-d-component="row"]',
+        textSelector: '[data-d-component="text"]', descriptionSelector: '[data-d-component="col"]',
+        iconSelector: '[data-d-component="favicon"]', imageSelector: '[data-d-component="image"]'
+      }
     },
     smartUi: {
       rootSelector: '[data-dil-message-id]', sourceIdAttr: 'data-dil-message-id',

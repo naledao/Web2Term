@@ -1,7 +1,9 @@
 .focus-layout{--fl-muted:color-mix(in srgb,var(--fc-text) 72%,var(--fc-bg));min-width:0;margin:16px 0;color:var(--fc-text);font-size:14px;line-height:1.6}
 .focus-layout{--fl-success:#41863b;--fl-warning:#956512;--fl-accent-soft:color-mix(in srgb,var(--fc-accent) 14%,var(--fc-bg));--fl-success-soft:color-mix(in srgb,var(--fl-success) 14%,var(--fc-bg));--fl-warning-soft:color-mix(in srgb,var(--fl-warning) 14%,var(--fc-bg));--fl-danger-soft:color-mix(in srgb,var(--fc-danger) 14%,var(--fc-bg))}
 .focus-chat[data-theme=dark] .focus-layout{--fl-success:#83cb7b;--fl-warning:#e2b65b}
-.focus-layout__viewport{max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;scrollbar-color:var(--fc-muted) transparent;border-radius:14px}
+/* Rounded clipping belongs to the extracted card, not its scroll viewport:
+   unframed rows can place small labels directly against the top/right edge. */
+.focus-layout__viewport{max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;scrollbar-color:var(--fc-muted) transparent;border-radius:0}
 .focus-layout__viewport:focus-visible{outline:2px solid var(--fc-accent);outline-offset:3px}
 .focus-layout__canvas{width:100%;box-sizing:border-box}
 .focus-layout__canvas *{box-sizing:border-box;min-width:0;margin:0;padding:0;border:0 solid var(--fc-border);font-family:inherit;overflow-wrap:break-word}
@@ -13,11 +15,7 @@
 .focus-layout__canvas .focus-layout__image-error{display:grid;place-items:center;min-height:120px;width:100%;padding:16px;background:var(--fc-soft);color:var(--fl-muted);text-align:center}
 .focus-layout__image-error small{display:block;margin-top:4px;font-size:12px}
 .focus-layout__canvas p,.focus-layout__canvas li{white-space:normal}
-/* Unframed metric labels touch the viewport edge; rounded overflow clips the first glyph. */
-.focus-layout--metrics .focus-layout__viewport{border-radius:0}
-.focus-layout--list .focus-layout__viewport{border-radius:0}
 .focus-layout--list ul,.focus-layout--list ol{list-style:none}
-.focus-layout--table .focus-layout__viewport{border-radius:0}
 .focus-layout__canvas table{width:100%;border-collapse:collapse;text-align:left}
 .focus-layout__canvas th,.focus-layout__canvas td{padding:8px 12px 8px 0;border-bottom:1px solid var(--fc-border);text-align:inherit;vertical-align:top}
 .focus-layout__canvas th{font-weight:600}

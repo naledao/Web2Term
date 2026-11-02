@@ -17,12 +17,18 @@ function load(path, dependencies = {}) {
   return exports
 }
 const fileLinks = load('../src/shared/focus-file-links.ts')
-const { parseFocusLayout, validFocusLayoutUrl } = load('../src/shared/focus-layout.ts', { './focus-file-links': fileLinks })
+const citations = load('../src/shared/focus-citations.ts')
+const { CHATGPT_PAGE } = load('../src/shared/platforms.ts')
+const { parseFocusLayout, validFocusLayoutUrl } = load('../src/shared/focus-layout.ts', { './focus-file-links': fileLinks, './focus-citations': citations })
 const { cleanFocusAnswer } = load('../src/shared/focus-chat.ts')
 const messageLinks = load('../src/renderer/src/components/FocusMessageLink.tsx', { react: React, 'react/jsx-runtime': jsxRuntime,
-  '@shared/focus-file-links': fileLinks, './FocusCitationLink': { FocusCitationContext: React.createContext(null) } })
+  '@shared/focus-file-links': fileLinks, './FocusCitationLink': { FocusCitationContext: React.createContext(null),
+    default: props => citations.parseFocusCitationHref(props.href)
+      ? React.createElement('button', { className: 'fixture-citation-trigger' }, citations.parseFocusCitationHref(props.href).label)
+      : React.createElement('a', { href: props.href }, props.children) },
+  './FocusFilePreview': { FocusFilePreviewContext: React.createContext(null) } })
 const { default: FocusLayout } = load('../src/renderer/src/components/FocusLayout.tsx', { react: React, 'react/jsx-runtime': jsxRuntime,
-  '@shared/focus-file-links': fileLinks, './FocusMessageLink': messageLinks })
+  '@shared/focus-file-links': fileLinks, '@shared/focus-citations': citations, './FocusMessageLink': messageLinks })
 const source = readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8')
 const ast = ts.createSourceFile('page.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
 function find(predicate, node = ast) { return predicate(node) ? node : ts.forEachChild(node, child => find(predicate, child)) }
@@ -62,6 +68,9 @@ class Element {
     if (selector === rules.cardSelector) return this.hasAttribute('data-d-has-border')
     if (selector === rules.groupSelector) return this.attrs.role === 'radiogroup'
     if (selector === '[data-d-component]') return this.hasAttribute('data-d-component')
+    const attributes = /^(\w+)?((?:\[[^\]]+\])+)$/.exec(selector)
+    if (attributes) return (!attributes[1] || this.tagName.toLowerCase() === attributes[1]) &&
+      [...attributes[2].matchAll(/\[([^=\]]+)(?:="([^"]*)")?\]/g)].every(([, key, value]) => value === undefined ? this.hasAttribute(key) : this.getAttribute(key) === value)
     return this.tagName.toLowerCase() === selector
   }
   querySelectorAll(selector) {
@@ -190,6 +199,36 @@ test('sandbox downloads inside rich layouts remain file controls through extract
   assert.match(html, /下载完整 HTML 页面/)
   assert.match(html, /查看页面预览/)
   assert.doesNotMatch(html, /<a[^>]*href="sandbox:/)
+})
+
+test('the measured pressable span retains a native file marker in prose and rich layouts', () => {
+  for (const rich of [false, true]) {
+    const f = fixture()
+    f.context.PAGE.focus.files = { nativeLinkSelector: 'span[data-d-component="pressable"][role="link"][tabindex="0"]' }
+    f.context.focusNativeFileLinksOf = helper('focusNativeFileLinksOf', f.context)
+    f.context.focusNativeFileHref = helper('focusNativeFileHref', f.context)
+    const link = new Element('span', { 'data-d-component': 'pressable', role: 'link', tabindex: '0', 'aria-label': '下载 HTML 页面' },
+      [new Element('span', { 'data-d-component': 'text' }, ['下载 HTML 页面'])])
+    link.onclick = () => {}
+    if (rich) append(f.grid, box([link]))
+    else { f.dil.childNodes = []; append(f.dil, new Element('p', {}, [link])) }
+    const entries = f.context.focusNativeFileLinksOf({})
+    assert.equal(entries.length, 1)
+    assert.equal(link.hasAttribute('href'), false, 'the live probe found a link role without href')
+    const href = f.context.focusNativeFileHref(entries[0].data)
+    assert.deepEqual(JSON.parse(JSON.stringify(fileLinks.parseFocusNativeFileHref(href))), JSON.parse(JSON.stringify(entries[0].data)))
+    if (rich) {
+      const data = parseFocusLayout(JSON.stringify(f.layouts({})[0].data))
+      assert.ok(data)
+      assert.match(renderToStaticMarkup(React.createElement(FocusLayout, { data })), /focus-file-link__trigger/)
+    } else {
+      const markdown = f.markdown({})
+      assert.match(markdown, /\[下载 HTML 页面\]\(#web2term-native-file=/)
+      assert.doesNotMatch(fileLinks.cleanFocusFileLinkCopy(markdown), /nativeIndex|web2term-native-file|signature/)
+      link.attrs['aria-disabled'] = 'true'
+      assert.equal(f.context.focusNativeFileLinksOf({}).length, 0)
+    }
+  }
 })
 
 test('image discovery accepts image-only galleries and lazy images without mistaking image frames for progress', () => {
@@ -817,6 +856,30 @@ test('an icon list within a dashboard stays in that dashboard, while ordinary te
   const layouts = h.layouts({})
   assert.equal(layouts.length, 2)
   assert.equal(layouts.find(layout => layout.element === cards).data.kind, undefined, 'a grid keeps its layout without becoming an icon list')
+})
+
+test('an href-less citation inside a rich layout stays interactive instead of becoming a static badge', () => {
+  const f = fixture()
+  f.context.PAGE.focus.citations = CHATGPT_PAGE.focus.citations
+  for (const name of ['focusCitationSourcesOf', 'focusCitationGroupsOf', 'focusCitationHref']) f.context[name] = helper(name, f.context)
+  const badge = new Element('span', { 'data-d-inline-text': '', role: 'button', tabindex: '0',
+    'aria-haspopup': 'dialog', 'aria-expanded': 'false', 'data-state': 'closed' }, [
+    new Element('div', { 'data-d-component': 'badge', 'data-pill': '' }, ['DeepSeek API Docs'])
+  ])
+  badge.onclick = () => assert.fail('extracting the presentation never opens the native badge')
+  append(f.outer, badge)
+  const layouts = f.layouts({})
+  assert.equal(layouts.length, 1)
+  const data = parseFocusLayout(JSON.stringify(layouts[0].data))
+  assert.ok(data)
+  const serialized = JSON.stringify(data)
+  assert.match(serialized, /#web2term-citation=/)
+  const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+  assert.match(html, /class="fixture-citation-trigger">DeepSeek API Docs<\/button>/)
+  assert.doesNotMatch(html, /href="#web2term-citation=/)
+  const invalid = JSON.parse(serialized)
+  invalid.root = { tag: 'a', attrs: { href: '#web2term-citation=%ZZ' }, children: ['坏标记'] }
+  assert.equal(parseFocusLayout(JSON.stringify(invalid)), null)
 })
 
 test('layout parser rejects executable tags, event attributes, remote references, unsafe CSS and excessive depth', () => {

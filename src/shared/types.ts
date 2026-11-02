@@ -9,9 +9,11 @@ import type { AutonomousTaskState, TaskResumeRequest } from './autonomous-task'
 import type { TaskLease } from './autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from './task-presentation'
 import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo, FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from './focus-chat'
+import type { CompactionAction, CompactionRequest, CompactionState } from './conversation-compaction'
 import type { FocusUiRequest } from './focus-smart-ui'
-import type { FocusCitationRequest, FocusCitationResult } from './focus-citations'
-import type { FocusFileLinkRequest } from './focus-file-links'
+import type { FocusCitationRequest, FocusCitationResult, FocusCitationOpenRequest } from './focus-citations'
+import type { FocusFileLinkRequest, FocusFilePreviewRequest, FocusFilePreviewResult, FocusFilePreviewHandle } from './focus-file-links'
+import type { FocusHtmlPreviewRequest, FocusHtmlPreviewOutcome } from './focus-html-preview'
 import type { RemoteRipgrepState, RemoteRipgrepRequest, RemoteRipgrepTaskResult } from './remote-ripgrep'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
@@ -45,13 +47,22 @@ export const IpcChannels = {
   embedNavigate: 'embed:navigate',
   embedGetState: 'embed:get-state',
   focusChatGet: 'focus-chat:get',
+  compactionGet: 'compaction:get',
+  compactionStart: 'compaction:start',
+  compactionAction: 'compaction:action',
+  compactionViewport: 'compaction:viewport',
   focusChatSend: 'focus-chat:send',
   focusChatStopGeneration: 'focus-chat:stop-generation',
   focusChatRetrySend: 'focus-chat:retry-send',
   focusChatEdit: 'focus-chat:edit',
   focusChatUiAction: 'focus-chat:ui-action',
   focusChatCitation: 'focus-chat:citation',
+  focusChatCitationOpen: 'focus-chat:citation-open',
   focusChatFileLink: 'focus-chat:file-link',
+  focusChatFilePreview: 'focus-chat:file-preview',
+  focusChatFileSave: 'focus-chat:file-save',
+  focusChatFileRelease: 'focus-chat:file-release',
+  focusHtmlPreview: 'focus-html:preview',
   focusChatComposerMode: 'focus-chat:composer-mode',
   focusChatModelSettings: 'focus-chat:model-settings',
   focusChatAsk: 'focus-chat:ask',
@@ -696,6 +707,8 @@ export const EMPTY_NACOS_VIEW_STATE: NacosViewState = {
 
 /** Snapshot of the embedded view, pushed from main to the renderer. */
 export interface EmbedState {
+  /** Stable local transcript identity across compaction; the page owner stays conversationId. */
+  viewConversationId?: string | null
   url: string
   title: string
   isLoading: boolean
@@ -772,6 +785,8 @@ export interface ConversationAttachment {
 }
 /** One clean user/assistant turn persisted for the app-owned conversation view. */
 export interface ConversationMessage {
+  /** Read-only display history from an earlier physical chat in this conversation. */
+  archived?: boolean
   id: string
   conversationId: string
   role: 'user' | 'assistant'
@@ -1655,6 +1670,8 @@ export function isRecentCommandPayload(payload: unknown): boolean {
 
 /** One command lifted out of an assistant reply, and what happened to it. */
 export interface ExecutionRecord {
+  /** Display-only predecessor record; never a runnable request in the current chat. */
+  archived?: boolean
   /** Assistant message id, or a unique rerun:<uuid> for an explicit history replay. */
   messageId: string
   conversationId: string
@@ -2362,6 +2379,10 @@ export interface AppApi {
   /** Current embed snapshot; call once on mount to cover events fired before subscribing. */
   getEmbedState(): Promise<EmbedState>
   getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
+  getCompaction(owner: FocusOwner): Promise<CompactionState | null>
+  startCompaction(owner: FocusOwner): Promise<CompactionState>
+  compactionAction(request: CompactionRequest, action: CompactionAction): Promise<void>
+  setCompactionViewport(request: CompactionRequest, bounds: EmbedBounds, visible: boolean): void
   pollFocusChat(owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null>
   readFocusExecutionOutput(owner: FocusOwner, messageId: string): Promise<string | null>
   sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome>
@@ -2370,7 +2391,12 @@ export interface AppApi {
   editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome>
   actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome>
   readFocusCitation(request: FocusCitationRequest): Promise<FocusCitationResult>
+  openFocusCitationSource(request: FocusCitationOpenRequest): Promise<FocusCitationResult['outcome']>
   openFocusFileLink(request: FocusFileLinkRequest): Promise<FocusSendOutcome>
+  previewFocusFile(request: FocusFilePreviewRequest): Promise<FocusFilePreviewResult>
+  saveFocusFilePreview(owner: FocusFilePreviewHandle): Promise<FocusSendOutcome>
+  releaseFocusFilePreview(owner: FocusFilePreviewHandle): Promise<void>
+  previewFocusHtml(request: FocusHtmlPreviewRequest): Promise<FocusHtmlPreviewOutcome>
   setFocusComposerMode(request: FocusComposerModeRequest): Promise<FocusSendOutcome>
   updateFocusModelSettings(request: FocusModelSettingsRequest): Promise<FocusModelSettingsResult>
   /** Ask about a focus-view selection in the side chat; '' once it is open, otherwise the message to show. */

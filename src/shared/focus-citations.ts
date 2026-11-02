@@ -3,12 +3,23 @@ import type { FocusOwner } from './focus-chat'
 export interface FocusCitationTarget { sourceMessageId: string; index: number; signature: string }
 export interface FocusCitation extends FocusCitationTarget { label: string }
 export interface FocusCitationRequest extends FocusCitationTarget, FocusOwner {}
-export interface FocusCitationSource { title: string; url: string; site: string }
+export interface FocusCitationSourceTarget { index: number; signature: string }
+export interface FocusCitationOpenRequest extends FocusCitationRequest { source: FocusCitationSourceTarget }
+export interface FocusCitationSource {
+  title: string; site: string; url?: string
+  /** Native button cards expose preview metadata without a public destination URL. */
+  kind?: 'preview'; description?: string; icon?: string; image?: string; native?: FocusCitationSourceTarget
+}
 export interface FocusCitationResult {
   outcome: 'ok' | 'busy' | 'unavailable' | 'cancelled'
   sources: FocusCitationSource[]
 }
 export const FOCUS_CITATION_PREFIX = '#web2term-citation='
+export function validFocusCitationSourceTarget(value: unknown): value is FocusCitationSourceTarget {
+  const item = value as FocusCitationSourceTarget | null
+  return !!item && Number.isSafeInteger(item.index) && item.index >= 0 && item.index < 40 &&
+    typeof item.signature === 'string' && /^[a-f0-9]{8}$/.test(item.signature)
+}
 
 export function validFocusCitationTarget(value: unknown): value is FocusCitationTarget {
   const item = value as FocusCitationTarget | null
@@ -28,8 +39,30 @@ export function parseFocusCitationSources(value: unknown): FocusCitationSource[]
   const seen = new Set<string>(), sources: FocusCitationSource[] = []
   for (const item of value) {
     if (!item || typeof item.title !== 'string' || !item.title.trim() || item.title.length > 1000 ||
-      typeof item.site !== 'string' || item.site.length > 200 || typeof item.url !== 'string' || item.url.length > 4096 ||
-      /[\s\u0000-\u001f\u007f]/.test(item.url)) return null
+      typeof item.site !== 'string' || item.site.length > 200) return null
+    if (item.kind === 'preview') {
+      if (item.url !== undefined || !item.site.trim() || (item.description !== undefined &&
+        (typeof item.description !== 'string' || item.description.length > 2000))) return null
+      const source: FocusCitationSource = { kind: 'preview', title: item.title, site: item.site }
+      if (item.native !== undefined) {
+        if (!validFocusCitationSourceTarget(item.native)) return null
+        source.native = { index: item.native.index, signature: item.native.signature }
+      }
+      if (item.description) source.description = item.description
+      for (const key of ['icon', 'image'] as const) {
+        if (item[key] === undefined) continue
+        if (typeof item[key] !== 'string' || item[key].length > 4096 || /[\s\u0000-\u001f\u007f]/.test(item[key])) return null
+        try {
+          const url = new URL(item[key])
+          if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) return null
+          source[key] = url.href
+        } catch { return null }
+      }
+      const key = JSON.stringify(source)
+      if (!seen.has(key)) { seen.add(key); sources.push(source) }
+      continue
+    }
+    if (item.kind !== undefined || typeof item.url !== 'string' || item.url.length > 4096 || /[\s\u0000-\u001f\u007f]/.test(item.url)) return null
     try {
       const url = new URL(item.url)
       if (!['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password) return null

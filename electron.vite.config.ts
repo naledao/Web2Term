@@ -4,10 +4,11 @@ import { createRequire } from 'node:module'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import { PDF_ASSETS } from './src/shared/pdf-assets'
+import { configureWindowsDevelopmentRuntime } from './build/windows-dev-runtime'
 
 const resolvePackage = createRequire(import.meta.url)
 
-export default defineConfig({
+const config = defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()]
   },
@@ -50,4 +51,9 @@ export default defineConfig({
       }
     }
   }
+})
+
+export default defineConfig(async ({ command }) => {
+  await configureWindowsDevelopmentRuntime(command, __dirname, () => resolvePackage('electron') as string)
+  return config
 })

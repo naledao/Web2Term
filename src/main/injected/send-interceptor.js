@@ -232,6 +232,7 @@
   let focusEditing = null
   let focusModeChanging = null
   let focusCitationOperation = null
+  let focusFileControl = null
   let focusModelCache = null
   // Editing can remove the latest reply and temporarily expose an older one. It must
   // never be mistaken for the new reply or re-executed as a fresh command.
@@ -702,11 +703,66 @@
   // Reuse copies across focus polling; weak keys release them with their native image elements.
   const focusLayoutImageCopies = new WeakMap()
 
+  // User-measured DIL file entries are pressable spans, with no downloadable href.
+  const focusNativeFileLinksOf = node => {
+    const rules = PAGE.focus?.files, smart = PAGE.focus?.smartUi, root = rules && smart ? replyRootOf(node) : null
+    const sourceMessageId = root ? messageIdOf(node) : ''
+    if (!root || !/^[a-zA-Z0-9_:-]{1,160}$/.test(sourceMessageId)) return []
+    return [...root.querySelectorAll(rules.nativeLinkSelector)].filter(element => {
+      const scope = element.closest(smart.rootSelector), label = collapse(element.textContent)
+      return scope?.getAttribute(smart.sourceIdAttr) === sourceMessageId && isVisibleElement(element)
+        && !element.closest('pre, code, a, button, [contenteditable="true"]') && !element.hasAttribute('href')
+        && element.getAttribute('aria-disabled') !== 'true' && typeof element.onclick === 'function'
+        && label.length > 0 && label.length <= 1000 && /下载|download|预览|preview/i.test(label + ' ' + (element.getAttribute('aria-label') || ''))
+    }).slice(0, 100).map((element, nativeIndex) => {
+      const label = collapse(element.textContent), identity = JSON.stringify([label, element.getAttribute('aria-label'), element.getAttribute('data-d-component')])
+      let hash = 2166136261
+      for (let at = 0; at < identity.length; at++) hash = Math.imul(hash ^ identity.charCodeAt(at), 16777619)
+      return { element, data: { sourceMessageId, nativeIndex, signature: (hash >>> 0).toString(16).padStart(8, '0'), label } }
+    })
+  }
+  const focusNativeFileHref = data => '#web2term-native-file=' + encodeURIComponent(JSON.stringify(data))
+    .replace(/[!'()*]/g, value => '%' + value.charCodeAt(0).toString(16).toUpperCase())
+  const focusFileLinkElement = (node, request) => {
+    if (request.href === undefined) {
+      const entries = focusNativeFileLinksOf(node).filter(item => item.data.signature === request.signature && item.data.label === request.label)
+      return entries.length === 1 && entries[0].data.nativeIndex === request.nativeIndex ? entries[0].element : null
+    }
+    const root = replyRootOf(node)
+    if (!root) return null
+    const links = [...(root.matches('a[href]') ? [root] : []), ...root.querySelectorAll('a[href]')].filter(link => {
+      if (link.closest('pre, code') || !isVisibleElement(link) || link.getAttribute('aria-disabled') === 'true' || collapse(link.textContent) !== request.label) return false
+      const raw = link.getAttribute('href') || ''
+      if (!/^sandbox:\/(?!\/)/i.test(raw) || /[\u0000-\u001f\u007f]/.test(raw)) return false
+      try { return new URL(raw).href === request.href } catch (_) { return false }
+    })
+    return links.length === 1 ? links[0] : null
+  }
+  const focusFileViewersOf = () => {
+    const rules = PAGE.focus?.files
+    if (!rules) return []
+    return [...document.querySelectorAll(rules.viewerSelector)].filter(isVisibleElement).flatMap(panel => {
+      const header = panel.querySelector(rules.headerSelector), fileName = panel.getAttribute('aria-label') || ''
+      if (!header || !panel.querySelector('iframe') || !/^[^\\/\u0000-\u001f\u007f]{1,240}$/.test(fileName) || ['.', '..'].includes(fileName)) return []
+      const buttons = [...header.querySelectorAll('button[aria-label]')]
+      const download = buttons.filter(button => button.getAttribute('aria-label') === rules.downloadLabel)
+      const close = buttons.filter(button => (button.getAttribute('aria-label') || '').includes(rules.closeLabel))
+      if (download.length !== 1) return []
+      const identity = panel.getAttribute('data-tab-id') || panel.id || fileName
+      let hash = 2166136261
+      for (let at = 0; at < identity.length; at++) hash = Math.imul(hash ^ identity.charCodeAt(at), 16777619)
+      return [{ panel, download: download[0], close: close.length === 1 ? close[0] : null,
+        fileName, signature: (hash >>> 0).toString(16).padStart(8, '0') }]
+    })
+  }
+
   /** A bounded presentation tree, read from native DIL boxes, images, lists, tables and vector icons. */
   const smartUiLayoutsOf = node => {
     const rules = PAGE.focus?.smartUi, answer = rules ? replyRootOf(node) : null
     if (!answer) return []
     const roots = [...(answer.matches(rules.rootSelector) ? [answer] : []), ...answer.querySelectorAll(rules.rootSelector)]
+    const nativeFiles = PAGE.focus?.files ? focusNativeFileLinksOf(node) : []
+    const citations = PAGE.focus?.citations ? focusCitationGroupsOf(node) : []
     const allowed = new Set(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'small',
       'ul', 'ol', 'li', 'hr', 'br', 'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'code', 'a', 'img', 'figure', 'figcaption',
       'svg', 'g', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse'])
@@ -928,6 +984,12 @@
           if (current.nodeType !== Node.ELEMENT_NODE) return null
           const nativeTag = current.tagName.toLowerCase()
           if (ignored.has(nativeTag)) return null
+          const citation = citations.find(item => item.element === current)
+          if (citation) {
+            chars += citation.data.label.length
+            if (chars > 40000) { failed = true; return null }
+            return { tag: 'a', attrs: { href: focusCitationHref(citation.data) }, children: [citation.data.label] }
+          }
           const computed = getComputedStyle(current)
           if (computed.display === 'none' || ['hidden', 'collapse'].includes(computed.visibility) || current.hasAttribute('hidden')) return null
           const bar = progress.get(current)
@@ -940,9 +1002,10 @@
               height: '100%', borderRadius: bar.radius, backgroundColor: bar.tone } }] }
           }
           const divider = separator(current)
-          const href = nativeTag === 'a' ? urlOf(current.href || current.getAttribute('href')) : ''
+          const nativeFile = nativeFiles.find(item => item.element === current)
+          const href = nativeFile ? focusNativeFileHref(nativeFile.data) : nativeTag === 'a' ? urlOf(current.href || current.getAttribute('href')) : ''
           const tag = current.getAttribute('data-markdown-copy') === 'inline-code' ? 'code' :
-            nativeTag === 'a' && !href ? 'span' : allowed.has(nativeTag) ? nativeTag :
+            nativeFile ? 'a' : nativeTag === 'a' && !href ? 'span' : allowed.has(nativeTag) ? nativeTag :
             nativeTag === 'button' || nativeTag === 'input' || nativeTag === 'textarea' ? 'span' : 'div'
           const result = { tag }, style = {}, attrs = {}
           const put = (key, value) => { if (value) style[key] = value }
@@ -1095,29 +1158,59 @@
     const rules = PAGE.focus?.citations, root = rules ? replyRootOf(node) : null
     const sourceMessageId = root ? messageIdOf(node) : ''
     if (!root || !/^[a-zA-Z0-9_:-]{1,160}$/.test(sourceMessageId)) return []
+    const nativeOf = element => {
+      const native = rules.native, smart = PAGE.focus?.smartUi
+      return !!native && !!smart && element.matches(native.triggerSelector) && !!element.querySelector(native.badgeSelector) &&
+        typeof element.onclick === 'function' && element.closest(smart.rootSelector)?.getAttribute(smart.sourceIdAttr) === sourceMessageId
+    }
     const candidates = [...(root.matches(rules.triggerSelector) ? [root] : []), ...root.querySelectorAll(rules.triggerSelector)]
       .filter(element => {
         if (element.closest('pre, code') || !isVisibleElement(element)) return false
         const label = collapse(element.textContent), sources = focusCitationSourcesOf(element)
         const explicit = element.hasAttribute('data-citation-group') || element.hasAttribute('data-citation-index') ||
           /citation/i.test(element.getAttribute('data-testid') || '')
-        return label && label.length <= 500 && (explicit || sources.length > 0 &&
+        return label && label.length <= 500 && (nativeOf(element) || explicit || sources.length > 0 &&
           (/\+\s*[1-9]\d?\s*$/.test(label) || element.hasAttribute('data-state') || element.hasAttribute('aria-describedby') ||
             element.hasAttribute('aria-controls') || element.hasAttribute('aria-haspopup')))
       })
     return candidates.filter(element => !candidates.some(parent => parent !== element && parent.contains(element))).slice(0, 100)
       .map((element, index) => {
-        const label = collapse(element.textContent), sources = focusCitationSourcesOf(element)
-        const identity = JSON.stringify([label, sources.map(source => source.url)])
+        const label = collapse(element.textContent), sources = focusCitationSourcesOf(element), native = nativeOf(element)
+        const identity = JSON.stringify([label, sources.map(source => source.url), ...(native ? ['native-badge'] : [])])
         let hash = 2166136261
         for (let at = 0; at < identity.length; at++) hash = Math.imul(hash ^ identity.charCodeAt(at), 16777619)
-        return { element, sources, expected: Math.max(sources.length, Number(label.match(/\+\s*(\d+)\s*$/)?.[1] || 0) + 1),
+        return { element, sources, native, expected: Math.max(sources.length, Number(label.match(/\+\s*(\d+)\s*$/)?.[1] || 0) + 1),
           data: { sourceMessageId, index, signature: (hash >>> 0).toString(16).padStart(8, '0'), label } }
       })
   }
+  const focusCitationHref = data => '#web2term-citation=' + encodeURIComponent(JSON.stringify(data)).replace(/[!'()*]/g, value => '%' + value.charCodeAt(0).toString(16).toUpperCase())
   const focusCitationMarkdown = data => {
-    const payload = encodeURIComponent(JSON.stringify(data)).replace(/[!'()*]/g, value => '%' + value.charCodeAt(0).toString(16).toUpperCase())
-    return '[' + data.label.replace(/[\\\[\]]/g, '\\$&') + '](#web2term-citation=' + payload + ')'
+    return '[' + data.label.replace(/[\\\[\]]/g, '\\$&') + '](' + focusCitationHref(data) + ')'
+  }
+  const focusCitationNativeSourcesOf = (root, withElements = false) => {
+    const rules = PAGE.focus?.citations?.native
+    if (!rules) return []
+    const imageOf = container => {
+      const image = container?.querySelector('img'), raw = image?.currentSrc || image?.getAttribute('src') || ''
+      if (!raw || raw.length > 4096 || /[\s\u0000-\u001f\u007f]/.test(raw)) return ''
+      try { const url = new URL(raw, location.href); return url.protocol === 'https:' && url.hostname && !url.username && !url.password ? url.href : '' } catch (_) { return '' }
+    }
+    const buttons = [...root.querySelectorAll(rules.sourceSelector)].filter(isVisibleElement)
+    if (buttons.length > 40) return []
+    return buttons.flatMap((button, index) => {
+      if (typeof button.onclick !== 'function' || button.closest('pre, code, [contenteditable="true"]') || button.getAttribute('aria-disabled') === 'true' || button.disabled) return []
+      const title = collapse(button.querySelector(rules.titleSelector)?.textContent),
+        site = collapse(button.querySelector(rules.rowSelector)?.querySelector(rules.textSelector)?.textContent),
+        description = collapse(button.querySelector(rules.descriptionSelector)?.textContent)
+      if (!title || title.length > 1000 || !site || site.length > 200 || description.length > 2000) return []
+      const icon = imageOf(button.querySelector(rules.iconSelector)), image = imageOf(button.querySelector(rules.imageSelector))
+      const identity = JSON.stringify([title, site, button.getAttribute('aria-label')])
+      let hash = 2166136261
+      for (let at = 0; at < identity.length; at++) hash = Math.imul(hash ^ identity.charCodeAt(at), 16777619)
+      const source = { kind: 'preview', title, site, native: { index, signature: (hash >>> 0).toString(16).padStart(8, '0') },
+        ...(description ? { description } : {}), ...(icon ? { icon } : {}), ...(image ? { image } : {}) }
+      return [withElements ? { element: button, source } : source]
+    })
   }
 
   const readReplyMarkdown = (node) => {
@@ -1126,6 +1219,7 @@
     const smartCards = PAGE.focus?.smartUi ? smartUiCardsOf(node) : []
     const layouts = PAGE.focus?.smartUi ? smartUiLayoutsOf(node) : []
     const citations = PAGE.focus?.citations ? focusCitationGroupsOf(node) : []
+    const nativeFiles = PAGE.focus?.files ? focusNativeFileLinksOf(node) : []
     const codeCards = new Map()
     const codeMarkdown = []
     const languageAliases = { 'c++': 'cpp', 'c#': 'csharp', cs: 'csharp', js: 'javascript', ts: 'typescript',
@@ -1194,6 +1288,8 @@
       const element = current
       const codeCard = codeCards.get(element)
       if (codeCard) return renderCode(codeCard.code, codeCard.language)
+      const nativeFile = nativeFiles.find(item => item.element === element)
+      if (nativeFile) return '[' + nativeFile.data.label.replace(/[\\\[\]]/g, '\\$&') + '](' + focusNativeFileHref(nativeFile.data) + ')'
       const citation = citations.find(item => item.element === element)
       if (citation) return focusCitationMarkdown(citation.data)
       const smart = smartCards.find(card => card.element === element)
@@ -6284,24 +6380,19 @@
     /** Replay only the file link the user selected, through the page's existing authenticated handler. */
     openFocusFileLink(request, expectedPath) {
       if (!PAGE.focus || !request || !/^[a-zA-Z0-9_:-]{1,160}$/.test(request.sourceMessageId || '') ||
-        typeof request.href !== 'string' || request.href.length > 4096 || !/^sandbox:\/(?!\/)/i.test(request.href) ||
-        /[\u0000-\u001f\u007f]/.test(request.href) || typeof request.label !== 'string' ||
+        !(typeof request.href === 'string' ? request.href.length <= 4096 && /^sandbox:\/(?!\/)/i.test(request.href) &&
+          !/[\u0000-\u001f\u007f]/.test(request.href) && request.nativeIndex === undefined && request.signature === undefined :
+          request.href === undefined && Number.isSafeInteger(request.nativeIndex) && request.nativeIndex >= 0 && request.nativeIndex < 100 && /^[a-f0-9]{8}$/.test(request.signature || '')) ||
+        typeof request.label !== 'string' ||
         !request.label || request.label.length > 1000 || collapse(request.label) !== request.label) return 'invalid'
       if (location.pathname !== expectedPath) return 'cancelled'
       if (focusCitationOperation || focusEditing || focusModeChanging || state.programmatic || fileSend) return 'busy'
       const nodes = queryAllAssistant().filter(node => messageIdOf(node) === request.sourceMessageId && isVisibleElement(node))
       if (nodes.length !== 1) return 'unavailable'
-      const root = replyRootOf(nodes[0])
-      if (!root) return 'unavailable'
-      const links = [...(root.matches('a[href]') ? [root] : []), ...root.querySelectorAll('a[href]')].filter(link => {
-        if (link.closest('pre, code') || !isVisibleElement(link) || link.getAttribute('aria-disabled') === 'true' ||
-          collapse(link.textContent) !== request.label) return false
-        const raw = link.getAttribute('href') || ''
-        if (!/^sandbox:\/(?!\/)/i.test(raw) || /[\u0000-\u001f\u007f]/.test(raw)) return false
-        try { return new URL(raw).href === request.href } catch (_) { return false }
-      })
-      if (links.length !== 1) return 'unavailable'
-      const link = links[0]
+      const link = focusFileLinkElement(nodes[0], request)
+      if (!link) return 'unavailable'
+      // Href-less pressables require the acknowledged native input path below.
+      if (request.href === undefined) return 'unavailable'
       // Bubble after the site's own handler, allowing it to resolve/download the file
       // while preventing the raw sandbox URL from becoming an OS protocol navigation.
       const preventNavigation = event => {
@@ -6310,6 +6401,100 @@
       document.addEventListener('click', preventNavigation)
       try { link.click(); return 'ok' } catch (_) { return 'unknown' }
       finally { document.removeEventListener('click', preventNavigation) }
+    },
+
+    prepareFocusFileControl(request, expectedPath) {
+      if (!PAGE.focus?.files || !request || !['source', 'download'].includes(request.kind) ||
+        !/^[a-zA-Z0-9-]{1,80}$/.test(request.token || '') || !request.target) return { outcome: 'invalid' }
+      if (location.pathname !== expectedPath) return { outcome: 'cancelled' }
+      if (focusFileControl || focusCitationOperation || focusEditing || focusModeChanging || state.programmatic || fileSend) return { outcome: 'busy' }
+      const locate = () => {
+        if (request.kind === 'source') {
+          const target = request.target
+          if (!/^[a-zA-Z0-9_:-]{1,160}$/.test(target.sourceMessageId || '') || target.href !== undefined ||
+            !Number.isSafeInteger(target.nativeIndex) || target.nativeIndex < 0 || target.nativeIndex >= 100 ||
+            !/^[a-f0-9]{8}$/.test(target.signature || '') || typeof target.label !== 'string') return null
+          const nodes = queryAllAssistant().filter(node => messageIdOf(node) === target.sourceMessageId && isVisibleElement(node))
+          return nodes.length === 1 ? focusFileLinkElement(nodes[0], target) : null
+        }
+        const viewers = focusFileViewersOf().filter(viewer => viewer.fileName === request.target.fileName && viewer.signature === request.target.signature)
+        return viewers.length === 1 && !viewers[0].download.disabled && viewers[0].download.getAttribute('aria-busy') !== 'true' ? viewers[0].download : null
+      }
+      const target = locate()
+      if (!target || !isVisibleElement(target)) return { outcome: 'unavailable', reason: 'native-click-target-changed' }
+      try { target.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' }) } catch (_) {}
+      // A multi-line inline link can have a bounding-box centre outside its text.
+      const point = [...target.getClientRects()].map(box => ({ x: box.left + box.width / 2, y: box.top + box.height / 2 }))
+        .find(({ x, y }) => {
+          if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false
+          const hit = document.elementFromPoint(x, y)
+          return hit && (hit === target || target.contains(hit))
+        })
+      if (!point) return { outcome: 'unavailable', reason: 'native-click-unreachable' }
+      const operation = { token: request.token, generation: state.taskPromptGeneration, pressed: false,
+        received: false, failed: false, prevented: false, timer: null, dispose: null }
+      const types = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']
+      const guard = event => {
+        if (!event.isTrusted || operation.received) return
+        if (focusFileControl !== operation || location.pathname !== expectedPath || operation.generation !== state.taskPromptGeneration || state.programmatic || fileSend ||
+          (!operation.pressed && locate() !== target) || !isVisibleElement(target) || !(event.target === target || target.contains(event.target))) {
+          operation.failed = true
+          event.preventDefault(); event.stopImmediatePropagation(); return
+        }
+        if (event.type === 'pointerdown' || event.type === 'mousedown') operation.pressed = true
+        if (event.type === 'click') {
+          operation.received = true
+          queueMicrotask(() => { operation.prevented = event.defaultPrevented })
+        }
+      }
+      operation.dispose = () => {
+        clearTimeout(operation.timer)
+        for (const type of types) document.removeEventListener(type, guard, true)
+        if (focusFileControl === operation) focusFileControl = null
+      }
+      focusFileControl = operation
+      for (const type of types) document.addEventListener(type, guard, true)
+      operation.timer = setTimeout(operation.dispose, 2000)
+      return { outcome: 'ok', ...point }
+    },
+    finishFocusFileControl(token, release) {
+      const operation = focusFileControl
+      if (!operation || operation.token !== token) return { outcome: 'unavailable' }
+      const result = { outcome: operation.failed ? 'unavailable' : operation.received ? 'ok' : 'pending', prevented: operation.prevented }
+      if (release === true) operation.dispose()
+      return result
+    },
+
+    prepareFocusFileViewer(request, expectedPath) {
+      if (location.pathname !== expectedPath || !PAGE.focus?.files) return 'cancelled'
+      if (focusCitationOperation || focusEditing || focusModeChanging || state.programmatic || fileSend) return 'busy'
+      const nodes = queryAllAssistant().filter(node => messageIdOf(node) === request.sourceMessageId && isVisibleElement(node))
+      if (nodes.length !== 1 || !focusFileLinkElement(nodes[0], request)) return 'unavailable'
+      const viewers = focusFileViewersOf()
+      if (viewers.length > 3 || viewers.some(viewer => !viewer.close)) return 'unavailable'
+      for (const viewer of viewers) viewer.close.click()
+      return 'ok'
+    },
+    readFocusFileViewer(expectedPath) {
+      if (location.pathname !== expectedPath) return { outcome: 'cancelled' }
+      const viewers = focusFileViewersOf()
+      if (!viewers.length) return { outcome: 'pending' }
+      if (viewers.length !== 1) return { outcome: 'unavailable' }
+      const viewer = viewers[0]
+      if (viewer.download.disabled || viewer.download.getAttribute('aria-busy') === 'true') return { outcome: 'pending' }
+      return { outcome: 'ok', fileName: viewer.fileName, signature: viewer.signature }
+    },
+    downloadFocusFileViewer(target, expectedPath) {
+      if (location.pathname !== expectedPath || state.programmatic || fileSend) return 'cancelled'
+      const viewers = focusFileViewersOf().filter(viewer => viewer.fileName === target.fileName && viewer.signature === target.signature)
+      if (viewers.length !== 1 || viewers[0].download.disabled || viewers[0].download.getAttribute('aria-busy') === 'true') return 'unavailable'
+      viewers[0].download.click()
+      return 'ok'
+    },
+    closeFocusFileViewer(target, expectedPath) {
+      if (location.pathname !== expectedPath) return
+      const viewers = focusFileViewersOf().filter(viewer => viewer.fileName === target.fileName && viewer.signature === target.signature)
+      if (viewers.length === 1) viewers[0].close?.click()
     },
 
     /** Arm a read of one reply's citation trigger, without changing the composer or task state. */
@@ -6342,6 +6527,18 @@
       // Opening a source list must never navigate the hidden control conversation.
       operation.inputEvents = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']
       operation.guard = event => {
+        const source = operation.sourceClick
+        if (source) {
+          if (!event.isTrusted || source.received) return
+          const hit = event.target === source.element || source.element.contains(event.target)
+          if (!operation.current() || !source.element.isConnected || !hit || (!source.pressed && source.locate() !== source.element)) {
+            source.failed = true
+            event.preventDefault(); event.stopImmediatePropagation(); return
+          }
+          if (event.type === 'pointerdown' || event.type === 'mousedown') source.pressed = true
+          if (event.type === 'click') source.received = true
+          return
+        }
         const hit = event.target === group.element || group.element.contains(event.target)
         if (operation.clickArmed && (!operation.current() || !hit)) {
           operation.clickInvalid = true
@@ -6364,6 +6561,32 @@
       if (point) operation.clickArmed = true
       return point
     },
+    prepareFocusCitationSourceClick(token, request) {
+      const operation = focusCitationOperation
+      if (!operation || operation.token !== token || !operation.current() || !operation.group.native || operation.sourceClick ||
+        !request || !Number.isSafeInteger(request.index) || request.index < 0 || request.index >= 40 || !/^[a-f0-9]{8}$/.test(request.signature || '')) return null
+      const locate = () => {
+        const popup = operation.popup
+        const ids = ['aria-describedby', 'aria-controls'].flatMap(key => String(operation.group.element.getAttribute(key) || '').split(/\s+/).filter(Boolean))
+        if (!operation.current() || !popup?.isConnected || !isVisibleElement(popup) || !ids.some(id => document.getElementById(id) === popup)) return null
+        const matches = focusCitationNativeSourcesOf(popup, true).filter(card => card.source.native.signature === request.signature)
+        return matches.length === 1 && matches[0].source.native.index === request.index ? matches[0].element : null
+      }
+      const element = locate()
+      if (!element) return null
+      try { element.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' }) } catch (_) {}
+      const rect = element.getBoundingClientRect(), x = rect.left + rect.width / 2, y = rect.top + rect.height / 2
+      const hit = document.elementFromPoint(x, y)
+      if (rect.width <= 0 || rect.height <= 0 || !hit || !(hit === element || element.contains(hit))) return null
+      operation.clickArmed = false
+      operation.sourceClick = { element, locate, received: false, pressed: false, failed: false }
+      return { x, y }
+    },
+    finishFocusCitationSourceClick(token) {
+      const operation = focusCitationOperation, source = operation?.sourceClick
+      if (!operation || operation.token !== token || !source || !operation.current()) return { outcome: 'cancelled' }
+      return { outcome: source.failed ? 'unavailable' : source.received ? 'ok' : 'pending' }
+    },
     async finishFocusCitation(token, waitMs) {
       const operation = focusCitationOperation
       if (!operation || operation.token !== token) return { outcome: 'cancelled', sources: [] }
@@ -6380,7 +6603,9 @@
         // Ownership does not depend on all links having loaded. Keep an identified
         // partial list available for cleanup when this read times out.
         const candidates = roots.flatMap(element => {
-          const sources = focusCitationSourcesOf(element)
+          const links = focusCitationSourcesOf(element)
+          // Button previews are accepted only from the trigger's own ARIA-linked dialog.
+          const sources = links.length ? links : operation.group.native && linked.includes(element) ? focusCitationNativeSourcesOf(element) : []
           if (!linked.includes(element) &&
             !operation.group.sources.some(known => sources.some(source => source.url === known.url))) return []
           return [{ element, sources }]
@@ -6428,6 +6653,23 @@
       return !current() ? 'cancelled' : focusGenerationState() === 'idle' ? 'ok' : 'unknown'
     },
     /** Read-only view data. User text is exposed only through the scoped recovery read above. */
+    compactionSnapshot(marker, fileName) {
+      if (typeof marker !== 'string' || !/^W2T_(?:COMPACT|HANDOFF)_[0-9a-f]{32}$/.test(marker) ||
+          !['source.md', 'summary.md'].includes(fileName)) return null
+      const users = fileUserTurns().filter(isVisibleElement).sort((a, b) =>
+        a === b ? 0 : a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
+      const user = users.at(-1)
+      const latest = latestReplyNode(queryAllAssistant())
+      const follows = !!latest && (!user || !!(user.compareDocumentPosition(latest) & Node.DOCUMENT_POSITION_FOLLOWING))
+      const requestFound = users.some(row => String(row.innerText || '').includes(marker) &&
+        turnShowsFiles(row, [{ fileName, mimeType: 'text/markdown' }]))
+      const answer = follows && isAssistantTurn(latest) ? readReplyMarkdown(latest) || readReplyText(latest) : ''
+      return { path: location.pathname, ready: !!getComposer(), nativeDraft: !!getComposer() && !!collapse(readComposer(getComposer())),
+        generating: focusGenerationState(), requestFound, hasHistory: queryAllMessages().length > 0,
+        replyId: follows && latest ? turnKeyOf(latest) : '', answer: answer.slice(0, 250000),
+        cutOff: !!latest && !!findContinueButton(latest), sendFailure: !!focusSendFailureOf(),
+        oversized: answer.length > 250000 }
+    },
     focusSnapshot() {
       // Every page-specific read below comes from the platform's measured focus rules.
       const rules = PAGE.focus || { reasoningSelectors: [] }

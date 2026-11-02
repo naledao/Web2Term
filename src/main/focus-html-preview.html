@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="{{theme}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="{{policy}}">
+  <title>HTML 预览 · Web2Term</title>
+  <style>
+    *{box-sizing:border-box}html,body{height:100%;margin:0}
+    :root{color-scheme:light;--bg:#f5f6fa;--panel:#fff;--text:#252b3b;--muted:#737d90;--border:#e0e4ee;--accent:#6269e8;--active:#ededff}
+    [data-theme=dark]{color-scheme:dark;--bg:#171923;--panel:#222532;--text:#edf0f8;--muted:#a6afc2;--border:#393e50;--accent:#b1b4ff;--active:#38395b}
+    body{display:flex;flex-direction:column;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif}
+    header{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:none;padding:12px 18px;border-bottom:1px solid var(--border);background:var(--panel)}
+    strong{font-size:15px;margin-right:auto}button{font:inherit;color:var(--text);border:1px solid var(--border);border-radius:7px;padding:6px 12px;background:var(--panel);cursor:pointer}
+    button:hover,button[aria-pressed=true]{background:var(--active);color:var(--accent)}button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    main{display:flex;justify-content:center;flex:1;min-height:0;overflow:hidden;padding:16px}
+    iframe{display:block;width:100%;height:100%;min-width:0;border:1px solid var(--border);border-radius:8px;background:#fff;color-scheme:light}
+    body[data-viewport=mobile] iframe{width:390px;max-width:100%}
+    pre{width:100%;height:100%;overflow:auto;white-space:pre;tab-size:2;margin:0;padding:18px;border:1px solid var(--border);border-radius:8px;background:var(--panel);font:13px/1.7 Consolas,monospace}
+    [hidden]{display:none!important}footer{flex:none;min-height:30px;padding:0 18px 10px;color:var(--muted);font-size:12px}
+    #error{color:#cf5656;margin-left:12px;overflow-wrap:anywhere}
+  </style>
+</head>
+<body data-viewport="desktop">
+  <header>
+    <strong>HTML 预览</strong>
+    <button type="button" id="desktop" aria-pressed="true">桌面</button>
+    <button type="button" id="mobile" aria-pressed="false">手机</button>
+    <button type="button" id="source-toggle" aria-pressed="false">查看源码</button>
+    <button type="button" id="rerun">重新运行</button>
+    <button type="button" id="close" aria-label="关闭 HTML 预览">关闭</button>
+  </header>
+  <main>
+    <iframe id="preview" title="HTML 运行结果" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="{{document}}"></iframe>
+    <pre id="source" aria-label="HTML 源码" tabindex="0" hidden>{{source}}</pre>
+  </main>
+  <footer>预览为点击时的代码快照<span id="error" role="status" aria-live="polite"></span></footer>
+  <script>
+    (() => {
+      const frame = document.getElementById('preview');
+      const source = document.getElementById('source');
+      const toggle = document.getElementById('source-toggle');
+      const error = document.getElementById('error');
+      const snapshot = frame.getAttribute('srcdoc');
+      function showSource(value) {
+        source.hidden = !value; frame.hidden = value;
+        toggle.setAttribute('aria-pressed', String(value));
+        toggle.textContent = value ? '返回预览' : '查看源码';
+      }
+      for (const mode of ['desktop', 'mobile']) document.getElementById(mode).addEventListener('click', () => {
+        document.body.dataset.viewport = mode;
+        for (const name of ['desktop', 'mobile']) document.getElementById(name).setAttribute('aria-pressed', String(name === mode));
+        showSource(false);
+      });
+      toggle.addEventListener('click', () => showSource(source.hidden));
+      document.getElementById('rerun').addEventListener('click', () => {
+        error.textContent = ''; showSource(false); frame.srcdoc = snapshot;
+      });
+      document.getElementById('close').addEventListener('click', () => window.close());
+      addEventListener('message', event => {
+        if (event.source === frame.contentWindow && event.data?.type === 'focus-html-preview-error' && typeof event.data.message === 'string') {
+          error.textContent = event.data.message.slice(0, 500);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

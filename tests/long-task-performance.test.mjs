@@ -64,6 +64,16 @@ test('omitted collections cannot initialize a transcript or cross a conversation
   assert.equal(next.turns.length, 0)
 })
 
+test('a new presentation lineage refreshes history even when live turn and execution revisions are unchanged', () => {
+  const initial = { ...metadata(), turns: [], executions: [], hiddenMessageIds: [] }
+  const turns = [{ id: 'inherited', archived: true }], executions = [{ messageId: 'old-output', archived: true }]
+  const changed = mergeFocusChatUpdate(initial, { ...metadata(), historyCursor: { ...cursor(), presentation: 'compaction-one' }, turns, executions })
+  assert.equal(changed.turns, turns)
+  assert.equal(changed.executions, executions)
+  const same = mergeFocusChatUpdate(changed, { ...metadata(), historyCursor: { ...cursor(), presentation: 'compaction-one' } })
+  assert.equal(same, changed)
+})
+
 test('thousands of process steps take one execution lookup each and preserve order and legacy unassigned steps', () => {
   const count = 5000, ids = Array.from({ length: count }, (_, index) => 'command-' + index)
   const turn = { segments: ids.map((_, cycle) => ({ cycle })), executionIds: [...ids, 'legacy', 'missing'],

@@ -7,17 +7,20 @@
   /*
    * Pick the palette BEFORE the stylesheet is parsed.
    *
-   * The splash mirrors the theme the app is about to show: a dark card in front of a white
-   * workspace (or the reverse) reads as a bug. Main passes ?theme=, and the system preference
-   * is only a fallback for the case where the query is missing.
+   * The splash can paint before the saved application theme is read. Start with
+   * the current native preference and follow its change when app settings load.
    *
    * Synchronous and inline on purpose: a deferred script would let the first frame paint in
    * the wrong palette, which is exactly the flash this page exists to prevent.
    */
   ;(function () {
     var match = /[?&]theme=(light|dark)/.exec(window.location.search)
-    var theme = match ? match[1] : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+    var preference = window.matchMedia('(prefers-color-scheme: dark)')
+    var theme = match ? match[1] : (preference.matches ? 'dark' : 'light')
     document.documentElement.setAttribute('data-theme', theme)
+    preference.addEventListener('change', function (event) {
+      document.documentElement.setAttribute('data-theme', event.matches ? 'dark' : 'light')
+    })
   })()
 </script>
 <style>

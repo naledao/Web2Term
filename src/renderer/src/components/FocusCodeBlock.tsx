@@ -1,6 +1,7 @@
 import { Children, createContext, isValidElement, memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentPropsWithoutRef, JSX, ReactNode } from 'react'
 import type { AppTheme } from '@shared/types'
+import { isFocusHtmlCode } from '@shared/focus-html-preview'
 
 export const FocusCodeThemeContext = createContext<AppTheme>('light')
 
@@ -14,7 +15,7 @@ const LANGUAGE_LABELS: Readonly<Record<string, string>> = {
   java: 'Java', javascript: 'JavaScript', js: 'JavaScript', typescript: 'TypeScript', ts: 'TypeScript',
   jsx: 'JSX', tsx: 'TSX', python: 'Python', py: 'Python', csharp: 'C#', cs: 'C#', cpp: 'C++',
   c: 'C', go: 'Go', rust: 'Rust', ruby: 'Ruby', php: 'PHP', kotlin: 'Kotlin', swift: 'Swift',
-  sql: 'SQL', json: 'JSON', xml: 'XML', html: 'HTML', css: 'CSS', scss: 'SCSS',
+  sql: 'SQL', json: 'JSON', xml: 'XML', html: 'HTML', htm: 'HTML', xhtml: 'HTML', css: 'CSS', scss: 'SCSS',
   bash: 'Bash', shell: 'Shell', sh: 'Shell', powershell: 'PowerShell', ps1: 'PowerShell',
   yaml: 'YAML', yml: 'YAML', markdown: 'Markdown', md: 'Markdown', dockerfile: 'Dockerfile',
   text: '纯文本', plaintext: '纯文本', txt: '纯文本', mermaid: 'Mermaid'
@@ -25,6 +26,9 @@ type Props = ComponentPropsWithoutRef<'pre'> & { node?: unknown }
 const FocusCodeBlock = memo(function FocusCodeBlock({ children, node: _node, ...props }: Props): JSX.Element {
   const [wrap, setWrap] = useState(false)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [htmlOpening, setHtmlOpening] = useState(false)
+  const [htmlError, setHtmlError] = useState<{ source: string; message: string } | null>(null)
+  const htmlLaunch = useRef(false)
   const theme = useContext(FocusCodeThemeContext)
   const [showSource, setShowSource] = useState(false)
   const [retry, setRetry] = useState(0)
@@ -61,6 +65,7 @@ const FocusCodeBlock = memo(function FocusCodeBlock({ children, node: _node, ...
   }, [info.language, info.text, theme, retry])
 
   const diagram = info.language === 'mermaid'
+  const html = isFocusHtmlCode(info.language, info.text)
   const currentPreview = preview?.source === info.text && preview.theme === theme ? preview : null
   const showCode = !diagram || showSource || !currentPreview?.svg
 
@@ -68,6 +73,21 @@ const FocusCodeBlock = memo(function FocusCodeBlock({ children, node: _node, ...
     <div className="focus-code-block__toolbar">
       <span className="focus-code-block__language">{info.label}</span>
       <div className="focus-code-block__actions">
+        {html ? <button type="button" className="focus-code-block__run" disabled={htmlOpening} aria-label="运行 HTML 预览"
+          title="在独立窗口中运行 HTML" onClick={async () => {
+            if (htmlLaunch.current) return
+            htmlLaunch.current = true; setHtmlOpening(true); setHtmlError(null)
+            const source = info.text
+            try {
+              const result = await window.api.previewFocusHtml({ html: source, theme })
+              if (alive.current && result !== 'ok') setHtmlError({ source, message: result === 'too-large'
+                ? 'HTML 过长，预览最多支持 200 万字符。' : '无法打开 HTML 预览，请重试。' })
+            } catch { if (alive.current) setHtmlError({ source, message: '无法打开 HTML 预览，请重试。' }) }
+            finally { htmlLaunch.current = false; if (alive.current) setHtmlOpening(false) }
+          }}>
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true"><path d="m6 3 11 7-11 7Z" /></svg>
+          {htmlOpening ? '正在打开…' : '运行预览'}
+        </button> : null}
         {diagram ? <>
           <button type="button" aria-pressed={!showSource} onClick={() => setShowSource(false)}>图表</button>
           <button type="button" aria-pressed={showSource} onClick={() => setShowSource(true)}>源码</button>
@@ -85,6 +105,7 @@ const FocusCodeBlock = memo(function FocusCodeBlock({ children, node: _node, ...
         </button>
       </div>
     </div>
+    {html && htmlError?.source === info.text ? <p className="focus-code-block__error" role="alert">{htmlError.message}</p> : null}
     {diagram && !showSource ? <div className="focus-mermaid" aria-busy={!currentPreview}>
       {currentPreview?.svg ? <div className="focus-mermaid__viewport" role="region" aria-label="Mermaid 图表" tabIndex={0}>
         {/* SVG images cannot execute diagram scripts or bind callbacks in the app. */}

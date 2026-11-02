@@ -7,6 +7,8 @@ import { ToolboxRouter } from './toolbox-router'
 import { TOOLBOX_METHODS } from '../shared/toolbox'
 import { DEFAULT_CHAT_VIEW, supportsFocusView } from '../shared/focus-chat'
 import type { FocusOwner } from '../shared/focus-chat'
+import type { CompactionAction } from '../shared/conversation-compaction'
+import type { StoredCompaction } from './conversation-compaction'
 import type { ToolboxInvocation, ToolboxMethod } from '../shared/toolbox'
 import type { AppApi } from '../shared/types'
 import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/background-tasks'
@@ -16,6 +18,8 @@ import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, Tray } from 'electron'
 import { APP_NAME, configureAppIdentity } from './app-identity'
 import { registerDesktopNotifications } from './desktop-notifications'
+import { openFocusHtmlPreview } from './focus-html-preview'
+import { configureWindowsAppDetails } from './windows-app-details'
 import { registerNotificationSound } from './notification-sound'
 import { NotificationActivationRouter, notificationProtocol } from './notification-target'
 import { taskbarCountIcon } from './taskbar-badge'
@@ -183,6 +187,7 @@ function readDefaultChatView(value: string | null): 'original' | 'local' | 'focu
 }
 
 let managerWindow: BrowserWindow | null = null
+let applicationReady = false
 let computerUseOverlayWindow: BrowserWindow | null = null
 const linuxAgentDownloader = new LinuxAgentDownloader((state) => {
   if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.linuxAgentDownloadChanged, state)
@@ -312,8 +317,8 @@ const nacosViews = new Map<string, NacosView>()
  * which is what keeps the animation smooth while the main process is busy probing the
  * machine, opening the database, and starting the first page load.
  *
- * It is a plain static HTML file with no script: all the motion is CSS, so there is nothing
- * to fail at the moment it matters.
+ * It is a standalone static HTML file: motion is CSS, and its small inline script only
+ * follows the native theme. It does not depend on the workspace renderer or preload.
  */
 let splashWindow: BrowserWindow | null = null
 let splashClosing = false
@@ -323,14 +328,17 @@ let splashCloseRequested = false
 /** Fallback timer, cleared as soon as the splash closes for the normal reason. */
 let splashFallbackTimer: ReturnType<typeof setTimeout> | null = null
 let splashCloseTimer: ReturnType<typeof setTimeout> | null = null
+let splashFirstPaint: Promise<void> | null = null
 let managerReadyToShow = false
 
 const SPLASH_WIDTH = 380
 const SPLASH_HEIGHT = 264
+/** A broken splash renderer must not stop the workspace from initializing. */
+const SPLASH_FIRST_PAINT_MAX_MS = 3_000
 /** Keep the animation visible for at least three seconds, even when the page is cached. */
 const SPLASH_MIN_VISIBLE_MS = 3_000
 /**
- * Hard ceiling on how long the splash may stay up.
+ * Chat-load deadline, measured from workspace creation rather than process startup.
  *
  * The normal exit is the first `did-stop-loading` of the visible chat view. That event never
  * fires when the page cannot be reached at all, and without this the splash would sit on top
@@ -462,7 +470,7 @@ function createComputerUseOverlay(parent: BrowserWindow): void {
 }
 
 function showManagerWhenReady(): void {
-  if (!managerReadyToShow || !managerWindow || managerWindow.isDestroyed()) return
+  if (quitting || !managerReadyToShow || !managerWindow || managerWindow.isDestroyed()) return
   /*
    * The splash is still up, so the main window must stay hidden. Do NOT clear
    * managerReadyToShow here: the flag is the record that the window is ready to be
@@ -481,8 +489,8 @@ function showManagerWhenReady(): void {
   managerWindow.focus()
 }
 
-function createSplashWindow(): void {
-  if (splashWindow && !splashWindow.isDestroyed()) return
+function createSplashWindow(): Promise<void> {
+  if (splashWindow && !splashWindow.isDestroyed()) return splashFirstPaint ?? Promise.resolve()
 
   splashClosing = false
   splashReady = false
@@ -532,6 +540,20 @@ function createSplashWindow(): void {
   window.setResizable(false)
   window.setMaximizable(false)
 
+  let resolveFirstPaint!: () => void
+  splashFirstPaint = new Promise<void>(resolve => { resolveFirstPaint = resolve })
+  const firstPaint = splashFirstPaint
+  let firstPaintTimer: ReturnType<typeof setTimeout> | null = null
+  const finishFirstPaint = (): void => {
+    if (firstPaintTimer) { clearTimeout(firstPaintTimer); firstPaintTimer = null }
+    resolveFirstPaint()
+  }
+  firstPaintTimer = setTimeout(() => {
+    console.warn('[splash] first-frame timeout; continuing workspace initialization')
+    finishFirstPaint()
+    closeSplashWindow(true)
+  }, SPLASH_FIRST_PAINT_MAX_MS)
+
   // `showInactive` so the splash never takes focus from the window that is still loading
   // behind it: stealing focus would make the main window's first paint look like a flash.
   // Some transparent Windows builds do not emit `ready-to-show`, so `did-finish-load` is
@@ -541,13 +563,15 @@ function createSplashWindow(): void {
     splashReady = true
     splashShownAt = Date.now()
     window.showInactive()
+    finishFirstPaint()
     if (splashCloseRequested) closeSplashWindow()
   }
   window.once('ready-to-show', revealSplash)
   window.webContents.once('did-finish-load', revealSplash)
   window.on('focus', () => markSessionViewed(currentSessionId))
   window.on('closed', () => {
-    if (splashWindow === window) splashWindow = null
+    finishFirstPaint()
+    if (splashWindow === window) { splashWindow = null; splashFirstPaint = null }
     showManagerWhenReady()
   })
 
@@ -557,16 +581,19 @@ function createSplashWindow(): void {
     ? join(app.getAppPath(), 'src/renderer/splash.html')
     : join(__dirname, '../renderer/splash.html')
   console.info(`[splash] opening separate ${SPLASH_WIDTH}x${SPLASH_HEIGHT} window`)
-  /*
-   * The palette has to be decided BEFORE the first paint, so the theme travels as a query
-   * parameter rather than as a message after load: a push would arrive one frame too late
-   * and the user would see the splash paint dark and then flip to light.
-   *
-   * settings is already populated from the database at this point (see the settings load
-   * above), so this is the same value the workspace itself is about to render with.
-   */
-  void window.loadFile(splashPath, { query: { theme: settings.theme } })
+  // The first frame follows the system theme without opening the database. The
+  // static page follows nativeTheme changes when the saved application theme loads.
+  void window.loadFile(splashPath).catch(error => {
+    console.warn('[splash] could not load the startup page:', error)
+    finishFirstPaint()
+    closeSplashWindow(true)
+  })
+  return firstPaint
+}
 
+/** Start the chat-load deadline only after workspace initialization has completed. */
+function armSplashFallback(): void {
+  if (!splashWindow || splashClosing || splashFallbackTimer) return
   splashFallbackTimer = setTimeout(() => {
     splashFallbackTimer = null
     if (splashClosing) return
@@ -620,6 +647,7 @@ function closeSplashWindow(force = false): void {
     splashCloseTimer = null
   }
   splashWindow = null
+  splashFirstPaint = null
 
   /*
    * Fade, then destroy.
@@ -687,6 +715,7 @@ function destroySplashWindow(): void {
   splashCloseRequested = false
   const window = splashWindow
   splashWindow = null
+  splashFirstPaint = null
   if (window && !window.isDestroyed()) window.destroy()
 }
 const EMPTY_EMBED_STATE: EmbedState = {
@@ -1025,6 +1054,8 @@ function createSession(
   const initialMode: ExecutionMode = savedMode === 'auto' ? 'auto' : 'manual'
   let runtime: SessionRuntime | null = null
   runtime = new SessionRuntime({
+    onCompactionTarget: createCompactionTarget,
+    onCompactionTargetOpen: id => { selectSession(id) },
     qqMail: qqMail ?? undefined,
     scheduledTasks: scheduledTasks ?? undefined,
     windowsHelper,
@@ -1099,6 +1130,12 @@ function createSession(
   broadcastManagedSessions()
   if (activate) selectSession(runtime.id, kind === 'ssh')
   return runtime
+}
+
+function createCompactionTarget(job: StoredCompaction, summary: string): string {
+  const source = runtimes.get(job.state.owner.sessionId)
+  if (!source || source.isDisposed()) throw new Error('来源工作区已关闭，请重新打开后继续压缩。')
+  return source.adoptCompaction(job, summary)
 }
 
 function showWeb2termWorkspace(options: Web2termWorkspaceOptions = {}): boolean {
@@ -1191,7 +1228,7 @@ function createManagerWindow(): void {
 
   const windowIconPath = app.isPackaged
     ? join(process.resourcesPath, 'tray-icon.png')
-    : join(app.getAppPath(), 'build', 'icon.png')
+    : join(app.getAppPath(), 'build', process.platform === 'win32' ? 'icon.ico' : 'icon.png')
 
   const window = new BrowserWindow({
     width: 1440,
@@ -1213,6 +1250,7 @@ function createManagerWindow(): void {
       backgroundThrottling: false
     }
   })
+  configureWindowsAppDetails(window)
   managerWindow = window
   createComputerUseOverlay(window)
   managerReadyToShow = false
@@ -1515,7 +1553,7 @@ function registerIpcHandlers(): void {
   ipcMain.on(IpcChannels.embedSetVisible, (event, visible: boolean) => runtimeForEvent(event)?.setEmbedVisible(Boolean(visible)))
   ipcMain.on(IpcChannels.embedCommand, (event, command: EmbedCommand) => runtimeForEvent(event)?.sendEmbedCommand(command))
   ipcMain.on(IpcChannels.embedNavigate, (event, url: string) => runtimeForEvent(event)?.navigateEmbed(String(url)))
-  ipcMain.handle(IpcChannels.embedGetState, (event): EmbedState => runtimeForEvent(event)?.embed.getState() ?? EMPTY_EMBED_STATE)
+  ipcMain.handle(IpcChannels.embedGetState, (event): EmbedState => runtimeForEvent(event)?.getEmbedState() ?? EMPTY_EMBED_STATE)
   const questionRuntime = (event: IpcMainEvent | IpcMainInvokeEvent, sessionId: string): SessionRuntime | null => {
     if (event.senderFrame !== event.sender.mainFrame) return null
     const runtime = runtimeForEvent(event)
@@ -1534,6 +1572,25 @@ function registerIpcHandlers(): void {
     if (!runtime) return null
     return cursor && typeof cursor.ownerKey === 'string' && Number.isSafeInteger(cursor.turns) && typeof cursor.executions === 'string'
       ? runtime.getFocusChat(owner, cursor) : runtime.getFocusChat(owner)
+  })
+  ipcMain.handle(IpcChannels.compactionGet, (event, owner) => focusRuntime(event, owner)?.getCompaction(owner) ?? null)
+  ipcMain.handle(IpcChannels.compactionStart, (event, owner) => {
+    const runtime = focusRuntime(event, owner)
+    if (!runtime) throw new Error('当前会话已切换。')
+    return runtime.startCompaction(owner)
+  })
+  ipcMain.handle(IpcChannels.compactionAction, (event, request, action: CompactionAction) => {
+    if (typeof request?.jobId !== 'string' || request.jobId.length > 128 ||
+        !['resume', 'cancel', 'source', 'summary', 'target', 'compression', 'copy-recovery', 'show-page', 'hide-page'].includes(action)) throw new Error('压缩任务操作无效。')
+    const runtime = focusRuntime(event, request)
+    if (!runtime) throw new Error('当前会话已切换。')
+    return runtime.compactionAction(request, action)
+  })
+  ipcMain.on(IpcChannels.compactionViewport, (event, request, bounds, visible) => {
+    if (typeof request?.jobId !== 'string' || request.jobId.length > 128 || typeof visible !== 'boolean') return
+    // Apply the same top-frame and active-session ownership checks as focus IPC.
+    const runtime = questionRuntime(event, request.sessionId)
+    runtime?.setCompactionViewport(request, bounds, visible)
   })
   ipcMain.handle(IpcChannels.focusExecutionOutput, (event, owner, messageId) =>
     focusRuntime(event, owner)?.readFocusExecutionOutput(owner, messageId) ?? null)
@@ -1560,8 +1617,18 @@ function registerIpcHandlers(): void {
       focusRuntime(event, request)?.actOnFocusUi(request) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatCitation, (event, request) =>
     focusRuntime(event, request)?.readFocusCitation(request) ?? { outcome: 'unavailable', sources: [] })
+  ipcMain.handle(IpcChannels.focusChatCitationOpen, (event, request) =>
+    focusRuntime(event, request)?.openFocusCitationSource(request) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatFileLink, (event, request) =>
     focusRuntime(event, request)?.openFocusFileLink(request) ?? 'unavailable')
+  ipcMain.handle(IpcChannels.focusChatFilePreview, (event, request) =>
+    focusRuntime(event, request)?.previewFocusFile(request) ?? { outcome: 'unavailable' })
+  ipcMain.handle(IpcChannels.focusChatFileSave, (event, request) =>
+    focusRuntime(event, request)?.saveFocusFilePreview(request) ?? 'unavailable')
+  ipcMain.handle(IpcChannels.focusChatFileRelease, (event, request) =>
+    focusRuntime(event, request)?.releaseFocusFilePreview(request))
+  ipcMain.handle(IpcChannels.focusHtmlPreview, (event, request) =>
+    isManagerEvent(event) && managerWindow ? openFocusHtmlPreview(managerWindow, request, settings.softwareProxy) : 'unavailable')
   ipcMain.handle(IpcChannels.focusChatComposerMode, (event, request) =>
     focusRuntime(event, request)?.setFocusComposerMode(request) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatModelSettings, (event, request) =>
@@ -1671,9 +1738,10 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IpcChannels.conversationsList, (event): Conversation[] => runtimeForEvent(event)?.currentMachineConversations() ?? [])
   ipcMain.handle(IpcChannels.conversationMessagesList, (event, conversationId: string): ConversationMessage[] => {
-    if (!runtimeForEvent(event) || !store) return []
+    const runtime = runtimeForEvent(event)
+    if (!runtime || !store) return []
     const id = typeof conversationId === 'string' ? conversationId : ''
-    return id === '' ? [] : store.listConversationMessages(id)
+    return id === '' ? [] : runtime.visibleConversationMessages(id)
   })
   ipcMain.handle(IpcChannels.conversationAttachmentRead, (event, attachmentId: string): string | null => {
     if (!runtimeForEvent(event) || !store) return null
@@ -2288,17 +2356,10 @@ function registerIpcHandlers(): void {
   })
 }
 
-if (!app.requestSingleInstanceLock()) {
-  app.quit()
-} else {
-  notificationActivations.handleCommandLine(process.argv)
-  app.on('second-instance', (_event, argv) => {
-    if (!notificationActivations.handleCommandLine(argv)) createManagerWindow()
-  })
-
-  void app.whenReady().then(async () => {
+async function initializeApplication(): Promise<void> {
     registerPdfAssetHandler()
-    registerDesktopNotifications(await registerNotificationSound())
+    await registerDesktopNotifications(await registerNotificationSound())
+    if (quitting) return
 
     if (appLogFile) {
       console.info(`[app] logging this run to ${appLogFile}`)
@@ -2364,6 +2425,7 @@ if (!app.requestSingleInstanceLock()) {
       defaultChatView: readDefaultChatView(conversationStore.getSetting(SETTING_DEFAULT_CHAT_VIEW))
     }
     await applySoftwareProxy(settings.softwareProxy)
+    if (quitting) return
     backendAuth = new BackendAuthService(conversationStore, {
       request: softwareFetch,
       encrypt(value) {
@@ -2391,9 +2453,8 @@ if (!app.requestSingleInstanceLock()) {
       }
     })
     /*
-     * Before any window or view exists, so the first paint of every embedded page already has
-     * the right `prefers-color-scheme` — including the splash, which takes the theme as a
-     * query parameter for exactly the same reason.
+     * Before workspace windows or embedded views exist, so their first paint has
+     * the saved theme. The already-visible splash follows the same media change.
      */
     applyAppTheme(settings.theme)
     await applyEmbedProxy(settings.embedProxy)
@@ -2403,16 +2464,16 @@ if (!app.requestSingleInstanceLock()) {
       }
     })
     await applyUpdateProxy(settings.updateProxy)
+    if (quitting) return
 
     registerIpcHandlers()
     createTray()
     /*
-     * Splash first, window second. Both are created without showing; the main window
-     * paints as soon as React's first render is ready, and the splash sits on top of it
-     * until the chat view reports its first finished load.
+     * The splash is already visible. Keep the workspace hidden while it paints
+     * and restores sessions, then release it when the visible chat finishes loading.
      */
-    createSplashWindow()
     createManagerWindow()
+    armSplashFallback()
     // First check fires immediately, then every 30 minutes (packaged builds only).
     startUpdateSchedule()
     const savedWorkspaceSessionId = conversationStore.getSetting(SETTING_WORKSPACE_SESSION_ID) ?? ''
@@ -2441,7 +2502,34 @@ if (!app.requestSingleInstanceLock()) {
     app.on('activate', () => {
       createManagerWindow()
     })
-  })
+    applicationReady = true
+}
+
+async function startApplication(): Promise<void> {
+  await createSplashWindow()
+  if (quitting) return
+  await initializeApplication()
+}
+
+function handleStartupFailure(error: unknown): void {
+  console.error('[startup] initialization failed:', error)
+  if (quitting) return
+  quitting = true
+  destroySplashWindow()
+  dialog.showErrorBox(`${APP_NAME} 启动失败`, error instanceof Error ? error.message : String(error))
+  app.quit()
+}
+
+function handleSecondInstance(argv: string[]): void {
+  if (!notificationActivations.handleCommandLine(argv) && applicationReady) createManagerWindow()
+}
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  notificationActivations.handleCommandLine(process.argv)
+  app.on('second-instance', (_event, argv) => handleSecondInstance(argv))
+  void app.whenReady().then(startApplication).catch(handleStartupFailure)
 }
 
 app.on('before-quit', () => {

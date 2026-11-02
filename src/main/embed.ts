@@ -34,9 +34,11 @@ import { observeFocusEditRequest, observeFocusPageRequest } from './focus-edit-r
 import { smartUiSubmission } from './focus-ui-request'
 import { dispatchFocusUiClick } from './focus-ui-click'
 import { readNativeFocusCitation } from './focus-citation-read'
-import type { FocusCitationTarget, FocusCitationResult } from '../shared/focus-citations'
+import type { FocusCitationTarget, FocusCitationResult, FocusCitationOpenRequest } from '../shared/focus-citations'
 import { openNativeFocusFileLink } from './focus-file-link'
 import type { FocusFileLinkTarget } from '../shared/focus-file-links'
+import { captureNativeFocusFile } from './focus-file-preview'
+import type { CapturedFocusFileResult, FocusFileCaptureDiagnostic } from './focus-file-preview'
 import { dispatchFocusModelClick } from './focus-model-click'
 import type { FocusUiAction, FocusUiRecovery } from '../shared/focus-smart-ui'
 import { parseReadFilesRequest } from '../shared/file-requests'
@@ -755,6 +757,10 @@ export class ChatGptEmbed {
     }
 
     contents.setWindowOpenHandler(({ url }) => {
+      if (this.focusCitationOutbound) {
+        this.focusCitationOutbound.receive(url)
+        return { action: 'deny' }
+      }
       openExternalUrl(url)
       return { action: 'deny' }
     })
@@ -1608,6 +1614,18 @@ export class ChatGptEmbed {
   }
 
   private focusEditToken: string | null = null
+  private focusCitationOutbound: { token: string; receive(url: string): void } | null = null
+  async previewFocusFile(target: FocusFileLinkTarget, isCurrent: () => boolean,
+    diagnose?: (details: FocusFileCaptureDiagnostic) => void): Promise<CapturedFocusFileResult> {
+    const contents = this.focusPage()
+    if (!contents || !this.platform.page.focus?.files) return { outcome: 'unavailable' }
+    if (this.focusEditToken) return { outcome: 'busy' }
+    const token = randomUUID()
+    this.focusEditToken = token
+    try { return await captureNativeFocusFile(contents, target, () => isCurrent() && this.focusEditToken === token, 20000,
+      { focused: () => !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false), diagnose }) }
+    finally { if (this.focusEditToken === token) this.focusEditToken = null }
+  }
   async openFocusFileLink(target: FocusFileLinkTarget, isCurrent: () => boolean): Promise<FocusSendOutcome> {
     const contents = this.focusPage()
     if (!contents || this.platform.id !== 'chatgpt') return 'unavailable'
@@ -1615,7 +1633,8 @@ export class ChatGptEmbed {
     const token = randomUUID()
     this.focusEditToken = token
     try {
-      return await openNativeFocusFileLink(contents, target, () => isCurrent() && this.focusEditToken === token)
+      return await openNativeFocusFileLink(contents, target, () => isCurrent() && this.focusEditToken === token,
+        { focused: () => !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false) })
     } finally { if (this.focusEditToken === token) this.focusEditToken = null }
   }
 
@@ -1627,6 +1646,27 @@ export class ChatGptEmbed {
       return await readNativeFocusCitation(contents, target, token, () => isCurrent() && this.focusEditToken === token,
         () => !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false))
     } finally { if (this.focusEditToken === token) this.focusEditToken = null }
+  }
+
+  async openFocusCitationSource(request: FocusCitationOpenRequest, token: string, isCurrent: () => boolean,
+    diagnose: (details: FocusEditDiagnostic) => void): Promise<FocusCitationResult['outcome']> {
+    const contents = this.focusPage()
+    if (!contents || !this.platform.page.focus?.citations?.native || this.focusEditToken) return 'unavailable'
+    this.focusEditToken = token
+    try {
+      const result = await readNativeFocusCitation(contents, request, token, () => isCurrent() && this.focusEditToken === token,
+        () => !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false), {
+          source: request.source, diagnose, openExternal: url => shell.openExternal(url),
+          captureUrl: receive => {
+            this.focusCitationOutbound = { token, receive }
+            return () => { if (this.focusCitationOutbound?.token === token) this.focusCitationOutbound = null }
+          }
+        })
+      return result.outcome
+    } finally {
+      if (this.focusCitationOutbound?.token === token) this.focusCitationOutbound = null
+      if (this.focusEditToken === token) this.focusEditToken = null
+    }
   }
 
   async readFocusUiRecovery(sourceIds: string[]): Promise<FocusUiRecovery | null> {

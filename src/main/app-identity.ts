@@ -2,11 +2,10 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { app } from 'electron'
 
-export const APP_NAME = 'Web2Term'
-
 // Keep the installed application identity stable so upgrades, shortcuts and
 // Windows notifications still belong to the same application.
-export const APP_ID = 'com.example.gptweb2codexterminal'
+export { APP_NAME, APP_ID, APP_DEVELOPMENT_NAME, APP_DEVELOPMENT_ID } from '../shared/app-identity'
+import { APP_NAME, APP_DEVELOPMENT_NAME } from '../shared/app-identity'
 
 const LEGACY_PRODUCT_NAME = 'GPT Web to Codex Terminal'
 const LEGACY_PACKAGE_NAME = 'gpt-web-to-codex-terminal'
@@ -28,9 +27,9 @@ export function configureAppIdentity(): void {
     ?? candidates[0]
 
   mkdirSync(userData, { recursive: true })
-  // Electron creates notification shortcuts from this name. A development run must
-  // not overwrite the installed Web2Term shortcut with node_modules/electron.exe.
-  app.setName(app.isPackaged ? APP_NAME : `${APP_NAME} (Development)`)
+  // Keep the runtime name distinct in development. Windows notification branding
+  // is registered separately: native Electron reads its executable's ProductName.
+  app.setName(app.isPackaged ? APP_NAME : APP_DEVELOPMENT_NAME)
   app.setPath('userData', userData)
   app.setPath('sessionData', userData)
 }

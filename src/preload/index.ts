@@ -11,8 +11,9 @@ import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/b
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from '../shared/github'
 import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusModelSettingsResult } from '../shared/focus-chat'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
-import type { FocusCitationRequest, FocusCitationResult } from '../shared/focus-citations'
-import type { FocusFileLinkRequest } from '../shared/focus-file-links'
+import type { FocusCitationRequest, FocusCitationResult, FocusCitationOpenRequest } from '../shared/focus-citations'
+import type { FocusFileLinkRequest, FocusFilePreviewRequest, FocusFilePreviewResult, FocusFilePreviewHandle } from '../shared/focus-file-links'
+import type { FocusHtmlPreviewRequest, FocusHtmlPreviewOutcome } from '../shared/focus-html-preview'
 import type { RemoteRipgrepRequest, RemoteRipgrepState, RemoteRipgrepTaskResult } from '../shared/remote-ripgrep'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
@@ -218,6 +219,10 @@ const api: AppApi = {
 
   getEmbedState: (): Promise<EmbedState> => ipcRenderer.invoke(IpcChannels.embedGetState),
   getFocusChat: (owner: FocusOwner): Promise<FocusChatState | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner),
+  getCompaction: owner => ipcRenderer.invoke(IpcChannels.compactionGet, owner),
+  startCompaction: owner => ipcRenderer.invoke(IpcChannels.compactionStart, owner),
+  compactionAction: (request, action) => ipcRenderer.invoke(IpcChannels.compactionAction, request, action),
+  setCompactionViewport: (request, bounds, visible) => ipcRenderer.send(IpcChannels.compactionViewport, request, bounds, visible),
   pollFocusChat: (owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner, cursor),
   readFocusExecutionOutput: (owner: FocusOwner, messageId: string): Promise<string | null> => ipcRenderer.invoke(IpcChannels.focusExecutionOutput, owner, messageId),
   sendFocusMessage: (request: FocusSendRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatSend, request),
@@ -226,7 +231,12 @@ const api: AppApi = {
   editFocusMessage: (request: FocusEditRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatEdit, request),
   actOnFocusUi: (request: FocusUiRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatUiAction, request),
   readFocusCitation: (request: FocusCitationRequest): Promise<FocusCitationResult> => ipcRenderer.invoke(IpcChannels.focusChatCitation, request),
+  openFocusCitationSource: (request: FocusCitationOpenRequest): Promise<FocusCitationResult['outcome']> => ipcRenderer.invoke(IpcChannels.focusChatCitationOpen, request),
   openFocusFileLink: (request: FocusFileLinkRequest): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatFileLink, request),
+  previewFocusFile: (request: FocusFilePreviewRequest): Promise<FocusFilePreviewResult> => ipcRenderer.invoke(IpcChannels.focusChatFilePreview, request),
+  saveFocusFilePreview: (owner: FocusFilePreviewHandle): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatFileSave, owner),
+  releaseFocusFilePreview: (owner: FocusFilePreviewHandle): Promise<void> => ipcRenderer.invoke(IpcChannels.focusChatFileRelease, owner),
+  previewFocusHtml: (request: FocusHtmlPreviewRequest): Promise<FocusHtmlPreviewOutcome> => ipcRenderer.invoke(IpcChannels.focusHtmlPreview, request),
   setFocusComposerMode: (request): Promise<FocusSendOutcome> => ipcRenderer.invoke(IpcChannels.focusChatComposerMode, request),
   updateFocusModelSettings: (request): Promise<FocusModelSettingsResult> => ipcRenderer.invoke(IpcChannels.focusChatModelSettings, request),
   /** '' once the side chat is open, otherwise the message to show. */

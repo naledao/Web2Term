@@ -111,6 +111,9 @@
 .focus-code-block__actions{display:flex;align-items:center;gap:4px;flex:none}
 .focus-code-block__actions button{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:28px;padding:4px 6px;border:0;border-radius:6px;background:transparent;font-size:11px;color:var(--fc-muted)}
 .focus-code-block__actions button:hover,.focus-code-block__actions button[aria-pressed=true]{background:var(--fc-border);color:var(--fc-text)}
+.focus-code-block__actions .focus-code-block__run{gap:5px;color:var(--fc-accent)}
+.focus-code-block__actions button:disabled{cursor:wait;opacity:.6}
+.focus-code-block__error{margin:0;padding:4px 20px 12px;font-size:12px;color:#cf5656}
 .focus-chat .wmde-markdown .focus-code-block pre{margin:0;padding:4px 20px 18px;border:0;border-radius:0;font:13px/1.8 Consolas,'Cascadia Code',monospace;white-space:pre;overflow-x:auto}
 .focus-chat .wmde-markdown .focus-code-block pre code{padding:0;border:0;background:transparent;font:inherit;white-space:inherit;word-break:normal;overflow-wrap:normal;overflow:visible;max-width:none}
 .focus-chat .wmde-markdown .focus-code-block[data-wrap=true] pre,.focus-chat .wmde-markdown .focus-code-block[data-wrap=true] pre code{white-space:pre-wrap;overflow-wrap:anywhere}
@@ -256,3 +259,5 @@
 .focus-chart__legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:1px}
 .focus-chart__caption{margin:6px 0 0;font-size:12px;color:var(--fc-muted)}
 .focus-chart__hint{margin:4px 0 0;font-size:11px;color:var(--fc-muted);opacity:.8}
+.focus-chat__compacted{display:flex;align-items:center;justify-content:center;gap:7px;margin:26px 0;color:var(--fc-muted);font-size:12px;line-height:1.6}
+.focus-chat__compacted::before,.focus-chat__compacted::after{content:"";height:1px;flex:1;max-width:150px;background:var(--fc-border)}

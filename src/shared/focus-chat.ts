@@ -138,6 +138,8 @@ export function validFocusToolCall(value: unknown): value is FocusToolCall {
     Number.isSafeInteger(call.cycle) && call.cycle >= 0 && Number.isFinite(call.createdAt) && Number.isFinite(call.updatedAt)
 }
 export interface FocusTurn {
+  /** Display-only predecessor turn from a completed compaction. */
+  archived?: boolean
   id: string
   userMessageId: string | null
   userText: string
@@ -224,6 +226,8 @@ export interface FocusPageSnapshot {
   modelSettingsReady?: boolean
 }
 export interface FocusChatState extends FocusOwner {
+  /** Persistent local compression boundaries, excluded from the model context. */
+  compactions?: import('./conversation-compaction').CompactionBoundary[]
   historyCursor?: FocusHistoryCursor
   ready: boolean
   nativeDraft: boolean
@@ -245,6 +249,7 @@ export interface FocusChatState extends FocusOwner {
 }
 /** Revisions are scoped to an owner; omitted collections mean reuse that owner's snapshot. */
 export interface FocusHistoryCursor {
+  presentation?: string
   ownerKey: string
   turns: number
   executions: string
