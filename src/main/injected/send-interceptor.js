@@ -1213,6 +1213,68 @@
     })
   }
 
+  /** Keep native Mermaid SVGs as isolated images, using the existing layout transport. */
+  const nativeMermaidMarkdown = (svg, sourceMessageId) => {
+    const title = String(svg.querySelector('title')?.textContent || svg.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 500) || 'Mermaid 图表'
+    const labelText = node => {
+      if (node.nodeType === Node.TEXT_NODE) return String(node.nodeValue || '')
+      if (node.nodeType !== Node.ELEMENT_NODE || /^(style|script|button)$/i.test(node.tagName)) return ''
+      return [...node.childNodes].map(labelText).join(' ')
+    }
+    const labels = [...new Set([...svg.querySelectorAll('text, foreignObject')]
+      .map(element => labelText(element).replace(/\s+/g, ' ').trim()).filter(Boolean))]
+    const fallback = [title, ...labels.filter(label => label !== title)].map(label => '> ' + label).join('\n')
+    const unavailable = message => '\n\n' + fallback + '\n> ' + message + '\n\n'
+    try {
+      const image = svg.cloneNode(true)
+      image.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+      // Native markers sometimes refer to the conversation URL. Make those fragment
+      // references local to the image, and drop external paints/resources entirely.
+      const localUrls = text => text.replace(/url\(([^)]*)\)/gi, (_, value) => {
+        const reference = value.trim().replace(/^['"]|['"]$/g, ''), hash = reference.indexOf('#')
+        const id = hash >= 0 ? reference.slice(hash + 1) : ''
+        return /^[a-zA-Z0-9_:.-]+$/.test(id) ? 'url(#' + id + ')' : 'none'
+      })
+      for (const element of [image, ...image.querySelectorAll('*')]) {
+        if (/^(script|iframe|object|embed|link|meta|animate|animatemotion|animatetransform|set)$/i.test(element.tagName)) {
+          element.remove(); continue
+        }
+        for (const attribute of [...element.attributes]) {
+          if (/^on/i.test(attribute.name) || /^(src|srcdoc)$/i.test(attribute.name) ||
+              /^(?:xlink:)?href$/i.test(attribute.name) && !/^#[a-zA-Z0-9_:.-]+$/.test(attribute.value)) {
+            element.removeAttribute(attribute.name)
+          } else if (/url\(/i.test(attribute.value)) element.setAttribute(attribute.name, localUrls(attribute.value))
+        }
+        if (element.tagName.toLowerCase() === 'style') {
+          element.textContent = localUrls(String(element.textContent || '').replace(/@import\s+[^;]+;?/gi, '')) +
+            '\n*{animation:none!important;transition:none!important}'
+        }
+      }
+      // Preserve the native diagram's contrast when the app theme changes later.
+      let background = 'rgb(255, 255, 255)'
+      for (let element = svg; element; element = element.parentElement) {
+        const color = getComputedStyle(element).backgroundColor
+        if (color && color !== 'transparent' && !/^rgba\([^)]*,\s*0(?:\.0+)?\)$/.test(color)) { background = color; break }
+      }
+      const box = String(svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number)
+      const bounds = svg.getBoundingClientRect()
+      const validBox = box.length === 4 && box.every(Number.isFinite) && box[2] > 0 && box[3] > 0
+      const width = validBox ? box[2] : bounds.width || 800
+      const height = validBox ? box[3] : bounds.height || 600
+      if (!validBox) image.setAttribute('viewBox', '0 0 ' + width + ' ' + height)
+      image.setAttribute('width', String(width)); image.setAttribute('height', String(height))
+      image.setAttribute('style', (image.getAttribute('style') || '') + ';background-color:' + background +
+        ';width:' + width + 'px;height:' + height + 'px;max-width:none')
+      const src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(image))
+      // Respect the existing inline-image transport; a fallback must never discard
+      // the surrounding answer or expose a partial SVG/CSS payload as prose.
+      if (src.length > 131072) return unavailable('图表较大，请切回原始页面查看完整图表。')
+      const data = { version: 1, sourceMessageId, label: title, width: Math.min(2000, Math.max(32, Math.ceil(width))),
+        root: { tag: 'figure', children: [{ tag: 'img', attrs: { src, alt: title } }] } }
+      return '\n\n<!--focus-layout ' + JSON.stringify(data).replace(/</g, '\\u003c').replace(/--/g, '\\u002d\\u002d') + ' -->\n' + fallback + '\n\n'
+    } catch { return unavailable('图表暂时无法提取，请切回原始页面查看。') }
+  }
+
   const readReplyMarkdown = (node) => {
     const root = replyRootOf(node)
     if (!root) return ''
@@ -1297,6 +1359,12 @@
       const layout = layouts.find(item => item.element === element)
       if (layout) return layoutMarkdown(layout)
       const tag = element.tagName.toLowerCase()
+      if (tag === 'script' || tag === 'style') return ''
+      if (tag === 'svg') {
+        const diagram = /^(?:chatgpt-)?mermaid[-_]/i.test(element.getAttribute('id') || '') ||
+          !!element.getAttribute('aria-roledescription')
+        return diagram ? nativeMermaidMarkdown(element, messageIdOf(node)) : ''
+      }
       // KaTeX contains three representations of the SAME formula: MathML, its TeX
       // annotation and visual HTML. Consume the outer formula once, before walking
       // children, otherwise every expression is concatenated two or three times.
@@ -6690,7 +6758,8 @@
         (state.enabled && state.awaitingReplySince !== 0 &&
           (raw.trim().startsWith('{') || raw.trim().startsWith(String.fromCharCode(96).repeat(3) + 'json')))
       const smartReplies = rules.smartUi ? queryAllAssistant().filter(node => isVisibleElement(node) &&
-        (node.matches?.(rules.smartUi.rootSelector) || node.querySelector?.(rules.smartUi.rootSelector))).slice(-8)
+        (node.matches?.(rules.smartUi.rootSelector) || node.querySelector?.(rules.smartUi.rootSelector) ||
+          node.querySelector?.('svg[id^="chatgpt-mermaid-"], svg[id^="mermaid-"], svg[aria-roledescription]'))).slice(-8)
         .flatMap(node => {
           // Rich-content refreshes obey the same protocol filter as the live answer.
           // Otherwise a saved command segment or a readable clarification can be

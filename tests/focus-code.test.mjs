@@ -22,17 +22,25 @@ function initializer(node, name) {
 
 class Element {
   constructor(tag, attrs = {}, children = []) {
-    this.nodeType = 1; this.tagName = tag.toUpperCase(); this.attrs = attrs
+    this.nodeType = 1; this.tagName = tag.toUpperCase(); this.localName = tag; this.attrs = { ...attrs }
     this.childNodes = children.map(child => typeof child === 'string' ? { nodeType: 3, nodeValue: child } : child)
     for (const child of this.childNodes) child.parentElement = this
   }
   get children() { return this.childNodes.filter(child => child.nodeType === 1) }
   get textContent() { return this.childNodes.map(child => child.nodeValue ?? child.textContent).join('') }
+  set textContent(value) { this.childNodes = [{ nodeType: 3, nodeValue: value, parentElement: this }] }
+  get attributes() { return Object.entries(this.attrs).map(([name, value]) => ({ name, value })) }
   get className() { return this.attrs.class || '' }
   getAttribute(name) { return this.attrs[name] ?? null }
+  setAttribute(name, value) { this.attrs[name] = value }
+  removeAttribute(name) { delete this.attrs[name] }
+  getBoundingClientRect() { return { width: 800, height: 600 } }
+  cloneNode() { return new Element(this.localName, this.attrs, this.childNodes.map(child => child.nodeType === 3 ? child.nodeValue : child.cloneNode(true))) }
+  remove() { if (this.parentElement) this.parentElement.childNodes = this.parentElement.childNodes.filter(child => child !== this) }
   matches(selector) {
     return selector.split(',').some(part => {
       part = part.trim()
+      if (part === '*') return true
       if (part.startsWith('.')) return this.className.split(' ').includes(part.slice(1))
       const attribute = /^(\w+)?\[([\w-]+)="([^"]+)"\]$/.exec(part)
       if (attribute) return (!attribute[1] || this.matches(attribute[1])) && this.getAttribute(attribute[2]) === attribute[3]
@@ -50,9 +58,27 @@ function parse(html) {
   const tree = fromHtmlIsomorphic(html, { fragment: true })
   return new Element('article', {}, tree.children.map(convert))
 }
-const extract = new Script('(' + initializer(source, 'readReplyMarkdown') + ')').runInNewContext({
-  PAGE: { focus: null }, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, replyRootOf: node => node
-})
+const escapeXml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+const serialize = node => node.nodeType === 3 ? escapeXml(node.nodeValue) :
+  '<' + node.localName + Object.entries(node.attrs).map(([name, value]) => ' ' + name + '="' + escapeXml(value) + '"').join('') + '>' +
+  node.childNodes.map(serialize).join('') + '</' + node.localName + '>'
+const extractionContext = {
+  PAGE: { focus: null }, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, replyRootOf: node => node,
+  messageIdOf: () => 'native-message', getComputedStyle: element => ({ backgroundColor: element.attrs['data-background'] || 'rgba(0, 0, 0, 0)' }),
+  XMLSerializer: class { serializeToString(element) { return serialize(element) } }
+}
+extractionContext.nativeMermaidMarkdown = new Script('(' + initializer(source, 'nativeMermaidMarkdown') + ')').runInNewContext(extractionContext)
+const extract = new Script('(' + initializer(source, 'readReplyMarkdown') + ')').runInNewContext(extractionContext)
+const layoutExports = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-layout.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: layoutExports, URL, require: () => ({}) })
+const layoutComponent = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/renderer/src/components/FocusLayout.tsx', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX }
+}).outputText).runInNewContext({ exports: layoutComponent, require(name) {
+  return name.endsWith('.css') || name.startsWith('@shared/') || name === './FocusMessageLink' ? {} : require(name)
+} })
 const codeExports = {}
 const htmlPreviewExports = {}
 new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-html-preview.ts', import.meta.url), 'utf8'), {
@@ -132,6 +158,80 @@ test('Mermaid toolbar labels survive extraction and select diagram rendering wit
   assert.match(html, /输入分层网络/)
   assert.equal(codeExports.codeBlockText(React.createElement('code', null, diagram)), diagram)
   assert.doesNotMatch(render('```text\n' + diagram + '\n```'), /focus-mermaid|>图表</)
+})
+
+const nativeDiagram = () => el('svg', [
+  el('title', ['整体架构']),
+  el('style', ['#chatgpt-mermaid-r_ol {font-family:Arial;fill:rgb(13,13,13)} .edge {marker-end:url(https://chatgpt.com/c/original#arrow)}']),
+  el('defs', [el('marker', [el('path', [], { d: 'M0 0L5 5L0 10' })], { id: 'arrow' })]),
+  el('g', [el('path', [], { d: 'M0 0L100 100', 'marker-end': 'url(https://chatgpt.com/c/original#arrow)' }),
+    el('foreignObject', [el('div', ['browser-harness CLI / MCP'], { xmlns: 'http://www.w3.org/1999/xhtml' })], { width: '200', height: '50' }),
+    el('text', ['daemon.py'])])
+], { id: 'chatgpt-mermaid-r_ol', viewBox: '0 0 900 700', width: '100%', role: 'graphics-document' })
+const diagramData = markdown => {
+  const match = /<!--focus-layout (\{[^\n]*\}) -->/.exec(markdown)
+  assert.ok(match, 'a native diagram is exported using the validated layout transport')
+  const data = layoutExports.parseFocusLayout(match[1])
+  assert.ok(data, 'the renderer accepts the complete image payload')
+  return data
+}
+const imageSource = data => decodeURIComponent(data.root.children[0].attrs.src.split(',').slice(1).join(','))
+
+test('ChatGPT rendered Mermaid SVGs retain labels, foreignObject layout and arrows without leaking CSS into prose', () => {
+  const diagram = nativeDiagram(), original = serialize(diagram)
+  const markdown = extract(el('article', [el('h2', ['整体架构']), diagram, el('p', ['下面解释文件关联。'])], { 'data-background': 'rgb(255, 255, 255)' }))
+  assert.match(markdown, /^## 整体架构/)
+  assert.match(markdown, /> browser-harness CLI \/ MCP\n> daemon\.py/)
+  assert.match(markdown, /下面解释文件关联。$/)
+  assert.doesNotMatch(markdown, /font-family:|#chatgpt-mermaid-r_ol|marker-end:url/)
+  const data = diagramData(markdown), svg = imageSource(data)
+  assert.equal(data.sourceMessageId, 'native-message')
+  assert.equal(data.width, 900)
+  assert.match(svg, /<foreignObject/)
+  assert.match(svg, /<marker id="arrow"/)
+  assert.match(svg, /marker-end="url\(#arrow\)"/)
+  assert.match(svg, /background-color:rgb\(255, 255, 255\)/)
+  assert.match(svg, /animation:none!important/)
+  assert.equal(serialize(diagram), original, 'export never mutates the original page or diagram')
+  const html = renderToStaticMarkup(React.createElement(layoutComponent.default, { data }))
+  assert.match(html, /<img[^>]+src="data:image\/svg\+xml/)
+  assert.match(html, /alt="整体架构"/)
+  assert.doesNotMatch(html, /<svg|<foreignObject|<script|<style/)
+})
+
+test('native diagram images drop executable nodes, handlers and external references while preserving local markers', () => {
+  const diagram = nativeDiagram()
+  diagram.setAttribute('onload', 'unsafeRoot()')
+  diagram.childNodes.push(el('script', ['unsafeScript()']), el('animate', [], { attributeName: 'x' }),
+    el('image', [], { href: 'https://example.invalid/tracker.png', onerror: 'unsafeImage()' }),
+    el('use', [], { 'xlink:href': '#arrow' }), el('use', [], { href: 'https://example.invalid/external.svg#shape' }),
+    el('style', ['@import url(https://example.invalid/style.css); .node{fill:url(https://example.invalid/paint.svg)}']))
+  const svg = imageSource(diagramData(extract(el('article', [diagram], { 'data-background': 'rgb(20, 20, 20)' }))))
+  assert.doesNotMatch(svg, /unsafeRoot|unsafeScript|unsafeImage|onload|onerror|<script|<animate|example\.invalid|@import/)
+  assert.match(svg, /xlink:href="#arrow"/)
+  assert.match(svg, /fill:none/)
+  assert.match(svg, /background-color:rgb\(20, 20, 20\)/)
+})
+
+test('diagram fallbacks preserve readable labels and surrounding prose when an image exceeds the existing transport', () => {
+  const diagram = nativeDiagram()
+  diagram.childNodes.push(el('path', [], { d: 'M0 0L1 1'.repeat(20_000) }))
+  const markdown = extract(el('article', [el('p', ['之前的说明']), diagram, el('p', ['之后的说明'])]))
+  assert.doesNotMatch(markdown, /<!--focus-layout|font-family:|M0 0L1 1/)
+  assert.match(markdown, /之前的说明/)
+  assert.match(markdown, /browser-harness CLI \/ MCP/)
+  assert.match(markdown, /图表较大，请切回原始页面查看完整图表/)
+  assert.match(markdown, /之后的说明/)
+})
+
+test('ordinary SVG icons and page styles are excluded while SVG code samples remain intact', () => {
+  const sample = '<svg><style>.node{fill:red}</style><text>源码</text></svg>'
+  const markdown = extract(el('article', [el('style', ['.page{color:red}']), el('script', ['unsafe()']),
+    el('svg', [el('style', ['.icon{fill:red}']), el('text', ['toolbar icon'])]),
+    el('pre', [el('code', [sample], { class: 'language-xml' })]), el('p', ['有效正文'])]))
+  assert.doesNotMatch(markdown, /\.page|\.icon|toolbar icon|unsafe/)
+  assert.ok(markdown.includes('```xml\n' + sample + '\n```'))
+  assert.match(markdown, /有效正文$/)
 })
 
 test('copying the Prism token tree produces only original code and preserves whitespace', () => {

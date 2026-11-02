@@ -126,12 +126,27 @@ SVG 沿用受限几何属性；从计算后的颜色、填充或描边映射成�
 RGB/sRGB 颜色，并沿用主题色映射和原生列对齐。隐藏文字、中性灰色及普通链接颜色不触发展示树。
 新增用例覆盖该八行风险表、建议列左对齐、正文位置、嵌套去重和超限文字后备；仍等待用户实际验收。
 
+## 2026-11-02：原生 Mermaid 图表
+
+用户截图中，原始页面的文件关系图可以正常显示，专注对话却从 `#chatgpt-mermaid-…` 开始输出大量 CSS。
+代码检查发现，已有 Mermaid 支持仅覆盖带语言标记的代码块；原生 SVG 被普通 Markdown 读取器逐层展开，
+其中的 `style` 正文和标签因此一起进入文字回答。本次依据截图和代码适配，未采集该会话的新 DOM。
+
+读取器现在识别 Mermaid 编号或带图表语义的 SVG，将原图复制为独立 SVG 图片，通过已有 `focus-layout`
+图片通道在原位置显示。保留节点、连线、箭头、HTML 标签排版、尺寸和原图背景；本地化箭头的 URL 片段引用，
+移除脚本、事件、外部资源与动画。图片通过 `img` 显示，原始 SVG 不进入应用 DOM。原网页不会被修改。
+标题和节点文字另作可读后备，复制回答和上下文估算沿用现有布局规则，不包含 SVG/CSS 数据。
+超出既有内联图片传输范围或无法提取时，保留标签、前后正文及返回原始页面的提示，不显示半截样式代码。
+
+已有会话的富内容刷新也识别没有 DIL 外层的 Mermaid 图表，载入原网页后可以替换旧的纯文字展示。
+普通 SVG 图标及页面样式不进入回答，代码块中的 SVG 源码继续按代码展示。
+
 ## 用户运行检查
 
 智能体只进行静态检查和构建，以下测试及真实界面验收由用户运行：
 
 ```powershell
-node --test tests/focus-layout.test.mjs tests/focus-smart-ui.test.mjs tests/focus-page.test.mjs tests/focus-chat.test.mjs
+node --test tests/focus-layout.test.mjs tests/focus-smart-ui.test.mjs tests/focus-page.test.mjs tests/focus-chat.test.mjs tests/focus-code.test.mjs tests/focus-mermaid.test.mjs tests/focus-token-usage.test.mjs
 ```
 
 检查实际提取器、数据解析和 React 静态输出：侧栏/网格/图标、原位 Markdown、危险标签/事件/URL、
@@ -153,5 +168,9 @@ node --test tests/focus-layout.test.mjs tests/focus-smart-ui.test.mjs tests/focu
 8. 对比“主要服务”状态表：五个绿色勾选和一个红色警告图标、对应状态文字均保留，状态列沿用
    原表对齐；`web2term-backend` 和 `bvcheckiprule.service` 保留行内代码样式。检查浅深色、
    窄窗口、刷新后的历史恢复，以及复制回答包含完整服务及状态文字且无机器标记。
+
+9. 打开含 Mermaid 文件关系图的截图会话，待原网页载入图表后切换专注对话，检查图形、箭头、
+   节点文字及前后章节均显示，不出现 `#chatgpt-mermaid-…` 样式代码。检查窄窗口、浅深色、复制回答、
+   刷新后的历史恢复，以及原有 Mermaid 代码块的图表/源码切换。图表图片需在切换应用主题后保持可读。
 
 交付状态：构建通过，等待用户测试。静态输出和构建不能代替实际布局验收。

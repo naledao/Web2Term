@@ -331,6 +331,28 @@ test('all three reasoning blocks and interleaved search sources keep document or
   assert.equal('userMessages' in result, false)
 })
 
+test('native Mermaid history refreshes without a DIL wrapper while protocol replies remain excluded', () => {
+  const f = fixture()
+  f.context.PAGE = CHATGPT_PAGE
+  f.context.isVisibleElement = node => node.visible !== false
+  const turn = (id, body, markdown, diagram = false, visible = true) => ({ id, body, markdown, visible,
+    matches: () => false,
+    getAttribute: name => name === CHATGPT_PAGE.messageIdAttr ? id : null,
+    querySelector: selector => selector.startsWith('svg[') ? diagram ? {} : null :
+      selector === CHATGPT_PAGE.assistantReplySelectors[0] ? { contains: () => false } : null,
+    querySelectorAll: () => [], closest: () => null })
+  const recovered = '<!--focus-layout {"version":1} -->\n> browser-harness CLI / MCP\n> daemon.py'
+  f.context.queryAllAssistant = () => [
+    turn('ordinary', '普通段落', '普通段落'),
+    turn('diagram-history', 'browser-harness CLI / MCP daemon.py', recovered, true),
+    turn('hidden-diagram', '隐藏的图表', '隐藏图表内容', true, false),
+    turn('protocol-diagram', '{"command":"Get-Date"}', '不应显示协议', true)
+  ]
+  const snapshot = f.snapshot()
+  assert.deepEqual(Array.from(snapshot.smartReplies, item => [item.sourceMessageId, item.answer]), [['diagram-history', recovered]])
+  assert.equal(f.calls.length, 0, 'refreshing an existing diagram never sends a message')
+})
+
 test('complete and partial command, question and read-files protocol never become body text', () => {
   for (const text of ['{"command":"pwd"}', '{"type":"read_files","files":[]}', '{"type":"questions","questions":[]}', '{"com']) {
     const f = fixture()
