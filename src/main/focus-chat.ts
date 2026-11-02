@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { FocusTurn, FocusSegment, FocusPageSnapshot, FocusDelivery, FocusAttachmentInfo, FocusToolCall, FocusToolKind, FocusToolObserver, FocusToolUpdate } from '../shared/focus-chat'
 import type { CommandRecoveryState, InterceptorPageEvent } from '../shared/types'
+import type { FocusToolSkill } from '../shared/focus-skills'
 import { cleanFocusAnswer, cleanFocusUserText, supportsFocusView, validFocusToolCall } from '../shared/focus-chat'
 
 interface FocusStore {
@@ -49,12 +50,12 @@ export class FocusChat {
     this.entries.set(platformId, entry)
     return entry
   }
-  begin(platformId: string, conversationId: string | null, text: string, files: FocusAttachmentInfo[] = []): string | undefined {
+  begin(platformId: string, conversationId: string | null, text: string, files: FocusAttachmentInfo[] = [], userSkills: FocusToolSkill[] = []): string | undefined {
     if (!supportsFocusView(platformId)) return undefined
     const entry = this.context(platformId, conversationId)
     this.stop(platformId)
     const turn: FocusTurn = { id: randomUUID(), userMessageId: null, userText: cleanFocusUserText(text), createdAt: Date.now(),
-      userAttachments: files,
+      userAttachments: files, userSkills: [...userSkills],
       updatedAt: Date.now(), status: 'working', segments: [], executionIds: [], executionCycles: {}, deliveries: {} }
     entry.turns.push(turn)
     entry.current = turn.id
@@ -78,9 +79,9 @@ export class FocusChat {
     return this.entries.get(platformId)?.turns.some(turn => turn.id === turnId && !turn.supersededBy) === true
   }
   /** Called only by the page's confirmed edit acknowledgement, never optimistically. */
-  revise(platformId: string, conversationId: string, text: string, turnIds: string[], messageIds: string[]): string | undefined {
+  revise(platformId: string, conversationId: string, text: string, turnIds: string[], messageIds: string[], userSkills: FocusToolSkill[] = []): string | undefined {
     const hidden = this.hiddenMessageIds(platformId, conversationId)
-    const id = this.begin(platformId, conversationId, text)
+    const id = this.begin(platformId, conversationId, text, [], userSkills)
     const entry = this.entries.get(platformId)
     if (!id || !entry) return undefined
     const replaced = new Set(turnIds)

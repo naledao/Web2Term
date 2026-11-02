@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PreparedAttachment } from './file-access'
+import type { FocusToolSkill } from '../shared/focus-skills'
 import type { FileSendOutcome } from '../shared/file-requests'
 import type { FileReadingPlatform } from '../shared/types'
 import { isQuestionChatHome, selectionQuestionConversation } from '../shared/deepseek-question'
@@ -109,7 +110,7 @@ export async function sendPageFiles(
   token: string,
   isCurrent: () => boolean,
   signal: AbortSignal,
-  options: { caption?: string; allowNewConversation?: boolean; userText?: string; computerResult?: { path: string; generation: number }; beforeSubmit?: () => void } = {}
+  options: { caption?: string; allowNewConversation?: boolean; userText?: string; userSkills?: FocusToolSkill[]; computerResult?: { path: string; generation: number }; beforeSubmit?: () => void } = {}
 ): Promise<FileSendOutcome> {
   const debuggerApi = contents.debugger
   let attached = false
@@ -215,7 +216,7 @@ export async function sendPageFiles(
     const begin = options.computerResult
       ? await call('beginComputerFileSend', token, fileInfo, options.computerResult)
       : options.userText !== undefined
-      ? await call('beginFocusFileSend', token, fileInfo, options.userText, new URL(ownerUrl).pathname)
+      ? await call('beginFocusFileSend', token, fileInfo, options.userText, new URL(ownerUrl).pathname, options.userSkills ?? [])
       : await call('beginFileSend', token, fileInfo)
     log('begin-result', { result: begin ?? 'missing-handler' })
     if (begin !== 'ok' && begin !== 'resume') {

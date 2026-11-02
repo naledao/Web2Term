@@ -1382,6 +1382,8 @@ export interface InterceptorPageEvent {
   /** Token for a page-side batch of user image attachments, on user-message. */
   attachmentToken?: string
   focusFiles?: FocusAttachmentInfo[]
+  /** Display-only skill references carried by a confirmed focus send. */
+  userSkills?: import('./focus-skills').FocusToolSkill[]
   focusSendToken?: string
   /** Correlation and origin of a confirmed human send, never an automatic result. */
   submissionId?: string

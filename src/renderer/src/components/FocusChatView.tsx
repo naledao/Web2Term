@@ -15,6 +15,8 @@ import { rehypeFocusFileLinks, cleanFocusFileLinkCopy } from '@shared/focus-file
 import FocusFilePreviewProvider from './FocusFilePreview'
 import FocusComposerModes from './FocusComposerModes'
 import FocusCompaction, { useConversationCompaction } from './FocusCompaction'
+import FocusSkillIcon from './FocusSkillIcon'
+import FocusMessageSkills from './FocusMessageSkills'
 import { FOCUS_SKILLS, focusSkillQuery, validFocusToolSkills, focusSkillUnavailable } from '@shared/focus-skills'
 import type { FocusSkillId, FocusToolSkill } from '@shared/focus-skills'
 import type { ConversationToolsState } from '@shared/conversation-tools'
@@ -864,12 +866,12 @@ function FocusChatView(props: Props): JSX.Element {
       return null
     } finally { sendLock.current = false; if (alive.current) setSending(false) }
   }
-  const userContent = (messageId: string | null, text: string, attachments: boolean, children?: ReactNode, archived = false): JSX.Element =>
-    <EditableUser text={text} editable={!archived && supportsFocusEdit(owner.platformId) && !!owner.conversationId && !!messageId && !!text.trim() && !attachments &&
+  const userContent = (messageId: string | null, text: string, attachments: boolean, children?: ReactNode, archived = false, skills?: FocusToolSkill[]): JSX.Element =>
+    <><FocusMessageSkills skills={skills} /><EditableUser text={text} editable={!archived && supportsFocusEdit(owner.platformId) && !!owner.conversationId && !!messageId && !!text.trim() && !attachments &&
       !messagesById.get(messageId)?.sourceMessageId?.startsWith('compaction:')}
       open={!!messageId && editingId === messageId} disabled={working || sending || stopping || settingPending !== null || !ready || !!state?.nativeDraft}
       onOpen={() => { if (!sendLock.current && messageId) setEditingId(messageId) }} onClose={() => setEditingId(null)}
-      onSend={text => editMessage(messageId!, text)}>{children}</EditableUser>
+      onSend={text => editMessage(messageId!, text)}>{children}</EditableUser></>
   const action = async (id: string, skip = false): Promise<void> => {
     if (actionId) return
     setActionId(id)
@@ -969,7 +971,7 @@ function FocusChatView(props: Props): JSX.Element {
         {userContent(turn.userMessageId, turn.userText, !!userMessage?.attachments.length || !!turn.userAttachments?.length, <>
           {userMessage?.attachments.map(props.renderAttachment)}
           {turn.userAttachments?.map((file, index) => <div className="focus-file-sent" key={index}>📎 {file.fileName}<span>{fileSize(file.sizeBytes)}</span></div>)}
-        </>, turn.archived)}</div>
+        </>, turn.archived, turn.userSkills)}</div>
       <div className="focus-assistant">
         <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}<span>{modelLabel}</span></div>
         <FocusDetails className="focus-process" ownerKey={viewOwnerKey} stateKey={'process:' + turn.id} defaultOpen summary={<><span className={turnWorking && !sendBlocked ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{sendBlocked ? '!' : turnWorking ? '' : turn.status === 'blocked' ? '!' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <ProcessHint /> : null}</>}>{() =>
@@ -1071,17 +1073,19 @@ function FocusChatView(props: Props): JSX.Element {
           {matchingSkills.length ? matchingSkills.map((skill, index) => <div className="focus-skills__row" key={skill.id} role="presentation"><button type="button" role="option" aria-selected={activeSkill?.id === skill.id} id={'focus-skill-' + skill.id + '-' + owner.sessionId}
             className="focus-skills__item" disabled={!!skillDisabled(skill.id)} onMouseDown={event => event.preventDefault()}
             onMouseEnter={() => setSkillIndex(index)} onClick={() => chooseSkill(skill.id)}>
-            <span className="focus-skills__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" /><path d="m4 7.5 8 4.5 8-4.5M12 12v9M8 5.3l8 4.5" /></svg></span>
+            <span className="focus-skills__icon" aria-hidden="true"><FocusSkillIcon skill={skill.id} /></span>
             <span className="focus-skills__body"><strong>{skill.name}</strong><small>{skillDisabled(skill.id) || (selectedSkills.includes(skill.id as FocusToolSkill) ? '已添加到当前输入' : skill.description)}</small></span>
             <span className="focus-skills__key">↵</span>
-          </button>{skill.id !== 'compact' ? <button type="button" className="focus-skills__settings" aria-label={skill.name + '设置'} title={skill.name + '设置'}
-            disabled={sending || stopping} onMouseDown={event => event.preventDefault()}
-            onClick={event => props.onSkillSettings(skill.id as FocusToolSkill, event.currentTarget)}>⚙</button> : null}</div>) : <div className="focus-skills__empty">没有匹配的技能</div>}
+          </button></div>) : <div className="focus-skills__empty">没有匹配的技能</div>}
         </div> : null}
         {selectedSkills.length ? <div className="focus-composer__skills" aria-label="本次使用的技能">
-          {selectedSkills.map(id => <span className="focus-skill-chip" key={id}>{FOCUS_SKILLS.find(skill => skill.id === id)!.name}
-            <button type="button" disabled={sending} aria-label={FOCUS_SKILLS.find(skill => skill.id === id)!.name + '设置'} onClick={event => props.onSkillSettings(id, event.currentTarget)}>⚙</button>
-            <button type="button" disabled={sending} aria-label={'移除' + FOCUS_SKILLS.find(skill => skill.id === id)!.name} onClick={() => changeSkills(selectedSkills.filter(skill => skill !== id))}>×</button>
+          {selectedSkills.map(id => <span className="focus-skill-chip" key={id}><FocusSkillIcon skill={id} /><span>{FOCUS_SKILLS.find(skill => skill.id === id)!.name}</span>
+            <button type="button" disabled={sending} aria-label={FOCUS_SKILLS.find(skill => skill.id === id)!.name + '设置'} onClick={event => props.onSkillSettings(id, event.currentTarget)}>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="M3 7h10m4 0h4M3 17h4m4 0h10" /><circle cx="15" cy="7" r="2" /><circle cx="9" cy="17" r="2" /></svg>
+            </button>
+            <button type="button" disabled={sending} aria-label={'移除' + FOCUS_SKILLS.find(skill => skill.id === id)!.name} onClick={() => changeSkills(selectedSkills.filter(skill => skill !== id))}>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18" /></svg>
+            </button>
           </span>)}<small>随本次任务按需加载</small>
         </div> : null}
         {draftFiles.length ? <div className="focus-composer__files" aria-label="待发送附件">{draftFiles.map(item =>

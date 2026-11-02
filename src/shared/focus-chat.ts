@@ -143,6 +143,8 @@ export interface FocusTurn {
   id: string
   userMessageId: string | null
   userText: string
+  /** Skills explicitly referenced by this human message; display metadata only. */
+  userSkills?: import('./focus-skills').FocusToolSkill[]
   userAttachments?: FocusAttachmentInfo[]
   createdAt: number
   updatedAt: number

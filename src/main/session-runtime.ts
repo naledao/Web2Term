@@ -1054,7 +1054,7 @@ export class SessionRuntime {
         this.options.store.upsertMany(scraped)
         this.broadcastConversations()
       },
-      onUserStarted: (text, files, editToken, submission, scheduledRunId) => {
+      onUserStarted: (text, files, editToken, submission, scheduledRunId, userSkills) => {
         if (this.disposed) return undefined
         const controlsCurrent = !this.disposed && isActive() && (this.active || this.canRunConversationInBackground(platform.id))
         const automatic = scheduledRunId !== undefined || submission?.id.startsWith('user:scheduled:') === true
@@ -1079,9 +1079,11 @@ export class SessionRuntime {
           this.backgroundTaskResults.cancel({ platformId: platform.id, conversationId: revision.conversationId })
           this.backgroundTasks.cancelNotifications({ platformId: platform.id, conversationId: revision.conversationId })
         }
+        const referencedSkills = userSkills ?? (editToken && revision
+          ? this.focusChat.turns(platform.id, revision.conversationId).find(turn => turn.userMessageId === revision.messageIds[0])?.userSkills : undefined)
         const turnId = editToken && revision
-          ? this.focusChat.revise(platform.id, revision.conversationId, text, revision.turnIds, revision.messageIds)
-          : this.focusChat.begin(platform.id, record().conversationId, text, files)
+          ? this.focusChat.revise(platform.id, revision.conversationId, text, revision.turnIds, revision.messageIds, referencedSkills)
+          : this.focusChat.begin(platform.id, record().conversationId, text, files, referencedSkills)
         if (editToken && revision) revision.acknowledged = true
         // A late send may remain in its original history, but cannot reopen task authority after handover.
         if (submission && !controlsCurrent) return turnId
@@ -1990,8 +1992,8 @@ export class SessionRuntime {
       if (request.files?.length) staged = await stageFocusAttachments(request.files)
       const outcome = controller.signal.aborted || !this.ownsFocus(request) ? 'cancelled' : staged
         ? await embed.sendFocusFiles(text, staged.attachments, 'focus:' + randomUUID(), uploadCurrent, controller.signal,
-          (request.files ?? []).filter(file => file.mimeType.startsWith('image/')).map(file => ({ ...file, width: null, height: null })))
-        : await this.embed.sendFocusUser(text)
+          (request.files ?? []).filter(file => file.mimeType.startsWith('image/')).map(file => ({ ...file, width: null, height: null })), skills)
+        : await this.embed.sendFocusUser(text, skills)
       if (skills.length && ['ok', 'unknown', 'stuck'].includes(outcome)) {
         const conversationId = request.conversationId ?? embed.getState().conversationId
         this.recordContextUsage(request.platformId, { id: skillUsageId, conversationId,
@@ -2516,8 +2518,8 @@ export class SessionRuntime {
     const lease = task && taskPresentationLease(task)
     // A live completion stays visible briefly as a notice, then leaves the native window hidden.
     // Reading history cannot create this lifetime or renew it on each 500 ms refresh.
-    // A plain chat turn records a task too; stay hidden until the model issues its first desktop step.
-    if (!task || !lease || !task.progress?.stepCount || !this.computerOverlayLifetime.visible(task)) return null
+    // Chat, command and file tasks share progress; only the lifetime opened by a computer step may display.
+    if (!task || !lease || !this.computerOverlayLifetime.visible(task)) return null
     return computerOverlaySnapshot(task, this.getTaskActivity(lease), this.runner.getAutomation().paused)
   }
 

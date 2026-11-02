@@ -93,6 +93,7 @@ test('compression annotations are persistent local boundaries, once per successf
 
 test('adoption preserves the original transcript, hides only trusted transport and survives reload', () => {
   const f = fixture(), task = job()
+  f.turns.get(physicalA)[0].userSkills = ['scheduled_task', 'computer']
   f.continuity.install(task, '# 交接摘要\n完成的事和待办')
   const rows = f.messages.get(physicalC)
   assert.equal(rows.length, 2, 'hidden context is retained for later compression')
@@ -109,6 +110,9 @@ test('adoption preserves the original transcript, hides only trusted transport a
   assert.equal(f.continuity.owns('chatgpt', physicalC, jobOne), true)
   const restored = new ConversationContinuity('workspace', f.store)
   assert.deepEqual(plain(restored.displayMessages('chatgpt', physicalC)), plain(visible))
+  const archived = restored.history('chatgpt', physicalC).turns.find(turn => turn.id === 'old-turn')
+  assert.equal(archived.archived, true)
+  assert.deepEqual(plain(archived.userSkills), ['scheduled_task', 'computer'], 'compression retains message references')
   const count = rows.length
   restored.install(task, '# 不应覆盖第一次导入')
   assert.equal(rows.length, count, 'recovery does not insert duplicate import messages')

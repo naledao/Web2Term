@@ -1370,13 +1370,32 @@
       // children, otherwise every expression is concatenated two or three times.
       if (element.matches('.katex-display, .katex, math')) {
         const annotation = element.querySelector('annotation[encoding="application/x-tex"]')
-        const tex = String(annotation?.textContent || '').trim()
+        let tex = String(annotation?.textContent || '').trim()
         const display = element.matches('.katex-display') || element.getAttribute('display') === 'block'
+        // A native box can surround an annotation containing only its inner TeX.
+        // Without TeX, recover a whole-expression box from its readable label.
+        const readable = current => {
+          if (current.nodeType === Node.TEXT_NODE) return String(current.nodeValue || '')
+          if (current.nodeType !== Node.ELEMENT_NODE || /^(annotation|annotation-xml|style|script)$/i.test(current.tagName)) return ''
+          return [...current.childNodes].map(readable).join('')
+        }
+        const visual = element.querySelector('.katex-html') || (tag === 'math' ? element : element.querySelector('math')) || element.querySelector('mrow')
+        const text = String((visual ? readable(visual) : '') || element.getAttribute('aria-label') || '')
+        const comparable = value => value.replace(/[\s\u200b\u2060]/g, '')
+        const sameLabel = current => !!comparable(text) && comparable(readable(current)) === comparable(text)
+        const boxed = [...element.querySelectorAll('menclose')].some(current =>
+          String(current.getAttribute('notation') || '').split(/\s+/).includes('box') && sameLabel(current)) ||
+          !!visual?.querySelector('.fbox') && [...visual.querySelectorAll('.boxpad')].some(sameLabel)
+        if (boxed && !tex) {
+          const escapes = { '\\': '\\textbackslash{}', '{': '\\{', '}': '\\}', '$': '\\$', '&': '\\&', '#': '\\#',
+            '%': '\\%', '_': '\\_', '^': '\\textasciicircum{}', '~': '\\textasciitilde{}' }
+          tex = '\\text{' + text.replace(/[\\{}$&#%_^~]/g, value => escapes[value]) + '}'
+        }
+        if (boxed && !/\\(?:boxed|fbox|fcolorbox)\b/.test(tex)) tex = '\\boxed{' + tex + '}'
         if (tex) return display ? '\n\n$$\n' + tex + '\n$$\n\n' : '$' + tex.replace(/\s*\n\s*/g, ' ') + '$'
         // A partial/native formula without TeX still has one readable version.
         // Never fall back to all descendants, which includes accessibility copies.
-        const visual = element.querySelector('.katex-html') || element.querySelector('mrow')
-        return String(visual?.textContent || element.getAttribute('aria-label') || '')
+        return text
       }
       const heading = /^h[1-6]$/.test(tag)
       // DIL Text uses p/span with an explicit strong marker or a computed weight;
@@ -2656,6 +2675,7 @@
         scheduleScrollToBottom()
       }
       if (ok && !isRaw) report({ event: 'user-message', text: userTextOf(text), attachmentToken: attachmentToken || undefined,
+        ...(sendContext.userSkills ? { userSkills: sendContext.userSkills } : {}),
         ...(sendContext.scheduledRunId ? { scheduledRunId: sendContext.scheduledRunId, submissionId: 'user:scheduled:' + sendContext.scheduledRunId } : {}),
         submissionKind: clarification ? 'clarification' : 'goal', ...(clarification ? {
           answeredQuestionId: sendContext.question.messageId, questionSource: sendContext.question.source,
@@ -4335,7 +4355,27 @@
     return true
   }
 
-  const checkMailNotification = (messageId, text) => {
+  // Keep the code's textContent intact: innerText includes code-card controls and
+  // can alter JSON escapes. Only measured code chrome and interactive controls are
+  // omitted; prose and quotations still reach the strict envelope check below.
+  const readMailNotificationText = (node) => {
+    const root = replyRootOf(node)
+    const visit = element => {
+      if (!element) return ''
+      if (element.nodeType === 3) return element.nodeValue || ''
+      if (element.nodeType !== 1) return ''
+      if (element.tagName === 'PRE') return '\n' + String((element.querySelector('code') || element).textContent || '') + '\n'
+      if (element.matches('script, style, button, [role="button"], svg')) return ''
+      // DeepSeek also renders bare span/div labels, without button semantics.
+      if (element.matches('.md-code-block-banner') && element.parentElement?.querySelector('pre')) return ''
+      const content = [...element.childNodes].map(visit).join('')
+      if (element.matches('blockquote, q, cite')) return '\n> ' + content + '\n'
+      return element.matches('p, div, section, article, li, br') ? '\n' + content + '\n' : content
+    }
+    return normalizeDsmlToolCalls(visit(root).trim())
+  }
+
+  const checkMailNotification = (messageId, text, node) => {
     if (!looksLikeMailReply(text)) return false
     if (!state.enabled || state.awaitingReplySince === 0 || !mailSourceSubmissionId) {
       state.lastCommandMessageId = messageId
@@ -4344,10 +4384,11 @@
     // The scanner already ignores outer Markdown fences. Replacing fences would
     // corrupt code snippets inside a JSON body. Malformed/mixed requests go to
     // main for a failure receipt and can never fall through to another tool.
-    const candidates = balancedObjects(String(text))
-    let rawJson = candidates.length === 1 ? candidates[0] : String(text)
+    const input = node ? readMailNotificationText(node) : String(text)
+    const candidates = balancedObjects(input)
+    let rawJson = candidates.length === 1 ? candidates[0] : input
     if (candidates.length === 1) {
-      const outside = String(text).replace(candidates[0], '').replace(/```(?:json)?/gi, '')
+      const outside = input.replace(candidates[0], '').replace(/```(?:json)?/gi, '')
         .replace(/^(?:json|Copy code|复制代码|复制)\s*$/gim, '').trim()
       // A schema example inside a normal explanation is not a send instruction.
       if (outside) rawJson = '{"type":"send_email","invalid":true}'
@@ -4790,7 +4831,7 @@
       return
     }
     if (checkComputerRequest(node, messageId)) return
-    if (checkMailNotification(messageId, text)) return
+    if (checkMailNotification(messageId, text, node)) return
     if (checkToolPromptRead(messageId, text)) return
     if (looksLikeScheduledReply(text)) {
       if (state.awaitingReplySince === 0 || !state.enabled) { state.lastCommandMessageId = messageId; return }
@@ -5585,7 +5626,7 @@
           draftRejected = false
           state.replyActionDetected = false
           report({ event: 'user-message', text: focus.text, focusFiles, focusSendToken: token, attachmentToken: focus.attachmentToken,
-            submissionKind: focus.submissionKind })
+            submissionKind: focus.submissionKind, userSkills: focus.userSkills })
           report({ event: 'sent', text: focus.text.slice(0, 400), promptInjected: focus.promptInjected,
             ...focus.injection.metadata, taskPromptGeneration: focus.generation })
         } else report({ event: 'sent-raw', text: computer ? '[computer observation attachment]' : '[read_files attachments]',
@@ -5673,14 +5714,14 @@
       if (result === 'ok' || result === 'resume') fileSend.computer = { path: options.path, generation: options.generation }
       return result
     },
-    beginFocusFileSend(token, files, text, expectedPath) {
+    beginFocusFileSend(token, files, text, expectedPath, userSkills = []) {
       if (location.pathname !== expectedPath || typeof text !== 'string' || text.length > 22000 ||
         !Array.isArray(files) || files.length < 1 || files.length > 3 || state.pendingQuestion || focusGenerationState() !== 'idle' ||
         focusEditing || focusModeChanging || nativeEditRetry || safetyLeak.busy) return 'busy'
       if (state.enabled && state.promptInjectionEnabled && !state.prefix) return 'busy'
       const result = this.beginFileSend(token, files)
       if (result === 'ok' || result === 'resume') {
-        fileSend.focus = { text: normalizeLineEndings(text), generation: state.taskPromptGeneration, prepared: false,
+        fileSend.focus = { text: normalizeLineEndings(text), userSkills, generation: state.taskPromptGeneration, prepared: false,
           submissionKind: state.pendingQuestion ? 'clarification' : 'goal' }
       }
       return result
@@ -6200,6 +6241,7 @@
       if (injection.metadata.promptInjected && !state.prefix) return Promise.resolve('unavailable')
       const payload = injection.prefix ? injection.prefix + USER_TEXT_SENTINEL + normalizeLineEndings(text) : normalizeLineEndings(text)
       const sendContext = { taskPromptGeneration: state.taskPromptGeneration, ...injection.metadata, conversationPromptInjected,
+        ...(options?.userSkills ? { userSkills: options.userSkills } : {}),
         ...(options?.scope ? { scope: options.scope, ...(!options.scope.allowNewConversation ? { path: expectedPath } : {}) } : {}),
         ...(options?.scheduledRunId ? { scheduledRunId: options.scheduledRunId, computerResultToken: options.computerResultToken, path: expectedPath } : {}) }
       state.programmatic = true
@@ -6759,7 +6801,8 @@
           (raw.trim().startsWith('{') || raw.trim().startsWith(String.fromCharCode(96).repeat(3) + 'json')))
       const smartReplies = rules.smartUi ? queryAllAssistant().filter(node => isVisibleElement(node) &&
         (node.matches?.(rules.smartUi.rootSelector) || node.querySelector?.(rules.smartUi.rootSelector) ||
-          node.querySelector?.('svg[id^="chatgpt-mermaid-"], svg[id^="mermaid-"], svg[aria-roledescription]'))).slice(-8)
+          node.querySelector?.('svg[id^="chatgpt-mermaid-"], svg[id^="mermaid-"], svg[aria-roledescription]') ||
+          node.querySelector?.('.katex .fbox, math menclose[notation~="box"]'))).slice(-8)
         .flatMap(node => {
           // Rich-content refreshes obey the same protocol filter as the live answer.
           // Otherwise a saved command segment or a readable clarification can be

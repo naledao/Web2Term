@@ -45,10 +45,89 @@ function page(report, overrides = {}) {
     state, mailSourceSubmissionId: 'user:first', computerPageEpoch: 'epoch-a',
     location: { pathname: '/chat-a' }, report,
     looksLikeMailReply: pageFunction('looksLikeMailReply'), balancedObjects: pageFunction('balancedObjects'),
+    readMailNotificationText: pageFunction('readMailNotificationText', {
+      replyRootOf: node => node.answerRoot || node, normalizeDsmlToolCalls: text => text
+    }),
     setReplyWaiting: value => { state.awaitingReplySince = value }
   })
   return { state, check }
 }
+
+class ElementFixture {
+  nodeType = 1
+  constructor(tag, attributes = {}, children = []) {
+    this.tagName = tag.toUpperCase()
+    this.attributes = attributes
+    this.childNodes = (Array.isArray(children) ? children : [children]).map(child =>
+      typeof child === 'string' ? { nodeType: 3, nodeValue: child } : child)
+    for (const child of this.childNodes) child.parentElement = this
+  }
+  get textContent() { return this.childNodes.map(child => child.nodeType === 3 ? child.nodeValue : child.textContent).join('') }
+  get innerText() { return this.textContent }
+  matches(selector) {
+    return selector.split(',').some(part => {
+      const value = part.trim()
+      if (value.startsWith('.')) return (this.attributes.class || '').split(/\s+/).includes(value.slice(1))
+      if (value === '[role="button"]') return this.attributes.role === 'button'
+      return this.tagName.toLowerCase() === value
+    })
+  }
+  querySelector(selector) {
+    for (const child of this.childNodes) {
+      if (child.nodeType !== 1) continue
+      if (child.matches(selector)) return child
+      const found = child.querySelector(selector)
+      if (found) return found
+    }
+    return null
+  }
+}
+const element = (tag, children, attributes = {}) => new ElementFixture(tag, attributes, children)
+const code = raw => element('pre', element('code', raw))
+function mailReply(raw, bareLabels = false) {
+  const control = label => bareLabels ? element('span', label) : element('div', [element('svg', 'icon'), element('span', label)], { role: 'button' })
+  return element('div', [element('div', [element('span', 'json'), control('复制'), control('下载')], { class: 'md-code-block-banner' }), code(raw)],
+    { class: 'md-code-block' })
+}
+
+test('mail recognition excludes DeepSeek code controls while preserving the exact JSON and body bytes', () => {
+  const content = { ...request, body: '下载\njson\n复制\n```javascript\nconst x = { value: "a\\nb" }\n```\n结束' }
+  const raw = JSON.stringify(content)
+  for (const bareLabels of [false, true]) {
+    const events = [], f = page(event => events.push(event)), node = mailReply(raw, bareLabels)
+    assert.equal(f.check('reply-a', node.innerText, node), true)
+    assert.equal(events.length, 1)
+    assert.equal(events[0].rawJson, raw)
+    assert.deepEqual(protocol.parseMailNotificationRequest(JSON.parse(events[0].rawJson)), content)
+    assert.equal(f.state.awaitingReplySince, 0)
+  }
+})
+
+test('mail DOM reading keeps prose, quotations, malformed JSON and additional calls from becoming a send', () => {
+  const raw = JSON.stringify(request)
+  for (const node of [
+    element('div', [element('p', '下面是调用格式示例：'), mailReply(raw)]),
+    element('div', [element('p', '下载'), mailReply(raw)]),
+    element('blockquote', mailReply(raw)), element('q', mailReply(raw)),
+    element('div', [mailReply(raw), code('{"command":"anything"}')]),
+    element('div', [mailReply(raw), mailReply(raw)]),
+    mailReply('{"type":"send_email","subject":')
+  ]) {
+    const events = [], f = page(event => events.push(event))
+    assert.equal(f.check('invalid-reply', node.innerText, node), true)
+    assert.equal(events.length, 1)
+    let value
+    try { value = JSON.parse(events[0].rawJson) } catch { value = null }
+    assert.equal(protocol.parseMailNotificationRequest(value), null)
+  }
+})
+
+test('mail DOM reading uses the answer root and does not include reasoning from the whole turn', () => {
+  const events = [], f = page(event => events.push(event)), raw = JSON.stringify(request)
+  const node = { answerRoot: mailReply(raw) }
+  assert.equal(f.check('reply-a', node.answerRoot.innerText, node), true)
+  assert.equal(events[0].rawJson, raw)
+})
 
 test('page recognition preserves Markdown inside the email and never acts on history or disabled terminal mode', () => {
   const events = [], f = page(event => events.push(event))
@@ -149,7 +228,8 @@ test('a complete page-to-service call sends exactly once and returns the server 
     send: async (text, value) => { receipts.push({ text, call: value }); return 'ok' }, note: text => notes.push(text) })
   t.after(() => notifications.cancel())
   const bridge = embed(value => notifications.receive(value, JSON.stringify(['session-a', 'claude', value.conversationId, value.sourceSubmissionId, value.messageId])))
-  page(event => bridge.handlePageReport('test:' + JSON.stringify(event))).check('reply-a', '```json\n' + JSON.stringify(request) + '\n```')
+  const node = mailReply(JSON.stringify(request))
+  page(event => bridge.handlePageReport('test:' + JSON.stringify(event))).check('reply-a', node.innerText, node)
   await settle()
   assert.equal(sent.length, 1)
   assert.equal(sent[0].recipientEmail, '987654321@qq.com')

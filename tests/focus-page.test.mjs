@@ -61,6 +61,30 @@ function fixture() {
   return { context, composer, calls, reports, send: method('sendUser', context), snapshot: method('focusSnapshot', context) }
 }
 
+test('selected skills travel through the confirmed text send while activation stays out of the message body', async () => {
+  const f = fixture(), timers = [], skills = ['scheduled_task', 'send_email']
+  const text = '技能激活说明' + USER_TEXT_SENTINEL + '创建计划并通知我'
+  const pending = f.send(text, '/a/chat/s/one', { fromFocus: true, userSkills: skills })
+  const call = f.calls[0]
+  assert.deepEqual(Array.from(call.at(-1).userSkills), skills)
+  assert.equal(f.reports.some(item => item.event === 'user-message'), false)
+  Object.assign(f.context, {
+    RECOVERY_ACTIONS: [], SEND_CONFIRM_POLL_MS: 20,
+    setTimeout: callback => timers.push(callback),
+    lastAssistantId: () => null, computerBaselineOf: () => ({}),
+    findSendButton: () => ({}), controlDisabled: () => false,
+    pressButton() { f.composer.draft = '' },
+    userTextOf: arrow('userTextOf', f.context), setReplyWaiting() {}, scheduleScrollToBottom() {}
+  })
+  arrow('submitWithRetry', f.context)(...call)
+  assert.equal(f.reports.some(item => item.event === 'user-message'), false, 'clicking alone is not confirmation')
+  timers.shift()()
+  assert.equal(await pending, 'ok')
+  const message = f.reports.find(item => item.event === 'user-message')
+  assert.equal(message.text, '创建计划并通知我')
+  assert.deepEqual(Array.from(message.userSkills), skills)
+})
+
 test('cancelling a dialog send stops actual retries and clears only its own draft', async () => {
   for (const attempted of [false, true]) {
     for (const edited of [false, true]) {
@@ -362,6 +386,23 @@ test('complete and partial command, question and read-files protocol never becom
   }
 })
 
+test('boxed formula history refreshes without a DIL wrapper and does not replay a task', () => {
+  const f = fixture()
+  f.context.PAGE = CHATGPT_PAGE
+  const recovered = '$$\n\\boxed{\\text{让 RL 学会在不同搜索状态下如何使用 LNS}}\n$$'
+  const turn = (id, body, markdown, boxed = false) => ({ id, body, markdown,
+    matches: () => false,
+    getAttribute: name => name === CHATGPT_PAGE.messageIdAttr ? id : null,
+    querySelector: selector => selector.includes('menclose') ? boxed ? {} : null :
+      selector === CHATGPT_PAGE.assistantReplySelectors[0] ? { contains: () => false } : null,
+    querySelectorAll: () => [], closest: () => null })
+  f.context.queryAllAssistant = () => [turn('ordinary', '普通段落', '普通段落'),
+    turn('boxed-history', '让 RL 学会在不同搜索状态下如何使用 LNS', recovered, true),
+    turn('protocol', '{"command":"Get-Date"}', '不能回填协议', true)]
+  assert.deepEqual(Array.from(f.snapshot().smartReplies, item => [item.sourceMessageId, item.answer]), [['boxed-history', recovered]])
+  assert.equal(f.calls.length, 0)
+})
+
 test('rich-content snapshots exclude command protocol while preserving ordinary JSON and shell examples', () => {
   const f = fixture()
   f.context.PAGE = CHATGPT_PAGE
@@ -539,7 +580,7 @@ test('a page without focus rules reads nothing rather than borrowing another sit
   assert.equal(result.reply, null, 'no row position rule, so no reply can be attributed to this send')
 })
 
-function uploadFixture(text = '阅读附件') {
+function uploadFixture(text = '阅读附件', skills = []) {
   const f = fixture()
   f.context.fileSendStatus = () => ({ status: 'ready' })
   f.api = {
@@ -551,7 +592,7 @@ function uploadFixture(text = '阅读附件') {
     prepare: method('prepareFocusFileSendCaption', f.context)
   }
   f.files = [{ fileName: 'image.png', mimeType: 'image/png', sizeBytes: 3 }]
-  assert.equal(f.api.begin('owned-file', f.files, text, '/a/chat/s/one'), 'ok')
+  assert.equal(f.api.begin('owned-file', f.files, text, '/a/chat/s/one', skills), 'ok')
   return f
 }
 
@@ -686,7 +727,7 @@ test('a deferred completion expires on a route or generation change without anot
 })
 
 test('confirmed attachment upload reports one human message and never sent-raw', () => {
-  const f = uploadFixture('阅读附件')
+  const f = uploadFixture('阅读附件', ['computer'])
   const turn = {}
   Object.assign(f.context, {
     confirmedFileSends: new Set(), lastDraftImageCapturedAt: 0, lastDraftImagePromise: Promise.resolve([]),
@@ -705,5 +746,6 @@ test('confirmed attachment upload reports one human message and never sent-raw',
   assert.equal(f.reports[0].attachmentToken, 'img:owned')
   assert.equal(f.reports[0].focusFiles[0].fileName, 'image.png')
   assert.equal(f.reports[0].focusSendToken, 'owned-file')
+  assert.deepEqual(Array.from(f.reports[0].userSkills), ['computer'])
   assert.equal(f.context.state.taskPromptInjected, true)
 })

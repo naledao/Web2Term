@@ -127,6 +127,73 @@ test('the emergency overlay expires from the original trigger time without polli
   assert.equal(computerOverlayEmergencySnapshot(null, state, 2100), null)
 })
 
+test('terminal/file steps and their completions cannot open a computer overlay, including legacy steps', () => {
+  for (const tool of ['command', 'read_files']) {
+    for (const legacy of [false, true]) {
+      const lifetime = new ComputerOverlayLifetime(), t = task()
+      Object.assign(t.progress.currentStep, { action: tool, tool, status: 'delivered', delivery: 'sent', execution: 'executed' })
+      if (legacy) delete t.progress.currentStep.tool
+      t.progress.phase = 'waiting-model'
+      lifetime.update(t, 1000)
+      assert.equal(lifetime.visible(t, 1000), false, 'a generic step count does not establish computer use')
+      t.status = 'completed'
+      lifetime.update(t, 2000)
+      assert.equal(lifetime.visible(t, 2001), false, 'a command-only task has no computer completion notice')
+    }
+  }
+})
+
+test('an actual computer step opens its own lifetime and keeps mixed tool steps continuous', () => {
+  const lifetime = new ComputerOverlayLifetime(), t = task()
+  t.progress.stepCount = 0
+  t.progress.currentStep = null
+  lifetime.update(t, 1000)
+  assert.equal(lifetime.visible(t, 1000), false, 'an enabled capability or a new goal is not a desktop step')
+  t.progress.stepCount = 1
+  t.progress.currentStep = { ...task().progress.currentStep, tool: 'computer', action: 'observe' }
+  assert.equal(lifetime.visible(t, 1100), false, 'reading a task cannot open the overlay')
+  lifetime.update(t, 1100)
+  assert.equal(lifetime.visible(t, 1100), true)
+  t.progress.stepCount++
+  t.progress.currentStep = { ...t.progress.currentStep, tool: 'command', action: 'command' }
+  lifetime.update(t, 1200)
+  assert.equal(lifetime.visible(t, 1200), true, 'the same computer task may also run a terminal command')
+  const next = { ...t, id: 'mail-only', generation: 2 }
+  lifetime.update(next, 1300)
+  assert.equal(lifetime.visible(next, 1300), false, 'new mail/terminal tasks do not inherit computer visibility')
+  assert.equal(lifetime.visible(t, 1300), false)
+})
+
+const runtimePath = '../src/main/session-runtime.ts'
+const runtimeAst = ts.createSourceFile(runtimePath, readFileSync(new URL(runtimePath, import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
+const runtimeClass = runtimeAst.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'SessionRuntime')
+const readMethod = runtimeClass.members.find(node => node.name?.getText(runtimeAst) === 'getComputerOverlaySnapshot')
+const readSnapshot = new Script(ts.transpileModule('class Runtime {' + readMethod.getText(runtimeAst) + '} Runtime.prototype.getComputerOverlaySnapshot', {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ computerOverlaySnapshot: project,
+  taskPresentationLease: load('../src/shared/task-presentation.ts').taskPresentationLease })
+
+test('the native window snapshot stays null for mail/terminal work with computer use enabled on either platform', () => {
+  for (const platformId of ['chatgpt', 'deepseek']) {
+    const t = { ...task(), platformId, originalRequest: '重新发一下邮件。' }, lifetime = new ComputerOverlayLifetime()
+    Object.assign(t.progress.currentStep, { action: 'command', tool: 'command', description: undefined,
+      status: 'delivered', execution: 'executed', delivery: 'sent' })
+    t.progress.phase = 'waiting-model'
+    lifetime.update(t)
+    let activityReads = 0
+    const runtime = { id: t.sessionId, active: true, disposed: false, activePlatformId: platformId,
+      getComputerUseCapability: () => ({ computerUseEnabled: true }), embed: { getState: () => ({ conversationId: t.conversationId }) },
+      options: { store: { latestAutonomousTask: () => t } }, computerOverlayLifetime: lifetime,
+      getTaskActivity() { activityReads++; return null }, runner: { getAutomation: () => ({ paused: false }) } }
+    assert.equal(readSnapshot.call(runtime), null)
+    assert.equal(activityReads, 0)
+    Object.assign(t.progress.currentStep, { tool: 'computer', action: 'observe' })
+    lifetime.update(t)
+    assert.equal(readSnapshot.call(runtime).action, '观察界面')
+    assert.equal(activityReads, 1)
+  }
+})
+
 test('live completion expires once; polling and repeated completed events never renew it', () => {
   const lifetime = new ComputerOverlayLifetime(), t = task()
   lifetime.update(t, 1000)

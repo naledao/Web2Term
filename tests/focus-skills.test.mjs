@@ -115,7 +115,7 @@ test('system routing uses current skill selection and preserves shell/question/c
 })
 
 function sender() {
-  const sent = [], recorded = [], state = tools()
+  const sent = [], referenced = [], recorded = [], state = tools()
   const Runtime = runtimeClass(['sendFocusMessage'], { randomUUID: () => 'request-id', writeFocusDiagnostic() {},
     validFocusFiles: () => true, computerUseSendBlock: capability => capability.block || null,
     stageFocusAttachments: async () => ({ attachments: [{}], cleanup: async () => {} }) })
@@ -129,14 +129,16 @@ function sender() {
     focusChat: { contextUsageTurnId: () => 'turn' },
     embed: { getState: () => ({ conversationId: owner.conversationId }),
       getInterceptorStatus: () => ({ installed: true, enabled: true, promptInjectionEnabled: true }),
-      sendFocusUser: async text => { sent.push(text); return outcome }, sendFocusFiles: async text => { sent.push(text); return outcome } } })
-  return { runtime, sent, recorded, state, reads: () => ({ capabilityReads, toolReads }), outcome: next => { outcome = next } }
+      sendFocusUser: async (text, skills) => { sent.push(text); referenced.push(plain(skills)); return outcome },
+      sendFocusFiles: async (text, _files, _token, _current, _signal, _images, skills) => { sent.push(text); referenced.push(plain(skills)); return outcome } } })
+  return { runtime, sent, referenced, recorded, state, reads: () => ({ capabilityReads, toolReads }), outcome: next => { outcome = next } }
 }
 
 test('ordinary sends do not load skill state or wait for the desktop helper', async () => {
   const f = sender()
   assert.equal(await f.runtime.sendFocusMessage({ ...owner, text: '解释这段代码' }), 'ok')
   assert.deepEqual(f.sent, ['解释这段代码'])
+  assert.deepEqual(f.referenced, [[]])
   assert.deepEqual(f.reads(), { capabilityReads: 0, toolReads: 0 })
   assert.equal(f.recorded.length, 0)
 })
@@ -148,6 +150,7 @@ test('selected descriptions use the existing send path and count the hidden acti
     assert.equal(f.sent.length, 1)
     assert.match(f.sent[0], /"tools":\["scheduled_task"\]/)
     assert.equal(focus.cleanFocusUserText(f.sent[0]), request.text)
+    assert.deepEqual(f.referenced, [request.skills], 'text and attachment sends carry per-message display references')
     assert.equal(f.recorded.length, 1)
     assert.equal(f.recorded[0].state, 'sent')
     assert.equal(f.recorded[0].estimatedTokens, usage.estimateContextText(skills.focusSkillPrefix(request.skills)).estimatedTokens)

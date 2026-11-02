@@ -342,6 +342,21 @@ test('recipient overrides, header injection and empty or oversized content canno
   assert.equal(attempts, 0)
 })
 
+test('invalid call feedback distinguishes parsing and envelope errors from SMTP configuration failures', async () => {
+  let attempts = 0
+  const f = configured({ send: async () => { attempts++ } })
+  for (const input of [null, { type: 'send_email', invalid: true }, { ...notification, to: 'elsewhere@qq.com' }]) {
+    const result = await send(f, 'invalid', input)
+    assert.equal(result.status, 'failed')
+    assert.match(result.message, /调用格式或参数无效/)
+    assert.match(result.message, /未连接 SMTP、未发送邮件/)
+    assert.match(result.message, /一个 JSON 代码块/)
+    assert.match(result.message, /此错误不代表邮箱或授权码配置有问题/)
+  }
+  assert.equal(attempts, 0)
+  assert.equal([...f.values.keys()].some(key => key.startsWith('qqMailDelivery:')), false)
+})
+
 test('duplicate and restarted calls return the durable result without sending twice', async () => {
   let attempts = 0
   const f = configured({ send: async () => { attempts++ } })

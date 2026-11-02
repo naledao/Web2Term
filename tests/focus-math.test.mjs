@@ -118,6 +118,61 @@ test('formulas on either side of a rich chart still use the math plugins', () =>
   assert.equal((html.match(/class="katex"/g) || []).length, 2)
 })
 
+test('boxed Chinese display text retains both frames and the surrounding explanation', () => {
+  const first = String.raw`\boxed{\text{原论文：证明 LNS 有效}}`
+  const second = String.raw`\boxed{\text{让 RL 学会在不同搜索状态下如何使用 LNS}}`
+  const source = extract(el('div', [el('p', ['一句话总结就是：']), formula(first, true),
+    el('p', ['而我们进一步做的是：']), formula(second, true), el('p', ['并且目前已有证据表明。'])]))
+  for (const tex of [first, second]) assert.equal(source.split(tex).length - 1, 1, 'each formula is captured once')
+  const html = render(source)
+  assert.equal((html.match(/class="[^"]*\bfbox\b/g) || []).length, 2)
+  assert.equal((html.match(/class="katex-display"/g) || []).length, 2)
+  assert.match(html, /border-style:solid;border-width:0\.04em/)
+  assert.match(html, /一句话总结就是：/)
+  assert.match(html, /而我们进一步做的是：/)
+  assert.match(html, /并且目前已有证据表明。/)
+  assert.doesNotMatch(html, /katex-error/)
+})
+
+test('a native MathML box outside an inner TeX annotation is preserved without duplicating its text', () => {
+  const text = '让 RL 学会在不同搜索状态下如何使用 LNS', inner = '\\text{' + text + '}'
+  const math = el('math', [el('semantics', [
+    el('menclose', [el('mrow', [el('mtext', [text])])], { notation: 'box' }),
+    el('annotation', [inner], { encoding: 'application/x-tex' })
+  ])], { display: 'block' })
+  const source = extract(math)
+  assert.equal(source, '$$\n\\boxed{' + inner + '}\n$$')
+  const html = render(source)
+  assert.equal((html.match(/class="[^"]*\bfbox\b/g) || []).length, 1)
+  assert.doesNotMatch(html, /katex-error/)
+})
+
+test('boxed MathML and visual-only KaTeX labels recover safe text while excluding accessibility copies', () => {
+  const text = String.raw`原论文：RL_1 {LNS} 50% $ & # \ ^ ~`
+  const cases = [
+    el('math', [el('menclose', [el('mtext', [text])], { notation: 'box' })], { display: 'block' }),
+    el('span', [el('span', ['duplicate accessibility copy'], { class: 'katex-mathml' }),
+      el('span', [el('span', [text], { class: 'boxpad' }), el('span', [], { class: 'fbox' })], { class: 'katex-html' })], { class: 'katex' })
+  ]
+  for (const math of cases) {
+    const source = extract(math), html = render(source)
+    assert.match(source, /\\boxed\{\\text\{/)
+    assert.match(source, /RL\\_1 \\\{LNS\\\} 50\\% \\\$/)
+    assert.doesNotMatch(source, /duplicate accessibility copy/)
+    assert.match(html, /class="[^"]*\bfbox\b/)
+    assert.doesNotMatch(html, /katex-error/)
+  }
+})
+
+test('a box around only part of an expression never becomes a box around the complete expression', () => {
+  const math = el('math', [el('mrow', [el('mtext', ['外部正文']),
+    el('menclose', [el('mtext', ['部分方框'])], { notation: 'box' })])], { display: 'block' })
+  assert.equal(extract(math), '外部正文部分方框')
+  const tex = String.raw`x+\boxed{y}`
+  assert.ok(extract(formula(tex, true)).includes(tex))
+  assert.equal((render(extract(formula(tex, true))).match(/class="[^"]*\bfbox\b/g) || []).length, 1)
+})
+
 test('code remains literal and a partial formula does not destroy the rest of the reply', () => {
   const source = extract(el('div', [el('pre', [el('code', [String.raw`$x$ \frac{1}{2}`])]), el('p', ['后续说明'])]))
   const html = render(source + '\n\n$\\frac{1}{$\n\n最后一段。')
@@ -129,4 +184,6 @@ test('code remains literal and a partial formula does not destroy the rest of th
 test('missing TeX uses only one readable representation and preserves surrounding text', () => {
   const math = el('span', [el('span', ['duplicate'], { class: 'katex-mathml' }), el('span', ['20mm'], { class: 'katex-html' })], { class: 'katex' })
   assert.equal(extract(el('p', ['长度 ', math, '。'])), '长度 20mm。')
+  const pending = el('span', [el('span', [], { class: 'katex-html' })], { class: 'katex', 'aria-label': '公式仍在生成' })
+  assert.equal(extract(pending), '公式仍在生成')
 })

@@ -17,9 +17,9 @@ export const DEFAULT_CONVERSATION_TOOLS: Readonly<ConversationToolPreferences> =
   backgroundTasksEnabled: true,
   scheduledTasksEnabled: true,
   mailNotificationsEnabled: true,
-  computerUseEnabled: false,
-  desktopControlEnabled: false,
-  desktopPointClickEnabled: false,
+  computerUseEnabled: true,
+  desktopControlEnabled: true,
+  desktopPointClickEnabled: true,
   computerResultDelaySeconds: 0
 })
 
@@ -54,7 +54,7 @@ export interface ConversationToolsUpdate extends ConversationToolsOwner {
 
 export function normalizeConversationTools(value: unknown): ConversationToolPreferences {
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value as Partial<ConversationToolPreferences> : {}
-  const on = input.computerUseEnabled === true
+  const on = input.computerUseEnabled !== false
   return {
     fileReadingEnabled: input.fileReadingEnabled !== false,
     backgroundTasksEnabled: input.backgroundTasksEnabled !== false,

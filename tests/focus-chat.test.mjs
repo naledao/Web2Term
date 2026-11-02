@@ -40,6 +40,24 @@ function fixture(sessionId = 'workspace-1') {
   return { chat: new FocusChat(sessionId, store), store, rows }
 }
 
+test('skill references belong to one confirmed message and survive storage, edits and conversation switches', () => {
+  const { chat, store } = fixture(), skills = ['scheduled_task', 'send_email']
+  const id = chat.begin('chatgpt', 'chat-1', '激活说明\u2063\u2063创建计划并通知我', [], skills)
+  skills.length = 0
+  const original = chat.turns('chatgpt', 'chat-1').find(turn => turn.id === id)
+  assert.equal(original.userText, '创建计划并通知我')
+  assert.deepEqual(clone(original.userSkills), ['scheduled_task', 'send_email'], 'draft changes cannot alter a sent reference')
+  const ordinary = chat.begin('chatgpt', 'chat-1', '定时任务是什么意思')
+  assert.deepEqual(clone(chat.turns('chatgpt', 'chat-1').find(turn => turn.id === ordinary).userSkills), [], 'body mentions do not imply references')
+  chat.begin('chatgpt', 'chat-2', '另一段对话', [], ['computer'])
+  const restored = new FocusChat('workspace-1', store)
+  assert.deepEqual(clone(restored.turns('chatgpt', 'chat-1').find(turn => turn.id === id).userSkills), ['scheduled_task', 'send_email'])
+  const revised = restored.revise('chatgpt', 'chat-1', '修改后的计划', [id, ordinary], ['old-user'], original.userSkills)
+  assert.deepEqual(clone(restored.turns('chatgpt', 'chat-1').find(turn => turn.id === revised).userSkills), ['scheduled_task', 'send_email'])
+  assert.deepEqual(clone(restored.turns('chatgpt', 'chat-2')[0].userSkills), ['computer'])
+  assert.equal(restored.turns('deepseek', 'chat-1').length, 0)
+})
+
 test('progress in a long conversation writes only the changed turn, while confirmed edits persist archived turns', () => {
   const { chat, store } = fixture()
   const ids = []

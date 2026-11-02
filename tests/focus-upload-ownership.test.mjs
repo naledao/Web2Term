@@ -17,6 +17,10 @@ function actualMethod(relative, name, globals = {}) {
   return new Script(code).runInNewContext({ AbortController, ...globals })
 }
 const image = { fileName: 'logo.png', mimeType: 'image/png', sizeBytes: 3, dataBase64: 'YWJj' }
+const skillExports = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-skills.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
+}).outputText).runInNewContext({ exports: skillExports })
 
 function runtimeFixture(initialConversationId = null) {
   let conversationId = initialConversationId, cleaned = 0
@@ -78,6 +82,7 @@ function embedFixture(images = [image]) {
   const started = [], captured = [], fallback = []
   const handle = actualMethod('../src/main/embed.ts', 'handlePageReport', {
     INTERCEPTOR_LOG_TAG: '[cmd-terminal] ', console: { info() {}, warn() {} },
+    validFocusToolSkills: skillExports.validFocusToolSkills,
     writeReplyDiagnostic: () => null, writePromptDiagnostic: () => null
   })
   const subject = {
@@ -115,4 +120,16 @@ test('file-only messages still establish a human turn and native paste keeps the
   f.report({ event: 'user-message', text: '', attachmentToken: 'img:native' })
   assert.equal(f.fallback.length, 1)
   assert.equal(f.fallback[0][1], 'img:native')
+})
+
+test('confirmed messages forward validated skill references without treating them as tool execution', () => {
+  for (const skills of [['scheduled_task', 'send_email'], [], ['invented'], ['computer', 'computer'], 'computer']) {
+    const f = embedFixture([])
+    f.report({ event: 'user-message', text: '用户正文', focusSendToken: 'focus:owned', userSkills: skills })
+    assert.equal(f.started.length, 1, 'invalid display metadata cannot drop the human message')
+    const references = f.started[0][5]
+    assert.deepEqual(references === undefined ? undefined : Array.from(references),
+      skillExports.validFocusToolSkills(skills) ? skills : undefined)
+    assert.equal(f.started[0][0], '用户正文')
+  }
 })

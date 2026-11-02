@@ -9,6 +9,8 @@ import type { ScheduledToolCall } from '../shared/scheduled-tasks'
 import type { MailNotificationCall } from '../shared/mail-notification'
 import type { ToolPromptReadCall } from '../shared/tool-prompts'
 import type { TaskSubmission } from '../shared/autonomous-task'
+import { validFocusToolSkills } from '../shared/focus-skills'
+import type { FocusToolSkill } from '../shared/focus-skills'
 import { validTaskQuestionSource, sameQuestionSource } from '../shared/task-clarification'
 import type { TaskQuestion, TaskQuestionSource, TaskQuestionRequest } from '../shared/task-clarification'
 import type { ComputerUseActionDefinition, ComputerUsePageRequest } from '../shared/computer-use'
@@ -453,7 +455,7 @@ export interface EmbedHandlers {
   /** An edit-and-resend drops later turns, possibly the one that held the prompt. */
   onConversationBranched?(conversationId: string | null): void
   /** Clean user text, with the injected system prefix already removed. */
-  onUserStarted?(text: string, files?: FocusAttachmentInfo[], editToken?: string, submission?: TaskSubmission, scheduledRunId?: string): string | undefined
+  onUserStarted?(text: string, files?: FocusAttachmentInfo[], editToken?: string, submission?: TaskSubmission, scheduledRunId?: string, userSkills?: FocusToolSkill[]): string | undefined
   onScheduledTask?(request: ScheduledToolCall): void
   onMailNotification?(request: MailNotificationCall): void
   onToolPromptRead?(request: ToolPromptReadCall): void
@@ -1585,9 +1587,9 @@ export class ChatGptEmbed {
     finally { if (timer) clearTimeout(timer); if (this.focusModelNativeClick?.token === token) this.focusModelNativeClick = null }
   }
 
-  async sendFocusUser(text: string): Promise<FocusSendOutcome> {
+  async sendFocusUser(text: string, userSkills: FocusToolSkill[] = []): Promise<FocusSendOutcome> {
     if (!supportsFocusView(this.platform.id)) return 'unavailable'
-    return this.sendUserTask(text, false, { fromFocus: true })
+    return this.sendUserTask(text, false, { fromFocus: true, userSkills })
   }
 
   /** Press only this page's native Stop control; terminal task cancellation is separate. */
@@ -1794,7 +1796,7 @@ export class ChatGptEmbed {
   }
 
   /** force: an explicit 继续原任务 — the page stops a streaming reply and ends a stale wait first. */
-  async sendUserTask(text: string, force = false, options?: { fromFocus: boolean }): Promise<FocusSendOutcome> {
+  async sendUserTask(text: string, force = false, options?: { fromFocus: boolean; userSkills?: FocusToolSkill[] }): Promise<FocusSendOutcome> {
     const contents = this.liveContents()
     if (!contents) return 'unavailable'
     let attempted = false
@@ -1802,7 +1804,8 @@ export class ChatGptEmbed {
       const url = new URL(contents.getURL())
       if (url.origin !== new URL(this.platform.homeUrl).origin) return 'unavailable'
       attempted = true
-      const sendOptions = { ...(force ? { force: true } : {}), ...(options?.fromFocus ? { fromFocus: true } : {}) }
+      const sendOptions = { ...(force ? { force: true } : {}), ...(options?.fromFocus ? { fromFocus: true } : {}),
+        ...(options?.userSkills ? { userSkills: options.userSkills } : {}) }
       const result = await contents.executeJavaScript(
         'window.__cmdTerminalInterceptor?.sendUser(' + JSON.stringify(text) + ', ' + JSON.stringify(url.pathname) + (Object.keys(sendOptions).length ? ', ' + JSON.stringify(sendOptions) : '') + ') ?? "unavailable"'
       )
@@ -1873,12 +1876,12 @@ export class ChatGptEmbed {
   }
 
   async sendFocusFiles(text: string, files: PreparedAttachment[], token: string, current: () => boolean, signal: AbortSignal,
-    images: ConversationImageAttachmentInput[] = []): Promise<FocusSendOutcome> {
+    images: ConversationImageAttachmentInput[] = [], userSkills: FocusToolSkill[] = []): Promise<FocusSendOutcome> {
     const contents = this.focusPage()
     if (!contents) return 'unavailable'
     try {
       this.focusSendImages.set(token, images)
-      const outcome = await sendPageFiles(contents, this.platform.id, files, token, current, signal, { userText: text, allowNewConversation: true })
+      const outcome = await sendPageFiles(contents, this.platform.id, files, token, current, signal, { userText: text, userSkills, allowNewConversation: true })
       if (outcome === 'ok') this.noteAttachmentTraffic(files)
       return outcome === 'not-submitted' ? 'upload-failed' : outcome
     } catch { return 'upload-failed' }
@@ -2341,7 +2344,8 @@ export class ChatGptEmbed {
             file && typeof file.fileName === 'string' && file.fileName.length <= 240 &&
             typeof file.mimeType === 'string' && file.mimeType.length <= 160 && Number.isSafeInteger(file.sizeBytes) && file.sizeBytes > 0) : []
           const scheduledRunId = typeof payload.scheduledRunId === 'string' && payload.scheduledRunId.length <= 128 ? payload.scheduledRunId : undefined
-          const turnId = this.handlers.onUserStarted?.(text, files, editToken, submission, scheduledRunId)
+          const userSkills = payload.userSkills !== undefined && validFocusToolSkills(payload.userSkills) ? [...payload.userSkills] : undefined
+          const turnId = this.handlers.onUserStarted?.(text, files, editToken, submission, scheduledRunId, userSkills)
           if (editToken && !turnId) break
           if (payload.contextUsage) this.contextUsage?.confirmedUsage(payload.contextUsage, 'injection', 'prefix:' + payload.contextUsage.id)
           if (submission) {

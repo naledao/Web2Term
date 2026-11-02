@@ -141,12 +141,21 @@ RGB/sRGB 颜色，并沿用主题色映射和原生列对齐。隐藏文字、�
 已有会话的富内容刷新也识别没有 DIL 外层的 Mermaid 图表，载入原网页后可以替换旧的纯文字展示。
 普通 SVG 图标及页面样式不进入回答，代码块中的 SVG 源码继续按代码展示。
 
+## 2026-11-02：带框中文公式
+
+用户截图中的两句居中总结使用公式方框，原始页面有细边框，专注视图只显示文字。
+本次依据截图和既有公式读取链适配，未采集该会话的新 DOM。保留原 TeX 中的 `\boxed`、`\fbox`
+及已有嵌套公式；当 MathML `menclose` 或 KaTeX 方框结构包围完整表达式、源码只记录内部内容时，
+补回整段方框。没有 TeX 时，仅对已确认的整段方框恢复转义后的文本公式，不把局部框扩大到整段。
+方框线跟随公式文字颜色，浅深色主题均使用同一条显示规则，长公式继续在内容区横向滚动。
+已载入的带框公式也进入历史富内容刷新，重读原网页即可替换旧的无框内容，不重新发送任务。
+
 ## 用户运行检查
 
 智能体只进行静态检查和构建，以下测试及真实界面验收由用户运行：
 
 ```powershell
-node --test tests/focus-layout.test.mjs tests/focus-smart-ui.test.mjs tests/focus-page.test.mjs tests/focus-chat.test.mjs tests/focus-code.test.mjs tests/focus-mermaid.test.mjs tests/focus-token-usage.test.mjs
+node --test tests/focus-layout.test.mjs tests/focus-smart-ui.test.mjs tests/focus-page.test.mjs tests/focus-chat.test.mjs tests/focus-code.test.mjs tests/focus-mermaid.test.mjs tests/focus-token-usage.test.mjs tests/focus-math.test.mjs
 ```
 
 检查实际提取器、数据解析和 React 静态输出：侧栏/网格/图标、原位 Markdown、危险标签/事件/URL、
@@ -172,5 +181,8 @@ node --test tests/focus-layout.test.mjs tests/focus-smart-ui.test.mjs tests/focu
 9. 打开含 Mermaid 文件关系图的截图会话，待原网页载入图表后切换专注对话，检查图形、箭头、
    节点文字及前后章节均显示，不出现 `#chatgpt-mermaid-…` 样式代码。检查窄窗口、浅深色、复制回答、
    刷新后的历史恢复，以及原有 Mermaid 代码块的图表/源码切换。图表图片需在切换应用主题后保持可读。
+
+10. 对比带框中文总结：两句居中公式均保留细边框，正文顺序、中文与 RL / LNS 保留，浅深色均可读。
+    检查窄窗口滚动、已有会话刷新、普通行内数学、分数和嵌套列表，以及代码块里的公式源码保持原样。
 
 交付状态：构建通过，等待用户测试。静态输出和构建不能代替实际布局验收。

@@ -54,25 +54,46 @@ function fixture(t) {
   return { db, store, choices: new ConversationTools('workspace-a', store), rows: () => plain(db.prepare('SELECT * FROM settings ORDER BY key').all()) }
 }
 
-test('new conversations enable files and background while computer use stays off, including with old global settings', t => {
+test('new conversations enable all tools by default, independently of old global settings', t => {
   const f = fixture(t)
-  for (const key of ['computerUseEnabled', 'desktopControlEnabled', 'autonomousExecutionEnabled']) f.store.setSetting(key, '1')
+  for (const key of ['computerUseEnabled', 'desktopControlEnabled', 'autonomousExecutionEnabled']) f.store.setSetting(key, '0')
   const preferences = f.choices.read('deepseek', 'chat-a')
   assert.equal(preferences.fileReadingEnabled, true); assert.equal(preferences.backgroundTasksEnabled, true)
   assert.equal(preferences.scheduledTasksEnabled, true)
   assert.equal(preferences.mailNotificationsEnabled, true)
-  assert.equal(preferences.computerUseEnabled, false); assert.equal(preferences.desktopControlEnabled, false)
-  assert.equal(preferences.desktopPointClickEnabled, false)
+  assert.equal(preferences.computerUseEnabled, true); assert.equal(preferences.desktopControlEnabled, true)
+  assert.equal(preferences.desktopPointClickEnabled, true)
+  assert.deepEqual(plain(preferences), plain(shared.DEFAULT_CONVERSATION_TOOLS))
+})
+
+test('missing skill choices default on while saved off choices survive reopening', t => {
+  const f = fixture(t)
+  f.store.setSetting('conversationTools:' + JSON.stringify(['conversation', 'chatgpt', 'legacy-chat']),
+    JSON.stringify({ fileReadingEnabled: false, backgroundTasksEnabled: false }))
+  const legacy = f.choices.read('chatgpt', 'legacy-chat')
+  for (const key of ['scheduledTasksEnabled', 'mailNotificationsEnabled', 'computerUseEnabled', 'desktopControlEnabled', 'desktopPointClickEnabled']) {
+    assert.equal(legacy[key], true, key)
+  }
+  assert.equal(legacy.fileReadingEnabled, false)
+  const closed = f.choices.update('chatgpt', 'closed-chat', {
+    scheduledTasksEnabled: false, mailNotificationsEnabled: false, computerUseEnabled: false
+  })
+  const reopened = new ConversationTools('another-workspace', f.store)
+  assert.deepEqual(plain(reopened.read('chatgpt', 'closed-chat')), plain(closed))
+  for (const key of ['scheduledTasksEnabled', 'mailNotificationsEnabled', 'computerUseEnabled', 'desktopControlEnabled', 'desktopPointClickEnabled']) {
+    assert.equal(closed[key], false, key)
+  }
+  assert.equal(reopened.read('chatgpt', 'new-chat').computerUseEnabled, true)
 })
 
 test('choices persist by platform and conversation across workspace instances without leaking to another conversation', t => {
   const f = fixture(t)
-  f.choices.update('deepseek', 'chat-a', { fileReadingEnabled: false, backgroundTasksEnabled: false, computerUseEnabled: true, computerResultDelaySeconds: 4 })
+  f.choices.update('deepseek', 'chat-a', { fileReadingEnabled: false, backgroundTasksEnabled: false, computerUseEnabled: false, computerResultDelaySeconds: 4 })
   const reopened = new ConversationTools('another-workspace', Object.assign(new Store(), { db: f.db }))
   const saved = reopened.read('deepseek', 'chat-a')
   assert.equal(saved.fileReadingEnabled, false); assert.equal(saved.backgroundTasksEnabled, false)
-  assert.equal(saved.computerUseEnabled, true); assert.equal(saved.desktopControlEnabled, true)
-  assert.equal(saved.desktopPointClickEnabled, true); assert.equal(saved.computerResultDelaySeconds, 4)
+  assert.equal(saved.computerUseEnabled, false); assert.equal(saved.desktopControlEnabled, false)
+  assert.equal(saved.desktopPointClickEnabled, false); assert.equal(saved.computerResultDelaySeconds, 4)
   assert.deepEqual(plain(reopened.read('deepseek', 'chat-b')), plain(shared.DEFAULT_CONVERSATION_TOOLS))
   assert.deepEqual(plain(reopened.read('chatgpt', 'chat-a')), plain(shared.DEFAULT_CONVERSATION_TOOLS))
 })
@@ -103,34 +124,34 @@ test('a first injected send transfers prompt history even with default tools and
 
 test('a confirmed first send transfers its draft choices once and the following new chat starts with defaults', t => {
   const f = fixture(t)
-  f.choices.update('deepseek', null, { fileReadingEnabled: false, computerUseEnabled: true })
+  f.choices.update('deepseek', null, { fileReadingEnabled: false, computerUseEnabled: false })
   f.choices.submitted('deepseek'); f.choices.bind('deepseek', null, 'new-chat')
-  assert.equal(f.choices.read('deepseek', 'new-chat').computerUseEnabled, true)
+  assert.equal(f.choices.read('deepseek', 'new-chat').computerUseEnabled, false)
   assert.equal(f.choices.read('deepseek', 'new-chat').fileReadingEnabled, false)
   assert.deepEqual(plain(f.choices.read('deepseek', null)), plain(shared.DEFAULT_CONVERSATION_TOOLS))
   f.choices.bind('deepseek', 'new-chat', null)
   f.choices.bind('deepseek', null, 'another-new-chat')
-  assert.equal(f.choices.read('deepseek', 'another-new-chat').computerUseEnabled, false)
+  assert.equal(f.choices.read('deepseek', 'another-new-chat').computerUseEnabled, true)
 })
 
 test('opening history without sending cannot inherit a draft or overwrite the history conversation', t => {
   const f = fixture(t)
-  f.choices.update('deepseek', null, { computerUseEnabled: true })
+  f.choices.update('deepseek', null, { computerUseEnabled: false })
   f.choices.bind('deepseek', null, 'history-without-settings')
-  assert.equal(f.choices.read('deepseek', 'history-without-settings').computerUseEnabled, false)
+  assert.equal(f.choices.read('deepseek', 'history-without-settings').computerUseEnabled, true)
   f.choices.update('deepseek', 'saved-history', { backgroundTasksEnabled: false })
-  f.choices.update('deepseek', null, { computerUseEnabled: true })
+  f.choices.update('deepseek', null, { computerUseEnabled: false })
   f.choices.submitted('deepseek'); f.choices.bind('deepseek', null, 'saved-history')
-  assert.equal(f.choices.read('deepseek', 'saved-history').computerUseEnabled, false)
+  assert.equal(f.choices.read('deepseek', 'saved-history').computerUseEnabled, true)
   assert.equal(f.choices.read('deepseek', 'saved-history').backgroundTasksEnabled, false)
 })
 
 test('drafts stay isolated by workspace and platform and survive reopening their own workspace', t => {
   const f = fixture(t)
-  f.choices.update('deepseek', null, { computerUseEnabled: true })
-  assert.equal(new ConversationTools('workspace-a', f.store).read('deepseek', null).computerUseEnabled, true)
-  assert.equal(new ConversationTools('workspace-b', f.store).read('deepseek', null).computerUseEnabled, false)
-  assert.equal(f.choices.read('chatgpt', null).computerUseEnabled, false)
+  f.choices.update('deepseek', null, { computerUseEnabled: false })
+  assert.equal(new ConversationTools('workspace-a', f.store).read('deepseek', null).computerUseEnabled, false)
+  assert.equal(new ConversationTools('workspace-b', f.store).read('deepseek', null).computerUseEnabled, true)
+  assert.equal(f.choices.read('chatgpt', null).computerUseEnabled, true)
 })
 
 test('invalid patches do not partially save and corrupt historical JSON falls back to the defaults', t => {
@@ -140,20 +161,20 @@ test('invalid patches do not partially save and corrupt historical JSON falls ba
     assert.throws(() => f.choices.update('deepseek', 'chat-a', patch))
     assert.deepEqual(f.rows(), before)
   }
-  f.choices.update('deepseek', 'chat-a', { computerUseEnabled: true })
+  f.choices.update('deepseek', 'chat-a', { computerUseEnabled: false })
   f.store.setSetting(f.rows()[0].key, 'broken-json')
   assert.deepEqual(plain(f.choices.read('deepseek', 'chat-a')), plain(shared.DEFAULT_CONVERSATION_TOOLS))
 })
 
 test('draft transfer rolls back its new conversation row if clearing the draft fails', t => {
   const f = fixture(t)
-  f.choices.update('deepseek', null, { computerUseEnabled: true })
+  f.choices.update('deepseek', null, { computerUseEnabled: false })
   f.choices.submitted('deepseek')
   f.db.exec(`CREATE TRIGGER reject_draft_clear BEFORE UPDATE ON settings
     WHEN NEW.value = '' BEGIN SELECT RAISE(FAIL, 'synthetic settings failure'); END`)
   assert.throws(() => f.choices.bind('deepseek', null, 'new-chat'), /synthetic settings failure/)
-  assert.equal(f.choices.read('deepseek', null).computerUseEnabled, true)
-  assert.equal(f.choices.read('deepseek', 'new-chat').computerUseEnabled, false)
+  assert.equal(f.choices.read('deepseek', null).computerUseEnabled, false)
+  assert.equal(f.choices.read('deepseek', 'new-chat').computerUseEnabled, true)
 })
 
 test('prompt composition independently includes only enabled file, background and computer declarations', () => {
@@ -175,12 +196,13 @@ const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', [
 
 test('runtime rejects stale conversation/workspace writes and derives computer capability from this conversation', t => {
   const f = fixture(t), entry = { conversationId: 'chat-a' }, refreshes = []
+  f.choices.update('deepseek', 'chat-a', { computerUseEnabled: false })
   const runtime = Object.assign(new Runtime(), { id: 'workspace-a', activePlatformId: 'deepseek', disposed: false,
     activeEmbed: () => entry, embeds: new Map([['deepseek', entry]]), conversationTools: f.choices,
     options: { settings: () => ({ computerUseEnabled: true, desktopControlEnabled: true }) },
     computerUseTool: { definitions: () => [] }, refreshComputerUseCapabilities: owner => refreshes.push(owner) })
   const owner = { sessionId: 'workspace-a', platformId: 'deepseek', conversationId: 'chat-a' }
-  assert.equal(runtime.getComputerUseCapability().computerUseEnabled, false, 'old global intent cannot enable a new conversation')
+  assert.equal(runtime.getComputerUseCapability().computerUseEnabled, false, 'old global intent cannot override a saved off choice')
   const first = runtime.getConversationTools(owner)
   assert.deepEqual(plain(first.tools.map(tool => tool.name)), ['文件读取', '后台任务', '定时任务', '邮件通知', '电脑操作（computer use）'])
   assert.ok(first.tools.every(tool => tool.prompt.length > 0), 'closed tools still have a readable preview')
@@ -216,7 +238,7 @@ test('runtime rejects stale conversation/workspace writes and derives computer c
   assert.throws(() => runtime.updateConversationTools({ ...owner, patch: { computerUseEnabled: true } }), /对话已变化/)
   assert.throws(() => runtime.getConversationTools(owner), /对话已变化/)
   assert.deepEqual(f.rows(), before)
-  assert.equal(runtime.getComputerUseCapability().computerUseEnabled, false)
+  assert.equal(runtime.getComputerUseCapability().computerUseEnabled, true, 'another conversation uses its own default')
   assert.throws(() => runtime.updateConversationTools({ ...owner, sessionId: 'old-workspace', conversationId: 'chat-b', patch: { computerUseEnabled: true } }))
 })
 

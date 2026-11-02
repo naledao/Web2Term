@@ -59,13 +59,22 @@ const short = (text: string, length: number): string => {
 
 const taskKey = (task: AutonomousTask): string => JSON.stringify([task.sessionId, task.platformId, task.conversationId, task.id, task.generation])
 
-/** Display lifetime only. Historical completions never open a new native window. */
+/** Display lifetime only, opened by an admitted computer step in this task generation.
+ * Shared command/file progress and historical completions cannot open the native window. */
 export class ComputerOverlayLifetime {
   private readonly scopes = new Map<string, { taskKey: string; expiresAt: number | null }>()
 
   update(task: AutonomousTask, now = Date.now()): void {
     const scope = JSON.stringify([task.sessionId, task.platformId]), key = taskKey(task), previous = this.scopes.get(scope)
-    if (task.status === 'recorded') this.scopes.set(scope, { taskKey: key, expiresAt: null })
+    if (task.status === 'recorded') {
+      const step = task.progress?.stepCount ? task.progress.currentStep : null
+      // Legacy desktop steps omitted tool; their action must still name a known desktop operation.
+      const desktop = step && (step.tool === 'computer' || step.tool === undefined &&
+        Object.hasOwn(actionLabels, step.action) && step.action !== 'command' && step.action !== 'read_files')
+      // Once opened, keep a mixed desktop/terminal task continuous until it finishes or stops.
+      if (desktop || previous?.taskKey === key) this.scopes.set(scope, { taskKey: key, expiresAt: null })
+      else this.scopes.delete(scope)
+    }
     else if (previous?.taskKey === key) {
       if (task.status !== 'completed') this.scopes.delete(scope)
       else if (previous.expiresAt === null) previous.expiresAt = now + COMPUTER_OVERLAY_COMPLETION_MS
@@ -73,9 +82,9 @@ export class ComputerOverlayLifetime {
   }
 
   visible(task: AutonomousTask, now = Date.now()): boolean {
-    if (task.status === 'recorded') return true
     const lifetime = this.scopes.get(JSON.stringify([task.sessionId, task.platformId]))
-    return task.status === 'completed' && lifetime?.taskKey === taskKey(task) && lifetime.expiresAt !== null && now < lifetime.expiresAt
+    return lifetime?.taskKey === taskKey(task) && (task.status === 'recorded' ||
+      task.status === 'completed' && lifetime.expiresAt !== null && now < lifetime.expiresAt)
   }
 }
 

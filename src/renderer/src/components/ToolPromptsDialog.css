@@ -5,7 +5,7 @@
   flex-direction: column;
   width: min(840px, calc(100vw - 48px));
   min-width: 0;
-  height: min(560px, calc(100vh - 48px));
+  max-height: min(560px, calc(100vh - 48px));
   overflow: hidden;
   border-radius: 14px;
   background: var(--bg);
@@ -17,7 +17,7 @@
 .tool-prompts-dialog__description { margin: 6px 0 0; color: var(--text-muted); font-size: 13px; }
 .tool-prompts-dialog__close { display: grid; place-items: center; flex: none; width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elevated); color: var(--text); cursor: pointer; }
 .tool-prompts-dialog__close:hover { background: var(--accent-soft); }
-.tool-prompts-dialog__body { flex: 1; min-height: 0; min-width: 0; overflow: auto; padding: 0 24px; scrollbar-gutter: stable; scrollbar-color: var(--border) transparent; }
+.tool-prompts-dialog__body { flex: 0 1 auto; min-height: 0; min-width: 0; overflow: auto; padding: 0 24px; scrollbar-gutter: stable; scrollbar-color: var(--border) transparent; }
 .tool-prompts-dialog__tool { padding: 20px 0; }
 .tool-prompts-dialog__tool + .tool-prompts-dialog__tool { border-top: 1px solid var(--border); }
 .tool-prompts-dialog__tool-head { display: flex; align-items: center; gap: 14px; }
@@ -47,7 +47,7 @@
 
 @media (max-width: 600px) {
   .modal--tools { padding: 12px; }
-  .tool-prompts-dialog { width: calc(100vw - 24px); height: min(560px, calc(100vh - 24px)); }
+  .tool-prompts-dialog { width: calc(100vw - 24px); max-height: min(560px, calc(100vh - 24px)); }
   .tool-prompts-dialog__head { padding: 20px 16px; }
   .tool-prompts-dialog__body { padding: 0 16px; }
   .tool-prompts-dialog__tool-head { flex-wrap: wrap; gap: 10px; }

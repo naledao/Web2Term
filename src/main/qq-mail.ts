@@ -153,7 +153,7 @@ export class QqMailService {
     const result = (status: MailNotificationResult['status'], message: string): MailNotificationResult =>
       ({ type: 'email_result', ok: status === 'sent', status, message })
     const request = parseMailNotificationRequest(value)
-    if (!request) return result('failed', '邮件参数无效：只接受 type、subject 和 body；标题最多 200 字符且不能换行，正文最多 20000 字符，均不能为空。')
+    if (!request) return result('failed', '邮件调用格式或参数无效，未连接 SMTP、未发送邮件。请仅输出一个 JSON 代码块，不要附带说明或其他调用；只接受 type="send_email"、subject 和 body。标题最多 200 字符且不能换行，正文最多 20000 字符，均不能为空。此错误不代表邮箱或授权码配置有问题。')
     if (!sourceKey || sourceKey.length > 4096) return result('failed', '邮件调用来源无效，未发送。')
     if (signal.aborted || !current()) return result('cancelled', '原任务已变化，邮件发送已取消。')
     const key = 'qqMailDelivery:' + createHash('sha256').update(sourceKey).digest('hex')

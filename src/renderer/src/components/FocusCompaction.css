@@ -18,8 +18,8 @@
 .focus-skills{position:absolute;z-index:8;left:0;right:0;bottom:calc(100% + 10px);padding:7px;border:1px solid var(--fc-border);border-radius:14px;background:var(--fc-bg);box-shadow:0 10px 36px #0002;color:var(--fc-text)}
 .focus-skills__label{padding:5px 10px;color:var(--fc-muted);font-size:11px}
 .focus-chat .focus-skills__item{display:flex;align-items:center;gap:12px;box-sizing:border-box;width:100%;padding:12px;border:0;border-radius:9px;background:var(--fc-soft);text-align:left}
-.focus-skills__icon{display:flex;align-items:center;justify-content:center;width:28px;height:28px;color:var(--fc-accent)}
-.focus-skills__icon svg{width:23px;height:23px}
+.focus-skills__icon{display:flex;flex:none;align-items:center;justify-content:center;width:28px;height:28px;color:var(--fc-accent)}
+.focus-skills__icon svg{display:block;width:24px;height:24px}
 .focus-skills__body{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0}
 .focus-skills__body strong{font-size:14px;font-weight:600}
 .focus-skills__body small{font-size:12px;line-height:1.6;color:var(--fc-muted)}
@@ -30,11 +30,12 @@
 .focus-chat .focus-skills__item[aria-selected=true]{background:var(--fc-soft)}
 .focus-skills__item:disabled{opacity:.55;cursor:not-allowed}
 .focus-composer__skills{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:10px 12px 0}
-.focus-skill-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border:1px solid var(--fc-border);border-radius:6px;background:var(--fc-soft);font-size:12px;color:var(--fc-text)}
-.focus-skill-chip button{padding:0 2px;border:0;background:transparent;color:var(--fc-muted);line-height:1}
+.focus-skill-chip{display:inline-flex;align-items:center;gap:6px;box-sizing:border-box;max-width:100%;padding:3px 8px;border:1px solid var(--fc-border);border-radius:6px;background:var(--fc-soft);font-size:12px;color:var(--fc-text)}
+.focus-skill-chip>svg{display:block;flex:none;width:16px;height:16px;color:var(--fc-accent)}
+.focus-skill-chip>span{min-width:0;overflow-wrap:anywhere}
+.focus-skill-chip button{display:inline-flex;flex:none;align-items:center;justify-content:center;width:20px;height:20px;padding:0;border:0;border-radius:3px;background:transparent;color:var(--fc-muted);line-height:1}
+.focus-skill-chip button svg{display:block;width:14px;height:14px}
+.focus-skill-chip button:hover:not(:disabled){background:var(--fc-border);color:var(--fc-text)}
 .focus-composer__skills small{font-size:11px;color:var(--fc-muted)}
 .focus-skills__row{display:flex;align-items:stretch;gap:4px}
 .focus-skills__row>.focus-skills__item{min-width:0;flex:1}
-.focus-chat .focus-skills__settings{display:grid;place-items:center;flex:none;width:34px;margin:2px 0;padding:0;border:0;border-radius:8px;background:transparent;color:var(--fc-muted);font-size:17px;cursor:pointer}
-.focus-chat .focus-skills__settings:hover:not(:disabled){background:var(--fc-soft);color:var(--fc-text)}
-.focus-skills__settings:focus-visible{outline:2px solid var(--fc-accent);outline-offset:-2px}
