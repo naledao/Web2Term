@@ -15,7 +15,9 @@ import { rehypeFocusFileLinks, cleanFocusFileLinkCopy } from '@shared/focus-file
 import FocusFilePreviewProvider from './FocusFilePreview'
 import FocusComposerModes from './FocusComposerModes'
 import FocusCompaction, { useConversationCompaction } from './FocusCompaction'
-import { compactionSkillQuery } from '@shared/conversation-compaction'
+import { FOCUS_SKILLS, focusSkillQuery, validFocusToolSkills, focusSkillUnavailable } from '@shared/focus-skills'
+import type { FocusSkillId, FocusToolSkill } from '@shared/focus-skills'
+import type { ConversationToolsState } from '@shared/conversation-tools'
 import FocusCodeBlock, { FocusCodeThemeContext } from './FocusCodeBlock'
 import FocusTokenUsage from './FocusTokenUsage'
 import FocusExecutionOutput from './FocusExecutionOutput'
@@ -52,6 +54,7 @@ interface Props {
   onQuestion(): void
   onOriginal(): void
   onOpenTerminal(): void
+  onSkillSettings(skill: FocusToolSkill, trigger: HTMLButtonElement): void
   onRun(messageId: string): Promise<void>
   onSkip(messageId: string): Promise<void>
   onPreviewImage(source: string, name: string): void
@@ -193,6 +196,14 @@ function encodeFile(file: File): Promise<FocusAttachmentInput> {
   })
 }
 function draftKey(owner: FocusOwner): string { return 'focus-chat.draft.' + focusOwnerKey(owner) }
+function readSkillDraft(key: string): FocusToolSkill[] {
+  try { const value: unknown = JSON.parse(localStorage.getItem('focus-chat.skills.' + key) || '[]'); return validFocusToolSkills(value) ? value : [] }
+  catch { return [] }
+}
+function saveSkillDraft(key: string, skills: FocusToolSkill[]): void {
+  try { if (skills.length) localStorage.setItem('focus-chat.skills.' + key, JSON.stringify(skills)); else localStorage.removeItem('focus-chat.skills.' + key) }
+  catch { /* Keep the current input's selection in memory. */ }
+}
 function readDraft(owner: FocusOwner): string {
   try { return (localStorage.getItem(draftKey(owner)) || '').slice(0, 20000) } catch { return '' }
 }
@@ -497,7 +508,13 @@ function FocusChatView(props: Props): JSX.Element {
   const compaction = useConversationCompaction(owner, visible)
   const [skillCaret, setSkillCaret] = useState(draft.length)
   const [skillsDismissed, setSkillsDismissed] = useState(false)
-  const skillQuery = compactionSkillQuery(draft, skillCaret)
+  const skillQuery = focusSkillQuery(draft, skillCaret)
+  const [skillIndex, setSkillIndex] = useState(0)
+  const [selectedSkills, setSelectedSkills] = useState<FocusToolSkill[]>(() => readSkillDraft(viewOwnerKey))
+  const [toolState, setToolState] = useState<ConversationToolsState | null>(null)
+  const composerInput = useRef<HTMLTextAreaElement>(null)
+  const matchingSkills = FOCUS_SKILLS.filter(skill => skillQuery?.ids.includes(skill.id))
+  const activeSkill = matchingSkills[Math.min(skillIndex, Math.max(0, matchingSkills.length - 1))]
   const [sending, setSending] = useState(false)
   const [changingMode, setChangingMode] = useState<FocusComposerModeId | null>(null)
   const [settingPending, setSettingPending] = useState<FocusModelSettingKind | null>(null)
@@ -533,6 +550,17 @@ function FocusChatView(props: Props): JSX.Element {
   useEffect(() => { alive.current = true; return () => {
     alive.current = false
   } }, [])
+  useEffect(() => { setSkillIndex(0) }, [skillQuery?.query, skillQuery?.start])
+  useEffect(() => {
+    if (!visible) return
+    let disposed = false, pushed = false
+    const apply = (next: ConversationToolsState): void => {
+      if (!disposed && focusOwnerKey(next.owner) === ownerKey) setToolState(next)
+    }
+    const off = window.api.onConversationToolsChanged(next => { if (focusOwnerKey(next.owner) === ownerKey) { pushed = true; apply(next) } })
+    void window.api.getConversationTools(owner).then(next => { if (!pushed) apply(next) }).catch(() => {})
+    return () => { disposed = true; off() }
+  }, [ownerKey, visible])
   useEffect(() => {
     const update = (): void => {
       const files = fileDrafts.get(viewOwnerKey) ?? []
@@ -624,7 +652,9 @@ function FocusChatView(props: Props): JSX.Element {
   const composerBusy = state?.generating !== 'idle'
   const ready = state?.ready === true
   // Computer use waits for its Windows helper; the composer keeps the draft meanwhile.
-  const sendBlock = state?.sendBlock || ''
+  const skillModeUnavailable = state?.promptInjection?.phase === 'disabled' ? '请先启用终端模式和提示词注入，再使用按需技能。' : ''
+  const selectedUnavailable = selectedSkills.length ? skillModeUnavailable || selectedSkills.map(id => focusSkillUnavailable(id, toolState)).find(Boolean) || '' : ''
+  const sendBlock = selectedUnavailable || (selectedSkills.includes('computer') ? state?.sendBlock || '' : '')
   const updateModelSettings = useCallback(async (kind: FocusModelSettingKind, value?: string, automatic = false): Promise<void> => {
     if (sendLock.current || working || editingId || !ready || !visible) return
     sendLock.current = true; settingBusy.current = true; readEpoch.current++
@@ -716,7 +746,7 @@ function FocusChatView(props: Props): JSX.Element {
       ? '请等待当前回答、发送或编辑结束后再压缩。' : compaction.blocked ? '正在处理压缩任务。' :
         compaction.state && !['completed', 'cancelled'].includes(compaction.state.phase) ? '请先继续检查或取消已有压缩任务。' : ''
   const startCompaction = async (): Promise<void> => {
-    if (compactionDisabled || sendLock.current || !skillQuery?.matches) return
+    if (compactionDisabled || sendLock.current || !skillQuery?.ids.includes('compact')) return
     const original = draftRef.current, query = { ...skillQuery }
     sendLock.current = true
     try {
@@ -729,6 +759,18 @@ function FocusChatView(props: Props): JSX.Element {
       }
     } finally { sendLock.current = false }
   }
+  const changeSkills = (skills: FocusToolSkill[]): void => { setSelectedSkills(skills); saveSkillDraft(viewOwnerKey, skills) }
+  const skillDisabled = (id: FocusSkillId): string => id === 'compact' ? compactionDisabled :
+    sending || stopping || !!editingId || settingPending !== null || compaction.blocked ? '当前操作结束后可选择技能。' : skillModeUnavailable || focusSkillUnavailable(id, toolState)
+  const chooseSkill = (id: FocusSkillId): void => {
+    if (!skillQuery || skillDisabled(id)) return
+    if (id === 'compact') { void startCompaction(); return }
+    if (!selectedSkills.includes(id)) changeSkills([...selectedSkills, id])
+    const next = draftRef.current.slice(0, skillQuery.start) + draftRef.current.slice(skillQuery.end)
+    const caret = skillQuery.start
+    setDraftText(next); setSkillCaret(caret); setSkillsDismissed(true)
+    requestAnimationFrame(() => { composerInput.current?.focus(); composerInput.current?.setSelectionRange(caret, caret) })
+  }
   // Through the editing pipeline, so Ctrl+Z still undoes the paste; a direct write is the fallback.
   const insertPastedText = (input: HTMLTextAreaElement, text: string): void => {
     input.focus()
@@ -739,6 +781,7 @@ function FocusChatView(props: Props): JSX.Element {
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
     const text = draftRef.current
+    const submittedSkills = [...selectedSkills]
     const sourceFiles = filesRef.current
     if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || composerBusy || props.needsAnswer || sendFailure || !ready || state?.nativeDraft || sendBlock || compaction.blocked) return
     sendLock.current = true
@@ -749,10 +792,13 @@ function FocusChatView(props: Props): JSX.Element {
       const files = await Promise.all(sourceFiles.map(item => encodeFile(item.file)))
       // Reading files can finish after a conversation change; never send an abandoned draft.
       if (!alive.current || sendCancelled.current) return
-      const result = await window.api.sendFocusMessage({ ...owner, text, files })
+      const result = await window.api.sendFocusMessage({ ...owner, text, files, skills: submittedSkills })
       // Clearing the source draft after a first-send route change is safe only
       // when its exact value still belongs to this confirmed submission.
       if (result === 'ok') {
+        // A home -> chat navigation may unmount this composer before the result.
+        if (JSON.stringify(readSkillDraft(viewOwnerKey)) === JSON.stringify(submittedSkills)) saveSkillDraft(viewOwnerKey, [])
+        if (alive.current) setSelectedSkills([])
         const submittedIds = new Set(sourceFiles.map(item => item.id))
         saveFileDraft(viewOwnerKey, (fileDrafts.get(viewOwnerKey) ?? []).filter(item => !submittedIds.has(item.id)))
         try { if (localStorage.getItem(draftKey(viewOwner)) === text) localStorage.removeItem(draftKey(viewOwner)) } catch { /* Optional draft persistence. */ }
@@ -1021,14 +1067,22 @@ function FocusChatView(props: Props): JSX.Element {
       <FocusCompaction owner={owner} visible={visible} state={compaction.state} pending={compaction.pending} error={compaction.error} act={compaction.act} />
       <form className="focus-composer" onSubmit={event => void submit(event)}>
         {skillsOpen ? <div className="focus-skills" id={'focus-skills-' + owner.sessionId} role="listbox" aria-label="选择技能">
-          <div className="focus-skills__label">技能 · Enter 选择 · Esc 关闭</div>
-          {skillQuery?.matches ? <button type="button" role="option" aria-selected="true" id={'focus-skill-compact-' + owner.sessionId}
-            className="focus-skills__item" disabled={!!compactionDisabled} onMouseDown={event => event.preventDefault()}
-            onClick={() => void startCompaction()}>
+          <div className="focus-skills__label">技能 · ↑↓ 选择 · Enter 确定 · Esc 关闭</div>
+          {matchingSkills.length ? matchingSkills.map((skill, index) => <div className="focus-skills__row" key={skill.id} role="presentation"><button type="button" role="option" aria-selected={activeSkill?.id === skill.id} id={'focus-skill-' + skill.id + '-' + owner.sessionId}
+            className="focus-skills__item" disabled={!!skillDisabled(skill.id)} onMouseDown={event => event.preventDefault()}
+            onMouseEnter={() => setSkillIndex(index)} onClick={() => chooseSkill(skill.id)}>
             <span className="focus-skills__icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" /><path d="m4 7.5 8 4.5 8-4.5M12 12v9M8 5.3l8 4.5" /></svg></span>
-            <span className="focus-skills__body"><strong>压缩会话</strong><small>{compactionDisabled || '整理当前会话，生成交接摘要并开启承接聊天'}</small></span>
+            <span className="focus-skills__body"><strong>{skill.name}</strong><small>{skillDisabled(skill.id) || (selectedSkills.includes(skill.id as FocusToolSkill) ? '已添加到当前输入' : skill.description)}</small></span>
             <span className="focus-skills__key">↵</span>
-          </button> : <div className="focus-skills__empty">没有匹配的技能</div>}
+          </button>{skill.id !== 'compact' ? <button type="button" className="focus-skills__settings" aria-label={skill.name + '设置'} title={skill.name + '设置'}
+            disabled={sending || stopping} onMouseDown={event => event.preventDefault()}
+            onClick={event => props.onSkillSettings(skill.id as FocusToolSkill, event.currentTarget)}>⚙</button> : null}</div>) : <div className="focus-skills__empty">没有匹配的技能</div>}
+        </div> : null}
+        {selectedSkills.length ? <div className="focus-composer__skills" aria-label="本次使用的技能">
+          {selectedSkills.map(id => <span className="focus-skill-chip" key={id}>{FOCUS_SKILLS.find(skill => skill.id === id)!.name}
+            <button type="button" disabled={sending} aria-label={FOCUS_SKILLS.find(skill => skill.id === id)!.name + '设置'} onClick={event => props.onSkillSettings(id, event.currentTarget)}>⚙</button>
+            <button type="button" disabled={sending} aria-label={'移除' + FOCUS_SKILLS.find(skill => skill.id === id)!.name} onClick={() => changeSkills(selectedSkills.filter(skill => skill !== id))}>×</button>
+          </span>)}<small>随本次任务按需加载</small>
         </div> : null}
         {draftFiles.length ? <div className="focus-composer__files" aria-label="待发送附件">{draftFiles.map(item =>
           <div className="focus-draft-file" key={item.id}>
@@ -1036,9 +1090,9 @@ function FocusChatView(props: Props): JSX.Element {
             <span className="focus-draft-file__name" title={item.file.name}>{item.file.name}<small>{fileSize(item.file.size)} · {sending ? '上传并发送中…' : '待发送'}</small></span>
             <button type="button" disabled={sending} aria-label={'移除附件 ' + item.file.name} onClick={() => removeFile(item.id)}>×</button>
           </div>)}</div> : null}
-        <textarea value={draft} disabled={!!editingId || compaction.blocked} maxLength={20000} rows={2} aria-label="消息" placeholder="描述你想完成的任务… 输入 // 选择技能"
+        <textarea ref={composerInput} value={draft} disabled={!!editingId || compaction.blocked} maxLength={20000} rows={2} aria-label="消息" placeholder="描述你想完成的任务… 输入 // 选择技能"
           aria-expanded={skillsOpen} aria-controls={skillsOpen ? 'focus-skills-' + owner.sessionId : undefined}
-          aria-activedescendant={skillsOpen && skillQuery?.matches ? 'focus-skill-compact-' + owner.sessionId : undefined}
+          aria-activedescendant={skillsOpen && activeSkill ? 'focus-skill-' + activeSkill.id + '-' + owner.sessionId : undefined}
           onSelect={event => setSkillCaret(event.currentTarget.selectionStart)}
           onChange={event => { setDraftText(event.target.value); setSkillCaret(event.currentTarget.selectionStart); setSkillsDismissed(false) }}
           onPaste={event => {
@@ -1066,7 +1120,9 @@ function FocusChatView(props: Props): JSX.Element {
               if (['ArrowUp', 'ArrowDown', 'Escape', 'Enter'].includes(event.key) && !event.shiftKey) {
                 event.preventDefault()
                 if (event.key === 'Escape') setSkillsDismissed(true)
-                if (event.key === 'Enter' && !event.repeat) void startCompaction()
+                if (event.key === 'ArrowDown' && matchingSkills.length) setSkillIndex((skillIndex + 1) % matchingSkills.length)
+                if (event.key === 'ArrowUp' && matchingSkills.length) setSkillIndex((skillIndex - 1 + matchingSkills.length) % matchingSkills.length)
+                if (event.key === 'Enter' && !event.repeat && activeSkill) chooseSkill(activeSkill.id)
                 return
               }
             }

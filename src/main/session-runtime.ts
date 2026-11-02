@@ -53,7 +53,8 @@ import type { CapturedFocusFile } from './focus-file-preview'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
 import type { FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
 import { validFocusModelSettingsRequest } from '../shared/focus-chat'
-import { focusPromptInjectionState, estimateFocusConversation } from '../shared/focus-token-usage'
+import { focusPromptInjectionState, estimateFocusConversation, estimateContextText } from '../shared/focus-token-usage'
+import { validFocusToolSkills, focusSkillUnavailable, focusSkillMessage, focusSkillPrefix } from '../shared/focus-skills'
 import type { ContextUsageEntry } from '../shared/context-usage'
 import { writeFile } from 'node:fs/promises'
 import { createConnection } from 'mysql2/promise'
@@ -76,7 +77,7 @@ import {
 } from '../shared/types'
 import { CHAT_PLATFORMS } from '../shared/platforms'
 import { selectionQuestionConversation } from '../shared/deepseek-question'
-import { computerUseCapabilityPrompt, computerUseStatusPrompt, computerUseSendBlock, resolveComputerUseCapability, supportsComputerUsePlatform } from '../shared/computer-use'
+import { computerUseCapabilityPrompt, computerUseSendBlock, resolveComputerUseCapability, supportsComputerUsePlatform } from '../shared/computer-use'
 import { normalizeComputerResultDelay } from '../shared/computer-progress'
 import { computerUseProtocol } from '../shared/computer-use-protocol'
 import type { ComputerUseProtocolError } from '../shared/computer-use-protocol'
@@ -1103,7 +1104,7 @@ export class SessionRuntime {
             const continuesPause = !automatic && !!paused && taskPausedByInput(paused)
             const submit = (resume?: { taskId: string; generation: number; userText?: boolean }): AutonomousTask | null =>
               this.taskCoordinator.submit({ platformId: platform.id, conversationId: record().conversationId,
-                submission, turnId, text, attachments: files ?? [], capability: this.getComputerUseCapability(platform.id),
+                submission, turnId, text: cleanFocusUserText(text), attachments: files ?? [], capability: this.getComputerUseCapability(platform.id),
                 ...(resume ? { resume } : {}),
                 machine: { id: this.options.localMachineId, label: '本机', platform: process.platform, arch: process.arch,
                   connection: 'local', workingDirectory: this.runner.getTerminalState().cwd || this.environment.workingDirectory || this.lastPersistedLocalCwd } })
@@ -1306,7 +1307,7 @@ export class SessionRuntime {
     entry.embed.setPromptInjectionEnabled(this.promptInjectionEnabled)
     const capability = this.getComputerUseCapability(platformId)
     entry.embed.setComputerUseRecognitionEnabled(capability.scopeSupported && capability.computerUseEnabled)
-    entry.embed.setSendBlock(computerUseSendBlock(capability))
+    entry.embed.setSendBlock(null)
     // A lazy platform must inherit the real slot BEFORE attach starts its first navigation.
     // Hiding a zero-sized view first lets the outer bounds change while Chromium's native
     // content host retains a 0x0 viewport; showing the original page then appears to fix it.
@@ -1961,14 +1962,24 @@ export class SessionRuntime {
   async sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome> {
     if (!this.ownsFocus(request)) return 'unavailable'
     if (typeof request.text !== 'string' || request.text.length > 20000 ||
+      !validFocusToolSkills(request.skills ?? []) ||
       !validFocusFiles(request.files ?? []) || (!request.text.trim() && !request.files?.length)) return 'invalid'
     if (this.focusSending) return 'busy'
-    if (computerUseSendBlock(this.getComputerUseCapability(request.platformId))) return 'helper-not-ready'
+    const skills = [...(request.skills ?? [])]
+    if (skills.length) {
+      const status = this.embed.getInterceptorStatus()
+      if (!status.installed || !status.enabled || !status.promptInjectionEnabled) return 'unavailable'
+      const tools = this.getConversationTools(request)
+      if (skills.some(id => focusSkillUnavailable(id, tools))) return 'unavailable'
+    }
+    if (skills.includes('computer') && computerUseSendBlock(this.getComputerUseCapability(request.platformId))) return 'helper-not-ready'
     this.focusSending = true
     writeFocusDiagnostic(request, { event: 'send-request', inputLength: request.text.length, attachmentCount: request.files?.length ?? 0 })
     const controller = new AbortController()
     this.focusUploadAbort = controller
     const embed = this.embed
+    const text = focusSkillMessage(request.text, skills)
+    const skillUsageId = 'skill:' + randomUUID()
     // The page uploader pins the first created conversation after its single submit.
     // The runtime guard owns the workspace/platform; it must not reject that home -> chat binding.
     const uploadCurrent = (): boolean => !this.disposed && !controller.signal.aborted &&
@@ -1978,9 +1989,16 @@ export class SessionRuntime {
     try {
       if (request.files?.length) staged = await stageFocusAttachments(request.files)
       const outcome = controller.signal.aborted || !this.ownsFocus(request) ? 'cancelled' : staged
-        ? await embed.sendFocusFiles(request.text, staged.attachments, 'focus:' + randomUUID(), uploadCurrent, controller.signal,
+        ? await embed.sendFocusFiles(text, staged.attachments, 'focus:' + randomUUID(), uploadCurrent, controller.signal,
           (request.files ?? []).filter(file => file.mimeType.startsWith('image/')).map(file => ({ ...file, width: null, height: null })))
-        : await this.embed.sendFocusUser(request.text)
+        : await this.embed.sendFocusUser(text)
+      if (skills.length && ['ok', 'unknown', 'stuck'].includes(outcome)) {
+        const conversationId = request.conversationId ?? embed.getState().conversationId
+        this.recordContextUsage(request.platformId, { id: skillUsageId, conversationId,
+          turnId: this.focusChat.contextUsageTurnId(request.platformId, conversationId) ?? null,
+          sourceMessageId: null, category: 'injection', state: outcome === 'ok' ? 'sent' : 'unknown',
+          ...estimateContextText(focusSkillPrefix(skills)), images: 0, files: 0, createdAt: Date.now() })
+      }
       writeFocusDiagnostic(request, { event: 'send-outcome', outcome })
       return outcome
     }
@@ -2775,12 +2793,14 @@ export class SessionRuntime {
     for (const entry of this.embeds.values()) {
       const capability = this.getComputerUseCapability(entry.platform.id)
       entry.embed?.setComputerUseRecognitionEnabled(capability.scopeSupported && capability.computerUseEnabled)
-      entry.embed?.setSendBlock(computerUseSendBlock(capability))
+      entry.embed?.setSendBlock(null)
       const currentStep = this.taskCoordinator?.current(entry.platform.id)?.progress?.currentStep
       if (!capability.computerUseEnabled || !capability.scopeSupported ||
         (!capability.desktopControlEnabled && currentStep && (currentStep.tool ?? 'computer') === 'computer' && currentStep.status !== 'delivered')) this.stopAutonomousTask(entry.platform.id, 'interrupted')
-      entry.embed?.setPromptParts(buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id)),
-        !!changed && changed.platformId === entry.platform.id && changed.conversationId === entry.conversationId)
+      const parts = buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id))
+      const catalogChanged = entry.embed?.getInterceptorStatus?.()?.toolPrompt !== parts.toolPrompt
+      entry.embed?.setPromptParts(parts,
+        catalogChanged && !!changed && changed.platformId === entry.platform.id && changed.conversationId === entry.conversationId)
       entry.embed?.setComputerUseProtocolContext?.({ definitions: capability.actionDefinitions,
         stepToken: capability.available ? this.taskCoordinator?.computerStepToken?.(entry.platform.id) ?? null : null })
     }
@@ -2863,16 +2883,13 @@ export class SessionRuntime {
   mailSettingsChanged(): void {
     if (this.disposed) return
     this.mailNotifications.cancel()
-    for (const entry of this.embeds.values()) {
-      entry.embed?.setPromptParts(buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id)), true)
-    }
     this.send(IpcChannels.conversationToolsChanged, this.getConversationTools())
   }
 
   saveScheduledTask(draft: ScheduledTaskDraft): void {
     if (!draft || !draft.owner || !sameConversationToolsOwner(draft.owner, this.toolsOwner()) || this.disposed ||
       typeof draft.requestId !== 'string' || !/^[\w-]{1,128}$/.test(draft.requestId) || !this.options.scheduledTasks) throw new Error('当前对话已变化，请重新打开定时任务。')
-    if (!this.toolPreferences().scheduledTasksEnabled) throw new Error('请先在工具设置中启用定时任务。')
+    if (!this.toolPreferences().scheduledTasksEnabled) throw new Error('请先在 // 菜单的定时任务设置中启用该技能。')
     if (draft.id) this.options.scheduledTasks.edit(this.id, draft)
     else this.options.scheduledTasks.create(draft.owner, this.scheduledTarget(), { type: 'scheduled_task', schedule: draft.schedule, prompt: draft.prompt },
       JSON.stringify(['ui', this.id, draft.requestId]))
@@ -3018,27 +3035,16 @@ export class SessionRuntime {
 
   /** The injected tool section: summaries only; full definitions are sent when the AI reads them. */
   private toolPrompt(platformId: string): string {
-    const capability = this.getComputerUseCapability(platformId)
     const preferences = this.toolPreferences(platformId)
-    const computerStatus = computerUseStatusPrompt(capability,
-      capability.available ? this.taskCoordinator?.computerStepToken?.(platformId) ?? null : null,
-      taskPausedByInput(this.taskCoordinator?.latest(platformId)))
     const disabled = [
       ...(!preferences.fileReadingEnabled ? ['当前对话已关闭文件读取工具，不要输出 read_files 请求。'] : []),
       ...(!preferences.backgroundTasksEnabled ? ['当前对话已关闭后台任务工具，不要输出 background:true 或后台登记标记。'] : []),
-      ...(!preferences.scheduledTasksEnabled ? ['当前对话已关闭定时任务工具，不要输出 scheduled_task 请求。'] : []),
-      ...(!preferences.mailNotificationsEnabled ? ['当前对话已关闭邮件通知工具，不要输出 send_email 请求。'] : [])
     ]
-    const mail = this.options.qqMail?.availability()
     const entries: ToolCatalogEntry[] = [
       ...(!this.web2term && preferences.fileReadingEnabled ? [{ name: 'read_files' as const }] : []),
       ...(preferences.backgroundTasksEnabled ? [{ name: 'background_task' as const }] : []),
-      ...(preferences.scheduledTasksEnabled ? [{ name: 'scheduled_task' as const }] : []),
-      ...(preferences.mailNotificationsEnabled ? [{ name: 'send_email' as const, note: mail?.available ? ''
-        : '当前邮箱尚未配置完成：' + (mail?.message ?? '请在「设置 → 邮件通知」配置收发邮箱和 SMTP 授权码。') }] : []),
-      ...(capability.available ? [{ name: 'computer' as const }] : [])
     ]
-    return toolCatalogPrompt(platformId, entries, [computerStatus, ...disabled].filter(Boolean).join('\n\n'))
+    return toolCatalogPrompt(platformId, entries, disabled.join('\n\n'))
   }
 
   /** One tool's full definition as it applies to this conversation right now. */

@@ -1,11 +1,11 @@
 import { fileReadingPlatform } from './types'
 
-/** Names the model uses for tools; each maps to one conversation tool switch. */
+/** Names accepted by tool-description reads, including explicitly selected skills. */
 export type ToolPromptName = 'read_files' | 'background_task' | 'scheduled_task' | 'send_email' | 'computer'
 
 export const TOOL_PROMPT_NAMES: readonly ToolPromptName[] = Object.freeze(['read_files', 'background_task', 'scheduled_task', 'send_email', 'computer'])
 
-/** Injected instead of the full definitions; the model reads a definition only when it needs it. */
+/** Summaries for UI and the selected automatic catalog, not an automatic injection list. */
 export const TOOL_PROMPT_SUMMARIES: Readonly<Record<ToolPromptName, string>> = Object.freeze({
   read_files: '将当前终端对应机器上的文件完整上传为当前会话附件，供查看源码、图片和文档。',
   background_task: '在当前终端对应机器启动非交互后台任务或常驻服务，自动回传就绪或结束结果。',
@@ -61,7 +61,7 @@ export function toolCatalogPrompt(platformId: string, entries: ToolCatalogEntry[
       '```json',
       `{"type":"read_tool_prompt","tools":["${entries[0].name}"]}`,
       '```',
-      `tools 为 1–${TOOL_PROMPT_NAMES.length} 个上面列出的工具名，可一次读取多个；该请求与 command、questions 及其他工具请求互斥。不要凭摘要猜测调用格式；本任务中已读过且确定格式时可直接调用，不确定时重新读取。`
+      `tools 为 1–${TOOL_PROMPT_NAMES.length} 个当前目录或用户本次明确选择的技能工具名，可一次读取多个；该请求与 command、questions 及其他工具请求互斥。不要凭摘要猜测调用格式。本次新选择的技能先读取最新说明，不沿用历史状态或步骤令牌；同一任务内已读过且格式未变时可继续使用，不确定时重新读取。`
     ].join('\n'),
     ...(tail ? [tail] : [])
   ].join('\n\n')

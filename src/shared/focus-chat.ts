@@ -272,7 +272,11 @@ export function focusDelivery(record: ExecutionRecord, delivery?: FocusDelivery)
       record.deliveryStatus === 'pending' || record.deliveryStatus === 'uploading' ? 'pending' : undefined
 }
 export type FocusSendOutcome = 'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable' | 'invalid' | 'upload-failed' | 'unsupported-file-type' | 'unknown' | 'cancelled' | 'helper-not-ready'
-export interface FocusSendRequest extends FocusOwner { text: string; files?: FocusAttachmentInput[] }
+export interface FocusSendRequest extends FocusOwner {
+  text: string
+  files?: FocusAttachmentInput[]
+  skills?: import('./focus-skills').FocusToolSkill[]
+}
 export interface FocusEditRequest extends FocusOwner { messageId: string; text: string }
 /** Metadata only, produced by the page's edit pipeline; no message or prompt text. */
 export interface FocusEditDiagnostic {

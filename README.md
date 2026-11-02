@@ -78,6 +78,7 @@ flowchart LR
 | 原始网页、终端命令与结果回传 | 支持 | 支持 | 支持 | 支持 |
 | 本地会话摘要 | 支持 | 支持 | 支持 | 支持 |
 | 专注对话 | 支持 | 支持 | — | — |
+| 会话压缩（专注对话） | 支持 | 支持 | — | — |
 | Computer Use（Windows x64 本机） | 支持 | 支持 | — | — |
 | 侧边聊天、选区追问 | 支持 | 支持 | 支持 | 支持 |
 | `read_files` 完整附件回传（本机／SSH） | 已接入 | 已接入 | 已接入 | 已接入，自动回传待用户验收 |
@@ -90,6 +91,14 @@ flowchart LR
 右侧页签栏的 **＋** 可添加“终端”“后台任务”“定时任务”“GitHub 仓库管理”或“侧边聊天”。新增终端是用户独立操作的 Shell，不把其输出自动发送给模型。每次新建侧边聊天会替换原侧边实例；选区追问从本地已保存的对话生成上下文 Markdown，发到同平台的新聊天中，侧边聊天不执行终端命令。
 
 “查看工具提示词”中可按对话开关文件读取、后台任务、定时任务、邮件通知和电脑操作。定时任务、邮件通知默认开启；邮件通知还需要先保存收发邮箱和授权码。
+
+#### 会话压缩（ChatGPT / DeepSeek）
+
+在 ChatGPT 或 DeepSeek 的**专注对话**输入框开头或新一行输入 `//`，选择“压缩会话”。需要当前会话已有网页地址，且模型回答和工具处理均已结束。
+
+软件整理当前有效历史和必要执行结果，保存 `source.md`，通过同平台的独立网页生成 `summary.md`，再导入新的承接聊天。原会话与本地历史保留；完成后仍在原工作区继续使用相同的会话入口、名称、项目、终端连接和专注视图。压缩前的历史可查看，但不会重新发送给模型；承接聊天确认摘要后等待用户的新消息。
+
+压缩通常在后台进行，输入框上方提供进度和“取消”；失败或暂停时可“重试”，必要时通过“处理问题”完成登录、验证或补全摘要。切换会话会暂停后续提交，重启不会自动重复发送。上下文过短、预计无压缩收益或文件超出预算时会停止并提示；未捕获的早期历史和原始附件不保证迁移。文件保存在用户数据目录的 `exports/compactions/<任务编号>/`。详见 [会话压缩说明](docs/conversation-compaction.md)。
 
 ### Computer Use
 
@@ -425,6 +434,7 @@ Projects group conversations and share supplementary Markdown instructions. Remo
 | Original website, terminal execution, result delivery | Yes | Yes | Yes | Yes |
 | Locally saved conversation summary | Yes | Yes | Yes | Yes |
 | Focus conversation view | Yes | Yes | — | — |
+| Conversation compaction (focus view) | Yes | Yes | — | — |
 | Computer Use, local Windows x64 sessions | Yes | Yes | — | — |
 | Side chat and questions about selected answer text | Yes | Yes | Yes | Yes |
 | Full-file attachments through `read_files`, local / SSH | Integrated | Integrated | Integrated | Integrated; automatic delivery awaits user acceptance |
@@ -437,6 +447,14 @@ The focus view presents messages, reasoning/search activity, and execution recor
 The right panel's **＋** menu adds personal terminals, background tasks, scheduled tasks, GitHub repository management, or a side chat. Personal terminals are independent shells whose output is not automatically sent to the model.
 
 “查看工具提示词” manages file reading, background tasks, scheduled tasks, email notifications, and computer use per conversation. Scheduled tasks and email notifications default to enabled; email also requires saved sender credentials and a recipient.
+
+#### Conversation compaction (ChatGPT / DeepSeek)
+
+In the **focus conversation view** for ChatGPT or DeepSeek, type `//` at the start of the input or on a new line and select “压缩会话” (Compact conversation). The conversation must already have a website URL, and the current model response and tool operations must be complete.
+
+The client exports the active local history and relevant execution results to `source.md`, generates a Markdown handoff in `summary.md` using a separate page on the same model platform, and imports it into a new continuation chat. The original conversation and local history remain available. The existing workspace entry, name, project, terminal connection, and focus view are preserved. Earlier messages remain readable but are not resent to the model; the continuation chat waits for the user's next message after acknowledging the summary.
+
+Compaction normally runs in the background, with progress and a cancel action above the input. Failed or paused jobs can be retried; “处理问题” (Resolve issue) opens the page for sign-in, verification, or summary corrections when necessary. Switching conversations pauses further submissions, and restarting does not automatically resend messages. Compaction stops when the context is too short, savings are insufficient, or size limits are exceeded. Uncaptured early history and original attachments are not guaranteed to transfer. Files are stored under `exports/compactions/<job-id>/` in the app's user data directory. See [conversation compaction details](docs/conversation-compaction.md).
 
 ### Computer Use on Windows
 

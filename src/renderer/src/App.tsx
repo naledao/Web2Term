@@ -17,6 +17,7 @@ import BackendLoginForm from './components/BackendLoginForm'
 import Web2termDevicesSettings from './components/Web2termDevicesSettings'
 import QqMailSettings from './components/QqMailSettings'
 import ToolPromptsDialog from './components/ToolPromptsDialog'
+import type { FocusToolSkill } from '@shared/focus-skills'
 import type { AutonomousTaskState } from '@shared/autonomous-task'
 import TerminalActionsMenu from './components/TerminalActionsMenu'
 import ToolboxPanel from './components/ToolboxPanel'
@@ -598,6 +599,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const tools = useToolWindows()
   const toolWindowOpen = tools.windows.some((item) => item.sessionId === sessionId && !item.minimized)
   const [toolsOpen, setToolsOpen] = useState(false)
+  const [toolsSkill, setToolsSkill] = useState<FocusToolSkill | null>(null)
+  const skillSettingsTriggerRef = useRef<HTMLButtonElement>(null)
   const toolsTriggerRef = useRef<HTMLButtonElement>(null)
   const [promptView, setPromptView] = useState<'base' | null>(null)
   const promptOpen = promptView !== null
@@ -2456,6 +2459,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               onQuestion={focusQuestion}
               onOriginal={focusOriginal}
               onOpenTerminal={focusOpenTerminal}
+              onSkillSettings={(skill, trigger) => { skillSettingsTriggerRef.current = trigger; setToolsSkill(skill); setToolsOpen(true) }}
               onRun={runExecution} onSkip={skipExecution}
               onPreviewImage={openImagePreview}
               renderAttachment={focusAttachment} />
@@ -2787,7 +2791,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               className="terminal__prompt-link"
               aria-haspopup="dialog"
               ref={toolsTriggerRef}
-              onClick={() => setToolsOpen(true)}
+              onClick={() => { setToolsSkill(null); setToolsOpen(true) }}
             >
               查看工具提示词
             </button>
@@ -3473,9 +3477,9 @@ ${record.command}`
           </Dialog.Root>
         ) : null}
 
-        {toolsOpen && appContainer ? <ToolPromptsDialog key={JSON.stringify([sessionId, platformId, embed.conversationId])}
+        {toolsOpen && appContainer ? <ToolPromptsDialog key={JSON.stringify([sessionId, platformId, embed.conversationId, toolsSkill])}
           owner={{ sessionId, platformId, conversationId: embed.conversationId }} container={appContainer} theme={theme}
-          trigger={toolsTriggerRef} onClose={() => setToolsOpen(false)} /> : null}
+          skillId={toolsSkill} trigger={toolsSkill ? skillSettingsTriggerRef : toolsTriggerRef} onClose={() => setToolsOpen(false)} /> : null}
         {/* System prompt keeps its searchable, read-only viewer. */}
         {promptOpen && appContainer ? (
           <Dialog.Root open modal onOpenChange={(open, details) => {

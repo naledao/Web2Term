@@ -252,7 +252,7 @@ test('runtime uses the live connection and refreshes cached platform prompts wit
     computerUseTool: { definitions: () => [] },
     stopAutonomousTask() {}, send() {},
     embeds: new Map(['deepseek', 'chatgpt'].map(id => [id, {
-      platform: { id }, embed: { setPromptParts: parts => prompts.set(id, parts), setComputerUseRecognitionEnabled() {} }
+      platform: { id }, embed: { setPromptParts: parts => prompts.set(id, parts), setComputerUseRecognitionEnabled() {}, setSendBlock() {} }
     }]))
   })
   assert.equal(runtime.getComputerUseCapability().scopeSupported, true)
@@ -266,8 +266,8 @@ test('runtime uses the live connection and refreshes cached platform prompts wit
   assert.equal(runtime.getComputerUseCapability().reason, 'remote-session')
   runtime.web2term = null
   runtime.refreshComputerUseCapabilities()
-  assert.match(prompts.get('deepseek').toolPrompt, /桌面执行器尚未接入/)
-  assert.match(prompts.get('chatgpt').toolPrompt, /首版仅适配 DeepSeek/)
+  assert.doesNotMatch(prompts.get('deepseek').toolPrompt, /computer|桌面执行器|step_token/)
+  assert.doesNotMatch(prompts.get('chatgpt').toolPrompt, /computer|桌面执行器|step_token/)
   preferences = { computerUseEnabled: false, desktopControlEnabled: false }
   runtime.refreshComputerUseCapabilities()
   assert.doesNotMatch(prompts.get('deepseek').toolPrompt, /【工具能力：computer use】/)

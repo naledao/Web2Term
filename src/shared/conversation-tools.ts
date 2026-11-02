@@ -2,6 +2,8 @@ import type { ComputerUseCapability, ComputerUsePreferences } from './computer-u
 import { normalizeComputerResultDelay } from './computer-progress'
 
 export type ConversationToolId = 'files' | 'background' | 'scheduled' | 'mail' | 'computer'
+/** Only these capabilities belong in the persistent tool prompt/settings view. */
+export const AUTOMATIC_CONVERSATION_TOOLS: readonly ConversationToolId[] = ['files', 'background']
 
 export interface ConversationToolPreferences extends ComputerUsePreferences {
   fileReadingEnabled: boolean
@@ -33,7 +35,8 @@ export interface ConversationToolEntry {
   enabled: boolean
   available: boolean
   message: string
-  /** The line injected for this tool; the full prompt is sent only when the AI reads it. */
+  /** Capability summary. Only files/background are in the automatic catalog;
+   * scheduled/mail/computer are selected from the focus composer. */
   summary: string
   prompt: string
 }

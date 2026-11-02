@@ -5606,7 +5606,7 @@
       return result
     },
     beginFocusFileSend(token, files, text, expectedPath) {
-      if (location.pathname !== expectedPath || typeof text !== 'string' || text.length > 20000 ||
+      if (location.pathname !== expectedPath || typeof text !== 'string' || text.length > 22000 ||
         !Array.isArray(files) || files.length < 1 || files.length > 3 || state.pendingQuestion || focusGenerationState() !== 'idle' ||
         focusEditing || focusModeChanging || nativeEditRetry || safetyLeak.busy) return 'busy'
       if (state.enabled && state.promptInjectionEnabled && !state.prefix) return 'busy'
@@ -6099,7 +6099,9 @@
       lastUserSendBlock = null
       const element = getComposer()
       if (!element) return Promise.resolve('no-composer')
-      if (typeof text !== 'string' || !text.trim() || text.length > 20000) return Promise.resolve('invalid')
+      // The host still limits user text to 20K. Focus sends may add a bounded,
+      // explicit skill activation block before the user-text boundary.
+      if (typeof text !== 'string' || !text.trim() || text.length > (options?.fromFocus === true ? 22000 : 20000)) return Promise.resolve('invalid')
       // Same guards as before, each now named in the raw-send log: a bare 'busy' left
       // "the focus view cannot send after startup" with nothing to read.
       const busy = (reason, details = {}) => {

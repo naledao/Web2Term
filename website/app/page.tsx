@@ -15,6 +15,7 @@ import {
   LINUX_AGENT_GUIDE_URL,
   COMPUTER_USE_GUIDE_URL,
   SCHEDULED_TASKS_GUIDE_URL,
+  CONVERSATION_COMPACTION_GUIDE_URL,
   MAIL_NOTIFICATIONS_GUIDE_URL,
 } from './site-config'
 
@@ -54,7 +55,7 @@ const steps: Step[] = [
   },
 ]
 
-const features = [
+const features: { title: string; body: string; tag: string; guideUrl?: string }[] = [
   {
     title: '按项目组织对话，共享补充说明',
     body: '为项目设置本机目录，将相关对话放在一起。项目内共享 Markdown 补充说明，新建本机会话从项目目录开始。',
@@ -64,6 +65,12 @@ const features = [
     title: '专注当前任务，也能在侧边追问',
     body: 'ChatGPT 和 DeepSeek 可切换专注对话，集中查看回答、思考与执行过程。四个平台均支持侧边聊天和选区追问，沿用各自的登录态。',
     tag: 'FOCUS + SIDE CHAT',
+  },
+  {
+    title: '对话太长？压缩历史，继续聊天',
+    body: '在 ChatGPT 或 DeepSeek 的专注对话输入 //，选择「压缩会话」。软件在后台整理有效历史并生成交接摘要，在原工作区接入新的承接聊天；旧历史仍可查看，失败可重试或处理问题。仅在预计节省上下文时执行，原始附件不会自动迁移。',
+    tag: 'CONVERSATION COMPACTION',
+    guideUrl: CONVERSATION_COMPACTION_GUIDE_URL,
   },
   {
     title: '让模型读取文件，直接查看原内容',
@@ -484,7 +491,7 @@ export default function Home() {
 
       <section className="capabilities section" id="capabilities">
         <div className="capabilities-heading"><p className="section-mark">THE WORKSPACE</p><h2>把上下文<br /><span>留在手边。</span></h2></div>
-        <div className="feature-rail">{features.map((feature, index) => <article className="feature-row" key={feature.tag}><span className="feature-index">0{index + 1}</span><div className="feature-content"><p>{feature.tag}</p><h3>{feature.title}</h3><span>{feature.body}</span></div><ArrowIcon /></article>)}</div>
+        <div className="feature-rail">{features.map((feature, index) => <article className="feature-row" key={feature.tag}><span className="feature-index">0{index + 1}</span><div className="feature-content"><p>{feature.tag}</p><h3>{feature.title}</h3><span>{feature.body}</span>{feature.guideUrl && <a className="text-link" href={feature.guideUrl} target="_blank" rel="noreferrer">阅读会话压缩说明 <ArrowIcon /></a>}</div><ArrowIcon /></article>)}</div>
       </section>
 
       <section className="automation section" id="automation" aria-labelledby="automation-title">

@@ -2,13 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { Dialog } from '@base-ui/react/dialog'
 import MDEditor from '@uiw/react-md-editor'
-import { sameConversationToolsOwner } from '@shared/conversation-tools'
+import { AUTOMATIC_CONVERSATION_TOOLS, sameConversationToolsOwner } from '@shared/conversation-tools'
+import { FOCUS_SKILLS, focusSkillToolId } from '@shared/focus-skills'
+import type { FocusToolSkill } from '@shared/focus-skills'
 import type { ConversationToolId, ConversationToolsOwner, ConversationToolsState, ConversationToolsUpdate } from '@shared/conversation-tools'
 import type { AppTheme } from '@shared/types'
 import ComputerUseSettings from './ComputerUseSettings'
 import './ToolPromptsDialog.css'
 
 interface Props {
+  skillId?: FocusToolSkill | null
   owner: ConversationToolsOwner
   container: HTMLElement
   theme: AppTheme
@@ -16,7 +19,7 @@ interface Props {
   onClose(): void
 }
 
-export default function ToolPromptsDialog({ owner, container, theme, trigger, onClose }: Props) {
+export default function ToolPromptsDialog({ owner, container, theme, trigger, onClose, skillId = null }: Props) {
   const [state, setState] = useState<ConversationToolsState | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -27,6 +30,10 @@ export default function ToolPromptsDialog({ owner, container, theme, trigger, on
   const alive = useRef(true)
   const busy = useRef(false)
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const skill = skillId ? FOCUS_SKILLS.find(item => item.id === skillId) : null
+  const title = skill ? skill.name + '设置' : '工具提示词'
+  const shownTools = state?.tools.filter(tool => skillId
+    ? tool.id === focusSkillToolId(skillId) : AUTOMATIC_CONVERSATION_TOOLS.includes(tool.id)) ?? []
 
   useEffect(() => {
     alive.current = true
@@ -83,10 +90,12 @@ export default function ToolPromptsDialog({ owner, container, theme, trigger, on
         <div className="tool-prompts-dialog" data-color-mode={theme}>
           <div className="tool-prompts-dialog__head">
             <div>
-              <Dialog.Title className="tool-prompts-dialog__title">工具提示词</Dialog.Title>
-              <Dialog.Description className="tool-prompts-dialog__description">仅应用于{owner.conversationId ? '当前对话' : '这个新对话'}，修改后自动保存。发送时只注入已启用工具的摘要，AI 需要时再读取完整提示词。</Dialog.Description>
+              <Dialog.Title className="tool-prompts-dialog__title">{title}</Dialog.Title>
+              <Dialog.Description className="tool-prompts-dialog__description">仅应用于{owner.conversationId ? '当前对话' : '这个新对话'}，修改后自动保存。{skill
+                ? '启用后可在 // 菜单中选择此技能；说明仅随选中的任务按需加载。'
+                : '这里只管理文件读取和后台任务；启用后提供工具目录，完整说明在调用时读取。'}</Dialog.Description>
             </div>
-            <Dialog.Close ref={closeButton} className="tool-prompts-dialog__close" aria-label="关闭工具提示词">
+            <Dialog.Close ref={closeButton} className="tool-prompts-dialog__close" aria-label={'关闭' + title}>
               <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
             </Dialog.Close>
           </div>
@@ -95,7 +104,7 @@ export default function ToolPromptsDialog({ owner, container, theme, trigger, on
               {!state ? <button type="button" onClick={() => setRetry(value => value + 1)}>重新加载</button> : null}
             </div> : null}
             {loading && !state ? <p className="tool-prompts-dialog__loading" role="status">正在读取当前对话的工具…</p> : null}
-            {state?.tools.map(tool => <section className="tool-prompts-dialog__tool" key={tool.id} aria-labelledby={`conversation-tool-${tool.id}`}>
+            {shownTools.map(tool => <section className="tool-prompts-dialog__tool" key={tool.id} aria-labelledby={`conversation-tool-${tool.id}`}>
               <div className="tool-prompts-dialog__tool-head">
                 <h3 id={`conversation-tool-${tool.id}`}>{tool.name}</h3>
                 <span className="tool-prompts-dialog__state">{tool.enabled ? '已启用' : '已关闭'}</span>
@@ -108,13 +117,13 @@ export default function ToolPromptsDialog({ owner, container, theme, trigger, on
                   <span className="switch__knob" />
                 </button>
               </div>
-              <p className="tool-prompts-dialog__summary"><span>注入摘要</span>{tool.summary}</p>
+              <p className="tool-prompts-dialog__summary"><span>{skill ? '技能说明' : '注入摘要'}</span>{tool.summary}</p>
               {!tool.available ? <p className="tool-prompts-dialog__availability">{tool.message}</p> : null}
               <details className="tool-prompts-dialog__details">
                 <summary>查看完整提示词</summary>
                 <div className="tool-prompts-dialog__prompt">
                   <div className="tool-prompts-dialog__prompt-head">
-                    <span>{tool.enabled ? 'AI 读取该工具时发送的完整提示词' : '启用后 AI 可读取的完整提示词预览'}</span>
+                    <span>{skill ? '选用此技能后按需读取的完整说明' : tool.enabled ? 'AI 读取该工具时发送的完整提示词' : '启用后 AI 可读取的完整提示词预览'}</span>
                     <button type="button" onClick={() => void copy(tool.id, tool.prompt)}>{copied === tool.id ? '已复制' : '复制提示词'}</button>
                   </div>
                   <div className="tool-prompts-dialog__prompt-content" role="region" aria-label={`${tool.name}提示词`} tabIndex={0}>
@@ -124,7 +133,7 @@ export default function ToolPromptsDialog({ owner, container, theme, trigger, on
               </details>
               {tool.id === 'computer' ? <details className="tool-prompts-dialog__details">
                 <summary>电脑操作设置</summary>
-                <ComputerUseSettings preferences={state.preferences} disabled={saving || loading}
+                <ComputerUseSettings preferences={state!.preferences} disabled={saving || loading}
                   onChange={value => void save({ computerResultDelaySeconds: value.computerResultDelaySeconds })} />
               </details> : null}
             </section>)}

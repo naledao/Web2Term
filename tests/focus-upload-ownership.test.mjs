@@ -28,6 +28,8 @@ function runtimeFixture(initialConversationId = null) {
   }
   const send = actualMethod('../src/main/session-runtime.ts', 'sendFocusMessage', {
     validFocusFiles: () => true,
+    validFocusToolSkills: skills => Array.isArray(skills) && !skills.length,
+    focusSkillMessage: text => text,
     stageFocusAttachments: async () => ({ attachments: [{ fileName: 'logo.png' }], cleanup: async () => { cleaned++ } }),
     randomUUID: () => 'owned-send', writeFocusDiagnostic: (_owner, data) => records.push(data)
   })

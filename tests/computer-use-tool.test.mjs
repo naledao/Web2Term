@@ -278,15 +278,17 @@ test('actual runtime refreshes only tool descriptions and dispatches with its li
   const runtime = Object.assign(new Runtime(), {
     id: 'session-A', activePlatformId: 'deepseek', active: true, disposed: false, remoteShell: null, web2term: null,
     options: { settings: () => preferences }, ssh: { getState: () => ({ attached: false }) },
+    toolPreferences: () => ({ fileReadingEnabled: true, backgroundTasksEnabled: true, ...preferences }),
+    getConversationTools: () => ({}),
     environment: { ...types.FALLBACK_ENVIRONMENT }, stopAutonomousTask() {}, send() {},
-    embeds: new Map(['deepseek', 'chatgpt'].map(id => [id, { platform: { id }, embed: { setPromptParts: parts => prompts.set(id, parts), setComputerUseRecognitionEnabled() {} } }]))
+    embeds: new Map(['deepseek', 'chatgpt'].map(id => [id, { platform: { id }, embed: { setPromptParts: parts => prompts.set(id, parts), setComputerUseRecognitionEnabled() {}, setSendBlock() {} } }]))
   })
   runtime.computerUseTool = new ComputerUseTool(() => runtime.refreshComputerUseCapabilities())
   const unregister = runtime.computerUseTool.register(definition(), {
     validate: () => null, execute: async () => { executions++; return { message: 'observed' } }
   })
-  // Only the summary and step state are injected; the action list is sent when the AI reads the computer tool.
-  assert.match(prompts.get('deepseek').toolPrompt, /- computer：[\s\S]*【computer use 状态】/)
+  // Desktop summaries, status and schemas are all absent from automatic prefixes.
+  assert.doesNotMatch(prompts.get('deepseek').toolPrompt, /computer|step_token|桌面/)
   assert.doesNotMatch(prompts.get('deepseek').toolPrompt, /【computer 当前可调用动作与参数】/)
   assert.doesNotMatch(prompts.get('chatgpt').toolPrompt, /- computer：/)
   assert.equal(prompts.get('deepseek').basePrompt, types.buildTerminalPromptParts(runtime.environment).basePrompt)
@@ -299,5 +301,5 @@ test('actual runtime refreshes only tool descriptions and dispatches with its li
   assert.equal(executions, 1)
   runtime.disposed = false
   unregister()
-  assert.match(prompts.get('deepseek').toolPrompt, /当前没有可调用的 computer 桌面动作/)
+  assert.doesNotMatch(prompts.get('deepseek').toolPrompt, /computer|step_token|桌面/)
 })

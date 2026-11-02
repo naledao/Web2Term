@@ -14,4 +14,5 @@ export const WEB2TERM_GUIDE_URL = `${REPOSITORY_URL}/blob/main/docs/web2term-des
 export const LINUX_AGENT_GUIDE_URL = `${REPOSITORY_URL}/blob/main/agents/linux/README.md`
 export const COMPUTER_USE_GUIDE_URL = `${REPOSITORY_URL}#computer-use`
 export const SCHEDULED_TASKS_GUIDE_URL = `${REPOSITORY_URL}/blob/main/docs/scheduled-tasks.md`
+export const CONVERSATION_COMPACTION_GUIDE_URL = `${REPOSITORY_URL}/blob/main/docs/conversation-compaction.md`
 export const MAIL_NOTIFICATIONS_GUIDE_URL = `${REPOSITORY_URL}/blob/main/docs/qq-mail-settings.md`
