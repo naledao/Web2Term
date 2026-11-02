@@ -44,6 +44,8 @@ export interface PreparedFileResult {
   cleanup(): Promise<void>
 }
 export type RemoteFileReader = (path: string, maxBytes: number, signal: AbortSignal) => Promise<Buffer>
+/** Application-generated compaction attachments can defer size limits to the platform. */
+export type FileReadSizePolicy = 'default' | 'unlimited'
 
 /** Recognize UTF-8 text without changing the bytes sent as an attachment. */
 function isUtf8Text(bytes: Buffer): boolean {
@@ -92,7 +94,8 @@ async function readLocalFile(path: string, maxBytes: number, signal: AbortSignal
 }
 
 /** Read snapshots; staging never modifies the user's source files. */
-export async function prepareFiles(request: StoredFileReadRequest, signal: AbortSignal, remoteRead?: RemoteFileReader, platformId?: FileReadingPlatform['id']): Promise<PreparedFileResult> {
+export async function prepareFiles(request: StoredFileReadRequest, signal: AbortSignal, remoteRead?: RemoteFileReader,
+  platformId?: FileReadingPlatform['id'], sizePolicy: FileReadSizePolicy = 'default'): Promise<PreparedFileResult> {
   if (request.files.length < 1 || request.files.length > MAX_READ_FILES) {
     throw new Error(`每次最多读取 ${MAX_READ_FILES} 个文件，请分批调用。`)
   }
@@ -118,7 +121,7 @@ export async function prepareFiles(request: StoredFileReadRequest, signal: Abort
       try {
         path = resolveFilePath(request, spec.path)
         const extension = extname(path).toLowerCase()
-        const limit = Math.min(MAX_FILE_BYTES, MAX_BATCH_BYTES - totalBytes)
+        const limit = sizePolicy === 'unlimited' ? Infinity : Math.min(MAX_FILE_BYTES, MAX_BATCH_BYTES - totalBytes)
         if (limit <= 0) throw new Error('本次附件合计超过 25 MiB。')
         const bytes = request.context.scope === 'ssh'
           ? await (remoteRead ? remoteRead(path, limit, signal) : Promise.reject(new Error('SSH 文件通道不可用。')))

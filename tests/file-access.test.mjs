@@ -95,6 +95,28 @@ test('DeepSeek uploads JSONC as a text snapshot while preserving BOM, comments, 
   }
 })
 
+test('generated compaction snapshots can exceed file and batch size limits without losing bytes', async () => {
+  const bytes = Buffer.alloc(26 * 1024 * 1024, 'a')
+  const f = fixture({ 'source.md': bytes }), signal = new AbortController().signal
+  const limited = await f.api.prepareFiles(f.request, signal, undefined, 'chatgpt')
+  assert.equal(limited.failed, true)
+  assert.equal(limited.attachments.length, 0)
+  assert.match(limited.text, /20 MiB/)
+  await limited.cleanup()
+
+  const result = await f.api.prepareFiles(f.request, signal, undefined, 'chatgpt', 'unlimited')
+  assert.equal(result.failed, false)
+  assert.equal(result.attachments.length, 1)
+  const attachment = result.attachments[0]
+  assert.equal(attachment.fileName, 'source.md')
+  assert.equal(attachment.mimeType, 'text/markdown')
+  assert.equal(attachment.sizeBytes, bytes.length)
+  assert.equal(attachment.sha256, createHash('sha256').update(bytes).digest('hex'))
+  assert.deepEqual(f.writes.get(attachment.path), bytes)
+  await result.cleanup()
+  assert.equal(f.removals.length, 1)
+})
+
 test('SSH JSONC snapshots use the same transport alias without attempting a local source read', async () => {
   const f = fixture({ 'opencode.jsonc': configBytes })
   const request = { ...f.request, context: { scope: 'ssh', hostId: 'fixture-host', cwd: '/srv/config' } }

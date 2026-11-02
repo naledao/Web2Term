@@ -37,7 +37,6 @@ export interface CompactionState {
 }
 export const COMPACTION_ACTIVE: readonly CompactionPhase[] = ['preparing', 'opening', 'uploading', 'summarizing', 'saving', 'importing']
 export const COMPACTION_SECTIONS = ['当前目标', '用户约束', '已确认事实', '已完成事项与验证', '关键决定与失败尝试', '文件与执行环境', '未完成事项与下一步', '缺失信息与未验证事项'] as const
-export const COMPACTION_MAX_SOURCE_TOKENS = 80_000
 export const COMPACTION_MAX_SUMMARY_CHARACTERS = 60_000
 export const compactionEndMarker = (id: string): string => 'W2T_COMPACTION_END_' + id.replace(/-/g, '')
 export const compactionRequestMarker = (id: string, handoff = false): string => 'W2T_' + (handoff ? 'HANDOFF_' : 'COMPACT_') + id.replace(/-/g, '')
@@ -146,7 +145,6 @@ export function compactionSourceMarkdown(input: CompactionSource): { markdown: s
     '## 执行环境（历史快照）', '', input.environment, '', '## 对话正文', '', body, '',
     '## 执行结果与工具记录', '', ...evidence, ...tools, ''].join('\n')
   const tokens = estimateContextText(markdown).estimatedTokens
-  if (markdown.length > 300_000 || tokens > COMPACTION_MAX_SOURCE_TOKENS) throw new Error('本地记录超过首版单次压缩预算（80,000 估算 token 或 300,000 字符）。请缩小会话范围；本次没有截断历史或发送。')
   return { markdown, messageCount: entries.length, tokens }
 }
 

@@ -112,7 +112,7 @@ export class CompactionPage {
   }
   send(path: string, prompt: string, signal: AbortSignal, isCurrent: () => boolean, beforeSubmit: () => void): ReturnType<typeof sendQuestionChatAttachment> {
     return sendQuestionChatAttachment(this.view.webContents, this.platform, path, prompt, signal,
-      () => this.available && isCurrent(), beforeSubmit)
+      () => this.available && isCurrent(), beforeSubmit, 'unlimited')
   }
   close(): void {
     if (this.disposed) return

@@ -20,7 +20,7 @@ B 和导入阶段的 C 没有终端、命令或工具执行回调，网页拦截
 
 文件保存在软件用户数据目录 `exports/compactions/<任务编号>/source.md` 和 `summary.md`，异常处理页保留定位文件入口。阶段、来源、文件哈希、压缩与承接网页地址、两次发送状态及承接会话编号保存在本地设置中。提交前先保存“不确定”边界；确认消息后记录成功。重启不会自动发送，用户重试后从已有阶段恢复；不确定发送只检查原网页，不重新提交。若提交结果不明且未能保存会话地址，需先核对平台历史；软件不会猜测另建一份。
 
-本地快照不保证覆盖网页尚未捕获的早期历史。原图片和文档只记录已知附件信息及历史文字结论，不携带原件。执行记录中超过 12,000 字符的单条日志保留前 4,000 和后 8,000 字符，明确标记省略，完整输出仍在原会话本地记录中。整份快照超过 80,000 估算 token 或 300,000 字符时，首版停止并说明原因，不静默删除对话。预算是应用的保守上限，不代表平台真实上下文或附件额度。
+本地快照不保证覆盖网页尚未捕获的早期历史。原图片和文档只记录已知附件信息及历史文字结论，不携带原件。执行记录中超过 12,000 字符的单条日志保留前 4,000 和后 8,000 字符，明确标记省略，完整输出仍在原会话本地记录中。整份快照不设置估算 token 或字符总量上限，不因会话较长而拒绝压缩或截断对话正文；token 估算仍用于记录快照规模。软件生成的压缩附件不受普通文件读取的单文件 20 MiB、单批 25 MiB 限制，实际上传和处理结果由平台的附件及上下文能力决定。摘要生成与导入阶段继续按下文的长度预算检查压缩收益。
 
 摘要保留八部分：当前目标、用户约束、已确认事实、已完成事项与验证、关键决定与失败尝试、文件与执行环境、未完成事项与下一步、缺失信息与未验证事项。结束标记、平台空闲和正文稳定只用于判断传输完整性，不保证语义没有遗漏。
 
@@ -53,7 +53,7 @@ B 和导入阶段的 C 没有终端、命令或工具执行回调，网页拦截
 离线回归由用户运行（不启动 Electron、不联网）：
 
 ```powershell
-node --test tests/conversation-compaction.test.mjs tests/compaction-page.test.mjs tests/conversation-continuity.test.mjs tests/long-task-performance.test.mjs tests/focus-smart-ui.test.mjs tests/focus-token-usage.test.mjs
+node --test tests/conversation-compaction.test.mjs tests/compaction-page.test.mjs tests/conversation-continuity.test.mjs tests/long-task-performance.test.mjs tests/focus-smart-ui.test.mjs tests/focus-token-usage.test.mjs tests/file-access.test.mjs tests/deepseek-question.test.mjs
 ```
 
 真实验收由用户使用 `npm run dev` 运行：

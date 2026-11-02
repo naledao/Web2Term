@@ -49,8 +49,8 @@ function fixture() {
     electron: { WebContentsView: View, shell: { openExternal() { throw new Error('No external browser in this test') } } },
     '../shared/deepseek-question': { questionChatBounds: raw => raw },
     './question-chat-page': { questionPageCall() { throw new Error('No page execution in native-host tests') } },
-    './question-chat-send': { async sendQuestionChatAttachment(_contents, _platform, _path, _prompt, _signal, current, beforeSubmit) {
-      sends.push(current())
+    './question-chat-send': { async sendQuestionChatAttachment(_contents, _platform, _path, _prompt, _signal, current, beforeSubmit, sizePolicy) {
+      sends.push({ current: current(), sizePolicy })
       if (!current()) return 'cancelled'
       beforeSubmit()
       return 'ok'
@@ -86,6 +86,7 @@ test('a hidden worker can send while retaining its dispatch ownership check', as
   const f = fixture(), signal = new AbortController().signal
   let submitted = 0
   assert.equal(await f.page.send('source.md', 'prompt', signal, () => true, () => submitted++), 'ok')
+  assert.equal(f.sends[0].sizePolicy, 'unlimited', 'generated compaction attachments have no application size cap')
   assert.equal(f.page.visible, false)
   assert.equal(submitted, 1)
   assert.equal(await f.page.send('source.md', 'prompt', signal, () => false, () => submitted++), 'cancelled')

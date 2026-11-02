@@ -472,7 +472,8 @@ function attachmentFixture({ outcome = 'ok', navigate = false, invalid = false, 
   const wc = { getURL: () => url, isDestroyed: () => false }
   const prompt = shared.selectionQuestionPrompt(selection, platformId)
   return { sends, scripts, requests, cleanups: () => cleanups,
-    send: () => helper.sendQuestionChatAttachment(wc, { id: platformId, page: {} }, '/synthetic-export/' + filename, prompt, new AbortController().signal, () => true), prompt }
+    send: sizePolicy => helper.sendQuestionChatAttachment(wc, { id: platformId, page: {} }, '/synthetic-export/' + filename, prompt,
+      new AbortController().signal, () => true, undefined, sizePolicy), prompt }
 }
 
 test('sidebar attachment reuses the uploader, adds the question as caption and cleans staging only', async () => {
@@ -487,7 +488,18 @@ test('sidebar attachment reuses the uploader, adds the question as caption and c
   assert.ok(fixture.scripts[0].includes('"enabled":false'))
   assert.ok(fixture.scripts[0].includes('"promptInjectionEnabled":false'))
   assert.equal(fixture.requests[0][0].files[0].path, '/synthetic-export/deepseek-context.md')
+  assert.equal(fixture.requests[0][4], undefined, 'ordinary question attachments use the default size policy')
   assert.equal(fixture.cleanups(), 1)
+})
+
+test('generated compression attachments defer size limits to the platform on both supported platforms', async () => {
+  for (const platformId of ['deepseek', 'chatgpt']) {
+    const fixture = attachmentFixture({ platformId })
+    assert.equal(await fixture.send('unlimited'), 'ok')
+    assert.equal(fixture.requests[0][4], 'unlimited')
+    assert.equal(fixture.sends.length, 1)
+    assert.equal(fixture.cleanups(), 1)
+  }
 })
 
 test('unsupported Markdown, a changed chat and a failed snapshot never trigger a URL fallback', async () => {

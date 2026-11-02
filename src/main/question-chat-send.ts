@@ -2,6 +2,7 @@ import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import interceptorSource from './injected/send-interceptor.js?raw'
 import { prepareFiles } from './file-access'
+import type { FileReadSizePolicy } from './file-access'
 import { sendPageFiles } from './page-files'
 import { questionPageCall } from './question-chat-page'
 import { isQuestionChatHome, supportsSelectionQuestion } from '../shared/deepseek-question'
@@ -11,7 +12,7 @@ import type { FileSendOutcome } from '../shared/file-requests'
 /** Upload the generated snapshot and question as ONE message. No URL-only fallback. */
 export async function sendQuestionChatAttachment(
   contents: Electron.WebContents, platform: ChatPlatform, contextPath: string, prompt: string,
-  signal: AbortSignal, isCurrent: () => boolean, beforeSubmit?: () => void
+  signal: AbortSignal, isCurrent: () => boolean, beforeSubmit?: () => void, sizePolicy?: FileReadSizePolicy
 ): Promise<FileSendOutcome> {
   if (!contextPath || !supportsSelectionQuestion(platform.id) || !isCurrent() || signal.aborted) return 'cancelled'
   const platformId = platform.id
@@ -22,7 +23,7 @@ export async function sendQuestionChatAttachment(
   // WebContents has no console report handler that could execute commands.
   await questionPageCall(contents, `${interceptorSource}\n;window.__cmdTerminalInterceptor.configure(${JSON.stringify(config)});true`)
   const prepared = await prepareFiles({ type: 'read_files', files: [{ path: contextPath }], description: '追问的本地对话 Markdown 上下文',
-    context: { scope: 'local', hostId: '', cwd: dirname(contextPath) } }, signal, undefined, platformId)
+    context: { scope: 'local', hostId: '', cwd: dirname(contextPath) } }, signal, undefined, platformId, sizePolicy)
   try {
     if (!isCurrent() || signal.aborted || contents.isDestroyed() || contents.getURL() !== ownerUrl) return 'cancelled'
     if (prepared.failed || prepared.attachments.length !== 1 || prepared.attachments[0].mimeType !== 'text/markdown') return 'upload-failed'

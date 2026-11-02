@@ -72,10 +72,23 @@ test('active-branch export deduplicates rows, excludes reasoning and retains exe
   assert.throws(() => shared.compactionSourceMarkdown({ ...input, messages: [{ ...input.messages[0], conversationId: 'another' }] }), /其他会话/)
 })
 
-test('oversize sources fail without silently truncating; long logs explicitly mark the omitted middle', () => {
+test('sources above the former token and character limits retain the complete conversation text', () => {
+  for (const content of ['你'.repeat(80_001), 'a'.repeat(300_001)]) {
+    const input = source()
+    input.messages[0].content = '对话开始\n' + content + '\n对话结束'
+    const { markdown, messageCount, tokens } = shared.compactionSourceMarkdown(input)
+    assert.ok(markdown.includes(input.messages[0].content), 'the complete conversation is exported without truncation')
+    assert.equal(messageCount, 1)
+    if (content.startsWith('你')) {
+      assert.ok(tokens > 80_000 && markdown.length < 300_000, 'exceeds only the former token limit')
+    } else {
+      assert.ok(markdown.length > 300_000 && tokens < 80_000, 'exceeds only the former character limit')
+    }
+  }
+})
+
+test('long logs explicitly mark the omitted middle', () => {
   const input = source()
-  input.messages[0].content = '你'.repeat(80_001)
-  assert.throws(() => shared.compactionSourceMarkdown(input), /单次压缩预算/)
   input.messages[0].content = '请检查'
   input.executions = [{ messageId: 'log', conversationId: owner.conversationId, kind: 'command', command: 'build',
     status: 'done', output: 'x'.repeat(20_000) + '最终错误', exitCode: 1, fileRequest: null }]
