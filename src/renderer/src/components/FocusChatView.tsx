@@ -9,7 +9,9 @@ import FocusChart, { parseFocusChart } from './FocusChart'
 import type { FocusChartData } from './FocusChart'
 import FocusSmartUi, { FocusSmartUiContext } from './FocusSmartUi'
 import FocusLayout from './FocusLayout'
-import FocusCitationLink, { cleanFocusCitationCopy, FocusCitationContext } from './FocusCitationLink'
+import { cleanFocusCitationCopy, FocusCitationContext } from './FocusCitationLink'
+import FocusMessageLink from './FocusMessageLink'
+import { rehypeFocusFileLinks } from '@shared/focus-file-links'
 import FocusComposerModes from './FocusComposerModes'
 import FocusCodeBlock, { FocusCodeThemeContext } from './FocusCodeBlock'
 import FocusTokenUsage from './FocusTokenUsage'
@@ -205,6 +207,7 @@ const RICH_BLOCK = /<!--focus-(chart|ui|layout) (\{[^\n]*\}) -->\n((?:>[^\n]*(?:
 const CHART_MARKER = /<!--focus-(?:chart|ui|layout) [\s\S]*? -->\n?/g
 const mathRemarkPlugins = [remarkMath]
 const mathRehypePlugins: NonNullable<ComponentProps<typeof MDEditor.Markdown>['rehypePlugins']> = [
+  rehypeFocusFileLinks,
   [rehypeKatex, { trust: false, strict: 'ignore', maxExpand: 1000, maxSize: 20 }]
 ]
 /** DeepSeek commonly emits LaTeX delimiters instead of Markdown math delimiters. */
@@ -227,10 +230,10 @@ const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: 
     blocks.push(source.slice(last, match.index), block)
     last = match.index + match[0].length
   }
-  if (!blocks.length) return <FocusCodeThemeContext.Provider value={theme}><MDEditor.Markdown source={source} skipHtml disableCopy components={{ pre: FocusCodeBlock, a: FocusCitationLink }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /></FocusCodeThemeContext.Provider>
+  if (!blocks.length) return <FocusCodeThemeContext.Provider value={theme}><MDEditor.Markdown source={source} skipHtml disableCopy components={{ pre: FocusCodeBlock, a: FocusMessageLink }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /></FocusCodeThemeContext.Provider>
   blocks.push(source.slice(last))
   return <FocusCodeThemeContext.Provider value={theme}>{blocks.map((block, index) => typeof block === 'string'
-    ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml disableCopy components={{ pre: FocusCodeBlock, a: FocusCitationLink }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /> : null
+    ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml disableCopy components={{ pre: FocusCodeBlock, a: FocusMessageLink }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /> : null
     : block.kind === 'chart' ? <FocusChart key={index} data={block.data} /> : block.kind === 'layout'
       ? <FocusLayout key={index} data={block.data} /> : <FocusSmartUi key={index} data={block.data} />)}</FocusCodeThemeContext.Provider>
 })

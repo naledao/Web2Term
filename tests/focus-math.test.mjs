@@ -60,6 +60,10 @@ const extract = new Script('(' + initializer(page, 'readReplyMarkdown') + ')').r
 // Use the actual focus component and its actual plugin options. The preview wrapper
 // is replaced by its underlying ReactMarkdown to avoid loading CSS in Node.
 const exports = {}
+const fileLinks = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-file-links.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: fileLinks, URL })
 const codeExports = {}
 new Script(ts.transpileModule(readFileSync(new URL('../src/renderer/src/components/FocusCodeBlock.tsx', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX }
@@ -70,7 +74,7 @@ new Script(ts.transpileModule(normalizeMath + '\n' + declarations.map(name => `c
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX }
 }).outputText).runInNewContext({ exports, require, memo: React.memo, remarkMath, rehypeKatex,
   FocusCodeBlock: codeExports.default,
-  FocusCitationLink: 'a',
+  FocusMessageLink: 'a', rehypeFocusFileLinks: fileLinks.rehypeFocusFileLinks,
   FocusCodeThemeContext: codeExports.FocusCodeThemeContext,
   cleanFocusAnswer: value => value,
   MDEditor: { Markdown: ({ source, wrapperElement, ...props }) => React.createElement('div', wrapperElement, React.createElement(ReactMarkdown, props, source)) },

@@ -728,6 +728,9 @@
       if (typeof value !== 'string' || !value || value.length > 4096 || /[\s\u0000-\u001f\u007f]/.test(value)) return ''
       try {
         const url = new URL(value, location.href)
+        if (!image && /^sandbox:\/(?!\/)/i.test(value) && url.protocol === 'sandbox:' && !url.host && url.pathname.startsWith('/')) {
+          return '#web2term-file=' + encodeURIComponent(url.href)
+        }
         return (image ? url.protocol === 'https:' : ['https:', 'http:'].includes(url.protocol)) && url.hostname && !url.username && !url.password ? url.href : ''
       } catch { return '' }
     }
@@ -6276,6 +6279,37 @@
         }
         return current() ? 'unknown' : 'cancelled'
       } finally { if (focusModeChanging === operation) focusModeChanging = null }
+    },
+
+    /** Replay only the file link the user selected, through the page's existing authenticated handler. */
+    openFocusFileLink(request, expectedPath) {
+      if (!PAGE.focus || !request || !/^[a-zA-Z0-9_:-]{1,160}$/.test(request.sourceMessageId || '') ||
+        typeof request.href !== 'string' || request.href.length > 4096 || !/^sandbox:\/(?!\/)/i.test(request.href) ||
+        /[\u0000-\u001f\u007f]/.test(request.href) || typeof request.label !== 'string' ||
+        !request.label || request.label.length > 1000 || collapse(request.label) !== request.label) return 'invalid'
+      if (location.pathname !== expectedPath) return 'cancelled'
+      if (focusCitationOperation || focusEditing || focusModeChanging || state.programmatic || fileSend) return 'busy'
+      const nodes = queryAllAssistant().filter(node => messageIdOf(node) === request.sourceMessageId && isVisibleElement(node))
+      if (nodes.length !== 1) return 'unavailable'
+      const root = replyRootOf(nodes[0])
+      if (!root) return 'unavailable'
+      const links = [...(root.matches('a[href]') ? [root] : []), ...root.querySelectorAll('a[href]')].filter(link => {
+        if (link.closest('pre, code') || !isVisibleElement(link) || link.getAttribute('aria-disabled') === 'true' ||
+          collapse(link.textContent) !== request.label) return false
+        const raw = link.getAttribute('href') || ''
+        if (!/^sandbox:\/(?!\/)/i.test(raw) || /[\u0000-\u001f\u007f]/.test(raw)) return false
+        try { return new URL(raw).href === request.href } catch (_) { return false }
+      })
+      if (links.length !== 1) return 'unavailable'
+      const link = links[0]
+      // Bubble after the site's own handler, allowing it to resolve/download the file
+      // while preventing the raw sandbox URL from becoming an OS protocol navigation.
+      const preventNavigation = event => {
+        if (event.target === link || link.contains(event.target)) event.preventDefault()
+      }
+      document.addEventListener('click', preventNavigation)
+      try { link.click(); return 'ok' } catch (_) { return 'unknown' }
+      finally { document.removeEventListener('click', preventNavigation) }
     },
 
     /** Arm a read of one reply's citation trigger, without changing the composer or task state. */

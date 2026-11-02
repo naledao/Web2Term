@@ -1560,6 +1560,8 @@ function registerIpcHandlers(): void {
       focusRuntime(event, request)?.actOnFocusUi(request) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatCitation, (event, request) =>
     focusRuntime(event, request)?.readFocusCitation(request) ?? { outcome: 'unavailable', sources: [] })
+  ipcMain.handle(IpcChannels.focusChatFileLink, (event, request) =>
+    focusRuntime(event, request)?.openFocusFileLink(request) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatComposerMode, (event, request) =>
     focusRuntime(event, request)?.setFocusComposerMode(request) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatModelSettings, (event, request) =>

@@ -11,6 +11,7 @@ import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from '
 import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo, FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from './focus-chat'
 import type { FocusUiRequest } from './focus-smart-ui'
 import type { FocusCitationRequest, FocusCitationResult } from './focus-citations'
+import type { FocusFileLinkRequest } from './focus-file-links'
 import type { RemoteRipgrepState, RemoteRipgrepRequest, RemoteRipgrepTaskResult } from './remote-ripgrep'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
@@ -50,6 +51,7 @@ export const IpcChannels = {
   focusChatEdit: 'focus-chat:edit',
   focusChatUiAction: 'focus-chat:ui-action',
   focusChatCitation: 'focus-chat:citation',
+  focusChatFileLink: 'focus-chat:file-link',
   focusChatComposerMode: 'focus-chat:composer-mode',
   focusChatModelSettings: 'focus-chat:model-settings',
   focusChatAsk: 'focus-chat:ask',
@@ -2368,6 +2370,7 @@ export interface AppApi {
   editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome>
   actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome>
   readFocusCitation(request: FocusCitationRequest): Promise<FocusCitationResult>
+  openFocusFileLink(request: FocusFileLinkRequest): Promise<FocusSendOutcome>
   setFocusComposerMode(request: FocusComposerModeRequest): Promise<FocusSendOutcome>
   updateFocusModelSettings(request: FocusModelSettingsRequest): Promise<FocusModelSettingsResult>
   /** Ask about a focus-view selection in the side chat; '' once it is open, otherwise the message to show. */

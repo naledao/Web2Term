@@ -1,11 +1,27 @@
-import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { app, shell } from 'electron'
 import type { ShortcutDetails } from 'electron'
 import { APP_ID, APP_NAME } from './app-identity'
 
 const legacyShortcutName = /^GPT Web to Codex Terminal(?: \(\d+\))?\.lnk$/i
+const legacyElectronShortcutName = /^Electron(?: \(\d+\))?\.lnk$/i
 const knownExecutableName = /^(?:GPT Web to Codex Terminal|Web2Term)\.exe$/i
+
+function isProjectElectronShortcut(shortcut: ShortcutDetails): boolean {
+  if (!isAbsolute(shortcut.target)
+    || !/[\\/]node_modules[\\/]electron[\\/]dist[\\/]electron\.exe$/i.test(shortcut.target)) return false
+  try {
+    const manifest: unknown = JSON.parse(readFileSync(
+      join(dirname(shortcut.target), '..', '..', '..', 'package.json'), 'utf8'
+    ))
+    return typeof manifest === 'object' && manifest !== null && 'name' in manifest
+      && (manifest.name === 'web2term' || manifest.name === 'gpt-web-to-codex-terminal')
+  } catch {
+    // A missing, unreadable or unrelated checkout is not enough evidence to delete a link.
+    return false
+  }
+}
 
 /** Run before the first toast, after setting the process AUMID. */
 export function repairWindowsNotificationShortcuts(): void {
@@ -42,9 +58,10 @@ export function repairWindowsNotificationShortcuts(): void {
     return
   }
 
-  // Windows can resolve the stable AUMID to an orphaned pre-rename shortcut even
-  // when Web2Term.lnk exists. Only remove known, broken links with our exact AUMID,
-  // and only after a working replacement has been ensured above.
+  // Windows can resolve the stable AUMID to an older shortcut even when Web2Term.lnk
+  // exists. Early development runs also left Electron.lnk using the installed AUMID.
+  // Remove only broken pre-rename links or project-owned Electron links with that
+  // exact AUMID, and only after a working replacement has been ensured above.
   const removeOrphans = (directory: string): void => {
     try {
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -52,13 +69,21 @@ export function repairWindowsNotificationShortcuts(): void {
         const path = join(directory, entry.name)
         if (entry.isDirectory()) {
           removeOrphans(path)
-        } else if (entry.isFile() && legacyShortcutName.test(entry.name)) {
+        } else if (entry.isFile()) {
+          const legacyInstall = legacyShortcutName.test(entry.name)
+          const legacyElectron = legacyElectronShortcutName.test(entry.name)
+          if (!legacyInstall && !legacyElectron) continue
           try {
             const shortcut = shell.readShortcutLink(path)
-            if (shortcut.appUserModelId === APP_ID && isAbsolute(shortcut.target)
-              && knownExecutableName.test(basename(shortcut.target)) && !existsSync(shortcut.target)) {
+            if (shortcut.appUserModelId !== APP_ID || !isAbsolute(shortcut.target)) continue
+            const orphanedInstall = legacyInstall && knownExecutableName.test(basename(shortcut.target))
+              && !existsSync(shortcut.target)
+            const projectElectron = legacyElectron && isProjectElectronShortcut(shortcut)
+            if (orphanedInstall || projectElectron) {
               unlinkSync(path)
-              console.info('[notification] removed an orphaned pre-rename Start Menu shortcut')
+              console.info(projectElectron
+                ? '[notification] removed a legacy project Electron shortcut using the installed app identity'
+                : '[notification] removed an orphaned pre-rename Start Menu shortcut')
             }
           } catch (error) {
             console.warn('[notification] could not inspect or remove a legacy Start Menu shortcut:', error)

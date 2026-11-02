@@ -1,6 +1,8 @@
 import { createElement, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, JSX, ReactNode } from 'react'
 import type { FocusLayoutData, FocusLayoutNode } from '@shared/focus-layout'
+import { parseFocusFileHref } from '@shared/focus-file-links'
+import FocusMessageLink from './FocusMessageLink'
 import './FocusLayout.css'
 
 const tones: Record<string, string> = { $text: 'var(--fc-text)', $muted: 'var(--fl-muted)', $bg: 'var(--fc-bg)',
@@ -32,7 +34,8 @@ function draw(node: string | FocusLayoutNode, key: number): ReactNode {
   if (divider) Object.assign(style, { boxSizing: 'content-box', backgroundClip: 'content-box',
     height: '1px', minHeight: '1px', maxHeight: '1px', borderWidth: 0,
     flexGrow: 0, flexShrink: 0, flexBasis: 'auto', backgroundColor: tones.$border })
-  return createElement(node.tag, { ...node.attrs, style, key,
+  const component = node.tag === 'a' && parseFocusFileHref(node.attrs?.href) ? FocusMessageLink : node.tag
+  return createElement(component, { ...node.attrs, style, key,
     ...(node.tag === 'a' ? { target: '_blank', rel: 'noopener noreferrer' } : {}),
     ...(node.tag === 'svg' ? { 'aria-hidden': true, focusable: false } : {}) },
   ...((node.tag === 'hr' || node.tag === 'br') ? [] : (node.children ?? []).map(draw)))

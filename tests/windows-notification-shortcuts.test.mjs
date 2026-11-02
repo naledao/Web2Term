@@ -15,6 +15,9 @@ const appData = 'C:\\用户\\AppData\\Roaming'
 const programs = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs')
 const executable = 'C:\\Program Files\\Web2Term\\Web2Term.exe'
 const canonical = path.join(programs, 'Web2Term.lnk')
+const developmentRoot = 'C:\\开发 目录\\Web2Term'
+const developmentExecutable = path.join(developmentRoot, 'node_modules', 'electron', 'dist', 'electron.exe')
+const developmentManifest = path.join(developmentRoot, 'package.json')
 const activator = '{11111111-2222-4333-8444-555555555555}'
 const savedActivator = '{aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee}'
 const plain = value => JSON.parse(JSON.stringify(value))
@@ -25,7 +28,7 @@ const desired = {
 
 function fixture({ platform = 'win32', packaged = true, existing = desired, writeFails = false,
   unreadable = [], inaccessible = [] } = {}) {
-  const files = new Map(), directories = new Map([[programs, []]])
+  const files = new Map(), manifests = new Map(), directories = new Map([[programs, []]])
   const targets = new Set([executable])
   const reads = [], writes = [], removed = [], warnings = [], calls = []
   function add(name, details, directory = programs) {
@@ -44,6 +47,13 @@ function fixture({ platform = 'win32', packaged = true, existing = desired, writ
     'node:fs': {
       existsSync(file) { calls.push(['exists', file]); return files.has(file) || targets.has(file) || directories.has(file) },
       mkdirSync(directory, options) { calls.push(['mkdir', directory]); assert.equal(options.recursive, true) },
+      readFileSync(file, encoding) {
+        calls.push(['readFile', file])
+        assert.equal(encoding, 'utf8')
+        if (unreadable.includes(file)) throw new Error('Access denied')
+        if (!manifests.has(file)) throw new Error('File not found')
+        return manifests.get(file)
+      },
       readdirSync(directory, options) {
         calls.push(['readdir', directory])
         assert.equal(options.withFileTypes, true)
@@ -85,13 +95,86 @@ function fixture({ platform = 'win32', packaged = true, existing = desired, writ
     process: { platform, execPath: executable }, console: { info() {}, warn(...args) { warnings.push(args) } },
     require(name) { assert.ok(Object.hasOwn(modules, name), `Unexpected dependency: ${name}`); return modules[name] }
   })
-  return { repair: module.exports.repairWindowsNotificationShortcuts, files, directories, targets,
+  return { repair: module.exports.repairWindowsNotificationShortcuts, files, manifests, directories, targets,
     reads, writes, removed, warnings, calls, add }
 }
 
 function legacy(overrides = {}) {
   return { target: 'C:\\Old install\\GPT Web to Codex Terminal.exe', appUserModelId: appId, ...overrides }
 }
+
+function development(overrides = {}) {
+  return { target: developmentExecutable, appUserModelId: appId, ...overrides }
+}
+
+test('removes a project Electron shortcut competing with the installed identity even while its target exists', () => {
+  for (const name of ['web2term', 'gpt-web-to-codex-terminal']) {
+    const f = fixture()
+    f.targets.add(developmentExecutable)
+    f.manifests.set(developmentManifest, JSON.stringify({ name }))
+    const old = f.add('Electron.lnk', development())
+    f.repair()
+    assert.deepEqual(f.removed, [old])
+    assert.ok(f.targets.has(developmentExecutable), 'only the conflicting shortcut is removed')
+    assert.deepEqual(f.files.get(canonical), desired)
+    assert.equal(f.writes.length, 0)
+    f.repair()
+    assert.deepEqual(f.removed, [old], 'subsequent startups do not repeat the cleanup')
+  }
+})
+
+test('finds numbered project Electron shortcuts in Start Menu subfolders', () => {
+  const f = fixture()
+  f.manifests.set(developmentManifest, JSON.stringify({ name: 'web2term' }))
+  const old = f.add('eLeCtRoN (2).LNK', development(), path.join(programs, 'Development'))
+  f.repair()
+  assert.deepEqual(f.removed, [old])
+})
+
+test('preserves Electron shortcuts with separate identities, unrelated projects or unrecognized targets', () => {
+  const unrelatedRoot = 'C:\\Other project'
+  const unrelatedExecutable = path.join(unrelatedRoot, 'node_modules', 'electron', 'dist', 'electron.exe')
+  const f = fixture()
+  f.manifests.set(developmentManifest, JSON.stringify({ name: 'web2term' }))
+  f.manifests.set(path.join(unrelatedRoot, 'package.json'), JSON.stringify({ name: 'another-app' }))
+  f.add('Electron.lnk', development({ appUserModelId: `${appId}.development` }))
+  f.add('Electron (2).lnk', development({ appUserModelId: 'another.app' }))
+  f.add('Electron (3).lnk', development({ appUserModelId: '' }))
+  f.add('Electron (4).lnk', development({ target: unrelatedExecutable }))
+  f.add('Electron (5).lnk', development({ target: 'C:\\Other app\\electron.exe' }))
+  f.add('Electron (6).lnk', development({ target: 'node_modules\\electron\\dist\\electron.exe' }))
+  f.add('Electron (7).lnk', development({ target: '' }))
+  f.add('My Electron shortcut.lnk', development())
+  f.repair()
+  assert.deepEqual(f.removed, [])
+  assert.deepEqual(f.writes, [])
+})
+
+test('missing, malformed, unrecognized or unreadable project manifests never justify removing an Electron shortcut', () => {
+  for (const contents of [undefined, '{invalid', 'null', '[]', '"web2term"', '{}', '{"name":"another-app"}']) {
+    const f = fixture()
+    if (contents !== undefined) f.manifests.set(developmentManifest, contents)
+    const old = f.add('Electron.lnk', development())
+    f.repair()
+    assert.deepEqual(f.removed, [])
+    assert.ok(f.files.has(old))
+  }
+  const f = fixture({ unreadable: [developmentManifest] })
+  f.manifests.set(developmentManifest, JSON.stringify({ name: 'web2term' }))
+  const old = f.add('Electron.lnk', development())
+  f.repair()
+  assert.deepEqual(f.removed, [])
+  assert.ok(f.files.has(old))
+})
+
+test('ensures a working installed shortcut before cleaning up a project Electron shortcut', () => {
+  const f = fixture({ existing: null })
+  f.manifests.set(developmentManifest, JSON.stringify({ name: 'web2term' }))
+  const old = f.add('Electron.lnk', development())
+  f.repair()
+  assert.deepEqual(f.writes, [{ file: canonical, operation: 'create', details: { ...desired, toastActivatorClsid: activator } }])
+  assert.deepEqual(f.removed, [old])
+})
 
 test('removes the numbered broken legacy shortcut that competes for the installed AUMID', () => {
   const f = fixture()
@@ -155,21 +238,27 @@ test('never follows directory links outside the Start Menu', () => {
 
 test('a failed replacement leaves every legacy shortcut intact', () => {
   const f = fixture({ existing: null, writeFails: true })
+  f.manifests.set(developmentManifest, JSON.stringify({ name: 'web2term' }))
   const old = f.add('GPT Web to Codex Terminal (2).lnk', legacy())
+  const electron = f.add('Electron.lnk', development())
   f.repair()
   assert.deepEqual(f.removed, [])
   assert.ok(f.files.has(old))
+  assert.ok(f.files.has(electron))
   assert.equal(f.warnings.length, 1)
 })
 
 test('an unreadable or foreign canonical shortcut is never overwritten or used to justify cleanup', () => {
   for (const options of [{ unreadable: [canonical] }, { existing: { ...desired, appUserModelId: 'another.app' } }]) {
     const f = fixture(options)
+    f.manifests.set(developmentManifest, JSON.stringify({ name: 'web2term' }))
     const old = f.add('GPT Web to Codex Terminal.lnk', legacy())
+    const electron = f.add('Electron.lnk', development())
     f.repair()
     assert.deepEqual(f.writes, [])
     assert.deepEqual(f.removed, [])
     assert.ok(f.files.has(old))
+    assert.ok(f.files.has(electron))
     assert.equal(f.warnings.length, 1)
   }
 })

@@ -1,0 +1,9 @@
+.focus-chat .focus-file-link{display:inline}
+.focus-chat .focus-file-link__trigger{display:inline-flex;align-items:baseline;gap:5px;max-width:100%;padding:0;border:0;background:transparent;color:var(--fc-accent);font:inherit;text-align:start;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+.focus-file-link__trigger svg{width:15px;height:15px;flex:none;align-self:center}
+.focus-file-link__trigger span{overflow-wrap:anywhere}
+.focus-chat .focus-file-link__trigger:hover{color:var(--fc-text)}
+.focus-chat .focus-file-link__trigger:focus-visible{outline:2px solid var(--fc-accent);outline-offset:3px;border-radius:3px}
+.focus-chat .focus-file-link__trigger:disabled{opacity:.6;cursor:wait}
+.focus-file-link__error{display:block;margin-top:6px;color:var(--fc-muted);font-size:12px;line-height:1.6}
+.focus-chat .focus-file-link__error button{margin-inline-start:8px;padding:2px 6px;border:1px solid var(--fc-border);border-radius:5px;background:var(--fc-soft);color:var(--fc-text);font:inherit;cursor:pointer}

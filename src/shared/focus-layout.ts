@@ -1,3 +1,5 @@
+import { parseFocusFileHref } from './focus-file-links'
+
 /** Plain presentation data extracted from an already rendered native DIL layout. */
 export interface FocusLayoutNode {
   tag: string
@@ -81,7 +83,7 @@ function validAttribute(tag: string, key: string, value: unknown): value is stri
   if (typeof value !== 'string') return false
   if (tag === 'img') return key === 'src' ? validFocusLayoutUrl(value, true) : key === 'alt' && value.length <= 500
   if (value.length > 16000) return false
-  if (tag === 'a') return key === 'href' && validFocusLayoutUrl(value)
+  if (tag === 'a') return key === 'href' && (validFocusLayoutUrl(value) || parseFocusFileHref(value) !== null)
   if (tag === 'div') {
     if (key === 'role') return value === 'progressbar'
     if (key === 'aria-label') return value.length <= 500

@@ -41,6 +41,8 @@ import type { TaskQuestion, TaskQuestionSource, TaskQuestionRequest } from '../s
 import { validFocusUiAction } from '../shared/focus-smart-ui'
 import { validFocusCitationTarget } from '../shared/focus-citations'
 import type { FocusCitationRequest, FocusCitationResult } from '../shared/focus-citations'
+import { validFocusFileLinkTarget } from '../shared/focus-file-links'
+import type { FocusFileLinkRequest } from '../shared/focus-file-links'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
 import type { FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
 import { validFocusModelSettingsRequest } from '../shared/focus-chat'
@@ -1867,6 +1869,18 @@ export class SessionRuntime {
       const resolved: FocusModelSettingsResult = this.ownsFocus(request) ? result : { outcome: 'cancelled', settings: null }
       writeFocusDiagnostic(request, { event: 'model-setting-outcome', setting: request.kind, outcome: resolved.outcome, reason: resolved.reason })
       return resolved
+    } finally { this.focusSending = false }
+  }
+
+  async openFocusFileLink(request: FocusFileLinkRequest): Promise<FocusSendOutcome> {
+    if (!this.ownsFocus(request) || request.platformId !== 'chatgpt' || !request.conversationId) return 'unavailable'
+    if (!validFocusFileLinkTarget(request)) return 'invalid'
+    if (this.focusSending || this.focusRevision) return 'busy'
+    const embed = this.embed
+    this.focusSending = true
+    try {
+      const result = await embed.openFocusFileLink(request, () => this.ownsFocus(request) && this.embed === embed)
+      return this.ownsFocus(request) && this.embed === embed ? result : 'cancelled'
     } finally { this.focusSending = false }
   }
 

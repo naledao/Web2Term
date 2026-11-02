@@ -16,9 +16,13 @@ function load(path, dependencies = {}) {
   }).outputText).runInNewContext({ exports, require: name => dependencies[name] ?? {}, URL, Buffer })
   return exports
 }
-const { parseFocusLayout, validFocusLayoutUrl } = load('../src/shared/focus-layout.ts')
+const fileLinks = load('../src/shared/focus-file-links.ts')
+const { parseFocusLayout, validFocusLayoutUrl } = load('../src/shared/focus-layout.ts', { './focus-file-links': fileLinks })
 const { cleanFocusAnswer } = load('../src/shared/focus-chat.ts')
-const { default: FocusLayout } = load('../src/renderer/src/components/FocusLayout.tsx', { react: React, 'react/jsx-runtime': jsxRuntime })
+const messageLinks = load('../src/renderer/src/components/FocusMessageLink.tsx', { react: React, 'react/jsx-runtime': jsxRuntime,
+  '@shared/focus-file-links': fileLinks, './FocusCitationLink': { FocusCitationContext: React.createContext(null) } })
+const { default: FocusLayout } = load('../src/renderer/src/components/FocusLayout.tsx', { react: React, 'react/jsx-runtime': jsxRuntime,
+  '@shared/focus-file-links': fileLinks, './FocusMessageLink': messageLinks })
 const source = readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8')
 const ast = ts.createSourceFile('page.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
 function find(predicate, node = ast) { return predicate(node) ? node : ts.forEachChild(node, child => find(predicate, child)) }
@@ -167,6 +171,25 @@ test('website reference cards retain both previews, crop ratios, links and capti
   assert.match(markdown, /参考下面两个产品官网：\s+<!--focus-layout /)
   assert.match(markdown, /两个案例优先展示产品价值。\s+\[The system for product development\+2\]\(https:\/\/linear.app\/method\)/)
   assert.match(markdown, /## 三、下一步设计$/)
+})
+
+test('sandbox downloads inside rich layouts remain file controls through extraction, validation and rendering', () => {
+  const f = fixture()
+  const href = 'sandbox:/mnt/data/article-views-ii-replica.html'
+  const download = new Element('a', { href }, ['下载完整 HTML 页面'])
+  const preview = new Element('a', { href }, ['查看页面预览'])
+  // Use a measured layout shape rather than treating ordinary prose as a layout.
+  f.grid.childNodes = []; append(f.grid, box([download, preview]))
+  const layouts = f.layouts({})
+  assert.ok(layouts.length > 0)
+  const data = parseFocusLayout(JSON.stringify(layouts[0].data))
+  assert.ok(data)
+  assert.match(JSON.stringify(data), /#web2term-file=/)
+  const html = renderToStaticMarkup(React.createElement(FocusLayout, { data }))
+  assert.equal((html.match(/focus-file-link__trigger/g) ?? []).length, 2)
+  assert.match(html, /下载完整 HTML 页面/)
+  assert.match(html, /查看页面预览/)
+  assert.doesNotMatch(html, /<a[^>]*href="sandbox:/)
 })
 
 test('image discovery accepts image-only galleries and lazy images without mistaking image frames for progress', () => {
