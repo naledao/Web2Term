@@ -224,8 +224,9 @@ test('actual page answer code captures provenance before the sender clears the p
   const message = f.events.find(event => event.event === 'user-message')
   assert.equal(message.answeredQuestionId, 'question:a'); assert.deepEqual(plain(message.questionSource), source)
   assert.equal(message.text, '不发送')
-  assert.equal(f.calls[0][0], 'SHORT\n\n\u2063\u2063不发送')
-  assert.equal(f.events.find(event => event.event === 'injected').promptInjected, false)
+  assert.equal(f.calls[0][0], '不发送')
+  assert.equal(f.calls[0][2].injection.prefix, 'SHORT\n\n')
+  assert.equal(f.calls[0][2].injection.metadata.promptInjected, false)
   assert.equal(f.calls[0][2].generation, 3); assert.equal(f.calls[0][2].path, source.pagePath)
   const stale = nativeQuestionApi()
   assert.equal(await stale.api.answerQuestion('question:a', '允许', { ...source, pageEpoch: 'old' }), 'stale')
@@ -241,7 +242,7 @@ test('question replies honor the injection switch and retain only their own fail
 
   const composer = { text: '' }
   const f = nativeQuestionApi({ getComposer: () => composer, composerMatches: (node, text) => node.text === text })
-  f.window.synthetic.sendRaw = async text => { composer.text = text; return 'stuck' }
+  f.window.synthetic.sendRaw = async (text, _owned, options) => { composer.text = options.injection.prefix + '\u2063\u2063' + text; return 'stuck' }
   assert.equal(await f.api.answerQuestion('question:a', '两行回答\n  第二行'), 'stuck')
   assert.equal(f.state.answerDraft.text, 'SHORT\n\n\u2063\u2063两行回答\n  第二行')
   assert.equal(f.state.pendingQuestion.messageId, 'question:a')

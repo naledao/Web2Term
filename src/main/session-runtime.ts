@@ -1230,7 +1230,7 @@ export class SessionRuntime {
       onCommand: (command) => {
         this.traceCommand(platform, {
           event: 'received', messageId: command.messageId, active: isActive(), live: command.live,
-          commandLength: 'command' in command ? command.command.length : undefined
+          commandLength: 'command' in command ? command.command.length : undefined, taskSourcePresent: Boolean(command.taskSource)
         })
         /*
          * Logged on BOTH sides of the gate.
@@ -2301,7 +2301,6 @@ export class SessionRuntime {
   }
 
   private handleDetectedCommand(command: ParsedAction): void {
-    if (this.taskEnded || this.options.automationBlocked?.() === true || this.taskCoordinator.waitingForUser(this.activePlatformId)) return
     try {
       if (this.routeTaskCommand(command)) return
     } catch (error) {
@@ -2348,30 +2347,47 @@ export class SessionRuntime {
 
   /** A tagged reply is never downgraded to an unowned command when its task is stale or busy. */
   private routeTaskCommand(command: ParsedAction, conversationIdOverride?: string): boolean {
-    if (this.taskEnded || this.options.automationBlocked?.() === true || this.taskCoordinator.waitingForUser(this.activePlatformId)) return true
-    const preferences = this.toolPreferences(this.activePlatformId, conversationIdOverride ?? this.embeds.get(this.activePlatformId)?.conversationId ?? null)
-    if ('type' in command ? !preferences.fileReadingEnabled || !!this.web2term : command.background === true && !preferences.backgroundTasksEnabled) return true
-    if (!command.taskSource) return this.runner.handleDetected(command, conversationIdOverride)
-    if (typeof command.messageId !== 'string' || !command.messageId.trim() || command.messageId.length > 512) return true
-    const platformId = this.activePlatformId, entry = this.embeds.get(platformId), source = command.taskSource
-    const capability = this.getComputerUseCapability(platformId)
-    if (!command.live || this.disposed || (!this.active && !this.canRunConversationInBackground(platformId)) || !supportsComputerUsePlatform(platformId) || !entry?.embed || !capability.scopeSupported || !capability.computerUseEnabled) return true
-    const conversationId = entry.platform.conversationIdFromPath(source.pagePath)
-    let task = this.taskCoordinator.current(platformId)
-    if (!task || task.sourceSubmissionId !== source.sourceSubmissionId || !conversationId || entry.embed.getState().conversationId !== conversationId) return true
-    if (task.conversationId === null && entry.conversationId === null) task = this.syncAutonomousTask(platformId, conversationId)?.task ?? null
-    if (!task || task.conversationId !== conversationId || entry.conversationId !== null && entry.conversationId !== conversationId) return true
-    const lease: TaskLease = { sessionId: this.id, platformId, conversationId, taskId: task.id, generation: task.generation }
-    if (task.progress?.handledMessageIds.includes(command.messageId) || this.options.store.getExecution(command.messageId.trim())) return true
-    if (task.progress?.currentStep?.delivery === 'sending' || this.backgroundTaskResults.isSending) {
-      if (!this.pendingTaskCommand && !this.pendingTaskComputer) this.pendingTaskCommand = { command: structuredClone(command), lease }
+    const trace = (event: 'skipped' | 'deferred', reason: NonNullable<CommandDiagnostic['reason']>): true => {
+      const task = this.taskCoordinator.current(this.activePlatformId)
+      this.traceCommand(this.activePlatform, { event, reason, messageId: command.messageId,
+        ownerConversationId: task?.conversationId, taskSourcePresent: Boolean(command.taskSource),
+        taskPhase: task?.progress?.phase, taskDelivery: task?.progress?.currentStep?.delivery })
       return true
     }
-    if (!this.embed.getInterceptorStatus().enabled) return true
+    if (this.taskEnded) return trace('skipped', 'task-ended')
+    if (this.options.automationBlocked?.() === true) return trace('skipped', 'automation-blocked')
+    if (this.taskCoordinator.waitingForUser(this.activePlatformId)) return trace('skipped', 'waiting-user')
+    const preferences = this.toolPreferences(this.activePlatformId, conversationIdOverride ?? this.embeds.get(this.activePlatformId)?.conversationId ?? null)
+    if ('type' in command ? !preferences.fileReadingEnabled || !!this.web2term : command.background === true && !preferences.backgroundTasksEnabled) return trace('skipped', 'tool-disabled')
+    if (!command.taskSource) return this.runner.handleDetected(command, conversationIdOverride)
+    if (typeof command.messageId !== 'string' || !command.messageId.trim() || command.messageId.length > 512) return trace('skipped', 'invalid-message-id')
+    const platformId = this.activePlatformId, entry = this.embeds.get(platformId), source = command.taskSource
+    const capability = this.getComputerUseCapability(platformId)
+    if (!command.live || this.disposed || (!this.active && !this.canRunConversationInBackground(platformId)) || !supportsComputerUsePlatform(platformId) || !entry?.embed || !capability.scopeSupported || !capability.computerUseEnabled) return trace('skipped', 'task-context-unavailable')
+    const conversationId = entry.platform.conversationIdFromPath(source.pagePath)
+    let task = this.taskCoordinator.current(platformId)
+    if (!task || task.sourceSubmissionId !== source.sourceSubmissionId) return trace('skipped', 'task-source-mismatch')
+    if (!conversationId || entry.embed.getState().conversationId !== conversationId) return trace('skipped', 'task-conversation-mismatch')
+    if (task.conversationId === null && entry.conversationId === null) task = this.syncAutonomousTask(platformId, conversationId)?.task ?? null
+    if (!task || task.conversationId !== conversationId || entry.conversationId !== null && entry.conversationId !== conversationId) return trace('skipped', 'task-conversation-mismatch')
+    const lease: TaskLease = { sessionId: this.id, platformId, conversationId, taskId: task.id, generation: task.generation }
+    if (task.progress?.handledMessageIds.includes(command.messageId) || this.options.store.getExecution(command.messageId.trim())) return trace('skipped', 'duplicate')
+    if (['waiting-tool', 'executing-tool', 'waiting-delivery'].includes(task.progress?.phase ?? '') ||
+      task.progress?.currentStep?.delivery === 'sending' || this.backgroundTaskResults.isSending) {
+      if (this.pendingTaskCommand || this.pendingTaskComputer) return trace('skipped', 'pending-task-command')
+      this.pendingTaskCommand = { command: structuredClone(command), lease }
+      return trace('deferred', 'waiting-task-result')
+    }
+    if (!this.embed.getInterceptorStatus().enabled) return trace('skipped', 'interceptor-disabled')
     try {
       const context = this.taskCoordinator.reserveToolStep(lease, command.messageId, 'type' in command ? 'read_files' : 'command', this.taskToolMachine(platformId))
       if (context) this.runner.handleDetected(command, conversationId, context)
-    } catch { this.taskCoordinator.fail(platformId, conversationId) }
+      else return trace('skipped', 'task-step-unavailable')
+    } catch (error) {
+      this.traceCommand(this.activePlatform, { event: 'error', reason: 'exception', messageId: command.messageId,
+        errorType: error instanceof Error ? error.name : 'Other' })
+      this.taskCoordinator.fail(platformId, conversationId)
+    }
     return true
   }
 
@@ -2387,7 +2403,12 @@ export class SessionRuntime {
     this.pendingTaskCommand = null; this.pendingTaskComputer = null
     const reply = this.pendingTaskReply; this.pendingTaskReply = null
     if (reply) this.noteAutonomousReply(reply.lease.platformId, reply.messageId, reply.kind)
-    if (command) this.routeTaskCommand(command.command)
+    if (command) {
+      this.traceCommand(this.activePlatform, { event: 'deferred-flush', reason: 'waiting-task-result',
+        messageId: command.command.messageId, ownerConversationId: command.lease.conversationId,
+        taskPhase: task.progress.phase, taskDelivery: task.progress.currentStep?.delivery })
+      this.routeTaskCommand(command.command)
+    }
     else if (computer) this.advanceComputerUse(computer)
   }
 
@@ -3134,7 +3155,7 @@ export class SessionRuntime {
 
   /**
    * Move the current conversation's injection ledger. A conversation without one is left alone:
-   * its next task start already sends the full prompt. Replans so the page's next prefix follows.
+   * its next send already carries the full prompt. Replans so due refreshes can travel with results.
    */
   private updateInjectionLedger(platformId: string, change: (ledger: InjectionLedger) => InjectionLedger): InjectionLedger | null {
     const entry = this.embeds.get(platformId)

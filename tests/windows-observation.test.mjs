@@ -520,7 +520,9 @@ test('actual page caption sender admits bounded UIA summaries only on the owned 
   const make = computer => {
     const fileSend = { computer: computer ? {} : undefined }, composer = { value: '' }
     const controller = new Script(`({ ${method} })`).runInNewContext({ fileSend, fileSendStatus: () => ({ status: 'ready' }), getComposer: () => composer,
-      composerMatches: (element, text) => element.value === text, normalizeLineEndings: text => text, insertText(element, text) { element.value = text; return true } })
+      composerMatches: (element, text) => element.value === text, normalizeLineEndings: text => text, insertText(element, text) { element.value = text; return true },
+      state: { taskPromptGeneration: 1 }, location: { pathname: '/fixture' },
+      userPromptInjection: () => ({ prefix: '', metadata: { promptInjected: false } }), reportUserInjection() {} })
     return { controller, composer }
   }
   assert.equal(make(false).controller.prepareFileSendCaption('token', 'a'.repeat(60000)), false)

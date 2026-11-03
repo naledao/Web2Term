@@ -1412,11 +1412,13 @@ export interface InterceptorPageEvent {
   prefixLength?: number
   /** Metadata for the exact submitted prefix, including the user-text separator; no prompt copy. */
   contextUsage?: { id: string; estimatedTokens: number; characters: number }
+  /** Identifies the exact configured prompt plan carried by this confirmed send. */
+  injectionPlanToken?: string
   /** Version and size of the reply contract actually carried by this human send. */
   replyProtocolVersion?: number
   replyProtocolKind?: 'full' | 'short'
   replyProtocolLength?: number
-  /** Present on `sent`: this confirmed user message carried the task's prompt. */
+  /** A confirmed human send or automatic result carried the planned prompt. */
   promptInjected?: boolean
   /** A scheduled send reused the system/tool prefix already present in this conversation. */
   conversationPromptInjected?: boolean
@@ -1478,8 +1480,11 @@ export interface InterceptorPageEvent {
   /** On `continue-generation` / `continue-clicked` and the `native-edit` click reasons: viewport CSS-pixel point the main process clicks. */
   x?: number
   y?: number
-  /** On `native-edit` / `safety-leak-failed`: which step of the automatic resend gave up. */
+  /** On `native-edit` failures: which step of the automatic resend gave up. */
   step?: string
+  /** Content-free native edit/send readiness diagnostics; no DOM text or selectors. */
+  nativeEditControlState?: 'missing' | 'outside-row' | 'hidden' | 'disabled' | 'out-of-viewport' | 'covered' | 'unstable' | 'ready'
+  nativeEditWaitMs?: number
   /** Which recovery action the failing pass used, or null when none had run yet. */
   recoveryTried?: string | null
   composerKind?: string | null

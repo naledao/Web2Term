@@ -209,6 +209,44 @@ test('a user-edited caption stops automatic submission without replacing the edi
   assert.equal(app.send.clicks, 0)
 })
 
+test('a due full prompt accompanies an attachment-only result once and confirms through sent-raw', () => {
+  const files = [{ fileName: 'result.md', mimeType: 'text/markdown', sizeBytes: 100 }]
+  const app = fixture(files), prefix = '【角色】\n完整的终端约定。\n\n'
+  app.controller.configure({ enabled: true, promptInjectionEnabled: true, prefix,
+    injectionMode: 'full', injectionPlanToken: 'attachment-refresh', taskPromptGeneration: 0,
+    prefixIncludesReplyProtocol: true, replyProtocolVersion: 1, replyProtocolFullLength: 8,
+    contextPrefixUsage: { estimatedTokens: 10, characters: prefix.length + 2 } })
+  app.render(['result.md'])
+  assert.equal(app.controller.prepareFileSendCaption(token, ''), true)
+  assert.equal(app.composer.textContent, prefix + '\u2063\u2063')
+  assert.equal(app.reports.some(event => event.event === 'sent-raw'), false)
+  app.confirmOnSend()
+  assert.equal(app.submit(), true)
+  assert.equal(app.status().status, 'sent')
+  const report = app.reports.find(event => event.event === 'sent-raw')
+  assert.equal(report.promptInjected, true)
+  assert.equal(report.injectionPlanToken, 'attachment-refresh')
+  assert.equal(report.taskPromptGeneration, 0)
+  assert.equal(report.textLength, 0)
+  assert.equal(report.contextUsage.characters, prefix.length + 2)
+  assert.equal(app.reports.some(event => event.event === 'user-message'), false)
+  assert.equal(app.controller.beginFileSend('second-result', files), 'ok')
+  app.controller.fileSelectionApplied('second-result'); app.render(['result.md'])
+  assert.equal(app.controller.prepareFileSendCaption('second-result', '后续结果'), true)
+  assert.equal(app.composer.textContent, '后续结果', 'the confirmed full plan is not repeated before reconfiguration')
+})
+
+test('attachment result captions cannot confirm an injection after the task changes', () => {
+  const app = fixture()
+  app.render(requestedFiles.map(file => file.fileName))
+  app.controller.configure({ injectionMode: 'full', injectionPlanToken: 'old-task', prefix: 'SYSTEM\n\n', taskPromptGeneration: 0 })
+  assert.equal(app.controller.prepareFileSendCaption(token, '结果'), true)
+  app.controller.configure({ taskPromptGeneration: 1 })
+  assert.equal(app.status().status, 'busy')
+  assert.equal(app.submit(), false)
+  assert.equal(app.reports.some(event => event.event === 'sent-raw'), false)
+})
+
 test('DeepSeek textarea uploads Markdown before inserting its caption and acknowledges both in the new virtual row', () => {
   const app = fixture([{ fileName: 'deepseek-context.md', mimeType: 'text/markdown', sizeBytes: 100 }], {
     ...platformExports.DEEPSEEK_PAGE, sendButtonSelectors: ['button[aria-label="发送"]']

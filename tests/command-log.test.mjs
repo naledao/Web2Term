@@ -114,3 +114,21 @@ test('unrecognized events and failed writes never disrupt command execution', (t
   writeFileSync(blocked, 'fixture')
   assert.doesNotThrow(() => assert.equal(new CommandDiagnosticLog(blocked).write('chatgpt', payload, context), null))
 })
+
+test('task routing diagnostics expose the waiting stage without recording command or conversation text', () => {
+  const value = commandDiagnosticMetadata('deepseek', {
+    event: 'deferred', reason: 'waiting-task-result', messageId: 'reply-a', ownerConversationId: 'chat-a',
+    taskSourcePresent: true, taskPhase: 'waiting-delivery', taskDelivery: 'pending',
+    command: 'private command', description: 'private description', sourceSubmissionId: 'private submission'
+  }, context)
+  assert.equal(value.reason, 'waiting-task-result')
+  assert.equal(value.taskPhase, 'waiting-delivery')
+  assert.equal(value.taskDelivery, 'pending')
+  assert.equal(value.taskSourcePresent, true)
+  assert.ok(!JSON.stringify(value).includes('private'))
+  const invalid = commandDiagnosticMetadata('deepseek', { event: 'skipped', reason: 'task-step-unavailable',
+    taskPhase: 'private stage', taskDelivery: 'private delivery' }, context)
+  assert.equal(invalid.taskPhase, undefined)
+  assert.equal(invalid.taskDelivery, undefined)
+  assert.equal(invalid.reason, 'task-step-unavailable')
+})

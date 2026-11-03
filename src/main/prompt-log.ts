@@ -6,7 +6,7 @@ import type { InterceptorPageEvent } from '../shared/types'
 import type { InjectionLedger, InjectionPlan } from '../shared/prompt-injection'
 
 const logPaths = new Map<ChatPlatform['id'], string>()
-const events = ['configured', 'send-observed', 'injected', 'sent', 'inject-failed', 'send-failed', 'send-recovery']
+const events = ['configured', 'send-observed', 'injected', 'sent', 'sent-raw', 'inject-failed', 'send-failed', 'send-recovery']
 const recoveryActions = ['toolbar-last', 'enter']
 const reasons = [
   'accepted', 'programmatic-send', 'terminal-disabled', 'missing-prefix', 'draft-rejected',
@@ -30,7 +30,7 @@ export function writePromptDiagnostic(
     details.reason = reasons.includes(payload.reason ?? '') ? payload.reason! : 'unknown'
     if (payload.trigger === 'enter' || payload.trigger === 'click') details.trigger = payload.trigger
   }
-  for (const key of ['count', 'prefixLength', 'replyProtocolVersion', 'replyProtocolLength', 'taskPromptGeneration', 'composerTextLength', 'attempts', 'attempt', 'toolbarCount'] as const) {
+  for (const key of ['count', 'prefixLength', 'textLength', 'replyProtocolVersion', 'replyProtocolLength', 'taskPromptGeneration', 'composerTextLength', 'attempts', 'attempt', 'toolbarCount'] as const) {
     const value = payload[key]
     if (Number.isSafeInteger(value) && Number(value) >= 0) details[key] = Number(value)
   }
@@ -59,7 +59,7 @@ export function writePromptDiagnostic(
 /** Section keys are the prompt's own headings; no prompt or conversation text is logged. */
 const sectionKeys = (keys: string[]) => keys.slice(0, 20).map(key => key.slice(0, 24))
 
-/** The prefix main pushed for the next task start changed. */
+/** The prefix main pushed for the next eligible send changed. */
 export function writeInjectionPlanDiagnostic(platformId: ChatPlatform['id'], plan: InjectionPlan | null, prefixLength: number): string | null {
   if (!plan) return appendPromptLog(platformId, { event: 'injection-plan', mode: 'unplanned', prefixLength })
   return appendPromptLog(platformId, { event: 'injection-plan', mode: plan.mode, reason: plan.reason, prefixLength,

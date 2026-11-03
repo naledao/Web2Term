@@ -117,9 +117,6 @@ export default function Web2termDevicesSettings({ onOpenBackend, onBusyChange }:
     <div className="settings-devices">
       <WindowsAgentSettings onBusyChange={setAgentBusy} />
       <LinuxAgentDownload />
-      <div className="settings-devices__toolbar">
-        <button type="button" className="settings-outline-btn" disabled={refreshing || saving} onClick={() => void refresh()}>{refreshing ? '刷新中…' : '刷新设备'}</button>
-      </div>
       {error ? <p className="settings-feedback" role="alert">{error}</p> : null}
       {notice ? <p className="settings-devices__notice" role="status">{notice}</p> : null}
       {logPath && error ? <p className="settings-devices__log">诊断日志：{logPath}</p> : null}
@@ -131,8 +128,16 @@ export default function Web2termDevicesSettings({ onOpenBackend, onBusyChange }:
         </div>
       ) : null}
       {auth?.status === 'signed-in' ? (
-        <div aria-busy={refreshing}>
-          <p className="settings-devices__count">我的设备 · {devices.length}</p>
+        <div className="settings-devices__card" aria-busy={refreshing}>
+          <div className="settings-devices__card-header">
+            <p className="settings-devices__count">我的设备 · {devices.length}</p>
+            <button type="button" className="settings-devices__icon-btn" disabled={refreshing || saving} onClick={() => void refresh()} aria-label={refreshing ? '刷新中…' : '刷新设备'} title={refreshing ? '刷新中…' : '刷新设备'}>
+              <svg className={refreshing ? 'settings-devices__icon-btn-spin' : undefined} viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                <path d="M21 3v6h-6" />
+              </svg>
+            </button>
+          </div>
           {!devices.length && !error ? <p className="settings-devices__empty">{refreshing ? '正在读取设备列表…' : '当前账号还没有设备。Windows 电脑可开启上方本机远程终端；Linux 设备请登录同一账号并运行 web2term run。'}</p> : null}
           <ul className="settings-devices__list" aria-label="我的 web2term 设备">
             {devices.map((device) => (

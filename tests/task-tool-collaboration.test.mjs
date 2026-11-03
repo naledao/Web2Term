@@ -11,10 +11,10 @@ import ts from 'typescript'
 import { taskContextModule } from './fixtures/task-context-module.mjs'
 
 const compile = source => ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-function load(path, dependencies = {}) {
+function load(path, dependencies = {}, globals = {}) {
   const exports = {}
   new Script(compile(readFileSync(new URL(path, import.meta.url), 'utf8'))).runInNewContext({ exports, structuredClone, process, console, AbortController,
-    setTimeout, clearTimeout, require(name) { if (Object.hasOwn(progressVmModules, name)) return progressVmModules[name]; if (name === '../shared/computer-diagnostics') return load('../src/shared/computer-diagnostics.ts'); if (name === '../shared/computer-actions') return load('../src/shared/computer-actions.ts')
+    setTimeout, clearTimeout, ...globals, require(name) { if (Object.hasOwn(progressVmModules, name)) return progressVmModules[name]; if (name === '../shared/computer-diagnostics') return load('../src/shared/computer-diagnostics.ts'); if (name === '../shared/computer-actions') return load('../src/shared/computer-actions.ts')
       assert.ok(Object.hasOwn(dependencies, name), name); return dependencies[name] } })
   return exports
 }
@@ -39,12 +39,28 @@ const Runtime = methods('../src/main/session-runtime.ts', 'SessionRuntime', ['ta
 const Embed = methods('../src/main/embed.ts', 'ChatGptEmbed', ['taskActionSource'])
 const plain = value => JSON.parse(JSON.stringify(value))
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
+function manualClock() {
+  const timers = new Map()
+  return {
+    setTimeout(callback, ms) { const handle = { unref() {} }; timers.set(handle, { callback, ms }); return handle },
+    clearTimeout(handle) { timers.delete(handle) },
+    fire(ms) {
+      const ready = [...timers].filter(([, timer]) => timer.ms === ms)
+      assert.ok(ready.length, `No timer for ${ms}`)
+      for (const [handle, timer] of ready) { timers.delete(handle); timer.callback() }
+    }
+  }
+}
+async function until(check) {
+  for (let n = 0; n < 40 && !check(); n++) await new Promise(resolve => setImmediate(resolve))
+  assert.ok(check(), 'Synthetic operation did not reach the expected state')
+}
 const path = '/a/chat/s/chat-a'
 
 function fixture(t, options = {}) {
   let runtime, runner, serial = 0, remote = null, activeConversation = 'chat-a', enabled = true
   const toolPreferences = { fileReadingEnabled: true, backgroundTasksEnabled: true, ...options.tools }
-  const tasks = new Map(), records = new Map(), history = [], shells = [], runs = [], sends = [], uploads = [], prepared = [], cleaned = [], desktop = [], computerSends = [], fileSources = []
+  const tasks = new Map(), records = new Map(), history = [], shells = [], runs = [], sends = [], uploads = [], prepared = [], cleaned = [], desktop = [], computerSends = [], fileSources = [], diagnostics = []
   const store = {
     autonomousTaskGeneration: () => Math.max(0, ...[...tasks.values()].map(task => task.generation)),
     latestAutonomousTask: (_s, _p, conversation) => [...tasks.values()].filter(task => task.conversationId === conversation).at(-1) ?? null,
@@ -81,11 +97,12 @@ function fixture(t, options = {}) {
     dispose() {}
   }
   const { CommandRunner } = load('../src/main/commands.ts', { 'node:crypto': crypto, './shell': { ConversationShell: Shell, IDLE_TIMEOUT_MS: 300000, MAX_RUNTIME_MS: 1800000 },
-    '../shared/file-requests': files, '../shared/background-tasks': background })
+    '../shared/file-requests': files, '../shared/background-tasks': background }, options.clock)
   runner = new CommandRunner({ store, currentConversationId: () => activeConversation, terminalModeEnabled: () => enabled, remoteShell: () => remote,
     toolEnabled: tool => tool === 'files' ? toolPreferences.fileReadingEnabled : toolPreferences.backgroundTasksEnabled,
     acquireLocalCommand: options.acquireLocalCommand,
     onAdmissionChanged: options.onAdmissionChanged,
+    onCommandDiagnostic: details => diagnostics.push(details),
     startBackgroundTask: options.startBackgroundTask,
     taskTools: { current: context => runtime.taskToolCurrent(context), event: (context, event) => coordinator.noteToolStep(context, event),
       files: (context, sources) => fileSources.push({ context, sources }),
@@ -107,7 +124,8 @@ function fixture(t, options = {}) {
   runtime = Object.assign(new Runtime(), { id: 'session-a', active: true, disposed: false, activePlatformId: 'deepseek', options: { store, localMachineId: 'machine-a' },
     environment: { workingDirectory: 'C:\\work' }, lastPersistedLocalCwd: 'C:\\work', runner, taskCoordinator: coordinator, pendingTaskCommand: null, pendingTaskComputer: null, pendingTaskReply: null,
     deferredCommands: new Map(), backgroundTaskResults: { isSending: false, cancel() {} }, backgroundTasks: { cancelNotifications() {} },
-    embed, embeds: new Map([['deepseek', { platform, embed, conversationId: 'chat-a' }]]), getComputerUseCapability: capability,
+    embed, activePlatform: platform, traceCommand: (_platform, details) => diagnostics.push(details),
+    embeds: new Map([['deepseek', { platform, embed, conversationId: 'chat-a' }]]), getComputerUseCapability: capability,
     toolPreferences: () => toolPreferences })
   const progression = new TaskProgression({ coordinator, isCurrent: () => runtime.active && !runtime.disposed, canRun: () => runner.canSendAutomaticResult(),
     machine: () => runtime.taskToolMachine('deepseek'),
@@ -128,7 +146,7 @@ function fixture(t, options = {}) {
     conversationId: task.conversationId, taskId: task.id, generation: task.generation, sourceMessageId: messageId,
     stepToken: coordinator.computerStepToken('deepseek'), call: { action: 'observe', parameters: { target: 'window', window_id: 'synthetic-window' } } } }
   t.after(() => { progression.dispose(); runner.disposeAll() })
-  return { runtime, runner, coordinator, store, records, tasks, history, shells, runs, sends, uploads, prepared, cleaned, desktop, computerSends, fileSources, command, computer, submit,
+  return { runtime, runner, coordinator, store, records, tasks, history, shells, runs, sends, uploads, prepared, cleaned, desktop, computerSends, fileSources, diagnostics, command, computer, submit,
     route: action => runtime.routeTaskCommand(action), progress: () => coordinator.current('deepseek').progress,
     setTools(patch) { Object.assign(toolPreferences, patch); runner.reconcileTaskTools() },
     remote: () => { remote = { running: false, alive: true, kind: 'posix', cwd: '/remote', run: async () => ({ output: 'Synthetic remote result', exitCode: 0, cwd: '/remote' }) } }, switchConversation: () => { activeConversation = 'chat-b' }, disable: () => { enabled = false },
@@ -429,6 +447,97 @@ test('busy bound text delivery retries the saved result and does not run the com
   assert.equal(f.runs.length, 1); assert.equal(f.sends.length, 2); assert.equal(f.sends[0].text, f.sends[1].text)
   assert.equal(f.progress().currentStep.id, step); assert.equal(f.progress().phase, 'waiting-model')
   await f.runner.retryTaskResults(); assert.equal(f.sends.length, 2)
+})
+
+test('a pending result queues the next command and releases it only after the original result is delivered', async t => {
+  let deliveries = 0
+  const f = fixture(t, { send: () => ++deliveries === 1 ? 'busy' : 'ok' })
+  f.route(f.command('result-pending')); await f.settled()
+  f.route(f.command('after-pending', { command: 'Write-Output next' }))
+  assert.equal(f.records.has('after-pending'), false)
+  assert.equal(f.runtime.pendingTaskCommand.command.messageId, 'after-pending')
+  assert.ok(f.diagnostics.some(row => row.event === 'deferred' && row.reason === 'waiting-task-result'
+    && row.taskPhase === 'waiting-delivery' && row.taskDelivery === 'pending'))
+  await f.runner.retryTaskResults(); await f.settled()
+  assert.equal(f.runs.length, 2)
+  assert.equal(f.sends.length, 3) // A definitely unsent attempt, its retry, then the next result.
+  assert.equal(f.sends[0].text, f.sends[1].text)
+  assert.equal(f.progress().phase, 'waiting-model')
+  assert.equal(f.progress().currentStep.sourceMessageId, 'after-pending')
+  assert.ok(f.diagnostics.some(row => row.event === 'deferred-flush' && row.messageId === 'after-pending'))
+})
+
+test('a command superseded before shell execution releases its task step as not executed', async t => {
+  const f = fixture(t)
+  f.route(f.command('preparing-original'))
+  f.route(f.command('newer-legacy', { command: 'Write-Output replacement', taskSource: undefined }))
+  await f.settled()
+  assert.equal(f.records.get('preparing-original').status, 'skipped')
+  assert.equal(f.progress().currentStep.execution, 'not_executed')
+  assert.equal(f.progress().currentStep.delivery, 'cancelled')
+  assert.equal(f.progress().phase, 'responded')
+  assert.deepEqual(f.runs, ['Write-Output replacement'])
+})
+
+test('a superseded delayed result keeps its successful execution and task ownership until delivery', async t => {
+  const clock = manualClock(), f = fixture(t, { clock })
+  f.runner.setSendDelay(1)
+  f.route(f.command('original-render'))
+  await until(() => f.records.get('original-render')?.status === 'done')
+  // Reproduce a late report from an older page bridge without task provenance.
+  f.route(f.command('late-render', { taskSource: undefined, description: '说明补全后的重复回复' }))
+  await until(() => f.records.get('late-render')?.status === 'done')
+  clock.fire(1000); await f.settled()
+  assert.equal(f.records.get('original-render').status, 'done')
+  assert.equal(f.records.get('original-render').exitCode, 0)
+  assert.equal(f.progress().phase, 'waiting-delivery')
+  assert.equal(f.sends.filter(row => row.context?.sourceMessageId === 'original-render').length, 0)
+  f.route(f.command('after-superseded', { command: 'Write-Output next' }))
+  assert.equal(f.records.has('after-superseded'), false)
+  await f.runner.retryTaskResults()
+  await until(() => f.records.get('after-superseded')?.status === 'done')
+  clock.fire(1000); await f.settled()
+  assert.equal(f.runs.length, 3)
+  assert.equal(f.sends.filter(row => row.context?.sourceMessageId === 'original-render').length, 1)
+  assert.equal(f.records.get('original-render').status, 'done')
+  assert.equal(f.progress().phase, 'waiting-model')
+  assert.equal(f.progress().currentStep.sourceMessageId, 'after-superseded')
+})
+
+test('pausing during the result delay retains the original receipt and resumes delivery without rerunning', async t => {
+  const clock = manualClock(), f = fixture(t, { clock })
+  f.runner.setSendDelay(1); f.route(f.command('pause-during-delay'))
+  await until(() => f.records.get('pause-during-delay')?.status === 'done')
+  f.runner.setPaused(true); clock.fire(1000); await f.settled()
+  assert.equal(f.sends.length, 0)
+  assert.equal(f.progress().phase, 'waiting-delivery')
+  f.runner.setPaused(false)
+  await f.runner.retryTaskResults(); await f.settled()
+  assert.equal(f.runs.length, 1)
+  assert.equal(f.sends.length, 1)
+  assert.equal(f.records.get('pause-during-delay').status, 'done')
+  assert.equal(f.progress().phase, 'waiting-model')
+})
+
+test('an unconfirmed delivery logs why the next command was rejected and never silently runs it', async t => {
+  const f = fixture(t, { send: () => 'unknown' })
+  f.route(f.command('uncertain-result')); await f.settled()
+  f.route(f.command('blocked-next'))
+  assert.equal(f.records.has('blocked-next'), false)
+  assert.equal(f.progress().phase, 'blocked')
+  assert.ok(f.diagnostics.some(row => row.event === 'skipped' && row.reason === 'task-step-unavailable'
+    && row.messageId === 'blocked-next' && row.taskPhase === 'blocked' && row.taskDelivery === 'uncertain'))
+})
+
+test('a goal replacement discards a deferred command and its saved predecessor result', async t => {
+  const f = fixture(t, { send: () => 'busy' })
+  f.route(f.command('old-result')); await f.settled()
+  f.route(f.command('old-deferred-next')); f.submit()
+  await f.runner.retryTaskResults(); await f.settled()
+  assert.equal(f.runs.length, 1)
+  assert.equal(f.sends.length, 1)
+  assert.equal(f.records.has('old-deferred-next'), false)
+  assert.equal(f.runtime.pendingTaskCommand, null)
 })
 
 test('queued saved results are discarded on goal replacement and corrupt task provenance cannot execute', async t => {

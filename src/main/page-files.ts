@@ -317,11 +317,12 @@ export async function sendPageFiles(
     }
     if (!readySince || Date.now() >= deadline) return finish('upload-failed', 'upload-ready-timeout')
     if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
-    if (options.caption || options.userText !== undefined) {
+    // Even an attachment-only result may need the conversation's due full prompt.
+    {
       stage = 'caption'
       const prepared = options.userText !== undefined
         ? await call('prepareFocusFileSendCaption', token)
-        : await call('prepareFileSendCaption', token, options.caption)
+        : await call('prepareFileSendCaption', token, options.caption ?? '')
       if (prepared !== true) return finish('busy', 'caption-not-prepared')
       const captionDeadline = Date.now() + 5000
       let ready = false

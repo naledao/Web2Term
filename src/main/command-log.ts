@@ -9,7 +9,10 @@ const events = ['received', 'deferred', 'deferred-flush', 'stored', 'skipped', '
 const reasons = [
   'inactive-platform', 'missing-conversation', 'terminal-mode-off', 'duplicate', 'empty-command',
   'placeholder', 'manual-mode', 'paused', 'already-in-flight', 'missing-record', 'execution-status',
-  'disposed', 'no-shell', 'superseded', 'conversation-changed', 'rejected', 'interrupted', 'exception'
+  'disposed', 'no-shell', 'superseded', 'conversation-changed', 'rejected', 'interrupted', 'exception',
+  'task-ended', 'automation-blocked', 'waiting-user', 'tool-disabled', 'invalid-message-id',
+  'task-context-unavailable', 'task-source-mismatch', 'task-conversation-mismatch', 'interceptor-disabled',
+  'waiting-task-result', 'pending-task-command', 'task-step-unavailable'
 ] as const
 
 export interface CommandDiagnostic {
@@ -37,6 +40,9 @@ export interface CommandDiagnostic {
   sessionLost?: boolean
   deliveryOutcome?: string
   errorType?: string
+  taskSourcePresent?: boolean
+  taskPhase?: string
+  taskDelivery?: string
 }
 
 export interface CommandDiagnosticContext {
@@ -75,11 +81,13 @@ export function commandDiagnosticMetadata(platformId: PlatformId, payload: Comma
   for (const key of ['commandLength', 'requestId', 'waiting'] as const) {
     if (Number.isSafeInteger(payload[key]) && Number(payload[key]) >= 0) details[key] = Number(payload[key])
   }
-  for (const key of ['live', 'active', 'enabled', 'paused', 'autoRun', 'shellAlive', 'shellRunning', 'rejected', 'interrupted', 'timedOut', 'sessionLost'] as const) {
+  for (const key of ['live', 'active', 'enabled', 'paused', 'autoRun', 'shellAlive', 'shellRunning', 'rejected', 'interrupted', 'timedOut', 'sessionLost', 'taskSourcePresent'] as const) {
     if (typeof payload[key] === 'boolean') details[key] = payload[key]!
   }
   if (payload.exitCode === null || Number.isSafeInteger(payload.exitCode)) details.exitCode = payload.exitCode!
   if (['auto', 'manual'].includes(payload.mode ?? '')) details.mode = payload.mode!
+  if (['waiting-model', 'responded', 'waiting-user', 'waiting-tool', 'executing-tool', 'waiting-delivery', 'blocked', 'completed'].includes(payload.taskPhase ?? '')) details.taskPhase = payload.taskPhase!
+  if (['pending', 'sending', 'sent', 'uncertain', 'cancelled'].includes(payload.taskDelivery ?? '')) details.taskDelivery = payload.taskDelivery!
   if (['windows', 'posix'].includes(payload.shellKind ?? '')) details.shellKind = payload.shellKind!
   if (['pending', 'blocked', 'running', 'done', 'failed', 'timeout', 'skipped', 'interrupted'].includes(payload.status ?? '')) details.status = payload.status!
   if (['ok', 'busy', 'stuck', 'no-composer', 'insert-failed'].includes(payload.deliveryOutcome ?? '')) details.deliveryOutcome = payload.deliveryOutcome!

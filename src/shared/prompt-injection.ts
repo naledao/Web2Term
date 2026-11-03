@@ -3,8 +3,8 @@
  *
  * The full prompt (several thousand characters) used to travel with the first human send of
  * every task, although the model still had the previous copy in context. Each conversation now
- * keeps a ledger of what it was last given, and every task start picks the cheapest prefix that
- * keeps the model on protocol:
+ * keeps a ledger of what it was last given. Task starts pick the cheapest prefix, while a due
+ * full refresh can also accompany the next automatic result during a running task:
  *
  *   full      no ledger, the context since the last full copy is large, or repeated violations
  *   reminder  one protocol violation since the last full copy: resend the core contract
@@ -34,7 +34,7 @@ export interface InjectionLedger {
 export interface InjectionPlan {
   mode: InjectionMode
   reason: InjectionReason
-  /** What the page prepends to the next task's first human send. */
+  /** What the page prepends to a human send, or to an automatic result when a full refresh is due. */
   prefix: string
   fullLength: number
   /** Hashes of the current full prompt's sections, committed once the send is confirmed. */

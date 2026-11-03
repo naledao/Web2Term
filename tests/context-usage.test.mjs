@@ -162,7 +162,7 @@ function embedFixture(fileSend = async () => 'ok') {
     if (outcome instanceof Error) throw outcome
     return outcome
   } }
-  const Embed = embedMethods(['sendRaw', 'sendTaskResult', 'sendFileResult', 'sendTaskObservation', 'handlePageReport'], {
+  const Embed = embedMethods(['sendRaw', 'sendTaskResult', 'sendFileResult', 'sendTaskObservation', 'handlePageReport', 'confirmInjection'], {
     ...reportGlobals, fileReadingPlatform: id => ({ id }), sendPageFiles: fileSend
   })
   const embed = Object.assign(new Embed(), { liveContents: () => contents, taskPromptGeneration: 1, computerPageEpoch: 'page-a',

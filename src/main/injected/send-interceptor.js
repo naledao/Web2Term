@@ -149,6 +149,8 @@
     enabled: false,
     promptInjectionEnabled: true,
     prefix: '',
+    injectionMode: null,
+    injectionPlanToken: null,
     replyProtocolPrefix: '',
     replyProtocolVersion: 0,
     prefixIncludesReplyProtocol: false,
@@ -169,7 +171,7 @@
     awaitingReplySince: 0,
     /** Remains true across clarification turns until explicit completion or manual end. */
     taskActive: false,
-    /** Only a confirmed user send carrying the prompt consumes this task's injection. */
+    /** A confirmed human send or due result refresh has carried this task's prompt. */
     taskPromptInjected: false,
     toolPromptRevision: null,
     /** Reject late sends/configuration from a task that has already ended. */
@@ -2260,20 +2262,31 @@
    * Composer plumbing
    * ------------------------------------------------------------------ */
 
-  /** Every human turn carries the reply contract; task/environment plans still send once. */
-  const userPromptInjection = (conversationPromptInjected = false) => {
+  const confirmedInjectionPlans = new Set()
+  /** Full refreshes also travel with automatic results during a running task. */
+  const userPromptInjection = (conversationPromptInjected = false, result = false) => {
     const active = state.enabled && state.promptInjectionEnabled
-    const promptInjected = active && !state.taskPromptInjected && !conversationPromptInjected
-    const prefix = active ? (promptInjected ? state.prefix : state.replyProtocolPrefix) : ''
+    const fullDue = state.injectionMode === 'full' && state.injectionPlanToken && !confirmedInjectionPlans.has(state.injectionPlanToken)
+    const promptInjected = active && !!state.prefix && (fullDue || (!result && !state.taskPromptInjected && !conversationPromptInjected))
+    const prefix = active ? (promptInjected ? state.prefix : result ? '' : state.replyProtocolPrefix) : ''
     const full = promptInjected && state.prefixIncludesReplyProtocol
     // Snapshot the counts configured WITH this exact prefix. A send can outlive a
     // reconfiguration; its acknowledgement must not estimate the next task's prompt.
     const usage = promptInjected ? state.contextPrefixUsage : state.contextReminderUsage
-    return { prefix, metadata: { promptInjected, ...(prefix && state.replyProtocolVersion ? {
+    return { prefix, metadata: { promptInjected, ...(promptInjected && state.injectionPlanToken ? { injectionPlanToken: state.injectionPlanToken } : {}), ...(prefix && state.replyProtocolVersion ? {
       replyProtocolVersion: state.replyProtocolVersion,
       replyProtocolKind: full ? 'full' : 'short',
       replyProtocolLength: full ? state.replyProtocolFullLength : state.replyProtocolPrefix.length
     } : {}), ...(prefix && usage ? { contextUsage: { ...usage, id: Date.now().toString(36) + ':' + Math.random().toString(36).slice(2) } } : {}) } }
+  }
+
+  const confirmPromptInjection = (metadata) => {
+    if (!metadata.promptInjected) return
+    state.taskPromptInjected = true
+    if (metadata.injectionPlanToken) {
+      confirmedInjectionPlans.add(metadata.injectionPlanToken)
+      if (confirmedInjectionPlans.size > 64) confirmedInjectionPlans.delete(confirmedInjectionPlans.values().next().value)
+    }
   }
 
   const reportUserInjection = (injection, generation = state.taskPromptGeneration) => {
@@ -2654,8 +2667,8 @@
         focusBaselinePosition = replyBaselinePosition
         focusReplyPosition = null
         state.replyActionDetected = false
+        confirmPromptInjection(sendContext)
         if (!isRaw) {
-          if (sendContext.promptInjected) state.taskPromptInjected = true
           draftRejected = false
           state.failedCommand = null
           state.commandRecoveryUsed = false
@@ -2684,10 +2697,16 @@
       report(
         ok
           ? isRaw
-            ? { event: 'sent-raw', text: text.slice(0, 200), textLength: text.length }
+            ? { event: 'sent-raw', textLength: sendContext.rawTextLength ?? text.length,
+                promptInjected: sendContext.promptInjected, injectionPlanToken: sendContext.injectionPlanToken,
+                contextUsage: sendContext.contextUsage, replyProtocolVersion: sendContext.replyProtocolVersion,
+                replyProtocolKind: sendContext.replyProtocolKind, replyProtocolLength: sendContext.replyProtocolLength,
+                pagePath: sendContext.path,
+                taskPromptGeneration: sendContext.taskPromptGeneration }
             : {
                 event: 'sent', text: userTextOf(text).slice(0, 400),
                 promptInjected: sendContext.promptInjected,
+                injectionPlanToken: sendContext.injectionPlanToken,
                 replyProtocolVersion: sendContext.replyProtocolVersion,
                 replyProtocolKind: sendContext.replyProtocolKind,
                 replyProtocolLength: sendContext.replyProtocolLength,
@@ -3203,9 +3222,7 @@
           state.commandRecoveryUsed = false
           state.lastCommandMessageId = null
           draftRejected = false
-          if (injection.metadata.promptInjected) {
-            state.taskPromptInjected = true
-          }
+          confirmPromptInjection(injection.metadata)
           reportUserInjection(injection, token.generation)
           report({ event: 'user-message', text, focusEditToken: request.token })
           setReplyWaiting(Date.now(), 'user-edited')
@@ -3526,19 +3543,25 @@
     return true
   }
 
-  /** A center point the page itself would deliver to `element` (or, for a hover-only toolbar, to its row). */
-  const nativeEditPoint = (element, row) => {
-    if (!element || !isVisibleElement(element) || controlDisabled(element)) return null
-    try { element.scrollIntoView({ block: 'nearest' }) } catch (_) { /* measured as-is */ }
+  /** Content-free reasons a measured native control cannot receive a real click. */
+  const nativeEditControl = (element, row) => {
+    if (!element) return { nativeEditControlState: 'missing' }
+    if (!row.contains(element)) return { nativeEditControlState: 'outside-row' }
+    if (!isVisibleElement(element)) return { nativeEditControlState: 'hidden' }
+    if (controlDisabled(element)) return { nativeEditControlState: 'disabled' }
+    try { element.scrollIntoView({ behavior: 'instant', block: 'nearest', inline: 'nearest' }) } catch (_) { /* measured as-is */ }
     const rect = element.getBoundingClientRect()
     const x = Math.round(rect.left + rect.width / 2)
     const y = Math.round(rect.top + rect.height / 2)
+    if (!Number.isFinite(x) || !Number.isFinite(y) || rect.width <= 0 || rect.height <= 0 ||
+      x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return { nativeEditControlState: 'out-of-viewport' }
     const hit = document.elementFromPoint(x, y)
-    return hit && row.contains(element) && (element.contains(hit) || hit.contains(element)) ? { x, y } : null
+    if (!hit || !(element.contains(hit) || hit.contains(element))) return { nativeEditControlState: 'covered' }
+    return { nativeEditControlState: 'ready', x, y }
   }
-  const nativeEditWait = async (probe, ms) => {
+  const nativeEditWait = async (probe, ms, current = () => true) => {
     const end = Date.now() + ms
-    while (Date.now() < end) {
+    while (Date.now() < end && current()) {
       const found = probe()
       if (found) return found
       await new Promise(resolve => setTimeout(resolve, 100))
@@ -3546,11 +3569,11 @@
     return null
   }
   const nativeRetryPrefix = kind => kind === 'stopped' ? 'stopped-retry' : `${kind}-leak`
-  const giveUpSafetyLeak = (messageId, step, kind = 'safety', budget = safetyLeak) => {
+  const giveUpSafetyLeak = (messageId, step, kind = 'safety', budget = safetyLeak, diagnostic = {}) => {
     if (budget !== safetyLeak) return
     safetyLeak.busy = false
     safetyLeak.failedKey = messageId
-    report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-failed`, messageId, step })
+    report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-failed`, messageId, step, ...diagnostic })
     scheduleCheck()
   }
 
@@ -3565,24 +3588,52 @@
     const current = () => budget === safetyLeak && path === location.pathname && generation === state.taskPromptGeneration &&
       state.enabled && state.taskActive && state.awaitingReplySince === since && userStoppedAt < since &&
       !state.pendingQuestion && !state.programmatic && !focusEditing
-    const fail = step => giveUpSafetyLeak(messageId, step, kind, budget)
+    const fail = (step, diagnostic = {}) => giveUpSafetyLeak(messageId, step, kind, budget, diagnostic)
     const row = latestUserRow()
     const rowKey = row?.getAttribute(PAGE.fileTurnPositionAttr)
     if (!row || !rowKey || nativeEditRejection(row, true, kind) ||
       queryAll([PAGE.nativeEdit.editorSelector]).some(isVisibleElement)) return fail('row')
     const latest = latestReplyNode(queryAllAssistant())
     if (!current() || !latest || turnKeyOf(latest) !== messageId) return fail('context')
-    const editPoint = nativeEditPoint(row.querySelector(PAGE.nativeEdit.buttonSelector), row)
-    if (!editPoint) return fail('edit-button')
-    report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-edit-click`, messageId, pagePath: path, ...editPoint })
-    const editor = await nativeEditWait(() => current() && nativeEditor(latestUserRow()), 3000)
+    const editControl = nativeEditControl(row.querySelector(PAGE.nativeEdit.buttonSelector), row)
+    if (editControl.nativeEditControlState !== 'ready') return fail('edit-button', editControl)
+    report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-edit-click`, messageId, pagePath: path, x: editControl.x, y: editControl.y })
+    const editor = await nativeEditWait(() => nativeEditor(latestUserRow()), 3000, current)
     if (!current() || !editor || collapse(editor.value) === '') return fail('editor')
     const editRow = editor.closest(PAGE.nativeEdit.rowSelector)
     if (editRow?.getAttribute(PAGE.fileTurnPositionAttr) !== rowKey) return fail('row-changed')
-    const sendPoint = nativeEditPoint(editRow.querySelector(PAGE.nativeEdit.submitSelector), editRow)
-    if (!sendPoint) return fail('submit')
-    if (!current() || !startNativeEditRetry(editRow, true, kind, current, messageId)) return fail('task')
-    report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-send-click`, messageId, pagePath: path, ...sendPoint })
+    // The textarea may mount before its send control is enabled or its expanded layout settles.
+    // Re-query the control on every pass; never reuse a removed button or send a user's new edit.
+    const original = editor.value, startedAt = Date.now()
+    const sendCurrent = () => current() && latestUserRow() === editRow &&
+      editRow.getAttribute(PAGE.fileTurnPositionAttr) === rowKey && nativeEditor(editRow) === editor &&
+      editor.value === original && !nativeEditRejection(editRow, true, kind) && !findStopButton()
+    let previous = null, nativeEditControlState = 'missing'
+    const sendControl = await nativeEditWait(() => {
+      const button = editRow.querySelector(PAGE.nativeEdit.submitSelector)
+      const control = nativeEditControl(button, editRow)
+      nativeEditControlState = control.nativeEditControlState
+      if (nativeEditControlState !== 'ready') { previous = null; return null }
+      const stable = previous?.button === button && previous.x === control.x && previous.y === control.y
+      previous = { button, x: control.x, y: control.y }
+      if (!stable) { nativeEditControlState = 'unstable'; return null }
+      return previous
+    }, 3000, sendCurrent)
+    const diagnostic = () => ({ nativeEditControlState, nativeEditWaitMs: Date.now() - startedAt })
+    if (!sendCurrent()) return fail('task', diagnostic())
+    if (!sendControl) return fail('submit', diagnostic())
+    // Revalidate after the await, before arming generation detection or requesting the one click.
+    const finalControl = nativeEditControl(editRow.querySelector(PAGE.nativeEdit.submitSelector), editRow)
+    nativeEditControlState = finalControl.nativeEditControlState
+    if (nativeEditControlState !== 'ready') return fail('submit', diagnostic())
+    if (editRow.querySelector(PAGE.nativeEdit.submitSelector) !== sendControl.button ||
+      finalControl.x !== sendControl.x || finalControl.y !== sendControl.y) {
+      nativeEditControlState = 'unstable'
+      return fail('submit', diagnostic())
+    }
+    if (!sendCurrent() || !startNativeEditRetry(editRow, true, kind, current, messageId)) return fail('task', diagnostic())
+    report({ event: 'native-edit', reason: `${nativeRetryPrefix(kind)}-send-click`, messageId, pagePath: path,
+      x: finalControl.x, y: finalControl.y, ...diagnostic() })
   }
 
   const replyLeakKind = (text, node = null) => {
@@ -3764,15 +3815,18 @@
 
   const computerWaitRebindable = (wait) => (wait.path === '/' || wait.baseline?.path === '/') && wait.path !== location.pathname &&
     !!PAGE.conversationPathPattern && new RegExp(PAGE.conversationPathPattern).test(location.pathname)
-  const computerWaitCurrent = (wait) => {
-    if (!wait || computerReplyWait !== wait || wait.reported || !state.enabled || !state.computerUseEnabled ||
+  const computerWaitCurrent = (wait, allowReported = false) => {
+    if (!wait || computerReplyWait !== wait || (wait.reported && !allowReported) || !state.enabled || !state.computerUseEnabled ||
       !wait.sourceSubmissionId || state.awaitingReplySince === 0 || state.pendingQuestion ||
       wait.pageEpoch !== computerPageEpoch ||
       wait.generation !== state.taskPromptGeneration) return false
     // The first confirmed send creates the SPA conversation route. ChatGPT can pass through an interim
     // /c/<uuid> before the real one (2026-10-27 reply log), so a send from the new-chat page follows the
     // current conversation route until its request is reported; main still requires the task's own conversation.
-    if (computerWaitRebindable(wait)) { wait.path = location.pathname; wait.bindCount = (wait.bindCount || 0) + 1 }
+    if (computerWaitRebindable(wait)) {
+      if (wait.reported) return false
+      wait.path = location.pathname; wait.bindCount = (wait.bindCount || 0) + 1
+    }
     return wait.path === location.pathname
   }
   const computerTurnIsNew = (node, wait) => {
@@ -3847,7 +3901,9 @@
   // Provenance is transport metadata only; command/read_files JSON and their execution rules stay unchanged.
   const legacyTaskSource = (node) => {
     const wait = computerReplyWait
-    if (PAGE.computerUseRequests !== true || !computerWaitCurrent(wait) || !computerTurnIsNew(node, wait)) return {}
+    // A later render of a claimed terminal reply still belongs to that task. Dropping
+    // provenance here would bypass its busy/delivery gate as an ordinary command.
+    if (PAGE.computerUseRequests !== true || !computerWaitCurrent(wait, true) || !computerTurnIsNew(node, wait)) return {}
     wait.reported = true
     return { sourceSubmissionId: wait.sourceSubmissionId, taskPromptGeneration: wait.generation, pagePath: wait.path }
   }
@@ -4987,18 +5043,21 @@
     restoreFailedCommandWait(node, messageId)
     const live = state.awaitingReplySince !== 0
     /*
-     * The same command from the same turn, during the same wait, is the same command.
+     * The same command from the same turn, under the same human submission, runs once.
      *
      * Without a stable message id the turn key is a content hash, so a reply that grows after
      * it looked settled gets a NEW key. Measured on DeepSeek, 2026-10-22: the answer went from
      * 721 to 762 characters a second after its command was reported, with no stop button on
      * either scan, and the identical 671-character command ran twice. The row position covers
      * a turn element the site remounts while it grows.
+     * Description text is presentation only: completing it cannot authorize a second run,
+     * even after our result send has already armed the wait for the next assistant turn.
      */
     const position = PAGE.fileTurnPositionAttr ? node.getAttribute(PAGE.fileTurnPositionAttr) : null
-    if (live && lastLiveCommand && lastLiveCommand.since === state.awaitingReplySince &&
+    if (live && lastLiveCommand && lastLiveCommand.submission === userSubmissionSerial &&
+        lastLiveCommand.generation === state.taskPromptGeneration && lastLiveCommand.path === location.pathname &&
         (lastLiveCommand.node === node || (position && lastLiveCommand.position === position)) &&
-        lastLiveCommand.command === parsed.command && lastLiveCommand.description === parsed.description &&
+        lastLiveCommand.command === parsed.command &&
         lastLiveCommand.background === (parsed.background === true) && JSON.stringify(lastLiveCommand.backgroundOptions) === JSON.stringify(parsed.backgroundOptions)) {
       state.lastCommandMessageId = messageId
       noteScan(messageId, 'duplicate-command')
@@ -5006,7 +5065,8 @@
     }
     if (live) {
       lastLiveCommand = {
-        since: state.awaitingReplySince, node, position, command: parsed.command, description: parsed.description,
+        submission: userSubmissionSerial, generation: state.taskPromptGeneration, path: location.pathname,
+        node, position, command: parsed.command,
         background: parsed.background === true, backgroundOptions: parsed.backgroundOptions
       }
     }
@@ -5582,6 +5642,7 @@
   const fileSendStatus = (token) => {
     if (confirmedFileSends.has(token)) return { status: 'sent' }
     if (!fileSend || fileSend.token !== token) return { status: 'stale' }
+    if (fileSend.resultScope && (fileSend.resultScope.generation !== state.taskPromptGeneration || fileSend.resultScope.path !== location.pathname)) return { status: 'busy' }
     if (fileSend.computer && (fileSend.computer.generation !== state.taskPromptGeneration || fileSend.computer.path !== location.pathname || !state.computerUseEnabled)) return { status: 'busy' }
     if (fileSend.focus && fileSend.focus.generation !== state.taskPromptGeneration) return { status: 'busy' }
     const composer = getComposer()
@@ -5615,6 +5676,9 @@
         const focus = fileSend.focus
         const computer = fileSend.computer
         const focusFiles = fileSend.files
+        const resultInjection = fileSend.resultInjection
+        const resultTextLength = fileSend.resultTextLength ?? 0
+        const resultScope = fileSend.resultScope
         confirmedFileSends.add(token)
         if (confirmedFileSends.size > 8) confirmedFileSends.delete(confirmedFileSends.values().next().value)
         state.programmatic = false
@@ -5622,15 +5686,20 @@
         lastDraftImagePromise = Promise.resolve([])
         fileSend = null
         if (focus) {
-          if (focus.promptInjected) state.taskPromptInjected = true
+          confirmPromptInjection(focus.injection.metadata)
           draftRejected = false
           state.replyActionDetected = false
           report({ event: 'user-message', text: focus.text, focusFiles, focusSendToken: token, attachmentToken: focus.attachmentToken,
             submissionKind: focus.submissionKind, userSkills: focus.userSkills })
           report({ event: 'sent', text: focus.text.slice(0, 400), promptInjected: focus.promptInjected,
             ...focus.injection.metadata, taskPromptGeneration: focus.generation })
-        } else report({ event: 'sent-raw', text: computer ? '[computer observation attachment]' : '[read_files attachments]',
-          attachmentKind: computer ? 'computer' : 'files' })
+        } else {
+          if (resultInjection) confirmPromptInjection(resultInjection.metadata)
+          report({ event: 'sent-raw', textLength: resultTextLength, ...(resultInjection?.metadata || {}),
+            taskPromptGeneration: resultScope?.generation ?? computer?.generation ?? state.taskPromptGeneration,
+            pagePath: resultScope?.path ?? computer?.path,
+            attachmentKind: computer ? 'computer' : 'files' })
+        }
         if (state.enabled && state.awaitingReplySince !== 0) scheduleCheck()
         scheduleScrollToBottom()
         return { status: 'sent' }
@@ -5892,14 +5961,20 @@
       }
     },
     prepareFileSendCaption(token, caption) {
-      if (typeof caption !== 'string' || !caption.trim() || caption.length > (fileSend?.computer ? 200000 : 50000) || fileSendStatus(token).status !== 'ready') return false
+      if (typeof caption !== 'string' || caption.length > (fileSend?.computer ? 200000 : 50000) || fileSendStatus(token).status !== 'ready') return false
       // Uploads wait on an empty draft. Add the owned question only once the
       // attachment is ready; subsequent user edits still invalidate this send.
       const composer = getComposer()
       if (!composer || !composerMatches(composer, '') || fileSend.caption) return false
-      fileSend.caption = normalizeLineEndings(caption)
+      const text = normalizeLineEndings(caption)
+      const injection = userPromptInjection(false, true)
+      fileSend.resultInjection = injection
+      fileSend.resultScope = { generation: state.taskPromptGeneration, path: location.pathname }
+      fileSend.resultTextLength = text.length
+      fileSend.caption = injection.prefix ? injection.prefix + USER_TEXT_SENTINEL + text : text
       fileSend.captionComposer = composer
-      if (!insertText(composer, fileSend.caption)) { fileSend.edited = true; return false }
+      if (fileSend.caption && !insertText(composer, fileSend.caption)) { fileSend.edited = true; return false }
+      reportUserInjection(injection)
       return true
     },
     /**
@@ -6004,6 +6079,8 @@
       }
       if (typeof config.promptInjectionEnabled === 'boolean') state.promptInjectionEnabled = config.promptInjectionEnabled
       if (typeof config.prefix === 'string') state.prefix = config.prefix
+      if (['full', 'delta', 'reminder', 'none', null].includes(config.injectionMode)) state.injectionMode = config.injectionMode
+      if (typeof config.injectionPlanToken === 'string' || config.injectionPlanToken === null) state.injectionPlanToken = config.injectionPlanToken
       if (typeof config.replyProtocolPrefix === 'string') state.replyProtocolPrefix = config.replyProtocolPrefix
       state.contextPrefixUsage = config.contextPrefixUsage
       state.contextReminderUsage = config.contextReminderUsage
@@ -6956,7 +7033,9 @@
         if (!ownedDraft || !composerMatches(element, ownedDraft)) return blocked('text-draft')
       }
 
-      const payload = normalizeLineEndings(text)
+      const resultText = normalizeLineEndings(text)
+      const injection = options?.injection || userPromptInjection(false, true)
+      const payload = injection.prefix ? injection.prefix + USER_TEXT_SENTINEL + resultText : resultText
       const taskPromptGeneration = state.taskPromptGeneration
 
       state.programmatic = true
@@ -6973,6 +7052,7 @@
         report({ event: 'inject-failed' })
         return Promise.resolve('insert-failed')
       }
+      reportUserInjection(injection, taskPromptGeneration)
 
       return new Promise((resolve) => {
         let settled = false
@@ -7009,7 +7089,7 @@
           0,
           Date.now() + SEND_BUTTON_GRACE_MS,
           null,
-          { taskPromptGeneration, promptInjected: false, ...(options?.path !== undefined ? { path: options.path } : {}),
+          { taskPromptGeneration, ...injection.metadata, rawTextLength: resultText.length, path: options?.path ?? location.pathname,
             ...(options?.question ? { question: options.question } : {}),
             ...(options?.computerResultToken !== undefined ? { computerResultToken: options.computerResultToken } : {}) }
         )
@@ -7060,14 +7140,13 @@
         source.pageEpoch !== computerPageEpoch || source.pagePath !== location.pathname || source.taskPromptGeneration !== state.taskPromptGeneration)) return 'stale'
       const ownedDraft = state.answerDraft?.messageId === messageId ? state.answerDraft.text : null
       const taskPromptGeneration = state.taskPromptGeneration
-      // Keep the question's raw delivery/ownership flow, adding only the per-user contract.
-      // sendRaw already accounts for the complete payload's context length, so do not emit a second sent event.
+      // Keep the question's raw delivery/ownership flow. Let sendRaw acknowledge this
+      // exact contract once, separately from the answer body; do not emit a second sent event.
       const injection = userPromptInjection(true)
       const text = normalizeLineEndings(answer)
       const payload = injection.prefix ? injection.prefix + USER_TEXT_SENTINEL + text : text
-      const outcome = await window[STATE_KEY].sendRaw(payload, ownedDraft, { generation: taskPromptGeneration, path: location.pathname, question: { messageId, source } })
+      const outcome = await window[STATE_KEY].sendRaw(text, ownedDraft, { injection, generation: taskPromptGeneration, path: location.pathname, question: { messageId, source } })
       if (outcome === 'ok') {
-        reportUserInjection(injection, taskPromptGeneration)
         report({ event: 'user-message', text: answer, submissionKind: 'clarification', taskPromptGeneration, contextUsage: injection.metadata.contextUsage,
           answeredQuestionId: messageId, questionSource: source })
       } else if (outcome === 'stuck' || outcome === 'insert-failed') {

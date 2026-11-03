@@ -160,15 +160,51 @@ function pageFixture(initial = [element('div', { 'data-virtual-list-item-key': '
   return fixture
 }
 
-test('legacy task provenance requires a new confirmed reply and consumes the same reply boundary only once', () => {
+test('legacy task provenance survives updates of a claimed reply without admitting old turns', () => {
   const f = pageFixture(), submission = f.confirm()
   assert.deepEqual(Object.keys(f.helpers.legacyTaskSource(turn('1', code('{"command":"history"}')))), [])
   const reply = turn('2', code('{"command":"prepare report","description":"prepare"}')); f.replace([reply])
   const source = f.helpers.legacyTaskSource(reply)
   assert.equal(source.sourceSubmissionId, submission); assert.equal(source.taskPromptGeneration, 3); assert.equal(source.pagePath, f.location.pathname)
+  assert.equal(f.helpers.legacyTaskSource(reply).sourceSubmissionId, submission)
+  f.location.pathname = '/a/chat/s/other-chat'
   assert.deepEqual(Object.keys(f.helpers.legacyTaskSource(reply)), [])
+  f.location.pathname = source.pagePath
   f.result(); const next = turn('3', code('{"type":"read_files","files":[{"path":"report.xlsx"}],"description":"inspect"}')); f.replace([next])
   assert.equal(f.helpers.legacyTaskSource(next).sourceSubmissionId, submission)
+})
+
+test('description completion and a remounted DeepSeek turn do not execute the same command twice', () => {
+  const f = pageFixture(), submission = f.confirm()
+  const command = 'Get-Content -LiteralPath C:\\work\\fixture.txt'
+  f.replace([turn('2', code(JSON.stringify({ command, description: '' })))])
+  f.settle()
+  assert.equal(f.actions().length, 1)
+  assert.equal(f.actions()[0].sourceSubmissionId, submission)
+  f.replace([turn('2', code(JSON.stringify({ command, description: '查看完整代码' })))])
+  f.settle()
+  assert.equal(f.actions().length, 1)
+  assert.ok(f.events.some(event => event.reason === 'duplicate-command'))
+  // A late layout update of the old reply must not spend the new result wait.
+  f.result()
+  f.replace([turn('2', code(JSON.stringify({ command, description: '查看完整代码，说明补全' })))])
+  f.settle()
+  assert.equal(f.actions().length, 1)
+  // The same command in the next model reply is still legitimate.
+  f.replace([turn('3', code(JSON.stringify({ command, description: '再次核对' })))])
+  f.settle()
+  assert.equal(f.actions().length, 2)
+  assert.equal(f.actions()[1].sourceSubmissionId, submission)
+})
+
+test('a changed command in a previously claimed reply keeps task ownership instead of bypassing its gate', () => {
+  const f = pageFixture(), submission = f.confirm()
+  f.replace([turn('2', code('{"command":"Write-Output first","description":"first"}'))])
+  f.settle()
+  f.replace([turn('2', code('{"command":"Write-Output corrected","description":"corrected"}'))])
+  f.settle()
+  assert.equal(f.actions().length, 2)
+  assert.ok(f.actions().every(event => event.sourceSubmissionId === submission && event.taskPromptGeneration === 3))
 })
 
 test('a document epoch change cancels a pending settled recognition and cannot re-arm restored history', () => {
@@ -613,7 +649,7 @@ const Runtime = actualClass('../src/main/session-runtime.ts', 'SessionRuntime', 
   }).supportsComputerUsePlatform,
   taskPresentationLease: load('../src/shared/task-presentation.ts').taskPresentationLease
 })
-const Embed = actualClass('../src/main/embed.ts', 'ChatGptEmbed', ['handlePageReport', 'taskActionSource', 'invalidateComputerDocument', 'getComputerUsePageEpoch',
+const Embed = actualClass('../src/main/embed.ts', 'ChatGptEmbed', ['handlePageReport', 'confirmInjection', 'taskActionSource', 'invalidateComputerDocument', 'getComputerUsePageEpoch',
   'endTask', 'completeTask', 'resetTaskPrompt'], {
   randomUUID,
   setTimeout, clearTimeout,

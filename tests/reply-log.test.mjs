@@ -42,6 +42,31 @@ test('analysis resend diagnostics keep recovery reasons without message text or 
   }
 })
 
+test('native resend diagnostics retain readiness failures and bounded wait duration without page content', () => {
+  for (const nativeEditControlState of ['missing', 'outside-row', 'hidden', 'disabled', 'out-of-viewport', 'covered', 'unstable', 'ready']) {
+    const value = replyDiagnosticMetadata('deepseek', {
+      event: 'native-edit', reason: 'stopped-retry-failed', step: 'submit', nativeEditControlState, nativeEditWaitMs: 3000,
+      text: 'private-editor-text', pagePath: '/private-conversation', x: 30, y: 80, selectors: ['private-selector']
+    }, context)
+    assert.equal(value.step, 'submit')
+    assert.equal(value.nativeEditControlState, nativeEditControlState)
+    assert.equal(value.nativeEditWaitMs, 3000)
+    assert.ok(!JSON.stringify(value).includes('private'))
+    assert.equal(value.x, undefined)
+    assert.equal(value.y, undefined)
+  }
+  for (const nativeEditWaitMs of [-1, Infinity, '3000']) {
+    const value = replyDiagnosticMetadata('deepseek', {
+      event: 'native-edit', reason: 'stopped-retry-failed', nativeEditControlState: 'private-state', nativeEditWaitMs
+    }, context)
+    assert.equal(value.nativeEditControlState, undefined)
+    assert.equal(value.nativeEditWaitMs, undefined)
+  }
+  for (const step of ['context', 'row-changed']) {
+    assert.equal(replyDiagnosticMetadata('deepseek', { event: 'native-edit', reason: 'stopped-retry-failed', step }, context).step, step)
+  }
+})
+
 test('computer recognition retains outcome and acceptance without raw JSON or paths', () => {
   const value = replyDiagnosticMetadata('deepseek', { event: 'computer-request', messageId: 'computer:page:1',
     computerOutcome: 'invalid', computerIssue: 'ambiguous-request', computerProtocolCode: 'duplicate_field', live: true,

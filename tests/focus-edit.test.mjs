@@ -87,6 +87,8 @@ function fixture() {
   })
   context.userTextOf = helper('userTextOf', context)
   context.userPromptInjection = helper('userPromptInjection', context)
+  context.confirmedInjectionPlans = new Set()
+  context.confirmPromptInjection = helper('confirmPromptInjection', context)
   context.reportUserInjection = helper('reportUserInjection', context)
   context.noteEditSubmission = method('noteEditSubmission', context)
   return { context, state, composer, calls, reports, editor, groups: () => groups, scanCount: () => scanCount,

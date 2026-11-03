@@ -178,6 +178,14 @@ export interface PageAdapter {
    * accepting the partial text as the final answer.
    */
   continueButtonLabels?: string[]
+  /** Dismiss the site's response comparison survey, identified by all three labels together. */
+  responsePreference?: {
+    promptLabels: string[]
+    skipLabels: string[]
+    chooseLabels: string[]
+    /** Survey controls and headings must be outside conversation content and editors. */
+    ignoreSelector: string
+  }
   /**
    * Exact text of the reasoning header when the SITE ended a reply mid-thinking with no answer and
    * no resume control. During the app's own wait such a turn is answered with 继续.
@@ -565,6 +573,12 @@ const SIDEBAR_SCRIPT_BY_DEFAULT = (linkSelector: string, pathPrefix: string): st
  * the reply marker rejects them; if it does not, they were never in the list.
  */
 export const CHATGPT_PAGE: PageAdapter = {
+  responsePreference: {
+    promptLabels: ['你更喜欢哪个选项？', 'Which response do you prefer?', 'Which option do you prefer?'],
+    skipLabels: ['跳过', 'Skip'],
+    chooseLabels: ['我更喜欢这个选项', 'I prefer this response', 'I prefer this option'],
+    ignoreSelector: '[data-message-author-role], [data-chatgpt-selection-message-id], [data-content-search-unit-key], [data-markdown-text-style], [data-composer-markdown], #prompt-textarea'
+  },
   /*
    * Desktop requests use the same reply reads as commands. A reply is new when its
    * `data-chatgpt-selection-message-id` was absent before the send (`computerBaselineOf`).

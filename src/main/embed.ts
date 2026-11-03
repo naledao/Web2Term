@@ -17,6 +17,7 @@ import type { ComputerUseActionDefinition, ComputerUsePageRequest } from '../sha
 import { createComputerUseProtocol } from '../shared/computer-use-protocol'
 import type { TaskResultSendOutcome } from './task-progression'
 import interceptorSource from './injected/send-interceptor.js?raw'
+import responsePreferenceSource from './injected/response-preference.js?raw'
 import themeSource from './injected/theme.js?raw'
 import selectionQuestionSource from './injected/selection-question.js?raw'
 import selectionQuestionCss from './injected/selection-question.css?raw'
@@ -448,7 +449,7 @@ export interface EmbedHandlers {
   /** Conversation history survives task completion and page/app reloads. */
   hasConversationPrompt?(conversationId: string): boolean
   onPromptInjected?(conversationId: string | null): void
-  /** The prefix the next task start carries, chosen from what this conversation already holds. */
+  /** The next send's prefix, chosen from what this conversation already holds. */
   planInjection?(fullPrefix: string, conversationId: string | null): InjectionPlan | null
   /** A confirmed send carried a prefix; `plan` is null when the page's prefix no longer matches the plan. */
   onInjectionSent?(conversationId: string | null, plan: InjectionPlan | null): void
@@ -545,7 +546,10 @@ export class ChatGptEmbed {
   }, entry => this.handlers.onContextUsage?.(entry))
   /** The plan behind the prefix last pushed to the page, and the length the page last injected. */
   private injectionPlan: InjectionPlan | null = null
+  private injectionPlanToken: string | null = null
+  private injectionPlans = new Map<string, { plan: InjectionPlan | null; prefix: string; conversationId: string | null; generation: number }>()
   private pushedPrefix: string | null = null
+  private pushedInjectionPlanToken: string | null = null
   private injectedPrefixLength: number | null = null
   private toolPromptRevision = 0
   private taskPromptGeneration = 0
@@ -1341,6 +1345,7 @@ export class ChatGptEmbed {
     const prefix = this.planPrefix(contents.getURL())
     if (prefix !== this.pushedPrefix) writeInjectionPlanDiagnostic(this.platform.id, this.injectionPlan, prefix.length)
     this.pushedPrefix = prefix
+    this.pushedInjectionPlanToken = this.injectionPlanToken
     const config = JSON.stringify({
       enabled: this.interceptor.enabled,
       promptInjectionEnabled: this.interceptor.promptInjectionEnabled,
@@ -1349,6 +1354,8 @@ export class ChatGptEmbed {
       computerProtocol: this.computerUseProtocolContext,
       sendBlock: this.sendBlock,
       prefix,
+      injectionMode: this.injectionPlan?.mode ?? null,
+      injectionPlanToken: this.injectionPlanToken,
       contextPrefixUsage: estimateContextText(prefix + '\u2063\u2063'),
       contextReminderUsage: estimateContextText(REPLY_PROTOCOL_REMINDER + '\u2063\u2063'),
       replyProtocolPrefix: REPLY_PROTOCOL_REMINDER,
@@ -1369,7 +1376,8 @@ export class ChatGptEmbed {
     try {
       await contents.executeJavaScript(
         `window.__computerUseProtocol = (${createComputerUseProtocol.toString()})();\n${interceptorSource}\n;` +
-          `window.__cmdTerminalInterceptor && window.__cmdTerminalInterceptor.configure(${config});true`
+          `window.__cmdTerminalInterceptor && window.__cmdTerminalInterceptor.configure(${config});\n` +
+          `${responsePreferenceSource}\n;window.__cmdTerminalResponsePreference.configure(${JSON.stringify(this.platform.page.responsePreference ?? null)});true`
       )
     } catch (error) {
       // A navigation during injection is normal; did-finish-load will retry.
@@ -1377,19 +1385,54 @@ export class ChatGptEmbed {
     }
   }
 
-  /** The prefix for the next task start in the conversation at `url`; the full prompt when nothing plans. */
+  /** The next human send or due automatic result carries this conversation's current plan. */
   private planPrefix(url: string): string {
-    this.injectionPlan = this.handlers.planInjection?.(this.interceptor.prefix, conversationIdOf(this.platform, url)) ?? null
+    const conversationId = conversationIdOf(this.platform, url)
+    this.injectionPlan = this.handlers.planInjection?.(this.interceptor.prefix, conversationId) ?? null
     const prefix = withReplyProtocol(this.injectionPlan ? this.injectionPlan.prefix : this.interceptor.prefix)
     // Commit the actual prefix (including a short contract on deltas/anchors), not an estimate.
     if (this.injectionPlan) this.injectionPlan = { ...this.injectionPlan, prefix }
+    // Keep the exact transmitted plan until acknowledgement. Traffic or settings may
+    // replan while a message is being submitted, even when both prefixes have equal length.
+    this.injectionPlans ??= new Map()
+    const previous = this.injectionPlanToken ? this.injectionPlans.get(this.injectionPlanToken) : null
+    if (!previous || previous.prefix !== prefix || previous.plan?.mode !== this.injectionPlan?.mode ||
+        previous.conversationId !== conversationId || previous.generation !== this.taskPromptGeneration) {
+      this.injectionPlanToken = randomUUID()
+    }
+    this.injectionPlans.set(this.injectionPlanToken!, { plan: this.injectionPlan, prefix, conversationId, generation: this.taskPromptGeneration })
+    if (this.injectionPlans.size > 64) this.injectionPlans.delete(this.injectionPlans.keys().next().value!)
     return prefix
+  }
+
+  private confirmInjection(payload: InterceptorPageEvent): void {
+    if (payload.promptInjected !== true) return
+    const contents = this.liveContents()
+    if (!contents) return
+    const conversationId = conversationIdOf(this.platform, contents.getURL())
+    let plan: InjectionPlan | null = null
+    if (payload.injectionPlanToken) {
+      const snapshot = this.injectionPlans?.get(payload.injectionPlanToken)
+      const createdConversation = snapshot?.conversationId === null && conversationId !== null && payload.event === 'sent'
+      if (!snapshot || (!createdConversation && snapshot.conversationId !== conversationId) || snapshot.generation !== this.taskPromptGeneration) return
+      plan = snapshot.plan
+      this.injectionPlans.delete(payload.injectionPlanToken)
+    } else {
+      // Compatibility with a page installed before plan tokens were configured.
+      plan = this.injectionPlan && this.injectionPlan.prefix.length === this.injectedPrefixLength ? this.injectionPlan : null
+    }
+    this.injectedPrefixLength = null
+    this.taskPromptInjected = true
+    this.handlers.onPromptInjected?.(conversationId)
+    this.handlers.onInjectionSent?.(conversationId, plan)
   }
 
   /** The conversation's ledger changed: reconfigure the page only when its next prefix differs. */
   refreshInjectionPlan(): void {
     const contents = this.liveContents()
-    if (contents && this.planPrefix(contents.getURL()) !== this.pushedPrefix) void this.installInterceptor(false)
+    if (!contents) return
+    const prefix = this.planPrefix(contents.getURL())
+    if (prefix !== this.pushedPrefix || this.injectionPlanToken !== this.pushedInjectionPlanToken) void this.installInterceptor(false)
   }
 
   /** Install the selection UI without exposing a page IPC bridge. */
@@ -2252,7 +2295,7 @@ export class ChatGptEmbed {
     let questionAccepted: boolean | undefined
     let computerAccepted: boolean | undefined
     // A confirmed send replans at once; the log line describes the plan the send carried.
-    const injectionMode = this.injectionPlan?.mode ?? null
+    const injectionMode = (payload.injectionPlanToken ? this.injectionPlans?.get(payload.injectionPlanToken)?.plan?.mode : null) ?? this.injectionPlan?.mode ?? null
     switch (payload.event) {
       case 'installed':
         this.interceptor.installed = true
@@ -2376,6 +2419,19 @@ export class ChatGptEmbed {
         }
         break
       case 'sent-raw':
+        if (payload.taskPromptGeneration !== undefined && payload.taskPromptGeneration !== this.taskPromptGeneration) break
+        if (payload.pagePath) {
+          try {
+            const contents = this.liveContents()
+            if (!contents || new URL(contents.getURL()).pathname !== payload.pagePath) break
+          } catch { break }
+        }
+        if (payload.contextUsage) this.contextUsage?.confirmedUsage(payload.contextUsage, 'injection', 'prefix:' + payload.contextUsage.id)
+        if (payload.promptInjected === true) this.confirmInjection(payload)
+        if (payload.promptInjected === false && payload.replyProtocolKind === 'short' &&
+          payload.replyProtocolVersion === REPLY_PROTOCOL_VERSION && payload.replyProtocolLength === REPLY_PROTOCOL_REMINDER.length) {
+          this.handlers.onContextTraffic?.(REPLY_PROTOCOL_REMINDER.length)
+        }
         // A computer observation's screenshot counts as a fixed amount of context, like noteAttachmentTraffic's images.
         this.handlers.onRawSent?.((Number.isSafeInteger(payload.textLength) ? payload.textLength! : 0) + (payload.attachmentKind === 'computer' ? 1500 : 0))
         break
@@ -2386,15 +2442,10 @@ export class ChatGptEmbed {
           payload.replyProtocolVersion === REPLY_PROTOCOL_VERSION && payload.replyProtocolLength === REPLY_PROTOCOL_REMINDER.length) {
           this.handlers.onContextTraffic?.(REPLY_PROTOCOL_REMINDER.length)
         }
-        if (payload.promptInjected === true) this.taskPromptInjected = true
-        if (payload.promptInjected === true || payload.conversationPromptInjected === true) {
+        if (payload.promptInjected === true) this.confirmInjection(payload)
+        if (payload.conversationPromptInjected === true && payload.promptInjected !== true) {
           const contents = this.liveContents()
           if (contents) this.handlers.onPromptInjected?.(conversationIdOf(this.platform, contents.getURL()))
-          if (contents && payload.promptInjected === true) {
-            const plan = this.injectionPlan && this.injectionPlan.prefix.length === this.injectedPrefixLength ? this.injectionPlan : null
-            this.injectedPrefixLength = null
-            this.handlers.onInjectionSent?.(conversationIdOf(this.platform, contents.getURL()), plan)
-          }
         }
         console.info(
           `[embed:${this.platform.id}] sent promptInjected=${payload.promptInjected === true} ` +

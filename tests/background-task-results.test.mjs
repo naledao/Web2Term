@@ -393,6 +393,7 @@ function pageFixture(patch = {}) {
     findStopButton: () => null, hasDraftImageAttachment: () => false, attachmentSnapshot: () => ({}), draftAttachmentEvidence: () => false,
     normalizeLineEndings: text => text, composerMatches: (element, text) => element.value === text,
     insertText(element, text) { element.value = text; return true },
+    userPromptInjection: () => ({ prefix: '', metadata: { promptInjected: false } }), reportUserInjection() {},
     setTimeout: () => 1, clearTimeout() {}, SEND_TIMEOUT_MS: 10000, SEND_BUTTON_GRACE_MS: 700,
     submitWithRetry(...args) { calls.push(args); args[3]('ok') }
   })

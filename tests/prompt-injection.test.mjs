@@ -2,6 +2,7 @@
 // Actual injection planner, real terminal prompt builder and ledger persistence with in-memory SQLite.
 // No Electron, real page, shell or network.
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { Script } from 'node:vm'
@@ -43,11 +44,17 @@ const { ConversationTools } = load('../src/main/conversation-tools.ts', {
 const Store = methods('../src/main/db.ts', 'ConversationStore', ['getSetting', 'setSetting', 'setSettings'])
 const { planInjection, commitInjection, addInjectionTraffic, noteInjectionViolation, parseInjectionLedger, splitPromptSections } = injection
 const EmbedPrefix = methods('../src/main/embed.ts', 'ChatGptEmbed', ['planPrefix'], {
-  withReplyProtocol: types.withReplyProtocol, conversationIdOf: () => 'chat-a'
+  randomUUID, withReplyProtocol: types.withReplyProtocol, conversationIdOf: () => 'chat-a'
 })
-const EmbedReports = methods('../src/main/embed.ts', 'ChatGptEmbed', ['handlePageReport'], {
+const EmbedReports = methods('../src/main/embed.ts', 'ChatGptEmbed', ['handlePageReport', 'confirmInjection'], {
   REPLY_PROTOCOL_VERSION: types.REPLY_PROTOCOL_VERSION, REPLY_PROTOCOL_REMINDER: types.REPLY_PROTOCOL_REMINDER,
   INTERCEPTOR_LOG_TAG: '[cmd-terminal] ', conversationIdOf: () => 'chat-a',
+  console: { info() {}, warn() {} }, writeReplyDiagnostic() {}, writePromptDiagnostic() {}
+})
+const EmbedResultInjection = methods('../src/main/embed.ts', 'ChatGptEmbed', ['planPrefix', 'confirmInjection', 'handlePageReport'], {
+  randomUUID, URL, withReplyProtocol: types.withReplyProtocol,
+  REPLY_PROTOCOL_VERSION: types.REPLY_PROTOCOL_VERSION, REPLY_PROTOCOL_REMINDER: types.REPLY_PROTOCOL_REMINDER,
+  INTERCEPTOR_LOG_TAG: '[cmd-terminal] ', conversationIdOf: (_platform, url) => new URL(url).pathname.split('/').at(-1) || null,
   console: { info() {}, warn() {} }, writeReplyDiagnostic() {}, writePromptDiagnostic() {}
 })
 
@@ -56,6 +63,81 @@ const tools = '【工具目录】\n以下只列出当前对话可用工具的摘
 const prefix = (env = linux, toolPrompt = tools) => types.buildTerminalPromptParts(env, toolPrompt).prefix
 const sent = (ledger, plan) => commitInjection(ledger, plan, 1)
 const plain = value => JSON.parse(JSON.stringify(value))
+
+function resultLedgerFixture() {
+  let ledger = sent(null, planInjection(null, prefix(), 'deepseek')), conversationId = 'chat-a'
+  const commits = [], usage = []
+  const embed = Object.assign(new EmbedResultInjection(), {
+    platform: { id: 'deepseek' }, taskPromptGeneration: 7, taskPromptInjected: true,
+    interceptor: { prefix: prefix(), enabled: true, promptInjectionEnabled: true, injectedCount: 0, taskStartedAt: 100, taskFinishedAt: null },
+    liveContents: () => ({ getURL: () => 'https://example.test/' + (conversationId ?? '') }), getInterceptorStatus: () => ({}),
+    contextUsage: { confirmedUsage: value => usage.push(value) },
+    handlers: {
+      planInjection: full => planInjection(ledger, full, 'deepseek'),
+      onInjectionSent(_id, plan) { assert.ok(plan); commits.push(plan); ledger = commitInjection(ledger, plan, 200); embed.planPrefix('https://example.test/' + conversationId) },
+      onRawSent(chars) { ledger = addInjectionTraffic(ledger, chars) }, onPromptInjected() {}, onInterceptor() {}
+    }
+  })
+  return { embed, commits, usage, ledger: () => ledger,
+    due() { ledger = addInjectionTraffic(ledger, injection.injectionBudget('deepseek')); return this.plan() },
+    plan() { const text = embed.planPrefix('https://example.test/' + (conversationId ?? '')); return { text, token: embed.injectionPlanToken } },
+    navigate(id) { conversationId = id },
+    report(payload) { embed.handlePageReport('[cmd-terminal] ' + JSON.stringify({ taskPromptGeneration: 7, ...payload })) }
+  }
+}
+
+test('mid-task result confirmation commits the full refresh before counting its result body', () => {
+  const f = resultLedgerFixture(), due = f.due(), before = f.ledger()
+  assert.equal(f.embed.injectionPlan.reason, 'budget')
+  f.report({ event: 'injected', prefixLength: due.text.length, injectionPlanToken: due.token, promptInjected: true })
+  f.report({ event: 'send-failed' })
+  assert.equal(f.ledger(), before, 'preparation or failure cannot reset the ledger')
+  f.report({ event: 'sent-raw', promptInjected: true, injectionPlanToken: due.token, textLength: 99, pagePath: '/chat-a',
+    contextUsage: { id: 'result-prefix', estimatedTokens: 123, characters: due.text.length + 2 } })
+  assert.equal(f.commits.length, 1); assert.equal(f.commits[0].mode, 'full')
+  assert.equal(f.ledger().charsSinceFull, 99)
+  assert.equal(f.ledger().fullAt, 200)
+  assert.equal(f.usage.length, 1)
+  assert.equal(f.embed.taskPromptGeneration, 7)
+  assert.equal(f.embed.interceptor.taskStartedAt, 100)
+  assert.equal(f.embed.interceptor.taskFinishedAt, null)
+  f.embed.confirmInjection({ event: 'sent-raw', promptInjected: true, injectionPlanToken: due.token })
+  assert.equal(f.commits.length, 1, 'a repeated acknowledgement cannot recommit the same full plan')
+})
+
+test('equal-length replans keep the exact submitted sections until acknowledgement', () => {
+  const f = resultLedgerFixture(), due = f.due()
+  const original = f.embed.injectionPlan
+  f.embed.interceptor.prefix = prefix(linux, tools.replace('读取文件。', '读取目录。'))
+  const newer = f.plan()
+  assert.equal(newer.text.length, due.text.length)
+  assert.notEqual(newer.token, due.token)
+  f.report({ event: 'sent-raw', promptInjected: true, injectionPlanToken: due.token, textLength: 15 })
+  assert.deepEqual(plain(f.commits[0].sections), plain(original.sections))
+  assert.equal(f.embed.injectionPlan.reason, 'changed', 'the newer tool section remains due after sending the old plan')
+  assert.equal(f.ledger().charsSinceFull, 15)
+})
+
+test('stale task, conversation and unknown plan acknowledgements cannot reset the injection ledger', () => {
+  for (const change of ['task', 'conversation', 'unknown']) {
+    const f = resultLedgerFixture(), due = f.due(), before = f.ledger()
+    if (change === 'task') f.embed.taskPromptGeneration++
+    if (change === 'conversation') f.navigate('chat-b')
+    f.report({ event: 'sent-raw', promptInjected: true, injectionPlanToken: change === 'unknown' ? 'missing-plan' : due.token,
+      textLength: 0, pagePath: '/chat-a' })
+    assert.equal(f.commits.length, 0, change)
+    assert.equal(f.ledger(), before, change)
+  }
+})
+
+test('an initial human send can commit its draft plan after the site creates the conversation', () => {
+  const f = resultLedgerFixture()
+  f.navigate(null); const draft = f.due()
+  f.navigate('new-chat')
+  f.report({ event: 'sent', promptInjected: true, injectionPlanToken: draft.token })
+  assert.equal(f.commits.length, 1)
+  assert.equal(f.ledger().charsSinceFull, 0)
+})
 
 test('the real prompt splits into its headed sections and keeps inline markers inside them', () => {
   const sections = splitPromptSections(prefix())

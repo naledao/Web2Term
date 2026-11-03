@@ -23,6 +23,17 @@ function fixture() {
 const state = { taskPromptInjected: true, taskPromptGeneration: 3, taskActive: true, currentPage: true }
 const settled = { event: 'task-finished', live: true, completed: false, taskPromptGeneration: 3 }
 
+test('automatic result injection logs counts and mode without copying prompt or result text', () => {
+  const f = fixture()
+  f.write('deepseek', { event: 'sent-raw', promptInjected: true, textLength: 123, taskPromptGeneration: 3,
+    text: 'private result', prefixHead: 'private prompt', injectionPlanToken: 'private-token' }, { ...state, injectionMode: 'full' })
+  assert.equal(f.records[0].event, 'sent-raw')
+  assert.equal(f.records[0].promptInjected, true)
+  assert.equal(f.records[0].textLength, 123)
+  assert.equal(f.records[0].injectionMode, 'full')
+  assert.ok(!JSON.stringify(f.records).includes('private'))
+})
+
 test('settled prose without a marker is an observation only for the current active task', () => {
   const f = fixture()
   const main = { ...state }, before = structuredClone(main)

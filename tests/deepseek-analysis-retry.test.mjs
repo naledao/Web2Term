@@ -15,25 +15,27 @@ function initializer(name) {
   return value.getText(pageSource)
 }
 const helpers = ['nativeEditRows', 'latestUserRow', 'nativeEditor', 'nativeEditRejection', 'startNativeEditRetry',
-  'nativeEditPoint', 'nativeEditWait', 'nativeRetryPrefix', 'giveUpSafetyLeak', 'resendAfterSafetyLeak', 'replyLeakKind', 'retryReplyByEditing', 'handleSafetyLeak']
+  'nativeEditControl', 'nativeEditWait', 'nativeRetryPrefix', 'giveUpSafetyLeak', 'resendAfterSafetyLeak', 'replyLeakKind', 'retryReplyByEditing', 'handleSafetyLeak']
 const code = helpers.map(name => `const ${name} = ${initializer(name)};`).join('\n')
 const tick = async () => { for (let i = 0; i < 8; i++) await Promise.resolve() }
+const ready = async f => { await tick(); f.advance(100); await tick() }
 
 function fixture() {
   const events = [], timers = [], sent = []
-  let now = 1000, opened = false, generating = false, failOpen = false, covered = false
+  let now = 1000, opened = false, generating = false, failOpen = false, covered = false, sendCovered = false, sendPresent = true
   const rules = { rowSelector: '[data-virtual-list-item-key]', buttonSelector: '.edit', editorSelector: '.editor', submitSelector: '.send',
     analysisLeakPattern: '^<analysis>\\s*\\S', safetyLeakPattern: '^<ds_safety>[\\s\\S]*</ds_safety>\\s*Safe$', retryStoppedByEditing: true }
-  const edit = { x: 10 }, send = { x: 30 }
+  const edit = { x: 10, y: 0 }, send = { x: 30, y: 0 }
+  let sendButton = send
   for (const button of [edit, send]) Object.assign(button, {
-    scrollIntoView() {}, getBoundingClientRect: () => ({ left: button.x, top: 0, width: 10, height: 10 }),
+    scrollIntoView() {}, getBoundingClientRect: () => ({ left: button.x, top: button.y, width: 10, height: 10 }),
     contains: node => node === button
   })
   const editor = { value: '【上一条命令执行结果】\n目录: /work/project\n原始完整输出，不得重写。', closest: () => row }
   const row = { key: '1', getAttribute: () => row.key, matches: () => false,
-    querySelector: selector => selector === rules.buttonSelector ? edit : selector === rules.submitSelector ? send : null,
+    querySelector: selector => selector === rules.buttonSelector ? edit : selector === rules.submitSelector && sendPresent ? sendButton : null,
     querySelectorAll: selector => selector === rules.editorSelector && opened ? [editor] : [],
-    contains: node => [edit, send, editor, row].includes(node) }
+    contains: node => [edit, sendButton, editor, row].includes(node) }
   const reply = { assistant: true, id: 'reply-2', markdown: '<analysis> 让我梳理整个对话' }
   const rows = [row, reply]
   const composer = { value: '' }
@@ -48,7 +50,7 @@ function fixture() {
     focusRowPosition: node => node === reply ? '2' : node?.key || null,
     queryAll: selectors => selectors.includes(rules.rowSelector) ? rows : selectors.includes(rules.editorSelector) && opened ? [editor] : [],
     queryAllAssistant: () => rows, latestReplyNode: nodes => nodes.at(-1), turnKeyOf: node => node.id,
-    isAssistantTurn: node => !!node.assistant, isVisibleElement: node => !!node,
+    isAssistantTurn: node => !!node.assistant, isVisibleElement: node => !!node && node.visible !== false,
     collapse: text => String(text || '').replace(/\s+/g, ' ').trim(),
     getComposer: () => composer, readComposer: node => node?.value || '',
     hasDraftImageAttachment: () => false, draftAttachmentEvidence: () => false, attachmentSnapshot: () => ({}),
@@ -57,8 +59,9 @@ function fixture() {
     findStopButton: () => generating ? {} : null,
     readReplyMarkdown: node => node.markdown,
     setReplyWaiting(since) { state.awaitingReplySince = since }, scheduleCheck() {},
-    setTimeout(callback, delay) { timers.push({ callback, delay }) },
-    document: { elementFromPoint: x => covered ? {} : x === 15 ? edit : send },
+    setTimeout(callback, delay) { timers.push({ callback, at: now + delay }) },
+    window: { innerWidth: 1000, innerHeight: 800 },
+    document: { elementFromPoint: x => covered || (sendCovered && x !== 15) ? { contains: () => false } : x === 15 ? edit : sendButton },
     report(event) {
       events.push(event)
       if (['analysis-leak-edit-click', 'stopped-retry-edit-click'].includes(event.reason) && !failOpen) opened = true
@@ -69,10 +72,16 @@ function fixture() {
   return { context, state, row, reply, rows, composer, editor, edit, send, events, sent,
     recover() { return context.api.handleSafetyLeak(reply.id, reply.markdown, reply) },
     stopGenerating() { generating = false },
+    startGenerating() { generating = true },
     failOpen() { failOpen = true }, cover() { covered = true },
+    coverSend(value = true) { sendCovered = value },
+    showSend(value) { sendPresent = value },
+    replaceSend(button) { sendButton = button },
+    closeEditor() { opened = false },
+    pendingTimers: () => timers.length,
     advance(delay) {
       now += delay
-      const due = timers.filter(timer => timer.delay === delay)
+      const due = timers.filter(timer => timer.at <= now)
       for (const timer of due) { timers.splice(timers.indexOf(timer), 1); timer.callback() }
     }
   }
@@ -81,7 +90,7 @@ function fixture() {
 test('terminal-mode analysis recovery clicks edit then send and preserves the complete original message', async () => {
   const f = fixture(), original = f.editor.value
   assert.equal(f.recover(), true)
-  await tick()
+  await ready(f)
   assert.deepEqual(f.events.filter(event => event.reason.endsWith('-click')).map(event => event.reason), ['analysis-leak-edit-click', 'analysis-leak-send-click'])
   assert.deepEqual(f.sent, [original])
   f.advance(200)
@@ -94,7 +103,7 @@ test('repeated abnormal replies share a two-attempt budget without requiring com
   const f = fixture()
   for (let attempt = 0; attempt < 2; attempt++) {
     assert.equal(f.recover(), true)
-    await tick()
+    await ready(f)
     f.advance(200)
     f.stopGenerating()
   }
@@ -116,7 +125,7 @@ test('a native user Stop suppresses every automatic resend until a newer reply w
     // The user's next confirmed message starts its own reply and may recover normally.
     f.state.awaitingReplySince++
     assert.equal(f.context.api.retryReplyByEditing(f.reply.id, 'analysis'), true)
-    await tick()
+    await ready(f)
     assert.equal(f.sent.length, 1)
   }
 })
@@ -128,7 +137,7 @@ test('stopped replies edit and resend the original user message even with only a
   f.context.PAGE.focus = { reasoningSelectors: ['.reasoning'] }
   f.rows.push(reasoning)
   assert.equal(f.context.api.retryReplyByEditing(reasoning.id, 'stopped'), true)
-  await tick()
+  await ready(f)
   assert.deepEqual(f.events.filter(event => event.reason.endsWith('-click')).map(event => event.reason), ['stopped-retry-edit-click', 'stopped-retry-send-click'])
   assert.deepEqual(f.sent, [original])
   f.advance(200)
@@ -138,9 +147,9 @@ test('stopped replies edit and resend the original user message even with only a
 
 test('stopped and analysis recovery share one resend limit for the same user message', async () => {
   const f = fixture()
-  f.recover(); await tick(); f.advance(200); f.stopGenerating()
+  f.recover(); await ready(f); f.advance(200); f.stopGenerating()
   assert.equal(f.context.api.retryReplyByEditing(f.reply.id, 'stopped'), true)
-  await tick(); f.advance(200); f.stopGenerating()
+  await ready(f); f.advance(200); f.stopGenerating()
   assert.equal(f.context.api.retryReplyByEditing(f.reply.id, 'stopped'), false)
   assert.equal(f.sent.length, 2)
   assert.ok(f.events.some(event => event.reason === 'stopped-retry-limit'))
@@ -171,6 +180,118 @@ test('conversation, task, native Stop, row or generation changes while opening t
     if (condition === 'new-send') f.context.safetyLeak = { count: 0, busy: false, failedKey: null }
     await tick()
     assert.equal(f.sent.length, 0, condition)
+  }
+})
+
+test('stopped recovery waits for a late, hidden, disabled, covered or offscreen send control', async () => {
+  for (const condition of ['missing', 'hidden', 'disabled', 'covered', 'out-of-viewport']) {
+    const f = fixture(), original = f.editor.value
+    if (condition === 'missing') f.showSend(false)
+    if (condition === 'hidden') f.send.visible = false
+    if (condition === 'disabled') f.send.disabled = true
+    if (condition === 'covered') f.coverSend()
+    if (condition === 'out-of-viewport') f.send.y = 900
+    assert.equal(f.context.api.retryReplyByEditing(f.reply.id, 'stopped'), true)
+    await ready(f)
+    assert.equal(f.sent.length, 0, condition)
+    assert.equal(f.events.some(event => event.reason === 'stopped-retry-failed'), false, 'temporary unavailability must keep waiting')
+
+    f.showSend(true); f.send.visible = true; f.send.disabled = false; f.coverSend(false); f.send.y = 50
+    f.advance(100); await tick()
+    assert.equal(f.sent.length, 0, 'the first usable position still needs a second measurement')
+    f.advance(100); await tick()
+    assert.deepEqual(f.sent, [original], condition)
+    const click = f.events.find(event => event.reason === 'stopped-retry-send-click')
+    assert.equal(click.nativeEditControlState, 'ready')
+    assert.equal(click.nativeEditWaitMs, 300)
+    assert.equal(click.y, 55)
+    f.advance(1000); await tick()
+    assert.equal(f.sent.length, 1, 'waiting for generation must not request another click')
+  }
+})
+
+test('send measurement waits for scrolling and expansion to settle before clicking the final position', async () => {
+  const f = fixture()
+  f.send.y = 900
+  let scrolled = false
+  f.send.scrollIntoView = options => {
+    assert.equal(options.behavior, 'instant')
+    if (scrolled) return
+    scrolled = true
+    f.context.setTimeout(() => { f.send.y = 100 }, 100)
+  }
+  f.recover(); await tick()
+  f.advance(100); await tick()
+  assert.equal(f.sent.length, 0)
+  f.send.y = 140 // An expanded message moves the button after scrolling.
+  f.advance(100); await tick()
+  assert.equal(f.sent.length, 0, 'moving coordinates reset the stability check')
+  f.advance(100); await tick()
+  assert.equal(f.sent.length, 1)
+  assert.equal(f.events.find(event => event.reason === 'analysis-leak-send-click').y, 145)
+})
+
+test('a replaced send button requires fresh measurements even at the same position', async () => {
+  const f = fixture()
+  f.recover(); await tick()
+  const replacement = { ...f.send }
+  replacement.contains = node => node === replacement
+  f.replaceSend(replacement)
+  f.advance(100); await tick()
+  assert.equal(f.sent.length, 0)
+  f.advance(100); await tick()
+  assert.equal(f.sent.length, 1)
+})
+
+test('send readiness times out with a specific reason and never repeatedly submits the same stopped reply', async () => {
+  for (const condition of ['missing', 'hidden', 'disabled', 'covered', 'out-of-viewport', 'unstable']) {
+    const f = fixture()
+    if (condition === 'missing') f.showSend(false)
+    if (condition === 'hidden') f.send.visible = false
+    if (condition === 'disabled') f.send.disabled = true
+    if (condition === 'covered') f.coverSend()
+    if (condition === 'out-of-viewport') f.send.y = 900
+    f.context.api.retryReplyByEditing(f.reply.id, 'stopped'); await tick()
+    for (let i = 0; i < 30; i++) {
+      if (condition === 'unstable') f.send.y += 1
+      f.advance(100); await tick()
+    }
+    assert.equal(f.sent.length, 0, condition)
+    const failure = f.events.find(event => event.reason === 'stopped-retry-failed')
+    assert.equal(failure.step, 'submit', condition)
+    assert.equal(failure.nativeEditControlState, condition)
+    assert.equal(failure.nativeEditWaitMs, 3000)
+    assert.equal(f.context.nativeEditRetry, null)
+    assert.equal(f.context.safetyLeak.busy, false)
+    assert.equal(f.pendingTimers(), 0)
+    assert.equal(f.context.api.retryReplyByEditing(f.reply.id, 'stopped'), false)
+    assert.equal(f.events.filter(event => event.reason === 'stopped-retry-edit-click').length, 1)
+  }
+})
+
+test('changes during the send wait cancel recovery without clicking or overwriting the editor', async () => {
+  for (const condition of ['path', 'generation', 'stop', 'native-stop', 'row', 'new-send', 'editor-text', 'cancel-edit', 'draft', 'generating', 'question']) {
+    const f = fixture()
+    f.send.disabled = true
+    f.recover(); await tick()
+    if (condition === 'path') f.context.location.pathname = '/a/chat/s/two'
+    if (condition === 'generation') f.state.taskPromptGeneration++
+    if (condition === 'stop') f.state.taskActive = false
+    if (condition === 'native-stop') f.context.userStoppedAt = f.state.awaitingReplySince
+    if (condition === 'row') f.row.key = 'another-user'
+    if (condition === 'new-send') f.context.safetyLeak = { count: 0, busy: false, failedKey: null }
+    if (condition === 'editor-text') f.editor.value += '\n用户补充的内容'
+    if (condition === 'cancel-edit') f.closeEditor()
+    if (condition === 'draft') f.composer.value = '用户的新草稿'
+    if (condition === 'generating') f.startGenerating()
+    if (condition === 'question') f.state.pendingQuestion = { id: 'pending' }
+    const text = f.editor.value
+    f.send.disabled = false
+    await ready(f)
+    assert.equal(f.sent.length, 0, condition)
+    assert.equal(f.editor.value, text, condition)
+    assert.equal(f.pendingTimers(), 0, condition)
+    assert.equal(f.context.nativeEditRetry, null, condition)
   }
 })
 

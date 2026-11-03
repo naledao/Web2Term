@@ -468,6 +468,13 @@ export class CommandRunner {
   private taskResult(record: ExecutionRecord, text: string): string {
     return record.taskContext && this.deps.taskTools ? this.deps.taskTools.format(record.taskContext, text) : text
   }
+  /** Preserve a definitely unsent result when a later execution or pause takes over. Never rerun its command. */
+  private retainTaskResult(record: ExecutionRecord, text: string): void {
+    if (!record.taskContext || !this.taskCurrent(record)) return
+    this.taskTextResult = { record: structuredClone(record), text }
+    this.taskEvent(record, { stage: 'pending', message: '命令结果已保存，等待当前操作结束后仅重试回传，不重新执行。' })
+    this.scheduleTaskResults()
+  }
   private clearTaskResults(): void {
     this.taskTextResult = null
     this.taskFileResult = null
@@ -1114,6 +1121,7 @@ export class CommandRunner {
     }
     if (request !== this.executionRequest) {
       this.diagnostic({ event: 'skipped', reason: 'superseded', messageId, ownerConversationId: conversationId, requestId: request })
+      this.taskEvent(record, { stage: 'skipped', execution: 'not_executed', message: '命令在准备期间被后续操作取代，尚未执行。' })
       this.deps.store.setExecutionStatus(messageId, 'skipped')
       this.broadcastExecutions(conversationId)
       return
@@ -1195,6 +1203,7 @@ export class CommandRunner {
 
     if (request !== this.executionRequest) {
       this.diagnostic({ event: 'delivery', reason: 'superseded', messageId, ownerConversationId: conversationId })
+      this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
       return
     }
 
@@ -1214,6 +1223,7 @@ export class CommandRunner {
     // for a click instead of running on its own.
     if (this.automation.paused) {
       this.diagnostic({ event: 'delivery', reason: 'paused', messageId, ownerConversationId: conversationId })
+      this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
       return
     }
 
@@ -1233,6 +1243,7 @@ export class CommandRunner {
     const owner = this.deps.currentConversationId()
     if (owner !== conversationId) {
       this.diagnostic({ event: 'delivery', reason: 'conversation-changed', messageId, ownerConversationId: conversationId })
+      this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
       this.appendLine({
         kind: 'error',
         text:
@@ -1263,12 +1274,12 @@ export class CommandRunner {
       if (this.disposed) return
       if (request !== this.executionRequest) {
         this.diagnostic({ event: 'delivery', reason: 'superseded', messageId, ownerConversationId: conversationId })
-        this.deps.store.setExecutionStatus(messageId, 'skipped')
-        this.broadcastExecutions(conversationId)
+        this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
         return
       }
       if (this.deps.currentConversationId() !== conversationId) {
         this.diagnostic({ event: 'delivery', reason: 'conversation-changed', messageId, ownerConversationId: conversationId })
+        this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
         this.appendLine({
           kind: 'error',
           text: '等待期间对话已切走，结果未回传。'
@@ -1281,6 +1292,7 @@ export class CommandRunner {
     // Pause/end can happen while waiting to return a result.
     if (this.automation.paused || request !== this.executionRequest) {
       this.diagnostic({ event: 'delivery', reason: this.automation.paused ? 'paused' : 'superseded', messageId, ownerConversationId: conversationId })
+      this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
       return
     }
 
@@ -1288,6 +1300,7 @@ export class CommandRunner {
     if (!this.terminalModeOn()) {
       this.appendLine({ kind: 'notice', text: '终端模式已关闭，结果未回传给模型' })
       this.diagnostic({ event: 'delivery', reason: 'terminal-mode-off', messageId, ownerConversationId: conversationId })
+      this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
       this.flushTerminal()
       return
     }

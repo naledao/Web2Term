@@ -65,7 +65,8 @@ export function replyDiagnosticMetadata(
     'taskPromptGeneration', 'assistantTurnCount', 'hiddenTurnCount', 'replyTextLength', 'codeBlockCount', 'textLength', 'objectCount',
     'selectedNodeTextLength', 'replyTextContentLength', 'visibleAssistantTurnCount', 'lastVisibleReplyTextLength',
     'lastVisibleReplyCodeBlockCount', 'visibleAnswerMarkerCount', 'visibleAnswerTextLength',
-    'visibleAnswerCodeBlockCount', 'visibleCodeBlockCount', 'lastScanAgeMs', 'lastMutationAgeMs', 'attempt', 'parseErrorOffset', 'parseFailureToken'
+    'visibleAnswerCodeBlockCount', 'visibleCodeBlockCount', 'lastScanAgeMs', 'lastMutationAgeMs', 'attempt', 'parseErrorOffset', 'parseFailureToken',
+    'nativeEditWaitMs'
   ] as const) {
     const value = payload[key]
     if (Number.isSafeInteger(value) && Number(value) >= 0) details[key] = Number(value)
@@ -78,7 +79,10 @@ export function replyDiagnosticMetadata(
   ] as const) {
     if (typeof payload[key] === 'boolean') details[key] = payload[key]!
   }
-  if (['row', 'edit-button', 'editor', 'submit', 'task', 'generation', 'error'].includes(payload.step ?? '')) details.step = payload.step!
+  if (['row', 'row-changed', 'context', 'edit-button', 'editor', 'submit', 'task', 'generation', 'error'].includes(payload.step ?? '')) details.step = payload.step!
+  if (['missing', 'outside-row', 'hidden', 'disabled', 'out-of-viewport', 'covered', 'unstable', 'ready'].includes(payload.nativeEditControlState ?? '')) {
+    details.nativeEditControlState = payload.nativeEditControlState!
+  }
   for (const key of ['replyKind', 'lastVisibleReplyKind', 'visibleAnswerKind'] as const) {
     if (['empty', 'questions', 'read-files', 'command', 'computer', 'prose'].includes(payload[key] ?? '')) details[key] = payload[key]!
   }
