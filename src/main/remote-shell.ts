@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
+import { stripVTControlCharacters } from 'node:util'
+import { powerShellEnvelope } from './powershell-terminal'
 import type { EventEmitter } from 'node:events'
 import { IDLE_TIMEOUT_MS, MAX_RUNTIME_MS } from './shell'
 import type { ExecutionShell, ShellResult } from './shell'
-import { REMOTE_DETECT_COMMAND } from './environment'
+import { DETECT_COMMAND, REMOTE_DETECT_COMMAND } from './environment'
 import type { EnvironmentKind } from '../shared/types'
 import type { RemoteProcessIdentity } from './ssh-command-stop'
 
@@ -83,8 +85,8 @@ export function buildEnvelope(token: string, seq: number, command: string, separ
  * changes on this channel are reported so the workbench follows the executor.
  */
 export class RemoteShell implements ExecutionShell {
-  readonly kind: EnvironmentKind = 'posix'
-  readonly probeCommand: string = REMOTE_DETECT_COMMAND
+  get kind(): EnvironmentKind { return this.options.kind ?? 'posix' }
+  get probeCommand(): string { return this.kind === 'windows' ? DETECT_COMMAND : REMOTE_DETECT_COMMAND }
 
   private readonly token = randomUUID().replace(/-/g, '').slice(0, 10)
   private seq = 0
@@ -104,6 +106,7 @@ export class RemoteShell implements ExecutionShell {
   constructor(
     private readonly stream: RemoteShellChannel,
     private readonly options: {
+      kind?: EnvironmentKind
       /** Called with decoded output as it arrives, for live display. */
       onOutput?: (chunk: string) => void
       /** Called when the channel goes away; the manager decides whether to reopen. */
@@ -145,8 +148,9 @@ export class RemoteShell implements ExecutionShell {
   async cd(path: string): Promise<boolean> {
     const target = path.trim()
     if (target === '') return false
-    const quoted = "'" + target.replace(/'/g, "'\\''") + "'"
-    const result = await this.run('cd ' + quoted, undefined, true)
+    const command = this.kind === 'windows' ? "Set-Location -LiteralPath '" + target.replace(/'/g, "''") + "'"
+      : "cd '" + target.replace(/'/g, "'\\''") + "'"
+    const result = await this.run(command, undefined, true)
     return result.exitCode === 0 && !result.rejected && !result.sessionLost && !result.timedOut
   }
 
@@ -190,7 +194,8 @@ export class RemoteShell implements ExecutionShell {
 
       try {
         // Leading newline separates the marker from output without a trailing LF.
-        this.stream.write(buildEnvelope(this.token, seq, cleaned, true, Boolean(this.options.stopProcess && !this.processIdentity)))
+        this.stream.write(this.kind === 'windows' ? powerShellEnvelope(this.token, seq, cleaned)
+          : buildEnvelope(this.token, seq, cleaned, true, Boolean(this.options.stopProcess && !this.processIdentity)))
       } catch {
         this.clearPending()
         resolve(this.reject('写入远端终端失败。'))
@@ -390,6 +395,7 @@ export class RemoteShell implements ExecutionShell {
   }
 
   private handleLine(line: string): void {
+    if (this.kind === 'windows') line = stripVTControlCharacters(line)
     const identityPrefix = `__CT_SHELL_${this.token}__ `
     if (this.options.stopProcess && line.startsWith(identityPrefix)) {
       const match = /^(\d+) ([A-Za-z0-9+/]+={0,2})$/.exec(line.slice(identityPrefix.length))

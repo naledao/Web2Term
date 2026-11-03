@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { stripVTControlCharacters } from 'node:util'
+import { powerShellBootstrap } from './powershell-terminal'
 import { RemoteShell } from './remote-shell'
-import { REMOTE_DETECT_COMMAND } from './environment'
+import { DETECT_COMMAND, REMOTE_DETECT_COMMAND } from './environment'
 import type { ExecutionShell, ShellResult } from './shell'
 import type { Web2termConnection } from './web2term-connection'
-import type { TerminalState, Web2termTerminalOutput } from '../shared/types'
+import type { EnvironmentKind, TerminalState, Web2termTerminalOutput } from '../shared/types'
 
 export interface Web2termSessionBinding {
   agentId: string
@@ -14,6 +16,7 @@ export interface Web2termSessionBinding {
   /** Absent in older saves; those sessions resume by default. Explicit close stores false. */
   reconnect?: boolean
   cwd?: string
+  shellKind?: EnvironmentKind
 }
 
 /** Stable device/account identity, also used when inheriting saved directory notes. */
@@ -29,7 +32,8 @@ export function parseWeb2termBinding(value: string | null): Web2termSessionBindi
       && typeof item.userId === 'string' && item.userId) {
       return { agentId: item.agentId, deviceName: item.deviceName, backendUrl: item.backendUrl, userId: item.userId,
         reconnect: item.reconnect !== false,
-        cwd: typeof item.cwd === 'string' && item.cwd.startsWith('/') && item.cwd.length <= 32768 && !item.cwd.includes('\0') ? item.cwd : '' }
+        shellKind: item.shellKind === 'windows' ? 'windows' : 'posix',
+        cwd: typeof item.cwd === 'string' && (item.cwd.startsWith('/') || (item.shellKind === 'windows' && /^(?:[A-Za-z]:[\\/]|\\\\)/u.test(item.cwd))) && item.cwd.length <= 32768 && !item.cwd.includes('\0') ? item.cwd : '' }
     }
   } catch { /* Ignore invalid settings rather than treating them as local sessions. */ }
   return null
@@ -87,8 +91,8 @@ class RelayChannel extends EventEmitter {
 
 /** One managed workspace owns one device PTY, shared by manual and model commands. */
 export class Web2termShell implements ExecutionShell {
-  readonly kind = 'posix' as const
-  readonly probeCommand = REMOTE_DETECT_COMMAND
+  get kind(): EnvironmentKind { return this.binding.shellKind ?? 'posix' }
+  get probeCommand(): string { return this.kind === 'windows' ? DETECT_COMMAND : REMOTE_DETECT_COMMAND }
   readonly hostId: string
   private sessionId: string | null = null
   private connectionId = ''
@@ -182,7 +186,10 @@ export class Web2termShell implements ExecutionShell {
         this.clearBootTimer()
         if (this.closeRequested && !this.enabled && entry?.status !== 'closed') this.closeUnconfirmed = true
         if (!this.wantOpen && !this.closeRequested) this.update(entry?.status === 'error' ? 'error' : 'disconnected', entry?.message || '设备终端已断开，请重新连接。')
-      } else if (entry.status === 'ready' && !this.channel && this.enabled) this.bootstrap()
+      } else if (entry.status === 'ready' && !this.channel && this.enabled) {
+        this.binding.shellKind = /(?:^|[\\/])(?:pwsh|powershell)(?:\.exe)?$/iu.test(entry.shell) ? 'windows' : 'posix'
+        this.bootstrap()
+      }
       else if (entry.status === 'closing') {
         if (['CLOSE_TIMEOUT', 'CLOSE_SEND_FAILED'].includes(entry.errorCode)) {
           this.update('error', '设备尚未确认终端关闭，请再次关闭或重新连接。')
@@ -261,7 +268,7 @@ export class Web2termShell implements ExecutionShell {
       this.connection.terminals.close(id); this.clearBootTimer()
       this.update(this.enabled ? 'connecting' : 'closing', this.enabled ? '正在结束设备终端…' : '正在关闭设备终端…')
     })
-    this.shell = new RemoteShell(this.channel, { onOutput: chunk => this.onOutput(chunk) })
+    this.shell = new RemoteShell(this.channel, { kind: this.kind, onOutput: chunk => this.onOutput(chunk) })
     // Remove PTY echo/canonical line limits and prompts before command framing.
     // The initial interactive shell execs sh; this still occupies exactly one PTY.
     this.bootTimer = setTimeout(() => {
@@ -271,7 +278,8 @@ export class Web2termShell implements ExecutionShell {
     }, 10_000)
     this.bootTimer.unref()
     try {
-      this.channel.write(`stty -echo -icanon && { unset ENV BASH_ENV; export PS1='' PS2='' TERM=dumb; printf '\\n%s\\n' '${this.bootToken}'; if command -v bash >/dev/null 2>&1; then export SHELL="$(command -v bash)"; exec "$SHELL" --noprofile --norc +i -s; else export SHELL=/bin/sh; exec /bin/sh +i -s; fi; }\n`)
+      this.channel.write(this.kind === 'windows' ? powerShellBootstrap(this.bootToken)
+        : `stty -echo -icanon && { unset ENV BASH_ENV; export PS1='' PS2='' TERM=dumb; printf '\\n%s\\n' '${this.bootToken}'; if command -v bash >/dev/null 2>&1; then export SHELL="$(command -v bash)"; exec "$SHELL" --noprofile --norc +i -s; else export SHELL=/bin/sh; exec /bin/sh +i -s; fi; }\n`)
     } catch {
       this.connection.terminals.recordShellEvent(id, 'shell_init_failed')
       this.channel.close(); this.update('error', '无法初始化设备 Shell，请重新连接。')
@@ -289,7 +297,8 @@ export class Web2termShell implements ExecutionShell {
     }
     let newline: number
     while ((newline = this.bootBuffer.indexOf('\n')) >= 0) {
-      const line = this.bootBuffer.subarray(0, newline).toString('utf8').replace(/\r$/, '')
+      const raw = this.bootBuffer.subarray(0, newline).toString('utf8').replace(/\r$/, '')
+      const line = this.kind === 'windows' ? stripVTControlCharacters(raw) : raw
       this.bootBuffer = this.bootBuffer.subarray(newline + 1)
       if (line !== this.bootToken) continue
       this.bootToken = ''; this.clearBootTimer()
@@ -302,8 +311,9 @@ export class Web2termShell implements ExecutionShell {
 
   private async finishBootstrap(shell: RemoteShell, channel: RelayChannel): Promise<void> {
     if (this.lastCwd) {
-      const path = "'" + this.lastCwd.replace(/'/g, "'\\''") + "'"
-      const result = await shell.run('cd ' + path, 10_000, true)
+      const command = this.kind === 'windows' ? "Set-Location -LiteralPath '" + this.lastCwd.replace(/'/g, "''") + "'"
+        : "cd '" + this.lastCwd.replace(/'/g, "'\\''") + "'"
+      const result = await shell.run(command, 10_000, true)
       this.lastCwd = result.cwd
     }
     if (this.disposed || !this.enabled || this.shell !== shell || this.channel !== channel || !shell.alive) return

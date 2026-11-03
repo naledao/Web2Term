@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import * as path from 'node:path'
 import * as stringDecoder from 'node:string_decoder'
+import * as util from 'node:util'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
 import ts from 'typescript'
@@ -30,6 +31,8 @@ const directory = load('../src/shared/ssh-directory.ts')
 const remote = load('../src/main/remote-shell.ts', {
   'node:crypto': crypto,
   'node:string_decoder': stringDecoder,
+  'node:util': util,
+  './powershell-terminal': {},
   './shell': { IDLE_TIMEOUT_MS: 5000, MAX_RUNTIME_MS: 10000 },
   './environment': { REMOTE_DETECT_COMMAND: 'fixture probe' }
 })

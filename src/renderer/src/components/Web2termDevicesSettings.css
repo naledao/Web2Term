@@ -1,4 +1,17 @@
 .settings-devices { min-width:0; }
+.settings-devices__local { display:grid; gap:14px; margin-bottom:24px; padding:20px; border:1px solid #e1e6f0; border-radius:14px; background:#fff; }
+.settings-devices__local-heading { display:flex; align-items:flex-start; flex-wrap:wrap; gap:16px; }
+.settings-devices__local-heading > div { flex:1 1 260px; }
+.settings-devices__local-heading strong { color:#25314a; font-size:16px; }
+.settings-devices__local-heading p,.settings-devices__local-help,.settings-devices__local-message { margin:6px 0 0; color:#667085; font-size:13px; line-height:1.8; }
+.settings-devices__local-status { display:flex; gap:20px; color:#667085; font-size:13px; }
+.settings-devices__local .settings-devices__log { margin:0; }
+.workspace[data-theme='dark'] .settings-devices__local { border-color:#3a4254; background:#252a36; }
+.workspace[data-theme='dark'] .settings-devices__local-heading strong { color:#e7edf7; }
+.workspace[data-theme='dark'] .settings-devices__local-heading p,
+.workspace[data-theme='dark'] .settings-devices__local-help,
+.workspace[data-theme='dark'] .settings-devices__local-message,
+.workspace[data-theme='dark'] .settings-devices__local-status { color:#aab6cd; }
 .settings-devices__toolbar { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:16px; margin-bottom:22px; }
 .settings-devices__toolbar button { flex:none; }
 .settings-devices__count { margin:0 0 12px; color:#667085; font-size:14px; }

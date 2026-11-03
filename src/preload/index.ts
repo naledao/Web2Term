@@ -16,6 +16,8 @@ import type { FocusFileLinkRequest, FocusFilePreviewRequest, FocusFilePreviewRes
 import type { FocusHtmlPreviewRequest, FocusHtmlPreviewOutcome } from '../shared/focus-html-preview'
 import type { RemoteRipgrepRequest, RemoteRipgrepState, RemoteRipgrepTaskResult } from '../shared/remote-ripgrep'
 import { contextBridge, ipcRenderer } from 'electron'
+import { WINDOWS_AGENT_GET, WINDOWS_AGENT_SET_ENABLED, WINDOWS_AGENT_CHANGED } from '../shared/windows-agent'
+import type { WindowsAgentState } from '../shared/windows-agent'
 import type { IpcRendererEvent } from 'electron'
 import { IpcChannels } from '../shared/types'
 import type { QuestionChatAction, QuestionChatState } from '../shared/deepseek-question'
@@ -388,6 +390,13 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   loginBackend: (draft: BackendLoginDraft): Promise<BackendAuthResult<BackendAuthState>> =>
     ipcRenderer.invoke(IpcChannels.backendLogin, draft),
   getWeb2termConnection: (): Promise<Web2termConnectionState> => ipcRenderer.invoke(IpcChannels.web2termGetState),
+  getWindowsAgent: (): Promise<WindowsAgentState> => ipcRenderer.invoke(WINDOWS_AGENT_GET),
+  setWindowsAgentEnabled: (enabled: boolean): Promise<WindowsAgentState> => ipcRenderer.invoke(WINDOWS_AGENT_SET_ENABLED, enabled),
+  onWindowsAgentChanged: (listener: (state: WindowsAgentState) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: WindowsAgentState): void => listener(state)
+    ipcRenderer.on(WINDOWS_AGENT_CHANGED, handler)
+    return () => { ipcRenderer.removeListener(WINDOWS_AGENT_CHANGED, handler) }
+  },
   listWeb2termDevices: (): Promise<BackendAuthResult<Web2termDevice[]>> => ipcRenderer.invoke(IpcChannels.web2termListDevices),
   renameWeb2termDevice: (draft: Web2termDeviceRenameDraft): Promise<BackendAuthResult<Web2termDeviceRenameDraft>> => ipcRenderer.invoke(IpcChannels.web2termRenameDevice, draft),
   connectWeb2term: (draft: Web2termConnectDraft): Promise<Web2termConnectionState> => ipcRenderer.invoke(IpcChannels.web2termConnect, draft),

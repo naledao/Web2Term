@@ -1,10 +1,11 @@
 import { posix, win32 } from 'node:path'
 
 /** Use the shell's absolute cwd; Windows aliases share a key, POSIX case remains significant. */
-export function normalizeTerminalNotesDirectory(scope: 'local' | 'ssh', directory: string): string {
+export function normalizeTerminalNotesDirectory(scope: 'local' | 'ssh', directory: string, dialect?: 'windows' | 'posix'): string {
   const value = directory.trim()
   if (!value) return ''
-  if (scope === 'ssh') {
+  const windowsPath = /^(?:[a-z]:[\\/]|\\\\)/i.test(value)
+  if (scope === 'ssh' && dialect !== 'windows' && !windowsPath) {
     if (!posix.isAbsolute(value)) return ''
     return posix.normalize(value).replace(/\/+$/, '') || '/'
   }

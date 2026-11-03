@@ -154,7 +154,9 @@ func (s *Server) relay(ctx context.Context, p *peer, fromAgent bool) {
 			return
 		}
 		var message struct {
-			Type string `json:"type"`
+			Type      string          `json:"type"`
+			SessionID string          `json:"session_id"`
+			Payload   json.RawMessage `json:"payload"`
 		}
 		if json.Unmarshal(data, &message) != nil || strings.TrimSpace(message.Type) == "" {
 			_ = p.conn.Close(websocket.StatusUnsupportedData, "invalid json or missing message type")
@@ -175,7 +177,18 @@ func (s *Server) relay(ctx context.Context, p *peer, fromAgent bool) {
 			}
 			continue
 		}
-		if target := s.hub.target(p, fromAgent); target != nil {
+		var failure struct {
+			Code string `json:"code"`
+		}
+		if fromAgent && message.Type == "terminal_error" {
+			_ = json.Unmarshal(message.Payload, &failure)
+		}
+		target, allowed := s.hub.terminalTarget(p, fromAgent, message.Type, message.SessionID, failure.Code)
+		if !allowed {
+			_ = p.conn.Close(websocket.StatusPolicyViolation, "too many pending terminal sessions")
+			return
+		}
+		if target != nil {
 			if err := writeSocket(ctx, target, data); err != nil {
 				// Losing the target must not disconnect an otherwise healthy agent.
 				_ = target.CloseNow()

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { BackendAuthState, Web2termDevice } from '@shared/types'
 import LinuxAgentDownload from './LinuxAgentDownload'
+import WindowsAgentSettings from './WindowsAgentSettings'
 import './Web2termDevicesSettings.css'
 
 interface Props {
@@ -14,6 +15,7 @@ export default function Web2termDevicesSettings({ onOpenBackend, onBusyChange }:
   const [devices, setDevices] = useState<Web2termDevice[]>([])
   const [refreshing, setRefreshing] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [agentBusy, setAgentBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [logPath, setLogPath] = useState<string | null>(null)
@@ -79,9 +81,9 @@ export default function Web2termDevicesSettings({ onOpenBackend, onBusyChange }:
   }, [refresh])
 
   useEffect(() => {
-    onBusyChange(saving)
+    onBusyChange(saving || agentBusy)
     return () => onBusyChange(false)
-  }, [saving, onBusyChange])
+  }, [saving, agentBusy, onBusyChange])
 
   const saveName = async (): Promise<void> => {
     if (!editing || reading.current || writing.current) return
@@ -113,6 +115,7 @@ export default function Web2termDevicesSettings({ onOpenBackend, onBusyChange }:
 
   return (
     <div className="settings-devices">
+      <WindowsAgentSettings onBusyChange={setAgentBusy} />
       <LinuxAgentDownload />
       <div className="settings-devices__toolbar">
         <button type="button" className="settings-outline-btn" disabled={refreshing || saving} onClick={() => void refresh()}>{refreshing ? '刷新中…' : '刷新设备'}</button>
@@ -130,7 +133,7 @@ export default function Web2termDevicesSettings({ onOpenBackend, onBusyChange }:
       {auth?.status === 'signed-in' ? (
         <div aria-busy={refreshing}>
           <p className="settings-devices__count">我的设备 · {devices.length}</p>
-          {!devices.length && !error ? <p className="settings-devices__empty">{refreshing ? '正在读取设备列表…' : '当前账号还没有设备，请在设备上登录同一账号并运行 web2term run。'}</p> : null}
+          {!devices.length && !error ? <p className="settings-devices__empty">{refreshing ? '正在读取设备列表…' : '当前账号还没有设备。Windows 电脑可开启上方本机远程终端；Linux 设备请登录同一账号并运行 web2term run。'}</p> : null}
           <ul className="settings-devices__list" aria-label="我的 web2term 设备">
             {devices.map((device) => (
               <li className="settings-devices__device" key={device.deviceId}>

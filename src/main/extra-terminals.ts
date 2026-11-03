@@ -120,7 +120,7 @@ export class ExtraTerminals {
     const entry = this.entries.get(id)
     const target = path.trim()
     if (!entry || target === '') return
-    const posix = entry.transport !== 'local' || entry.shell?.kind === 'posix'
+    const posix = entry.shell?.kind === 'posix' || (!entry.shell && entry.transport === 'ssh')
     const command = posix
       ? `cd ${posixQuote(target)}`
       : `Set-Location -LiteralPath '${target.replace(/'/g, "''")}'`

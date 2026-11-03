@@ -186,6 +186,17 @@ function parseReport(raw: string): Partial<EnvironmentInfo> | null {
   return null
 }
 
+/** A remote PowerShell report must never inherit the desktop machine's OS or home directory. */
+export function parseRemoteWindowsEnvironment(raw: string, remoteName: string, remoteTarget: string): EnvironmentInfo {
+  const reported = parseReport(raw)
+  return {
+    ...FALLBACK_ENVIRONMENT, kind: 'windows', osCaption: '', osVersion: '', buildNumber: '',
+    architecture: '', workingDirectory: '', powerShellExe: 'PowerShell', powerShellVersion: '', powerShellEdition: '',
+    ...reported, remoteName, remoteTarget,
+    detected: Boolean(reported?.osCaption || reported?.powerShellVersion)
+  }
+}
+
 function ripgrepAvailability(value: unknown): NonNullable<EnvironmentInfo['ripgrep']> {
   return value === 'available' || value === 'missing' ? value : 'unknown'
 }

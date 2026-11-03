@@ -34,7 +34,25 @@ const REPORT = 'OSCAP=Ubuntu 26.04.1 LTS|OSVER=7.0.0-38-generic|ARCH=x86_64|SHEL
 const result = (output, patch = {}) => ({ output, exitCode: 0, rejected: false, interrupted: false,
   timedOut: false, sessionLost: false, cwd: '/home/fixture', ...patch })
 
-function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, flags = {} } = {}) {
+test('remote Windows reports keep the target identity and never borrow the desktop environment', async () => {
+  const output = JSON.stringify({ osCaption: 'Windows Server', osVersion: 'remote-version', architecture: 'ARM64',
+    powerShellVersion: '7.5', powerShellEdition: 'Core', workingDirectory: 'D:\\中文 项目', ripgrep: 'available' })
+  const { runtime } = fixture({ desktop: 'darwin', shellKind: 'windows', output })
+  const info = await runtime.probeEnvironment()
+  assert.equal(info.kind, 'windows')
+  assert.equal(info.osCaption, 'Windows Server')
+  assert.equal(info.architecture, 'ARM64')
+  assert.equal(info.workingDirectory, 'D:\\中文 项目')
+  assert.equal(info.remoteName, 'Private device name')
+  assert.equal(info.ripgrep, 'available')
+  const unknown = await fixture({ desktop: 'darwin', shellKind: 'windows', output: 'unreadable' }).runtime.probeEnvironment()
+  assert.equal(unknown.kind, 'windows')
+  assert.equal(unknown.architecture, '')
+  assert.equal(unknown.workingDirectory, '')
+  assert.equal(unknown.detected, false)
+})
+
+function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, flags = {}, shellKind } = {}) {
   const environment = load('../src/main/environment.ts', {
     'node:os': { arch: () => 'x64', homedir: () => desktop === 'darwin' ? '/Users/desktop' : 'C:\\Users\\desktop', release: () => 'desktop-version' },
     './posix-shell': { localPosixShellPath: () => '/bin/zsh' }, '../shared/types': types
@@ -74,7 +92,7 @@ function fixture({ transport = 'web2term', desktop = 'win32', output = REPORT, f
     embeds: new Map(platforms.CHAT_PLATFORMS.map((platform) => [platform.id, { platform,
       embed: { setPromptParts: (parts) => prompts.set(platform.id, parts), setComputerUseRecognitionEnabled() {} } }])),
     runner: { runEnvironmentProbe: async () => { probeCalls++; return {
-      kind: transport !== 'local' || desktop === 'darwin' ? 'posix' : 'windows', result: result(output, flags)
+      kind: shellKind ?? (transport !== 'local' || desktop === 'darwin' ? 'posix' : 'windows'), result: result(output, flags)
     } } },
     ssh: { connectionKey: remote, getState: () => ({ status: transport === 'ssh' ? 'connected' : 'disconnected', name: 'Private SSH name', target: 'private-ssh-address', hostId: 'ssh:fixture' }) },
     currentNotes: () => ({ scope: transport === 'local' ? 'local' : 'ssh', hostId: 'fixture', directory: runtime.environment.workingDirectory,

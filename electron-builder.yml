@@ -27,12 +27,15 @@ files:
   - '!node_modules/@vscode/ripgrep-universal/**'
 
 asar: true
+asarUnpack:
+  - node_modules/node-pty/**
 extraResources:
   - from: build/icon.png
     to: tray-icon.png
   # Only the target executable and its notices ship; all other architectures stay in the build tree.
   - from: out/ripgrep/${os}-${arch}
     to: ripgrep
+# node-pty 1.1 ships Windows Node-API prebuilds, loaded lazily on Windows only.
 # ssh2's native accelerators (cpu-features/nan) are OPTIONAL and were never built
 # 鈥?npm's allow-scripts gate skips them, and the pure-JS path is what runs. So
 # there is nothing to rebuild.

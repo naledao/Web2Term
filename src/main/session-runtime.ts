@@ -152,7 +152,7 @@ import { dispatchGithubLoginTask } from './github-login-task'
 import type { GithubLoginTaskResult } from '../shared/github'
 import type { FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusToolKind, FocusToolObserver } from '../shared/focus-chat'
 import type { EmbedHandlers } from './embed'
-import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseWindowsEnvironment } from './environment'
+import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseRemoteWindowsEnvironment, parseWindowsEnvironment } from './environment'
 import { RemoteRipgrepSetup } from './remote-ripgrep'
 import { remoteRipgrepInstallPrompt, validRemoteRipgrepRequest } from '../shared/remote-ripgrep'
 import type { RemoteRipgrepState, RemoteRipgrepTaskResult } from '../shared/remote-ripgrep'
@@ -555,7 +555,8 @@ export class SessionRuntime {
   constructor(private readonly options: SessionRuntimeOptions) {
     this.web2term = options.web2term ? new Web2termShell(options.web2term.binding, options.web2term.connection) : null
     if (this.web2term) {
-      this.environment = { ...FALLBACK_ENVIRONMENT, kind: 'posix', osCaption: 'Linux', shellPath: '/bin/sh', powerShellExe: '', workingDirectory: '', remoteName: this.web2term.binding.deviceName, remoteTarget: this.web2term.binding.agentId }
+      const windows = this.web2term.kind === 'windows'
+      this.environment = { ...FALLBACK_ENVIRONMENT, kind: windows ? 'windows' : 'posix', osCaption: windows ? 'Windows' : '', shellPath: windows ? '' : '/bin/sh', powerShellExe: windows ? 'PowerShell' : '', workingDirectory: '', remoteName: this.web2term.binding.deviceName, remoteTarget: this.web2term.binding.agentId }
       this.environmentScope = { scope: 'ssh', hostId: this.web2term.hostId, label: this.web2term.binding.deviceName || this.web2term.binding.agentId }
     }
     this.id = options.id ?? randomUUID()
@@ -3327,7 +3328,7 @@ export class SessionRuntime {
     if (this.web2term) {
       const directory = this.web2term.alive ? this.web2term.cwd : ''
       return { projectId: this.projectId, scope: 'ssh', hostId: this.web2term.hostId, label: this.web2term.binding.deviceName || this.web2term.binding.agentId,
-        directory, directoryKey: normalizeTerminalNotesDirectory('ssh', directory) }
+        directory, directoryKey: normalizeTerminalNotesDirectory('ssh', directory, this.web2term.kind) }
     }
     const ssh = this.ssh?.getState()
     if (ssh?.attached) {
@@ -4163,7 +4164,7 @@ export class SessionRuntime {
       const sshState = this.ssh.getState()
       const info =
         backend
-          ? parseRemoteEnvironment(result.output, this.web2term?.binding.deviceName ?? sshState.name ?? '', this.web2term?.binding.agentId ?? sshState.target ?? '')
+          ? (kind === 'windows' ? parseRemoteWindowsEnvironment : parseRemoteEnvironment)(result.output, this.web2term?.binding.deviceName ?? sshState.name ?? '', this.web2term?.binding.agentId ?? sshState.target ?? '')
           : kind === 'posix' ? parseLocalPosixEnvironment(result.output) : parseWindowsEnvironment(result.output, resolvePowerShell())
 
       this.environmentScope =
@@ -4267,7 +4268,7 @@ export class SessionRuntime {
     const device = descriptor.web2term
     if (descriptor.transport === 'web2term' && device) {
       const web2termOptions = this.options.web2term
-      const binding = { ...device, reconnect: false, cwd: '/' }
+      const binding = { ...device, reconnect: false, shellKind: descriptor.kind, cwd: descriptor.kind === 'windows' ? descriptor.cwd : '/' }
       const available = (): boolean => {
         if (this.disposed || !web2termOptions) return false
         const state = web2termOptions.connection.getState()

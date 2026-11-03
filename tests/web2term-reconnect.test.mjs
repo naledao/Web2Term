@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import * as crypto from 'node:crypto'
 import * as events from 'node:events'
+import * as util from 'node:util'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
@@ -11,7 +12,8 @@ import ts from 'typescript'
 const exports = {}
 const source = readFileSync(new URL('../src/main/web2term-shell.ts', import.meta.url), 'utf8')
 const dependencies = {
-  'node:crypto': crypto, 'node:events': events,
+  'node:crypto': crypto, 'node:events': events, 'node:util': util,
+  './powershell-terminal': {},
   './remote-shell': { RemoteShell: class { constructor() { throw new Error('A real shell must not start') } } },
   './environment': { REMOTE_DETECT_COMMAND: 'fixture probe' }
 }
@@ -101,6 +103,17 @@ test('older bindings can resume and invalid working directories are not restored
     assert.equal(parseWeb2termBinding(JSON.stringify(binding({ cwd }))).cwd, '')
   }
   assert.equal(parseWeb2termBinding('{'), null)
+})
+
+test('Windows bindings preserve drive and UNC directories while keeping the PowerShell dialect', () => {
+  for (const cwd of ['C:\\Users\\中文 路径', '\\\\server\\share\\project']) {
+    const saved = parseWeb2termBinding(JSON.stringify(binding({ cwd, shellKind: 'windows' })))
+    assert.equal(saved.cwd, cwd)
+    const shell = new Web2termShell(saved, connection())
+    assert.equal(shell.kind, 'windows')
+    assert.equal(shell.persistentBinding().cwd, cwd)
+    shell.dispose()
+  }
 })
 
 test('login/server mismatches and existing routes never trigger an automatic replacement', () => {

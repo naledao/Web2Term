@@ -15,6 +15,8 @@ Web2Term 把模型网页、项目对话和本机／远程终端放进同一个�
 | Web2Term 桌面客户端 | 管理项目与对话、嵌入模型网页、执行命令、使用工具箱和连接远程设备；Windows x64 另支持 Computer Use。 | Windows x64 安装包、macOS Apple Silicon DMG。 |
 | `web2term` 小工具 | 在 Linux 设备上保持后端连接，供桌面客户端打开远程终端；无需设备运行 sshd。 | Linux x86_64（amd64）单文件程序。 |
 
+Windows 客户端还可在设备设置中开启“本机远程终端”，将这台电脑作为 PowerShell 远程设备，供同一账号的其他客户端连接，最多同时运行 3 个终端。详见 [Windows 本机远程终端与验收说明](docs/windows-agent.md)。
+
 客户端直接使用模型网站，不需要配置模型 API Key；模型账号、可用功能和附件额度由相应网站决定。仅使用本机或 SSH 终端时，无需登录 Web2Term 后端。本文描述当前仓库实现，已发布安装包包含的功能以对应版本为准。
 
 ### 下载与安装

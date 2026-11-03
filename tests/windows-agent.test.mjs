@@ -1,0 +1,283 @@
+// User-run offline regression: node --test tests/windows-agent.test.mjs
+// Synthetic sockets, timers and PTYs only. Never starts Electron/PowerShell or accesses a backend/profile.
+import assert from 'node:assert/strict'
+import * as crypto from 'node:crypto'
+import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import * as stringDecoder from 'node:string_decoder'
+import * as util from 'node:util'
+import { Script } from 'node:vm'
+import { test } from 'node:test'
+import ts from 'typescript'
+
+function load(file, dependencies = {}, globals = {}) {
+  const exports = {}
+  new Script(ts.transpileModule(readFileSync(new URL(file, import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText, { filename: file }).runInNewContext({
+    exports, Buffer, URL, process: { platform: 'fixture' }, setTimeout, clearTimeout, queueMicrotask,
+    require(name) { assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`); return dependencies[name] }, ...globals
+  })
+  return exports
+}
+const forbidden = () => { throw new Error('Real I/O is forbidden') }
+const protocol = load('../src/main/windows-agent-terminals.ts', { 'node:string_decoder': stringDecoder })
+const powershell = load('../src/main/powershell-terminal.ts')
+const shared = load('../src/shared/windows-agent.ts')
+const backend = load('../src/shared/backend-url.ts')
+const DEVICE = '00000000-1234-5678-9abc-0123456789ab'
+const id = number => `${String(number).padStart(8, '0')}-1234-5678-9abc-0123456789ab`
+const packet = (type, sessionId, payload = {}) => ({ version: 1, type, session_id: sessionId, payload })
+
+class Pty {
+  input = []
+  sizes = []
+  killed = 0
+  data = new Set()
+  exits = new Set()
+  write(data) { this.input.push(data) }
+  resize(cols, rows) { this.sizes.push({ cols, rows }) }
+  kill() { this.killed++ }
+  onData(listener) { this.data.add(listener); return { dispose: () => this.data.delete(listener) } }
+  onExit(listener) { this.exits.add(listener); return { dispose: () => this.exits.delete(listener) } }
+  output(data) { for (const listener of [...this.data]) listener(data) }
+  exit(exitCode = 0) { for (const listener of [...this.exits]) listener({ exitCode }) }
+}
+function terminalFixture(spawn) {
+  const messages = [], logs = [], ptys = []
+  const terminals = new protocol.WindowsAgentTerminals({
+    spawn: spawn ?? (() => { const pty = new Pty(); ptys.push(pty); return { pty, shell: 'pwsh.exe' } }),
+    send(message) { messages.push(message); return true }, changed() {}, log: record => logs.push(record)
+  })
+  return { terminals, messages, logs, ptys }
+}
+
+test('three slots include closing shells and disconnected generations until exit is confirmed', () => {
+  const f = terminalFixture()
+  for (let n = 0; n < 3; n++) f.terminals.receive(packet('terminal_open', id(n)))
+  f.terminals.receive(packet('terminal_open', id(3)))
+  assert.equal(f.ptys.length, 3)
+  assert.equal(f.messages.at(-1).payload.code, 'TERMINAL_LIMIT_REACHED')
+  f.terminals.receive(packet('terminal_close', id(0)))
+  f.terminals.receive(packet('terminal_open', id(4)))
+  assert.equal(f.ptys[0].killed, 1)
+  assert.equal(f.terminals.count, 3)
+  f.terminals.disconnect(); f.terminals.attach()
+  f.terminals.receive(packet('terminal_open', id(5)))
+  assert.equal(f.ptys.length, 3)
+  const before = f.messages.length
+  f.ptys[0].exit()
+  assert.equal(f.messages.length, before, 'a retired generation must not send exits on a new connection')
+  f.terminals.receive(packet('terminal_open', id(5)))
+  assert.equal(f.ptys.length, 4)
+  assert.equal(f.terminals.count, 3)
+})
+
+test('input preserves split UTF-8 and control bytes; output is split into valid protocol packets', () => {
+  const f = terminalFixture()
+  f.terminals.receive(packet('terminal_open', DEVICE))
+  const bytes = Buffer.from('中文\x03')
+  f.terminals.receive(packet('terminal_input', DEVICE, { data: bytes.subarray(0, 2).toString('base64') }))
+  f.terminals.receive(packet('terminal_input', DEVICE, { data: bytes.subarray(2).toString('base64') }))
+  assert.equal(f.ptys[0].input.join(''), '中文\x03')
+  f.ptys[0].output('中文'.repeat(10000))
+  const output = f.messages.filter(message => message.type === 'terminal_output')
+  assert.ok(output.length > 1)
+  assert.ok(output.every(message => Buffer.byteLength(message.payload.data, 'base64') <= 16384))
+  assert.equal(Buffer.concat(output.map(message => Buffer.from(message.payload.data, 'base64'))).toString(), '中文'.repeat(10000))
+  assert.ok(!JSON.stringify(f.logs).includes('中文'))
+  f.terminals.receive(packet('terminal_resize', DEVICE, { cols: 132, rows: 43 }))
+  assert.deepEqual(f.ptys[0].sizes, [{ cols: 132, rows: 43 }])
+})
+
+test('rejects invalid payloads, session reuse and size/base64 limits without spawning extra shells', () => {
+  const f = terminalFixture()
+  f.terminals.receive(packet('terminal_open', 'not-a-uuid'))
+  assert.equal(f.messages.at(-1).payload.code, 'INVALID_SESSION_ID')
+  assert.equal(f.messages.at(-1).session_id, undefined)
+  for (const payload of [{ shell: 'evil.exe' }, { cols: 1001 }, { rows: 1.5 }, { cols: null }]) f.terminals.receive(packet('terminal_open', DEVICE, payload))
+  assert.equal(f.ptys.length, 0)
+  f.terminals.receive(packet('terminal_open', DEVICE))
+  for (const data of ['!!', 'Zh==', Buffer.alloc(16385).toString('base64')]) {
+    f.terminals.receive(packet('terminal_input', DEVICE, { data }))
+    assert.equal(f.messages.at(-1).payload.code, 'INVALID_INPUT')
+  }
+  f.terminals.receive(packet('terminal_open', DEVICE))
+  assert.equal(f.messages.at(-1).payload.code, 'SESSION_EXISTS')
+  f.ptys[0].exit(7)
+  assert.equal(f.messages.at(-1).payload.exit_code, 7)
+  f.terminals.receive(packet('terminal_open', DEVICE))
+  assert.equal(f.messages.at(-1).payload.code, 'SESSION_CLOSED')
+  assert.equal(f.terminals.count, 0)
+})
+
+test('spawn failures release slots without sending terminal_ready', () => {
+  const f = terminalFixture(() => { throw new Error('fixture failure') })
+  f.terminals.receive(packet('terminal_open', DEVICE))
+  assert.equal(f.terminals.count, 0)
+  assert.equal(f.messages.length, 1)
+  assert.equal(f.messages[0].payload.code, 'TERMINAL_START_FAILED')
+})
+
+class Socket extends EventEmitter {
+  static OPEN = 1
+  readyState = 0
+  bufferedAmount = 0
+  sent = []
+  terminated = false
+  send(value, callback) { this.sent.push(JSON.parse(value)); callback?.() }
+  terminate() { this.terminated = true; this.readyState = 3 }
+  open() { this.readyState = Socket.OPEN; this.emit('open') }
+  message(value) { this.emit('message', Buffer.from(JSON.stringify(value)), false) }
+}
+function agentFixture() {
+  const timers = new Map(), sockets = [], logs = [], settings = new Map(), states = [], ptys = []
+  let now = 1000
+  let owner = 'owner'
+  let backendUrl = 'https://example.invalid/context'
+  let signedIn = true
+  const auth = {
+    getState: () => ({ status: signedIn ? 'signed-in' : 'signed-out', backendUrl, user: signedIn ? { publicId: owner } : null }),
+    getConnectionCredentials: () => signedIn ? { backendUrl, accessToken: 'fixture-secret-never-log', expiresAt: 100000 } : null
+  }
+  const schedule = (callback, milliseconds) => { const handle = { unref() {} }; timers.set(handle, { callback, milliseconds }); return handle }
+  const { WindowsAgent, agentWebSocketUrl } = load('../src/main/windows-agent.ts', {
+    'node:fs': { appendFileSync: forbidden, mkdirSync: forbidden, writeFileSync: forbidden }, 'node:crypto': crypto,
+    'node:os': { ...os, hostname: () => 'fixture-pc' }, 'node:path': path, 'node:module': { createRequire: forbidden },
+    ws: Socket, '../shared/backend-url': backend, '../shared/windows-agent': shared,
+    './shell': { resolvePowerShell: forbidden }, './bundled-ripgrep': { withRipgrepPath: forbidden }, './windows-agent-terminals': protocol
+  })
+  const agent = new WindowsAgent({ getSetting: key => settings.get(key), setSettings: values => Object.entries(values).forEach(([key, value]) => settings.set(key, value)) }, auth, {
+    supported: true, now: () => now, random: () => 0,
+    schedule, unschedule: handle => timers.delete(handle), log: { path: 'fixture.log', write: record => logs.push(record) },
+    changed: state => states.push(state),
+    spawn: () => { const pty = new Pty(); ptys.push(pty); return { pty, shell: 'powershell.exe' } },
+    createSocket(url, options) { const socket = new Socket(); sockets.push({ socket, url, options }); return socket }
+  })
+  return { agent, sockets, states, settings, logs, timers, ptys, agentWebSocketUrl,
+    setIdentity(value) { owner = value }, setSignedIn(value) { signedIn = value }, setBackend(value) { backendUrl = value }, setNow(value) { now = value },
+    fire(milliseconds) { const found = [...timers.entries()].find(([, timer]) => timer.milliseconds === milliseconds); assert.ok(found, `Timer ${milliseconds} missing`); timers.delete(found[0]); found[1].callback() }
+  }
+}
+
+test('agent is opt-in; keeps auth in headers; online requires ack; paths and heartbeat order are preserved', () => {
+  const f = agentFixture(); f.agent.start()
+  assert.equal(f.sockets.length, 0)
+  f.agent.setEnabled(true)
+  assert.equal(f.sockets[0].url, 'wss://example.invalid/context/ws/agent')
+  assert.equal(f.sockets[0].options.followRedirects, false)
+  assert.equal(f.sockets[0].options.headers.Authorization, 'Bearer fixture-secret-never-log')
+  const socket = f.sockets[0].socket; socket.open()
+  assert.equal(f.agent.getState().status, 'connecting')
+  assert.deepEqual(socket.sent, [{ type: 'heartbeat' }])
+  socket.message({ type: 'heartbeat_ack' })
+  assert.equal(f.agent.getState().status, 'online')
+  assert.equal(socket.sent[1].type, 'agent_hello')
+  socket.message({ type: 'heartbeat_ack' })
+  assert.equal(socket.sent.length, 2)
+  f.fire(20000)
+  assert.equal(socket.sent.at(-1).type, 'heartbeat')
+  assert.ok(!JSON.stringify([f.agent.getState(), f.states, f.logs, [...f.settings]]).includes('fixture-secret'))
+  assert.equal(f.agentWebSocketUrl('http://[::1]:8080/context/'), 'ws://[::1]:8080/context/ws/agent')
+  f.agent.dispose()
+})
+
+test('network failures recycle terminals, back off, ignore stale sockets and preserve device identity', () => {
+  const f = agentFixture(); f.agent.setEnabled(true)
+  const first = f.sockets[0].socket; first.open(); first.message({ type: 'heartbeat_ack' })
+  const deviceId = f.agent.getState().deviceId
+  first.message(packet('terminal_open', DEVICE))
+  assert.equal(f.agent.getState().terminalCount, 1)
+  first.emit('error', new Error('fixture secret'))
+  assert.equal(f.agent.getState().status, 'reconnecting')
+  assert.equal(f.ptys[0].killed, 1)
+  f.fire(1000)
+  assert.equal(f.sockets.length, 2)
+  assert.equal(f.agent.getState().deviceId, deviceId)
+  first.emit('close', 1000)
+  assert.equal(f.agent.getState().status, 'connecting')
+  f.sockets[1].socket.emit('error', new Error('again'))
+  f.fire(2000)
+  f.agent.dispose()
+  assert.equal(f.timers.size, 0)
+})
+
+test('account/backend switches cannot silently expose this machine to another identity', () => {
+  const f = agentFixture(); f.agent.setEnabled(true)
+  const initial = f.agent.getState().deviceId
+  f.setIdentity('someone-else'); f.agent.credentialsChanged()
+  assert.equal(f.agent.getState().status, 'waiting-login')
+  assert.equal(f.sockets.length, 1)
+  f.agent.setEnabled(false); f.agent.setEnabled(true)
+  assert.notEqual(f.agent.getState().deviceId, initial)
+  f.setBackend('https://another.invalid'); f.agent.credentialsChanged()
+  assert.equal(f.agent.getState().status, 'waiting-login')
+  assert.equal(f.sockets.length, 2)
+  f.agent.dispose()
+})
+
+test('expired credentials, disable and replacement do not reconnect automatically', () => {
+  const f = agentFixture(); f.agent.setEnabled(true)
+  f.setNow(100000); f.fire(99000)
+  assert.equal(f.agent.getState().status, 'waiting-login')
+  assert.equal(f.timers.size, 0)
+  f.setNow(1000); f.agent.credentialsChanged()
+  f.sockets.at(-1).socket.emit('close', 1000)
+  assert.equal(f.agent.getState().status, 'error')
+  assert.equal(f.timers.size, 0)
+  f.agent.setEnabled(false)
+  f.agent.start()
+  assert.equal(f.sockets.length, 2)
+  assert.equal(f.agent.getState().enabled, false)
+  f.agent.dispose()
+})
+
+test('malformed saved identities are preserved and never replaced with a new device', () => {
+  for (const invalid of ['null', 'false', '0', '{}', '{broken']) {
+    const f = agentFixture(); f.agent.setEnabled(true)
+    const key = [...f.settings.keys()].find(key => key.startsWith('windowsAgentIdentity:'))
+    f.agent.setEnabled(false); f.settings.set(key, invalid); f.agent.setEnabled(true)
+    assert.equal(f.agent.getState().status, 'error')
+    assert.equal(f.settings.get(key), invalid)
+    assert.equal(f.sockets.length, 1)
+    f.agent.dispose()
+  }
+})
+
+test('PowerShell framing limits console lines, preserves long Unicode commands and separates markers', () => {
+  const command = "Set-Location -LiteralPath 'C:\\中文 路径'; Write-Output '" + '长'.repeat(20000) + "'"
+  const envelope = powershell.powerShellEnvelope('token', 12, command)
+  const lines = envelope.trimEnd().split('\r')
+  assert.ok(lines.every(line => line.length <= 2001))
+  assert.ok(lines.slice(0, -1).every(line => line[0] === '+'))
+  assert.equal(lines.at(-1)[0], '=')
+  const script = Buffer.from(lines.map(line => line.slice(1)).join(''), 'base64').toString()
+  assert.ok(script.includes('__CT_DONE_token_12__'))
+  const encodedCommand = /FromBase64String\('([^']+)'\)/.exec(script)[1]
+  assert.equal(Buffer.from(encodedCommand, 'base64').toString(), command)
+  assert.ok(script.includes('[Console]::SetIn($w2tSavedIn)'))
+  const bootstrap = powershell.powerShellBootstrap('__FIXTURE_READY__')
+  assert.ok(bootstrap.split('\r').every(line => line.length < 2000))
+  assert.ok(!bootstrap.includes('stty'))
+})
+
+test('remote PowerShell parses ANSI completion markers and keeps Windows cwd and exit code', async () => {
+  const remote = load('../src/main/remote-shell.ts', {
+    'node:crypto': crypto, 'node:string_decoder': stringDecoder, 'node:util': util,
+    './powershell-terminal': powershell, './shell': { IDLE_TIMEOUT_MS: 10000, MAX_RUNTIME_MS: 20000 },
+    './environment': { DETECT_COMMAND: 'windows probe', REMOTE_DETECT_COMMAND: 'posix probe' }
+  })
+  class Channel extends EventEmitter { write(value) { this.written = value } close() { this.emit('close') } signal() {} }
+  const channel = new Channel(), shell = new remote.RemoteShell(channel, { kind: 'windows' })
+  const running = shell.run("Write-Output '中文'")
+  const script = Buffer.from(channel.written.trimEnd().split('\r').map(line => line.slice(1)).join(''), 'base64').toString()
+  const marker = /__CT_DONE_[a-f0-9]+_1__/.exec(script)[0]
+  channel.emit('data', Buffer.from(`中文\r\n\x1b[0m${marker} 3 C:\\中文 路径\r\n`))
+  const result = await running
+  assert.equal(shell.kind, 'windows'); assert.equal(shell.probeCommand, 'windows probe')
+  assert.equal(result.cwd, 'C:\\中文 路径'); assert.equal(result.exitCode, 3)
+  assert.equal(result.output, '中文')
+  shell.dispose()
+})

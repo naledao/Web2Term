@@ -190,6 +190,11 @@ func TestWebSocketRelayReplacementAndInvalidJSON(t *testing.T) {
 	if !api.hub.online(testDevice) {
 		t.Fatal("old connection cleared replacement presence")
 	}
+	if _, _, err := desktop.Read(ctx); err == nil {
+		t.Fatal("desktop must learn that its original agent connection was replaced")
+	}
+	waitDesktopReleased(t, api, testDesktop)
+	desktop = dial(t, url, "desktop", testDesktop, "Bearer owner")
 	send(t, desktop, command)
 	receive(t, replacement, command)
 	send(t, desktop, `{broken`)

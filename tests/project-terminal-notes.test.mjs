@@ -65,6 +65,7 @@ const { SessionRuntime } = load('../src/main/session-runtime.ts', {
   './embed': {}, './environment': {}, './shell': {}, './ssh': {}, './web2term-shell': {}, './terminal-notes': notes
 })
 const web2term = load('../src/main/web2term-shell.ts', {
+  './powershell-terminal': {},
   './remote-shell': {}, './environment': { REMOTE_DETECT_COMMAND: '' }
 })
 const main = ts.createSourceFile('index.ts', readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
@@ -250,4 +251,15 @@ test('unassigned chats retain directory isolation and stale-directory save prote
   first.terminal.cwd = 'D:\\other'
   assert.throws(() => first.instance.applyTerminalNotes('过期保存', owner), /工作目录已变化/)
   assert.equal(types.canEditTerminalNotes(runtime(store, null, 'web2term', '').instance.currentNotes()), false)
+}))
+
+test('remote Windows directory notes survive database normalization and stay scoped to the device', () => fixture(({ store }) => {
+  const first = runtime(store, null, 'web2term', 'D:\\中文 项目')
+  first.instance.web2term.kind = 'windows'
+  first.instance.web2term.hostId = 'web2term:windows-fixture'
+  const owner = first.instance.currentNotes()
+  first.instance.applyTerminalNotes('Windows 目录说明', owner)
+  assert.equal(first.instance.currentNotes().text, 'Windows 目录说明')
+  assert.equal(store.getDirectoryNote('ssh', 'web2term:windows-fixture', 'd:/中文 项目/'), 'Windows 目录说明')
+  assert.equal(store.getDirectoryNote('ssh', 'web2term:another-device', 'D:\\中文 项目'), null)
 }))

@@ -22,6 +22,12 @@ module.exports = async function verifyPackageResources(context) {
     if (!readFileSync(join(directory, license), 'utf8').trim()) throw new Error(`Missing ripgrep notice: ${license}`)
   }
   if (platform === 'win32') {
+    // No process launch: verify the native addons and their worker scripts really escaped app.asar.
+    const pty = join(resources, 'app.asar.unpacked', 'node_modules', 'node-pty')
+    for (const file of [`prebuilds/win32-${arch}/conpty.node`, `prebuilds/win32-${arch}/conpty_console_list.node`,
+      'lib/windowsTerminal.js', 'lib/conpty_console_list_agent.js', 'lib/worker/conoutSocketWorker.js']) {
+      if (!readFileSync(join(pty, file)).length) throw new Error(`Packaged PowerShell terminal resource missing: ${file}`)
+    }
     const sound = readFileSync(join(resources, 'notification-wood-drop.wav'))
     const source = readFileSync(join(__dirname, 'notification-wood-drop.wav'))
     if (!sound.equals(source)) throw new Error('Packaged notification sound is missing or corrupt.')

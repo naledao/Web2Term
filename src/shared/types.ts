@@ -2517,6 +2517,9 @@ export interface AppApi {
   sendBackendLoginCode(draft: BackendLoginCodeDraft): Promise<BackendAuthResult<{ resendAfterSeconds: number }>>
   loginBackend(draft: BackendLoginDraft): Promise<BackendAuthResult<BackendAuthState>>
   getWeb2termConnection(): Promise<Web2termConnectionState>
+  getWindowsAgent(): Promise<import('./windows-agent').WindowsAgentState>
+  setWindowsAgentEnabled(enabled: boolean): Promise<import('./windows-agent').WindowsAgentState>
+  onWindowsAgentChanged(listener: (state: import('./windows-agent').WindowsAgentState) => void): () => void
   listWeb2termDevices(): Promise<BackendAuthResult<Web2termDevice[]>>
   renameWeb2termDevice(draft: Web2termDeviceRenameDraft): Promise<BackendAuthResult<Web2termDeviceRenameDraft>>
   connectWeb2term(draft: Web2termConnectDraft): Promise<Web2termConnectionState>

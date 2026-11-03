@@ -57,6 +57,8 @@ import { WindowsObservationService } from './windows-observation'
 import { DesktopCoordinator } from './desktop-coordinator'
 import { WindowsWindowCatalog } from './windows-window-catalog'
 import { Web2termConnection } from './web2term-connection'
+import { WindowsAgent } from './windows-agent'
+import { EMPTY_WINDOWS_AGENT, WINDOWS_AGENT_GET, WINDOWS_AGENT_SET_ENABLED, WINDOWS_AGENT_CHANGED } from '../shared/windows-agent'
 import { disconnectUnusedWeb2term, parseWeb2termBinding, restoreWeb2termSessions, web2termHostId } from './web2term-shell'
 import type { Web2termSessionBinding } from './web2term-shell'
 import { EMPTY_WEB2TERM_CONNECTION, EMPTY_WEB2TERM_TERMINALS } from '../shared/types'
@@ -200,6 +202,7 @@ let scheduledTasks: ScheduledTasks | null = null
 let backendAuth: BackendAuthService | null = null
 let qqMail: QqMailService | null = null
 let web2termConnection: Web2termConnection | null = null
+let windowsAgent: WindowsAgent | null = null
 let localMachineId = ''
 let settings: AppSettings = { ...DEFAULT_COMPUTER_USE_PREFERENCES, theme: 'light', backendUrl: DEFAULT_BACKEND_URL, forceDefaultBackendUrl: true, softwareProxy: DEFAULT_SOFTWARE_PROXY, embedProxy: {}, sshProxy: '', updateProxy: '', userAvatarDataUrl: '', userAvatarSourceDataUrl: '', userAvatarPositionX: 50, userAvatarPositionY: 50, userAvatarScale: 1, defaultPlatformId: DEFAULT_PLATFORM_ID, defaultChatView: DEFAULT_CHAT_VIEW }
 const runtimes = new Map<string, SessionRuntime>()
@@ -2248,6 +2251,9 @@ function registerIpcHandlers(): void {
 
   // Account data and requests are available only to the desktop's main frame.
   const canUseBackendAuth = (event: IpcMainInvokeEvent): boolean => isManagerEvent(event) && event.senderFrame === event.sender.mainFrame
+  ipcMain.handle(WINDOWS_AGENT_GET, event => canUseBackendAuth(event) ? windowsAgent?.getState() ?? EMPTY_WINDOWS_AGENT : EMPTY_WINDOWS_AGENT)
+  ipcMain.handle(WINDOWS_AGENT_SET_ENABLED, (event, enabled: unknown) =>
+    canUseBackendAuth(event) && typeof enabled === 'boolean' ? windowsAgent?.setEnabled(enabled) ?? EMPTY_WINDOWS_AGENT : EMPTY_WINDOWS_AGENT)
   ipcMain.handle(IpcChannels.backendAuthGet, (event) => {
     if (!canUseBackendAuth(event) || !backendAuth) return { backendUrl: '', status: 'signed-out', user: null, expiresAt: null }
     return backendAuth.getState()
@@ -2429,7 +2435,7 @@ async function initializeApplication(): Promise<void> {
         return safeStorage.decryptString(Buffer.from(value, 'base64'))
       },
       onBackendUrlSaved: setBackendUrlState,
-      onLoginChanged: () => web2termConnection?.credentialsChanged()
+      onLoginChanged: () => { web2termConnection?.credentialsChanged(); windowsAgent?.credentialsChanged() }
     })
     web2termConnection = new Web2termConnection(conversationStore, backendAuth, {
       createSocket: createSoftwareSocket,
@@ -2444,6 +2450,13 @@ async function initializeApplication(): Promise<void> {
         if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.web2termTerminalOutput, output)
       }
     })
+    windowsAgent = new WindowsAgent(conversationStore, backendAuth, {
+      createSocket: createSoftwareSocket,
+      changed(state) {
+        if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(WINDOWS_AGENT_CHANGED, state)
+      }
+    })
+    windowsAgent.start()
     /*
      * Before workspace windows or embedded views exist, so their first paint has
      * the saved theme. The already-visible splash follows the same media change.
@@ -2536,6 +2549,7 @@ app.on('before-quit', () => {
   windowsHelper.dispose()
   for (const runtime of runtimes.values()) persistManagedSession(runtime)
   web2termConnection?.dispose()
+  windowsAgent?.dispose()
 })
 
 app.on('will-quit', () => {
@@ -2545,6 +2559,7 @@ app.on('will-quit', () => {
   for (const runtime of runtimes.values()) runtime.dispose()
   runtimes.clear()
   web2termConnection = null
+  windowsAgent = null
   store?.close()
   store = null
 })

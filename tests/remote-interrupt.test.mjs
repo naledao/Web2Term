@@ -5,6 +5,7 @@ import * as crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import * as stringDecoder from 'node:string_decoder'
+import * as util from 'node:util'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
 import ts from 'typescript'
@@ -48,7 +49,8 @@ class Channel extends EventEmitter {
 function fixture(t, options = {}) {
   const timers = new Map()
   const remote = load('../src/main/remote-shell.ts', {
-    'node:crypto': crypto, 'node:string_decoder': stringDecoder,
+    'node:crypto': crypto, 'node:string_decoder': stringDecoder, 'node:util': util,
+    './powershell-terminal': {},
     './shell': { IDLE_TIMEOUT_MS: 60000, MAX_RUNTIME_MS: 1800000 },
     './environment': { REMOTE_DETECT_COMMAND: 'fixture only' }
   }, {
