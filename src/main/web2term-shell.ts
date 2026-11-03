@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { stripVTControlCharacters } from 'node:util'
-import { powerShellBootstrap, powerShellPrepare } from './powershell-terminal'
+import { parsePowerShellBootstrapFailure, powerShellBootstrap, powerShellPrepare } from './powershell-terminal'
 import { RemoteShell } from './remote-shell'
 import { DETECT_COMMAND, REMOTE_DETECT_COMMAND } from './environment'
 import type { ExecutionShell, ShellResult } from './shell'
@@ -318,9 +318,18 @@ export class Web2termShell implements ExecutionShell {
         }
         continue
       }
-      if (this.kind === 'windows' && this.bootPhase === 'script' && line === this.bootToken + '_FAILED') {
-        this.connection.terminals.recordShellEvent(this.sessionId!, 'shell_init_failed', { phase: this.bootPhase, outputBytes: this.bootBytes })
-        this.channel.close(); this.update('error', '设备 PowerShell 初始化脚本执行失败，请检查设备端控制台环境。'); return
+      const failure = this.kind === 'windows' && this.bootPhase === 'script' ? parsePowerShellBootstrapFailure(line, this.bootToken) : null
+      if (failure) {
+        this.connection.terminals.recordShellEvent(this.sessionId!, 'shell_init_failed', { phase: this.bootPhase, outputBytes: this.bootBytes, ...failure })
+        const messages: Record<typeof failure.bootstrapStage, string> = {
+          decode: '设备 PowerShell 初始化数据不完整或解码失败，请重新连接。',
+          console_type: '设备 PowerShell 无法加载控制台接口，请查看连接日志中的错误类别。',
+          console_mode: '设备 PowerShell 无法设置控制台输入模式，请查看连接日志中的错误类别。',
+          encoding: '设备 PowerShell 无法设置终端编码，请查看连接日志中的错误类别。',
+          command_loop: '设备 PowerShell 命令循环初始化失败，请查看连接日志中的错误类别。',
+          unknown: '设备 PowerShell 初始化脚本执行失败，请查看连接日志。'
+        }
+        this.channel.close(); this.update('error', messages[failure.bootstrapStage]); return
       }
       if (this.bootPhase === 'input') continue
       if (line !== this.bootToken) continue

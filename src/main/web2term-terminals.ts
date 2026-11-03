@@ -48,7 +48,7 @@ export class Web2termTerminals {
   }
 
   recordShellEvent(sessionId: string, event: 'shell_initializing' | 'shell_input_ready' | 'shell_ready' | 'shell_init_timeout' | 'shell_init_failed',
-    details: { phase?: 'input' | 'script'; outputBytes?: number } = {}): void {
+    details: { phase?: 'input' | 'script'; outputBytes?: number; bootstrapStage?: string; errorId?: string } = {}): void {
     this.dependencies.log({ event, sessionId, ...details })
   }
 

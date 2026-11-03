@@ -363,7 +363,7 @@ test('PowerShell framing limits console lines, preserves long Unicode commands a
   const command = "Set-Location -LiteralPath 'C:\\中文 路径'; Write-Output '" + '长'.repeat(20000) + "'"
   const envelope = powershell.powerShellEnvelope('token', 12, command)
   const lines = envelope.trimEnd().split('\r')
-  assert.ok(lines.every(line => line.length <= 2001))
+  assert.ok(lines.every(line => line.length <= 254), 'command frames must fit the default Console.ReadLine buffer')
   assert.ok(lines.slice(0, -1).every(line => line[0] === '+'))
   assert.equal(lines.at(-1)[0], '=')
   const script = Buffer.from(lines.map(line => line.slice(1)).join(''), 'base64').toString()
@@ -372,8 +372,37 @@ test('PowerShell framing limits console lines, preserves long Unicode commands a
   assert.equal(Buffer.from(encodedCommand, 'base64').toString(), command)
   assert.ok(script.includes('[Console]::SetIn($w2tSavedIn)'))
   const bootstrap = powershell.powerShellBootstrap('__FIXTURE_READY__')
-  assert.ok(bootstrap.split('\r').every(line => line.length < 2000))
+  assert.ok(bootstrap.split('\r').every(line => line.length <= 254), 'loader syntax counts towards the console line limit')
   assert.ok(!bootstrap.includes('stty'))
+})
+
+test('bootstrap survives a receiver limited to 254 characters per line and checks its complete payload', () => {
+  const token = '__W2T_READY_' + 'a'.repeat(32) + '__'
+  assert.ok(powershell.powerShellPrepare(token).trimEnd().length <= 254)
+  const lines = powershell.powerShellBootstrap(token).split('\r').map(line => line.slice(0, 254))
+  const fragments = lines.flatMap(line => {
+    const match = /^\[void\]\$w2tStartup\.Append\('([A-Za-z0-9+/=]+)'\)$/.exec(line)
+    return match ? [match[1]] : []
+  })
+  const encoded = fragments.join('')
+  assert.ok(fragments.length > 1)
+  assert.ok(lines.some(line => line.includes(`$w2tStartup.Length -ne ${encoded.length}`)))
+  const script = Buffer.from(encoded, 'base64').toString('utf8')
+  assert.ok(script.includes(`[Console]::WriteLine([Environment]::NewLine + '${token}')`))
+  assert.ok(script.endsWith('\nexit'))
+  for (const stage of ['console_type', 'console_mode', 'encoding', 'command_loop']) assert.ok(script.includes(`$w2tStage = '${stage}'`))
+})
+
+test('bootstrap error metadata accepts only fixed stages and short identifiers', () => {
+  const token = '__FIXTURE_READY__'
+  assert.deepEqual({ ...powershell.parsePowerShellBootstrapFailure(`${token}_FAILED decode BOOTSTRAP_LENGTH_MISMATCH`, token) },
+    { bootstrapStage: 'decode', errorId: 'BOOTSTRAP_LENGTH_MISMATCH' })
+  assert.equal(powershell.parsePowerShellBootstrapFailure(`Write-Output '${token}_FAILED'`, token), null)
+  assert.equal(powershell.parsePowerShellBootstrapFailure('__WRONG_READY___FAILED', token), null)
+  for (const suffix of ['', ' unknown Failure', ' console_type ' + 'a'.repeat(41), ' encoding private output', ' console_mode path/secret']) {
+    const result = powershell.parsePowerShellBootstrapFailure(token + '_FAILED' + suffix, token)
+    assert.deepEqual({ ...result }, { bootstrapStage: 'unknown', errorId: 'unknown' })
+  }
 })
 
 function bootstrapFixture(kind = 'windows') {
@@ -463,12 +492,26 @@ test('PowerShell bootstrap failures close immediately instead of waiting for the
   const f = bootstrapFixture()
   t.after(() => f.shell.dispose())
   f.output(f.token + '_INPUT\r\n')
-  f.output('\x1b[0m' + f.token + '_FAILED\r\n')
+  f.output('\x1b[0m' + f.token + '_FAILED console_mode CONSOLE_UNAVAILABLE\r\n')
   assert.equal(f.closes, 1)
   assert.equal(f.ready, 0)
   assert.equal(f.timers.size, 0)
   assert.equal(f.logs.at(-1).event, 'shell_init_failed')
+  assert.equal(f.logs.at(-1).bootstrapStage, 'console_mode')
+  assert.equal(f.logs.at(-1).errorId, 'CONSOLE_UNAVAILABLE')
   assert.equal(f.shell.transport.status, 'error')
+  assert.ok(f.shell.transport.message.includes('控制台输入模式'))
+})
+
+test('bootstrap failures without metadata still close with a generic diagnostic', t => {
+  const f = bootstrapFixture()
+  t.after(() => f.shell.dispose())
+  f.output(f.token + '_INPUT\r\n')
+  f.output(f.token + '_FAILED\r\n')
+  assert.equal(f.closes, 1)
+  assert.equal(f.ready, 0)
+  assert.equal(f.logs.at(-1).bootstrapStage, 'unknown')
+  assert.equal(f.logs.at(-1).errorId, 'unknown')
 })
 
 test('POSIX bootstrap keeps its existing single-stage handshake', t => {
