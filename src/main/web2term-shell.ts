@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { stripVTControlCharacters } from 'node:util'
-import { powerShellBootstrap } from './powershell-terminal'
+import { powerShellBootstrap, powerShellPrepare } from './powershell-terminal'
 import { RemoteShell } from './remote-shell'
 import { DETECT_COMMAND, REMOTE_DETECT_COMMAND } from './environment'
 import type { ExecutionShell, ShellResult } from './shell'
@@ -105,6 +105,8 @@ export class Web2termShell implements ExecutionShell {
   private closeUnconfirmed = false
   private disposed = false
   private bootToken = ''
+  private bootPhase: 'input' | 'script' = 'script'
+  private bootBytes = 0
   private bootBuffer = Buffer.alloc(0)
   private bootTimer: ReturnType<typeof setTimeout> | null = null
   private lastCwd = ''
@@ -255,7 +257,9 @@ export class Web2termShell implements ExecutionShell {
 
   private bootstrap(): void {
     const id = this.sessionId!
-    this.connection.terminals.recordShellEvent(id, 'shell_initializing')
+    this.bootPhase = this.kind === 'windows' ? 'input' : 'script'
+    this.bootBytes = 0
+    this.connection.terminals.recordShellEvent(id, 'shell_initializing', { phase: this.bootPhase })
     this.bootToken = '__W2T_READY_' + randomUUID().replace(/-/g, '') + '__'
     this.bootBuffer = Buffer.alloc(0)
     this.channel = new RelayChannel(data => {
@@ -272,16 +276,18 @@ export class Web2termShell implements ExecutionShell {
     // Remove PTY echo/canonical line limits and prompts before command framing.
     // The initial interactive shell execs sh; this still occupies exactly one PTY.
     this.bootTimer = setTimeout(() => {
-      this.connection.terminals.recordShellEvent(id, 'shell_init_timeout')
+      this.connection.terminals.recordShellEvent(id, 'shell_init_timeout', { phase: this.bootPhase, outputBytes: this.bootBytes })
       this.channel?.close()
-      this.update('error', '设备 Shell 未在 10 秒内就绪，请重新连接。')
+      this.update('error', this.kind === 'windows' && this.bootPhase === 'input'
+        ? '设备 PowerShell 未在 10 秒内确认输入模式切换，请重新连接。'
+        : '设备 Shell 未在 10 秒内就绪，请重新连接。')
     }, 10_000)
     this.bootTimer.unref()
     try {
-      this.channel.write(this.kind === 'windows' ? powerShellBootstrap(this.bootToken)
+      this.channel.write(this.kind === 'windows' ? powerShellPrepare(this.bootToken)
         : `stty -echo -icanon && { unset ENV BASH_ENV; export PS1='' PS2='' TERM=dumb; printf '\\n%s\\n' '${this.bootToken}'; if command -v bash >/dev/null 2>&1; then export SHELL="$(command -v bash)"; exec "$SHELL" --noprofile --norc +i -s; else export SHELL=/bin/sh; exec /bin/sh +i -s; fi; }\n`)
     } catch {
-      this.connection.terminals.recordShellEvent(id, 'shell_init_failed')
+      this.connection.terminals.recordShellEvent(id, 'shell_init_failed', { phase: this.bootPhase, outputBytes: this.bootBytes })
       this.channel.close(); this.update('error', '无法初始化设备 Shell，请重新连接。')
     }
   }
@@ -290,9 +296,10 @@ export class Web2termShell implements ExecutionShell {
     if (this.disposed || !this.enabled || output.sessionId !== this.sessionId || output.connectionId !== this.connectionId || !this.channel) return
     const bytes = Buffer.from(output.data, 'base64')
     if (!this.bootToken) { this.channel.emit('data', bytes); return }
+    this.bootBytes += bytes.length
     this.bootBuffer = Buffer.concat([this.bootBuffer, bytes])
     if (this.bootBuffer.length > 64 * 1024) {
-      this.connection.terminals.recordShellEvent(this.sessionId!, 'shell_init_failed')
+      this.connection.terminals.recordShellEvent(this.sessionId!, 'shell_init_failed', { phase: this.bootPhase, outputBytes: this.bootBytes })
       this.channel.close(); this.update('error', '设备 Shell 初始化响应异常，请重新连接。'); return
     }
     let newline: number
@@ -300,6 +307,22 @@ export class Web2termShell implements ExecutionShell {
       const raw = this.bootBuffer.subarray(0, newline).toString('utf8').replace(/\r$/, '')
       const line = this.kind === 'windows' ? stripVTControlCharacters(raw) : raw
       this.bootBuffer = this.bootBuffer.subarray(newline + 1)
+      if (this.kind === 'windows' && this.bootPhase === 'input' && line === this.bootToken + '_INPUT') {
+        // Wait for PSReadLine to relinquish stdin before sending any more input.
+        this.bootPhase = 'script'
+        this.connection.terminals.recordShellEvent(this.sessionId!, 'shell_input_ready', { phase: this.bootPhase })
+        try { this.channel.write(powerShellBootstrap(this.bootToken)) }
+        catch {
+          this.connection.terminals.recordShellEvent(this.sessionId!, 'shell_init_failed', { phase: this.bootPhase, outputBytes: this.bootBytes })
+          this.channel.close(); this.update('error', '无法初始化设备 Shell，请重新连接。'); return
+        }
+        continue
+      }
+      if (this.kind === 'windows' && this.bootPhase === 'script' && line === this.bootToken + '_FAILED') {
+        this.connection.terminals.recordShellEvent(this.sessionId!, 'shell_init_failed', { phase: this.bootPhase, outputBytes: this.bootBytes })
+        this.channel.close(); this.update('error', '设备 PowerShell 初始化脚本执行失败，请检查设备端控制台环境。'); return
+      }
+      if (this.bootPhase === 'input') continue
       if (line !== this.bootToken) continue
       this.bootToken = ''; this.clearBootTimer()
       if (this.bootBuffer.length) this.channel.emit('data', this.bootBuffer)

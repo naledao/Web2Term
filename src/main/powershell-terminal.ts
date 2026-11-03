@@ -21,12 +21,18 @@ export function powerShellEnvelope(token: string, seq: number, command: string):
   return lines.join('\r') + '\r'
 }
 
-/** Enter a persistent command loop in the existing PowerShell, retaining directory and variables. */
+/** Send this line alone: PSReadLine can read ahead and retain subsequent lines in its own queue. */
+export function powerShellPrepare(ready: string): string {
+  return "Remove-Module PSReadLine -ErrorAction SilentlyContinue; function global:PSConsoleHostReadLine { [Console]::ReadLine() }; "
+    + `[Console]::WriteLine([Environment]::NewLine + '${ready}_INPUT')\r`
+}
+
+/** Send after the input acknowledgement; retain the existing PowerShell's directory and variables. */
 export function powerShellBootstrap(ready: string): string {
   const script = [
     "$ErrorActionPreference = 'Continue'",
     'Remove-Module PSReadLine -ErrorAction SilentlyContinue',
-    "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class W2TConsole { [DllImport(\"kernel32.dll\")] public static extern IntPtr GetStdHandle(int n); [DllImport(\"kernel32.dll\")] public static extern bool GetConsoleMode(IntPtr h, out uint m); [DllImport(\"kernel32.dll\")] public static extern bool SetConsoleMode(IntPtr h, uint m); }'",
+    "Add-Type -ErrorAction Stop -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class W2TConsole { [DllImport(\"kernel32.dll\")] public static extern IntPtr GetStdHandle(int n); [DllImport(\"kernel32.dll\")] public static extern bool GetConsoleMode(IntPtr h, out uint m); [DllImport(\"kernel32.dll\")] public static extern bool SetConsoleMode(IntPtr h, uint m); }'",
     '$w2tInputHandle = [W2TConsole]::GetStdHandle(-10); [uint32]$w2tInputMode = 0',
     'if (-not [W2TConsole]::GetConsoleMode($w2tInputHandle, [ref]$w2tInputMode)) { throw "Console unavailable" }',
     // ECHO_INPUT; retain processed input, so a raw Ctrl+C still reaches the console.
@@ -48,8 +54,8 @@ export function powerShellBootstrap(ready: string): string {
   ].join('\n')
   // ASCII bootstrap avoids shell quoting and preserves non-ASCII paths in subsequent commands.
   const encoded = Buffer.from(script, 'utf8').toString('base64')
-  const lines = ['Remove-Module PSReadLine -ErrorAction SilentlyContinue; function global:PSConsoleHostReadLine { [Console]::ReadLine() }; $w2tStartup = New-Object Text.StringBuilder']
+  const lines = ['$w2tStartup = New-Object Text.StringBuilder']
   for (let offset = 0; offset < encoded.length; offset += 1800) lines.push(`[void]$w2tStartup.Append('${encoded.slice(offset, offset + 1800)}')`)
-  lines.push('Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($w2tStartup.ToString())))')
+  lines.push(`try { Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($w2tStartup.ToString()))) } catch { [Console]::WriteLine([Environment]::NewLine + '${ready}_FAILED') }`)
   return lines.join('\r') + '\r'
 }

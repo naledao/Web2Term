@@ -376,6 +376,112 @@ test('PowerShell framing limits console lines, preserves long Unicode commands a
   assert.ok(!bootstrap.includes('stty'))
 })
 
+function bootstrapFixture(kind = 'windows') {
+  const timers = new Map(), writes = [], logs = [], sessions = []
+  let receive, closes = 0, ready = 0
+  const { Web2termShell } = load('../src/main/web2term-shell.ts', {
+    'node:crypto': crypto, 'node:events': { EventEmitter }, 'node:util': util,
+    './powershell-terminal': powershell,
+    './remote-shell': { RemoteShell: class {
+      alive = true
+      constructor(channel) { channel.on('close', () => { this.alive = false }) }
+      dispose() { this.alive = false }
+    } },
+    './environment': { DETECT_COMMAND: 'windows probe', REMOTE_DETECT_COMMAND: 'posix probe' }
+  }, {
+    setTimeout(callback, milliseconds) { const handle = { unref() {} }; timers.set(handle, { callback, milliseconds }); return handle },
+    clearTimeout(handle) { timers.delete(handle) }
+  })
+  const connection = {
+    getState: () => ({ status: 'connected', agentId: DEVICE,
+      auth: { status: 'signed-in', backendUrl: 'https://example.invalid', user: { publicId: 'owner' } } }),
+    terminals: {
+      subscribe(_changed, output) { receive = output; return () => {} },
+      getState: () => ({ connectionId: 'route', sessions }),
+      open() { sessions.push({ id: DEVICE, status: 'opening', shell: '' }); return { ok: true, sessionId: DEVICE } },
+      input(_id, data) { writes.push(Buffer.from(data).toString()); return { ok: true } },
+      close() { closes++; sessions[0].status = 'closing'; return { ok: true } },
+      recordShellEvent(sessionId, event, details = {}) { logs.push({ sessionId, event, ...details }) }
+    }
+  }
+  const shell = new Web2termShell({ agentId: DEVICE, deviceName: 'Fixture device', backendUrl: 'https://example.invalid', userId: 'owner' }, connection)
+  shell.onReady = () => ready++
+  shell.activate()
+  Object.assign(sessions[0], { status: 'ready', shell: kind === 'windows' ? 'powershell.exe' : '/bin/bash' })
+  shell.sync()
+  const token = /__W2T_READY_[a-f0-9]+__/.exec(writes[0])[0]
+  return { shell, writes, logs, timers, token, get closes() { return closes }, get ready() { return ready },
+    output(text) { receive({ connectionId: 'route', sessionId: DEVICE, data: Buffer.from(text).toString('base64') }) },
+    expire() { const [handle, timer] = [...timers][0]; timers.delete(handle); timer.callback() }
+  }
+}
+
+test('Windows bootstrap waits for the input handoff before sending lines PSReadLine could read ahead', t => {
+  const f = bootstrapFixture()
+  t.after(() => f.shell.dispose())
+  assert.equal(f.writes.length, 1)
+  assert.equal(f.writes[0].trimEnd().split('\r').length, 1, 'PSReadLine must receive only its final command line')
+  assert.ok(f.writes[0].includes('Remove-Module PSReadLine'))
+  assert.ok(!f.writes[0].includes('$w2tStartup'))
+  // Echoed commands, a final marker arriving too early and incomplete lines cannot release the handoff.
+  f.output(f.writes[0] + '\n' + f.token + '\r\n')
+  f.output('\x1b[0m' + f.token + '_IN')
+  assert.equal(f.writes.length, 1)
+  assert.equal(f.ready, 0)
+  f.output('PUT\x1b[0m\r\n')
+  const startup = f.writes.slice(1).join('')
+  assert.ok(startup.includes('$w2tStartup'))
+  assert.equal(f.ready, 0, 'input handoff is not command-loop readiness')
+  f.output(f.token + '_INPUT\r\n')
+  assert.equal(f.writes.slice(1).join(''), startup, 'a duplicate acknowledgement must not replay the script')
+  f.output('\x1b[0m' + f.token.slice(0, 15))
+  f.output(f.token.slice(15) + '\x1b[0m\r\n')
+  assert.equal(f.ready, 1)
+  assert.equal(f.shell.alive, true)
+  assert.equal(f.timers.size, 0)
+  assert.deepEqual(f.logs.map(log => log.event), ['shell_initializing', 'shell_input_ready', 'shell_ready'])
+})
+
+test('bootstrap timeouts report the stalled phase and byte count without logging terminal content', t => {
+  for (const phase of ['input', 'script']) {
+    const f = bootstrapFixture()
+    t.after(() => f.shell.dispose())
+    if (phase === 'script') f.output(f.token + '_INPUT\r\n')
+    f.output('fixture-private-output')
+    f.expire()
+    assert.equal(f.closes, 1)
+    assert.equal(f.ready, 0)
+    assert.equal(f.shell.transport.status, 'error')
+    assert.equal(f.logs.at(-1).event, 'shell_init_timeout')
+    assert.equal(f.logs.at(-1).phase, phase)
+    assert.ok(f.logs.at(-1).outputBytes > 0)
+    assert.ok(!JSON.stringify(f.logs).includes('fixture-private-output'))
+  }
+})
+
+test('PowerShell bootstrap failures close immediately instead of waiting for the readiness timeout', t => {
+  const f = bootstrapFixture()
+  t.after(() => f.shell.dispose())
+  f.output(f.token + '_INPUT\r\n')
+  f.output('\x1b[0m' + f.token + '_FAILED\r\n')
+  assert.equal(f.closes, 1)
+  assert.equal(f.ready, 0)
+  assert.equal(f.timers.size, 0)
+  assert.equal(f.logs.at(-1).event, 'shell_init_failed')
+  assert.equal(f.shell.transport.status, 'error')
+})
+
+test('POSIX bootstrap keeps its existing single-stage handshake', t => {
+  const f = bootstrapFixture('posix')
+  t.after(() => f.shell.dispose())
+  assert.equal(f.writes.length, 1)
+  assert.ok(f.writes[0].startsWith('stty '))
+  f.output(f.token + '\n')
+  assert.equal(f.ready, 1)
+  assert.equal(f.shell.alive, true)
+  assert.equal(f.timers.size, 0)
+})
+
 test('remote PowerShell parses ANSI completion markers and keeps Windows cwd and exit code', async () => {
   const remote = load('../src/main/remote-shell.ts', {
     'node:crypto': crypto, 'node:string_decoder': stringDecoder, 'node:util': util,

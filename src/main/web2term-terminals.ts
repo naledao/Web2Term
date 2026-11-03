@@ -47,8 +47,9 @@ export class Web2termTerminals {
     return () => { this.stateListeners.delete(changed); this.outputListeners.delete(output) }
   }
 
-  recordShellEvent(sessionId: string, event: 'shell_initializing' | 'shell_ready' | 'shell_init_timeout' | 'shell_init_failed'): void {
-    this.dependencies.log({ event, sessionId })
+  recordShellEvent(sessionId: string, event: 'shell_initializing' | 'shell_input_ready' | 'shell_ready' | 'shell_init_timeout' | 'shell_init_failed',
+    details: { phase?: 'input' | 'script'; outputBytes?: number } = {}): void {
+    this.dependencies.log({ event, sessionId, ...details })
   }
 
   constructor(private readonly dependencies: Dependencies) {
