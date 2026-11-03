@@ -46,8 +46,9 @@ interface Options {
   store: SettingsStore
   makePage(platformId: string, url: string, onUrl: (url: string) => void): Page
   canWork(owner: FocusOwner): boolean
+  canAdopt?(owner: FocusOwner): boolean
   createTarget(job: StoredCompaction, summary: string): string
-  onComplete?(sessionId: string): void
+  onStateChanged?(): void
   isAdopted?(job: StoredCompaction): boolean
   now?: () => number
   pause?: () => Promise<void>
@@ -123,7 +124,13 @@ export class ConversationCompaction {
     return this.job && sameOwner(owner, this.job.state.owner) ? { ...this.job.state, owner: { ...this.job.state.owner } } : null
   }
   get busy(): boolean { return this.running }
-  private save(): void { if (this.job) { this.options.store.setSetting(this.key, JSON.stringify(this.job)); log(this.job) } }
+  get inProgress(): boolean { return !!this.job && COMPACTION_ACTIVE.includes(this.job.state.phase) }
+  private save(): void {
+    if (!this.job) return
+    this.options.store.setSetting(this.key, JSON.stringify(this.job))
+    log(this.job)
+    this.options.onStateChanged?.()
+  }
   private update(phase: CompactionPhase, message: string): void {
     if (!this.job) return
     this.job.state = { ...this.job.state, phase, message, updatedAt: this.now(),
@@ -202,13 +209,18 @@ export class ConversationCompaction {
         this.save()
       }
       checkCompactionContextBudget(this.job.state.id, summary, this.job.handoffAnswer, this.job.budget)
-      // A confirmed C can be registered after a restart without reopening a page.
-      while (!this.options.canWork(this.job.state.owner)) { this.current(controller.signal); await this.pause() }
+      // The isolated pages can finish in the background. Adoption also waits for
+      // the source platform and its shared runtime to be safe to replace.
+      if (this.options.canAdopt?.(this.job.state.owner) === false) {
+        this.update('importing', '摘要已准备完成，等待返回来源平台并结束当前操作后接入…')
+      }
+      while (!this.options.canWork(this.job.state.owner) || this.options.canAdopt?.(this.job.state.owner) === false) {
+        this.current(controller.signal); await this.pause()
+      }
       this.current(controller.signal)
       this.job.state.targetSessionId = this.options.createTarget(this.job, summary)
       this.closePage()
       this.update('completed', '对话已压缩，可以继续聊天。')
-      this.options.onComplete?.(this.job.state.targetSessionId!)
     } catch (error) {
       if (this.controller === controller && !controller.signal.aborted) {
         const uncertain = this.job.sourceDelivery === 'uncertain' || this.job.handoffDelivery === 'uncertain'

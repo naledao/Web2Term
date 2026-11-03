@@ -1575,6 +1575,7 @@ export class SessionRuntime {
       conversationId: state.conversationId,
       platformId: this.activeEmbed().platform.id,
       taskRunning: this.taskRunning(),
+      compacting: this.compaction?.inProgress ?? false,
       createdAt: this.createdAt
     }
   }
@@ -1676,7 +1677,12 @@ export class SessionRuntime {
   private compactionService(): ConversationCompaction {
     if (!this.compaction) this.compaction = new ConversationCompaction({
       sessionId: this.id, directory: join(app.getPath('userData'), 'exports', 'compactions'), store: this.options.store,
-      canWork: owner => this.active && this.ownsFocus(owner) && !this.options.automationBlocked?.(),
+      // A compaction owns isolated pages, so selecting another workspace or
+      // platform only hides its optional UI; it does not revoke the upload.
+      canWork: owner => !this.disposed && owner.sessionId === this.id && !!owner.conversationId &&
+        this.embeds.get(owner.platformId)?.embed?.getState().conversationId === owner.conversationId &&
+        !this.options.automationBlocked?.(),
+      canAdopt: owner => this.ownsFocus(owner) && !this.focusSending && !this.focusRevision && !this.runner.hasInFlightWork(),
       makePage: (platformId, url, onUrl) => {
         if (!this.window || this.window.isDestroyed()) throw new Error('应用窗口不可用。')
         const platform = this.embeds.get(platformId)?.platform
@@ -1687,7 +1693,7 @@ export class SessionRuntime {
         if (!this.options.onCompactionTarget) throw new Error('无法创建承接会话。')
         return this.options.onCompactionTarget(job, summary)
       },
-      onComplete: id => this.options.onCompactionTargetOpen?.(id),
+      onStateChanged: () => this.options.onSummaryChanged(),
       isAdopted: job => this.continuity.owns(job.state.owner.platformId, this.activeEmbed().conversationId, job.state.id)
     })
     return this.compaction

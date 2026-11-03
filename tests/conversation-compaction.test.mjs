@@ -164,7 +164,7 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
   let clock = 1_000, failTarget = settingsOptions.failTarget === true
   const options = { sessionId: owner.sessionId, directory, store: { getSetting: key => settings.get(key) ?? null,
     setSetting: (key, value) => settings.set(key, value) }, canWork: () => true,
-    now: () => clock, pause: async () => { clock += 900; await immediate() },
+    now: () => clock, pause: async () => { clock += 900; await settingsOptions.beforePause?.(); await immediate() },
     createTarget: (job, summary) => {
       if (failTarget) { failTarget = false; throw new Error('创建工作区失败') }
       created.push({ id: job.targetId, summary, seed: job.seed })
@@ -174,15 +174,18 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
         setViewport(_bounds, visible) { this.visible = visible },
         async read(marker) {
           const record = records.get(this.url)
+          await settingsOptions.beforeRead?.({ record, page: this })
           return { ready: true, nativeDraft: false, uploadReady: true, generating: 'idle', hasHistory: !!record,
             requestFound: record?.marker === marker, answer: record?.answer ?? '', replyId: record ? this.url : '',
             cutOff: false, sendFailure: false, oversized: false }
-        }, async send(path, prompt, signal, _current, beforeSubmit) {
+        }, async send(path, prompt, signal, current, beforeSubmit) {
+          const handoff = path.endsWith('summary.md')
           const content = await readFile(path, 'utf8')
-          signal.throwIfAborted()
+          await settingsOptions.beforeSend?.({ handoff, signal, current, page: this })
+          if (signal.aborted || !current()) return 'cancelled'
           beforeSubmit()
           const stored = JSON.parse(settings.get('conversationCompaction:' + owner.sessionId))
-          const handoff = path.endsWith('summary.md'), delivery = handoff ? stored.handoffDelivery : stored.sourceDelivery
+          const delivery = handoff ? stored.handoffDelivery : stored.sourceDelivery
           assert.equal(delivery, 'uncertain', 'dispatch intent is durable before a page submit')
           calls.push({ handoff, content, prompt })
           this.url = (platform === 'deepseek' ? 'https://chat.deepseek.com/a/chat/s/' : 'https://chatgpt.com/c/') +
@@ -210,6 +213,171 @@ async function settled(f) {
   assert.equal(f.service.busy, false, 'workflow settles without real timers')
   return f.service.state(f.owner)
 }
+
+// Use the actual runtime callbacks with the real workflow and synthetic pages.
+// A permanently-true canWork stub would miss the workspace-switch regression.
+const runtimePath = join(root, 'src/main/session-runtime.ts')
+const runtimeAst = ts.createSourceFile(runtimePath, readFileSync(runtimePath, 'utf8'), ts.ScriptTarget.Latest, true)
+const runtimeClass = runtimeAst.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'SessionRuntime')
+const runtimeMethods = ['ownsFocus', 'compactionService', 'summary'].map(name => runtimeClass.members.find(node => node.name?.getText(runtimeAst) === name).getText(runtimeAst))
+const Runtime = new Script(ts.transpileModule(`class Runtime { ${runtimeMethods.join('\n')} }; Runtime`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
+}).outputText).runInNewContext({ join, app: { getPath: () => tmpdir() },
+  supportsFocusView: load(join(root, 'src/shared/focus-chat.ts')).supportsFocusView,
+  ConversationCompaction: class { constructor(options) { this.options = options } } })
+function backgroundRuntime(f) {
+  const selected = [], updates = [], state = { conversationId: f.owner.conversationId, blocked: false, executing: false }
+  const sourceEmbed = { getState: () => ({ conversationId: state.conversationId }) }
+  const otherPlatformId = f.owner.platformId === 'chatgpt' ? 'deepseek' : 'chatgpt'
+  const runtime = Object.assign(new Runtime(), { id: f.owner.sessionId, active: true, disposed: false,
+    activePlatformId: f.owner.platformId, customTitle: '来源聊天', createdAt: 1,
+    embeds: new Map([[f.owner.platformId, { platform: { id: f.owner.platformId }, embed: sourceEmbed }],
+      [otherPlatformId, { platform: { id: otherPlatformId }, embed: { getState: () => ({ conversationId: 'other-chat' }) } }]]),
+    activeEmbed() { return this.embeds.get(this.activePlatformId) }, taskRunning: () => false,
+    ssh: { getState: () => ({ attached: false }) },
+    runner: { hasInFlightWork: () => state.executing }, options: { store: f.options.store,
+      automationBlocked: () => state.blocked, onCompactionTargetOpen: id => selected.push(id),
+      onSummaryChanged: () => updates.push(runtime.summary()) } })
+  Object.defineProperty(runtime, 'embed', { get() { return this.embeds.get(this.activePlatformId).embed } })
+  const options = runtime.compactionService().options
+  runtime.compaction = f.service
+  Object.assign(f.options, { canWork: options.canWork, canAdopt: options.canAdopt, onComplete: options.onComplete,
+    onStateChanged: options.onStateChanged })
+  return { runtime, state, selected, updates, otherPlatformId }
+}
+
+test('sidebar summaries publish background compression and clear the marker after completion', async t => {
+  const hooks = {}, f = fixture(t, new Map(), hooks), { runtime, updates } = backgroundRuntime(f)
+  assert.equal(runtime.summary().compacting, false)
+  hooks.beforeSend = () => { runtime.active = false }
+  await f.start()
+  assert.equal((await settled(f)).phase, 'completed')
+  assert.ok(updates.some(item => item.compacting), 'the sidebar receives progress without polling the selected chat')
+  assert.ok(updates.every(item => item.id === f.owner.sessionId), 'only the source workspace owns this marker')
+  assert.equal(updates.at(-1).compacting, false)
+  assert.equal(runtime.summary().compacting, false)
+})
+
+test('a failed background compression clears its sidebar marker', async t => {
+  const f = fixture(t, new Map(), { incomplete: true }), { runtime, updates } = backgroundRuntime(f)
+  runtime.active = false
+  await f.start()
+  assert.equal((await settled(f)).phase, 'failed')
+  assert.ok(updates.some(item => item.compacting))
+  assert.equal(updates.at(-1).compacting, false)
+})
+
+test('workspace switches during uploads and summary generation finish in the background without taking focus', async t => {
+  for (const platformId of ['chatgpt', 'deepseek']) {
+    for (const stage of ['source-upload', 'summary-generation', 'summary-upload']) {
+      await t.test(platformId + ': ' + stage, async t => {
+        const hooks = { platformId }, f = fixture(t, new Map(), hooks), background = backgroundRuntime(f)
+        let switched = false
+        const switchAway = () => { background.runtime.active = false; f.service.hide(); switched = true }
+        hooks.beforeSend = ({ handoff }) => {
+          if (stage === (handoff ? 'summary-upload' : 'source-upload')) switchAway()
+        }
+        hooks.beforeRead = ({ record }) => { if (stage === 'summary-generation' && record) switchAway() }
+        await f.start()
+        const state = await settled(f)
+        assert.equal(switched, true)
+        assert.equal(state.phase, 'completed')
+        assert.equal(f.calls.filter(call => !call.handoff).length, 1)
+        assert.equal(f.calls.filter(call => call.handoff).length, 1)
+        assert.equal(f.created.length, 1)
+        assert.equal(f.created[0].seed.session.id, f.owner.sessionId)
+        assert.equal(f.created[0].seed.session.platformId, platformId)
+        assert.equal(background.runtime.active, false)
+        assert.deepEqual(background.selected, [], 'completion must not select the source workspace')
+        assert.ok(f.pages.every(page => !page.visible))
+      })
+    }
+  }
+})
+
+test('switching platforms during upload finishes both exchanges and waits to adopt without resending', async t => {
+  const hooks = {}, f = fixture(t, new Map(), hooks), background = backgroundRuntime(f)
+  hooks.beforeSend = () => { background.runtime.activePlatformId = background.otherPlatformId; f.service.hide() }
+  await f.start()
+  let stored
+  for (let attempt = 0; attempt < 2000; attempt++) {
+    stored = JSON.parse(f.settings.get('conversationCompaction:' + f.owner.sessionId))
+    if (stored.handoffAnswer) break
+    await immediate()
+  }
+  assert.ok(stored.handoffAnswer, 'summary generation and import finish while another platform is selected')
+  assert.equal(f.service.busy, true)
+  assert.equal(f.created.length, 0, 'another platform must not be overwritten')
+  assert.equal(f.calls.length, 2)
+  assert.equal(background.runtime.activePlatformId, background.otherPlatformId)
+  assert.equal(background.runtime.summary().compacting, true, 'the marker remains while adoption waits')
+  background.runtime.activePlatformId = f.owner.platformId
+  // Adoption can finish even if the user has since selected another workspace.
+  background.runtime.active = false
+  assert.equal((await settled(f)).phase, 'completed')
+  assert.equal(f.calls.length, 2)
+  assert.equal(f.created.length, 1)
+  assert.deepEqual(background.selected, [])
+})
+
+test('background compaction retains source ownership and emergency-stop guards', t => {
+  const f = fixture(t), { runtime, state, otherPlatformId } = backgroundRuntime(f)
+  runtime.active = false
+  runtime.activePlatformId = otherPlatformId
+  assert.equal(f.options.canWork(f.owner), true)
+  assert.equal(f.options.canWork({ ...f.owner, sessionId: 'another-workspace' }), false)
+  assert.equal(f.options.canWork({ ...f.owner, platformId: otherPlatformId }), false)
+  state.conversationId = 'another-source'
+  assert.equal(f.options.canWork(f.owner), false)
+  state.conversationId = f.owner.conversationId
+  state.blocked = true
+  assert.equal(f.options.canWork(f.owner), false)
+  state.blocked = false
+  runtime.disposed = true
+  assert.equal(f.options.canWork(f.owner), false)
+})
+
+test('a busy source delays background adoption until execution ends without repeating either exchange', async t => {
+  const hooks = {}, f = fixture(t, new Map(), hooks), { runtime, state } = backgroundRuntime(f)
+  runtime.active = false
+  state.executing = true
+  let deferred = false
+  hooks.beforePause = () => {
+    const stored = JSON.parse(f.settings.get('conversationCompaction:' + f.owner.sessionId))
+    if (stored.handoffAnswer) {
+      assert.equal(f.created.length, 0)
+      assert.equal(f.calls.length, 2)
+      deferred = true
+      state.executing = false
+    }
+  }
+  await f.start()
+  assert.equal((await settled(f)).phase, 'completed')
+  assert.equal(deferred, true)
+  assert.equal(f.calls.length, 2)
+})
+
+test('cancel and emergency pause still stop a background upload and require explicit recovery', async t => {
+  for (const action of ['cancel', 'pause']) {
+    await t.test(action, async t => {
+      const hooks = {}, f = fixture(t, new Map(), hooks), { runtime, updates } = backgroundRuntime(f)
+      hooks.beforeSend = () => {
+        runtime.active = false
+        if (action === 'cancel') f.service.cancel()
+        else f.service.pauseTask('全局急停')
+      }
+      await f.start()
+      assert.equal((await settled(f)).phase, action === 'cancel' ? 'cancelled' : 'paused')
+      runtime.active = true
+      await immediate()
+      assert.equal(f.service.busy, false)
+      assert.equal(f.calls.length, 0)
+      assert.equal(f.created.length, 0)
+      assert.ok(f.pages.every(page => !page.available))
+      assert.equal(updates.at(-1).compacting, false)
+    })
+  }
+})
 
 test('oversize model summaries stop before creating C and can be manually corrected on the same B page', async t => {
   const f = fixture(t, new Map(), { verboseSummary: true })

@@ -95,10 +95,13 @@ export default function WorkspaceNavigation({ sessions, projects, activeId, them
         if (event.key === 'Escape') { saving.current = true; setRenaming(null) }
       }} /> : <>
       <button type="button" className="workspace-navigation__chat-link" aria-current={item.id === activeId ? 'page' : undefined}
-        title={`${item.title}\n${platformById(item.platformId)?.label ?? item.platformId} · ${item.target}${item.taskRunning ? ' · 执行中' : ''}`}
+        title={`${item.title}\n${platformById(item.platformId)?.label ?? item.platformId} · ${item.target}${item.compacting ? ' · 压缩中' : ''}${item.taskRunning ? ' · 执行中' : ''}`}
         onClick={() => void run(async () => { if (!await window.api.openManagedSession(item.id)) throw new Error('对话已关闭，请重新选择。') })}
         onDoubleClick={() => rename(item)}>
         <span className="workspace-navigation__title">{item.title || '本地'}</span>
+        {item.compacting ? <span className="workspace-navigation__compacting" role="status" aria-label="正在压缩会话" title="正在压缩会话">
+          <span className="workspace-navigation__compacting-spinner" aria-hidden="true" />压缩中
+        </span> : null}
         {item.taskRunning ? <span className="workspace-navigation__running" role="img" aria-label="执行中" title="执行中" /> : null}
         {item.unseenCompletedCount ? <span className="workspace-navigation__unseen" aria-label={`${item.unseenCompletedCount} 个任务已完成`}>{item.unseenCompletedCount}</span> : null}
       </button>

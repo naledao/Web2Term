@@ -25,6 +25,10 @@
 .workspace-navigation__project-head:has([data-popup-open]) .workspace-navigation__folder { padding-right: 61px; }
 .workspace-navigation__chat:has([data-popup-open]) .workspace-navigation__chat-link { padding-right: 33px; }
 .workspace-navigation__running { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.workspace-navigation__compacting { display: inline-flex; flex: none; align-items: center; gap: 4px; padding: 2px 5px; border-radius: 5px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); font-size: 11px; line-height: 16px; white-space: nowrap; }
+.workspace-navigation__compacting-spinner { width: 9px; height: 9px; box-sizing: border-box; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: workspace-compacting-spin .9s linear infinite; }
+@keyframes workspace-compacting-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .workspace-navigation__compacting-spinner { animation: none; } }
 .workspace-navigation__unseen { color: var(--ok); font-size: 11px; font-variant-numeric: tabular-nums; }
 .workspace-navigation__rename { width: 100%; min-width: 0; margin: 3px 5px; padding: 5px 7px; border: 1px solid var(--accent); border-radius: 6px; background: var(--bg-elevated); color: var(--text); font: inherit; }
 .workspace-navigation__error { margin: 8px; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
