@@ -645,3 +645,39 @@ test('an empty command in an autonomous goal sends evidence requirements without
   assert.equal(f.progress().phase, 'waiting-model')
   assert.equal(f.coordinator.completionNotificationAllowed('deepseek', 'chat-a'), false)
 })
+
+// Chat log 2026-11-03: a goal sent on a remote (Ubuntu) terminal never became a task; after switching back to
+// the local terminal, its reply carried that submission as task source and was skipped as task-source-mismatch.
+test('a reply tagged with a goal that never became a task runs as an ordinary command, while a stopped task stays rejected', async t => {
+  const f = fixture(t)
+  const tagged = (messageId, sourceSubmissionId) => ({ messageId, command: 'Write-Output report', description: 'Prepare report',
+    timeoutSeconds: 30, live: true, taskSource: { sourceSubmissionId, taskPromptGeneration: 7, pagePath: path } })
+  const stopped = f.coordinator.current('deepseek').sourceSubmissionId
+  f.coordinator.stop('deepseek', 'stopped')
+  assert.equal(f.coordinator.current('deepseek'), null)
+  assert.equal(f.route(tagged('late-stopped', stopped)), true)
+  await f.settled()
+  assert.equal(f.runs.length, 0, 'a late reply of a recorded task never downgrades to an ordinary command')
+  assert.ok(f.diagnostics.some(item => item.reason === 'task-missing' && item.messageId === 'late-stopped'))
+  assert.equal(f.route(tagged('after-remote', 'user:remote-goal:1')), true)
+  await f.settled()
+  assert.equal(f.runs.length, 1)
+  assert.ok(f.diagnostics.some(item => item.reason === 'task-source-untracked' && item.messageId === 'after-remote'))
+  assert.equal(f.coordinator.current('deepseek'), null, 'running it creates no task')
+})
+
+test('a running task, or a dispatch block, keeps rejecting replies tagged with an unknown goal', async t => {
+  const f = fixture(t)
+  const tagged = messageId => ({ messageId, command: 'Write-Output report', description: 'Prepare report',
+    timeoutSeconds: 30, live: true, taskSource: { sourceSubmissionId: 'user:remote-goal:1', taskPromptGeneration: 7, pagePath: path } })
+  f.route(tagged('other-goal'))
+  await f.settled()
+  assert.equal(f.runs.length, 0)
+  assert.ok(f.diagnostics.some(item => item.reason === 'task-source-mismatch' && item.messageId === 'other-goal'))
+  f.coordinator.stop('deepseek', 'stopped')
+  f.coordinator.setDispatchBlocked(true)
+  f.route(tagged('blocked-goal'))
+  await f.settled()
+  assert.equal(f.runs.length, 0)
+  assert.ok(f.diagnostics.some(item => item.reason === 'task-missing' && item.messageId === 'blocked-goal'))
+})

@@ -12,6 +12,7 @@ export const LINUX_AGENT_DOWNLOAD_URL = `${LATEST_RELEASE_URL}/download/web2term
 export const LINUX_AGENT_CHECKSUM_URL = `${LINUX_AGENT_DOWNLOAD_URL}.sha256`
 export const WEB2TERM_GUIDE_URL = `${REPOSITORY_URL}/blob/main/docs/web2term-desktop-connection.md`
 export const LINUX_AGENT_GUIDE_URL = `${REPOSITORY_URL}/blob/main/agents/linux/README.md`
+export const WINDOWS_AGENT_GUIDE_URL = `${REPOSITORY_URL}/blob/main/docs/windows-agent.md`
 export const COMPUTER_USE_GUIDE_URL = `${REPOSITORY_URL}#computer-use`
 export const SCHEDULED_TASKS_GUIDE_URL = `${REPOSITORY_URL}/blob/main/docs/scheduled-tasks.md`
 export const CONVERSATION_COMPACTION_GUIDE_URL = `${REPOSITORY_URL}/blob/main/docs/conversation-compaction.md`

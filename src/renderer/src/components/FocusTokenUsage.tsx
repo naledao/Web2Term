@@ -20,9 +20,9 @@ export default function FocusTokenUsage({ usage, injection, loading }: {
   const nextReason = reason === 'budget' ? '已达到字符阈值。' : reason === 'violations' ? '连续回复格式错误，需要刷新完整约定。'
     : reason === 'mostly-changed' ? '提示词更新较多，需要完整注入。' : '尚无完整注入记录。'
   const injectionHint = phase === 'disabled' ? '终端模式或提示词注入已关闭。' : phase === 'loading' ? '正在读取当前会话的提示词注入状态。'
-    : phase === 'full-next' ? nextReason + '下一次回传执行结果或发送消息时，会附带完整提示词；任务执行期间同样生效。'
+    : phase === 'full-next' ? nextReason + '你下一次主动发送消息时，会附带完整提示词；自动回传执行结果时不注入。'
       : '按当前已记录文本的字符与 Token 比例折算。实际阈值为 ' + injection!.characterBudget.toLocaleString('zh-CN') +
-        ' 字符；达到阈值后，在下一次回传执行结果或发送消息时注入。提示词大幅变化或连续格式错误也可能提前触发完整注入。'
+        ' 字符；达到阈值后，在你下一次主动发送消息时注入，自动回传执行结果时不注入。提示词大幅变化或连续格式错误也可能提前触发完整注入。'
   return <div className="focus-chat__token-usage" role="group" aria-label="Token 估算">
     <details className="focus-context-details">
       <summary title="查看上下文估算明细">

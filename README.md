@@ -146,6 +146,19 @@ Computer Use 让模型在对话中发现和启动应用、查看真实窗口，�
 
 SSH 两个 Shell 的环境变量和交互状态不共享，应用会尝试从交互终端提示符同步目录。SSH 文件传输入口位于终端目录栏，所有会话的上传、下载进度集中显示在窗口底部，支持取消。
 
+### Windows 本机远程终端
+
+Windows 客户端可以在设备设置中把本机变成一台 PowerShell 远程设备，供同一后端、同一账号下的其他客户端连接，无需安装 sshd 或额外工具。
+
+- **开启**：进入 **设置 → web2term 设备**，打开本机远程终端。首次开启生成绑定当前后端和账号的设备 ID，重启与重连保留同一 ID。
+- **连接**：在另一台运行 Web2Term 的电脑登录同一后端和账号，刷新设备列表，选择这台 Windows 电脑并连接。
+- **运行环境**：PowerShell 由 ConPTY 承载，优先使用 PowerShell 7，未安装时使用系统自带的 PowerShell 5.1。每台设备最多 3 个终端，各自保留独立的目录、变量和输出。
+- **权限与边界**：功能默认关闭；开启后以运行客户端的 Windows 用户权限执行。客户端隐藏到托盘后保持在线，完全退出、关闭开关、登录过期或更换登录凭据会回收终端。开启记录绑定后端和用户 ID，切换后端或账号需要重新开启。
+- **版本要求**：设备端与连接端都需要包含 PowerShell 协议适配的版本，旧客户端只支持远程 POSIX Shell。
+- **日志与自启**：运行日志位于 `%TEMP%\gpt-login-diag\web2term-windows-agent-*.log`，路径显示在设备设置中。本版随客户端启动，不注册 Windows 服务，也不修改登录启动项。
+
+详见 [Windows 本机远程终端与验收说明](docs/windows-agent.md)。
+
 ### 后台任务
 
 长时间运行、持续输出或需要等待外部事件的非交互任务，可以交给软件启动并监控。模型使用以下命令格式：
@@ -507,6 +520,19 @@ The toolbox opens minimizable tool windows:
 **MySQL, Redis, and Nacos connect from the desktop computer**, without an automatic SSH or Web2Term tunnel. `127.0.0.1` refers to that computer. Database passwords use system-backed encryption.
 
 **＋ → GitHub 仓库管理** uses the locally installed `gh` and its active `github.com` account. It supports account checks, AI-assisted login, logout, repository search/filtering/sorting, and cloning into a selected local directory with progress. AI-assisted login requires a local terminal with terminal mode and prompt injection enabled.
+
+### Windows remote terminal
+
+Any Windows client can expose itself as a PowerShell remote device for other clients signed in to the same backend and account, without installing sshd or extra tools.
+
+- **Enable:** open **Settings → web2term devices** and turn on the local remote terminal. The first enable creates a device ID bound to the current backend and account; restarts and reconnects keep the same ID.
+- **Connect:** sign in to the same backend and account from another Web2Term client, refresh the device list, and connect to this Windows machine.
+- **Runtime:** PowerShell runs under ConPTY, preferring PowerShell 7 and falling back to the built-in PowerShell 5.1. Each device supports up to 3 terminals, each keeping its own directory, variables, and output.
+- **Scope:** off by default. Once enabled, remote terminals run with the Windows user privileges of the client. The client stays online while minimized to the tray; quitting the app, disabling the switch, an expired login, or switching credentials revokes terminals. The record is bound to the backend and user ID, so switching backend or account requires enabling it again.
+- **Versions:** both the device and the connecting client need the build with PowerShell protocol support; older clients only speak remote POSIX shell.
+- **Logs:** runtime logs live in `%TEMP%\gpt-login-diag\web2term-windows-agent-*.log` and the path appears in device settings. This build starts with the client and registers no Windows service or login startup item.
+
+See [Windows remote terminal and validation](docs/windows-agent.md) for details.
 
 ### Scheduled tasks
 

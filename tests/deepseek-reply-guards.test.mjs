@@ -866,6 +866,39 @@ test('a DSML call to an unknown tool is not turned into a request', () => {
   assert.equal(app.events.some((event) => ['command', 'read-files', 'question'].includes(event.event)), false)
 })
 
+test('a live malformed DSML command call starts an edit-and-resend instead of running or settling', () => {
+  const app = fixture([userTurn('1')])
+  app.confirmSend()
+  app.replaceNodes([userTurn('1'), dsmlTurn('2', [
+    '< | | DSML | | calls>',
+    '< | | DSML | | invoke name="command">rg -n "^###? " README.md</ | | DSML | | parameter>',
+    '< | | DSML | | parameter name="description" string="true">列出 README 所有标题</ | | DSML | | parameter>',
+    '</ | | DSML | | invoke>',
+    '</ | | DSML | | calls>'
+  ])])
+  app.scan()
+  app.tick(250)
+  assert.ok(app.events.some(event => event.event === 'native-edit' && event.reason === 'dsml-leak-detected'))
+  assert.equal(app.events.some(event => ['command', 'read-files', 'question'].includes(event.event)), false)
+})
+
+test('unreadable DSML never shows as a focus answer or enters the transcript, even when no resend is made', () => {
+  const page = { ...DEEPSEEK_PAGE, nativeEdit: { ...DEEPSEEK_PAGE.nativeEdit, retryDsmlByEditing: false } }
+  const app = fixture([userTurn('1')], page)
+  app.confirmSend()
+  app.replaceNodes([userTurn('1'), dsmlTurn('2', [
+    '< | | DSML | | calls>',
+    '< | | DSML | | invoke name="command">rg -n "^###? " README.md</ | | DSML | | parameter>',
+    '</ | | DSML | | invoke>',
+    '</ | | DSML | | calls>'
+  ])])
+  app.scan()
+  app.tick(250)
+  assert.equal(app.controller.focusSnapshot().reply.answer, '')
+  assert.equal(app.events.some(event => event.event === 'assistant-message'), false)
+  assert.ok(app.events.some(event => event.event === 'task-finished'))
+})
+
 // DeepSeek ended a reply by itself mid-thinking: the reasoning header reads 已停止, no answer, no 继续生成.
 const stoppedTurn = (key) => element('div', { 'data-virtual-list-item-key': key }, [
   element('div', { class: 'ds-think-header' }, [element('span', {}, '已停止')]),

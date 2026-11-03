@@ -212,6 +212,8 @@ export interface PageAdapter {
     analysisLeakPattern?: string
     /** Recover interrupted replies by editing the preceding user message instead of continuing. */
     retryStoppedByEditing?: boolean
+    /** Resend the preceding user message when the answer holds native DSML tool-call markup that could not be read. */
+    retryDsmlByEditing?: boolean
   }
   /** Attachment acknowledgements only; never used as command message identities. */
   fileTurnPositionAttr?: string
@@ -865,7 +867,9 @@ export const DEEPSEEK_PAGE: PageAdapter = {
     safetyLeakPattern: '^<ds_safety>[\\s\\S]*</ds_safety>\\s*Safe$',
     // User screenshot 2026-10-31: the answer begins with literal <analysis> and a conversation recap.
     analysisLeakPattern: '^<analysis>\\s*\\S',
-    retryStoppedByEditing: true
+    retryStoppedByEditing: true,
+    // User screenshot 2026-11-03: a malformed `<｜DSML｜invoke name="command">…` left as prose.
+    retryDsmlByEditing: true
   },
   /*
    * The focus view's reads, measured in the user's 2026-10-22 chat-view log: send and stop

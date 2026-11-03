@@ -86,48 +86,52 @@ function resultInjectionFixture() {
     confirm() { for (const [id, timer] of [...timers]) if (timer.delay === 120) { timers.delete(id); timer.callback() } } }
 }
 
-test('a due full prompt accompanies the next result inside the same running task and is consumed only on confirmation', async () => {
+test('a due full prompt never accompanies an automatic result and stays due for the next human send', async () => {
   const f = resultInjectionFixture(), generation = f.context.state.taskPromptGeneration
-  const pending = f.send('完成第一条命令\r\n退出码 0')
-  assert.equal(f.submitted[0], 'SYSTEM\n\n' + USER_TEXT_SENTINEL + '完成第一条命令\n退出码 0')
-  assert.equal(f.context.confirmedInjectionPlans.size, 0, 'insertion and clicking do not consume a refresh')
-  assert.equal(f.reports.some(event => event.event === 'sent-raw'), false)
-  f.confirm()
+  const pending = f.send('完成第一条命令\r\n退出码 0'); f.confirm()
   assert.equal(await pending, 'ok')
+  assert.equal(f.submitted[0], '完成第一条命令\n退出码 0')
   const report = f.reports.find(event => event.event === 'sent-raw')
-  assert.equal(report.promptInjected, true)
-  assert.equal(report.injectionPlanToken, 'refresh-1')
-  assert.equal(report.textLength, '完成第一条命令\n退出码 0'.length, 'the full prefix is accounted for separately')
-  assert.equal(report.contextUsage.characters, f.context.state.prefix.length + USER_TEXT_SENTINEL.length)
-  assert.equal(report.pagePath, f.context.location.pathname)
+  assert.equal(report.promptInjected, false)
+  assert.equal(report.injectionPlanToken, undefined)
+  assert.equal(f.context.confirmedInjectionPlans.size, 0, 'a result never consumes the refresh')
   assert.equal(f.context.state.taskPromptGeneration, generation)
   assert.equal(f.context.state.taskActive, true)
-  assert.equal(f.reports.some(event => event.event === 'user-message'), false, 'a refresh is not a new goal')
-  // The main process may not have reconfigured the page yet. Do not send the same full plan twice.
-  const second = f.send('完成第二条命令'); f.confirm()
-  assert.equal(await second, 'ok')
-  assert.equal(f.submitted[1], '完成第二条命令')
-  assert.equal(f.reports.filter(event => event.event === 'sent-raw' && event.promptInjected).length, 1)
-  f.context.state.injectionPlanToken = 'refresh-2'
-  const third = f.send('新一轮阈值已到'); f.confirm()
-  assert.equal(await third, 'ok')
-  assert.equal(f.submitted[2], 'SYSTEM\n\n' + USER_TEXT_SENTINEL + '新一轮阈值已到')
+  const human = f.context.userPromptInjection()
+  assert.equal(human.metadata.promptInjected, true)
+  assert.equal(human.metadata.injectionPlanToken, 'refresh-1')
+  assert.equal(human.prefix, f.context.state.prefix)
 })
 
-test('blocked or failed insertion retains the refresh; disabled or short plans leave results unprefixed', async () => {
+test('a changed prompt (terminal environment switch) travels with the next result once, mid-task', async () => {
+  for (const [injectionMode, injectionReason] of [['delta', 'changed'], ['full', 'mostly-changed']]) {
+    const f = resultInjectionFixture()
+    Object.assign(f.context.state, { injectionMode, injectionReason })
+    const pending = f.send('切换后的命令结果'); f.confirm()
+    assert.equal(await pending, 'ok')
+    assert.equal(f.submitted[0], 'SYSTEM\n\n' + USER_TEXT_SENTINEL + '切换后的命令结果', injectionReason)
+    const report = f.reports.find(event => event.event === 'sent-raw')
+    assert.equal(report.promptInjected, true)
+    assert.equal(report.injectionPlanToken, 'refresh-1')
+    assert.equal(f.context.state.taskActive, true)
+    const second = f.send('下一条结果'); f.confirm()
+    assert.equal(await second, 'ok')
+    assert.equal(f.submitted[1], '下一条结果', 'the confirmed change is not repeated before reconfiguration')
+  }
+})
+
+test('a human send during a running task also carries a changed prompt, not only the first send', () => {
   const f = resultInjectionFixture()
-  f.composer.draft = '用户自己的草稿'
-  assert.equal(await f.send('结果'), 'busy')
-  assert.equal(f.composer.draft, '用户自己的草稿')
-  f.composer.draft = ''; f.failInsert(true)
-  assert.equal(await f.send('结果'), 'insert-failed')
-  assert.equal(f.context.confirmedInjectionPlans.size, 0)
-  assert.equal(f.reports.some(event => event.event === 'sent-raw'), false)
-  f.failInsert(false)
-  const retry = f.send('结果'); f.confirm()
-  assert.equal(await retry, 'ok')
-  assert.equal(f.submitted[0], 'SYSTEM\n\n' + USER_TEXT_SENTINEL + '结果')
-  for (const patch of [{ promptInjectionEnabled: false }, { enabled: false }, { injectionMode: 'none' }, { injectionMode: 'delta' }, { injectionMode: 'reminder' }]) {
+  Object.assign(f.context.state, { injectionMode: 'delta', injectionReason: 'changed' })
+  const injection = f.context.userPromptInjection()
+  assert.equal(injection.metadata.promptInjected, true)
+  assert.equal(injection.prefix, f.context.state.prefix)
+})
+
+test('disabled, short or due plans all leave automatic results unprefixed', async () => {
+  for (const patch of [{}, { injectionReason: 'budget' }, { injectionReason: 'violations' }, { injectionReason: 'no-ledger' },
+    { injectionReason: 'changed', promptInjectionEnabled: false }, { injectionReason: 'changed', enabled: false },
+    { injectionMode: 'none' }, { injectionMode: 'delta' }, { injectionMode: 'reminder', injectionReason: 'violation' }]) {
     const off = resultInjectionFixture(); Object.assign(off.context.state, patch)
     const pending = off.send('原始回传'); off.confirm()
     assert.equal(await pending, 'ok')

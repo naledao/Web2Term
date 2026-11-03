@@ -292,6 +292,16 @@ export class TaskCoordinator {
     const state = this.entries.get(platformId)
     return !this.dispatchBlocked && state?.task?.status === 'recorded' && !state.error ? structuredClone(state.task) : null
   }
+  /**
+   * A goal sent while computer use was out of scope (a remote terminal) never became a task, yet its
+   * replies are tagged with it once the terminal is local again. True only when nothing owns them:
+   * no running task, no error or dispatch block, and no task ever recorded for that submission.
+   */
+  neverTracked(platformId: string, submissionId: string): boolean {
+    const state = this.entries.get(platformId)
+    if (this.dispatchBlocked || state?.error || state?.task?.status === 'recorded') return false
+    try { return !this.store.autonomousTaskBySubmission(this.sessionId, platformId, submissionId) } catch { return false }
+  }
   hasError(platformId: string, conversationId: string | null): boolean {
     const state = this.entries.get(platformId)
     return state?.conversationId === conversationId && !!state.error

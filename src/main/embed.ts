@@ -1355,6 +1355,7 @@ export class ChatGptEmbed {
       sendBlock: this.sendBlock,
       prefix,
       injectionMode: this.injectionPlan?.mode ?? null,
+      injectionReason: this.injectionPlan?.reason ?? null,
       injectionPlanToken: this.injectionPlanToken,
       contextPrefixUsage: estimateContextText(prefix + '\u2063\u2063'),
       contextReminderUsage: estimateContextText(REPLY_PROTOCOL_REMINDER + '\u2063\u2063'),
@@ -2777,8 +2778,10 @@ export class ChatGptEmbed {
     const analysis = payload.reason === 'analysis-leak-edit-click' || payload.reason === 'analysis-leak-send-click'
     const stopped = payload.reason === 'stopped-retry-edit-click' || payload.reason === 'stopped-retry-send-click'
     const safety = payload.reason === 'safety-leak-edit-click' || payload.reason === 'safety-leak-send-click'
-    if ((!analysis && !safety && !stopped) || this.platform.id !== 'deepseek' || !this.platform.page.nativeEdit ||
+    const dsml = payload.reason === 'dsml-leak-edit-click' || payload.reason === 'dsml-leak-send-click'
+    if ((!analysis && !safety && !stopped && !dsml) || this.platform.id !== 'deepseek' || !this.platform.page.nativeEdit ||
       (stopped && !this.platform.page.nativeEdit.retryStoppedByEditing) ||
+      (dsml && !this.platform.page.nativeEdit.retryDsmlByEditing) ||
       !this.interceptor.enabled || this.interceptor.taskFinishedAt !== null ||
       payload.taskPromptGeneration !== this.taskPromptGeneration || payload.taskActive !== true ||
       payload.awaitingReply !== true || this.interceptor.pendingQuestion ||

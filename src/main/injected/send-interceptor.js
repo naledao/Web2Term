@@ -150,6 +150,7 @@
     promptInjectionEnabled: true,
     prefix: '',
     injectionMode: null,
+    injectionReason: null,
     injectionPlanToken: null,
     replyProtocolPrefix: '',
     replyProtocolVersion: 0,
@@ -446,6 +447,9 @@
   const looksLikeJsonEnvelope = (text) => /^(?:```(?:json)?\s*)?(?:\{|\[)/i.test(String(text || '').trimStart())
   const looksLikeDsmlToolCall = (text) => DSML_INVOKE_START.test(String(text || ''))
   const looksLikeDsmlComputerCall = (text) => !looksLikeJsonEnvelope(text) && DSML_COMPUTER_START.test(String(text || ''))
+  // Any DSML tag still present after normalization: an unknown tool, or a malformed invoke
+  // (user screenshot 2026-11-03: `invoke name="command">rg …</｜DSML｜parameter>`, no parameter tag).
+  const DSML_MARKUP = new RegExp(`${DSML_OPEN}(?:invoke|invocation|parameter|\\w*calls)\\b`)
   // string="false" is JSON. Models leave Windows paths unescaped (`"C:\Users\a"`), which is
   // either invalid JSON or, worse, valid with `\t`/`\n` inside it; escape lone backslashes first then.
   const dsmlJson = (raw) => {
@@ -2263,11 +2267,18 @@
    * ------------------------------------------------------------------ */
 
   const confirmedInjectionPlans = new Set()
-  /** Full refreshes also travel with automatic results during a running task. */
+  /**
+   * A refresh due to the character budget or format errors waits for the next human send. A prompt
+   * whose content changed (a terminal environment switch, the tool catalog) is news the model needs
+   * now, so it also travels with the next automatic result, mid-task included.
+   */
   const userPromptInjection = (conversationPromptInjected = false, result = false) => {
     const active = state.enabled && state.promptInjectionEnabled
-    const fullDue = state.injectionMode === 'full' && state.injectionPlanToken && !confirmedInjectionPlans.has(state.injectionPlanToken)
-    const promptInjected = active && !!state.prefix && (fullDue || (!result && !state.taskPromptInjected && !conversationPromptInjected))
+    const planDue = !!state.injectionPlanToken && !confirmedInjectionPlans.has(state.injectionPlanToken)
+    const fullDue = planDue && state.injectionMode === 'full'
+    const changedDue = planDue && ['full', 'delta'].includes(state.injectionMode) && ['changed', 'mostly-changed'].includes(state.injectionReason)
+    const promptInjected = active && !!state.prefix &&
+      (result ? changedDue : fullDue || changedDue || (!state.taskPromptInjected && !conversationPromptInjected))
     const prefix = active ? (promptInjected ? state.prefix : result ? '' : state.replyProtocolPrefix) : ''
     const full = promptInjected && state.prefixIncludesReplyProtocol
     // Snapshot the counts configured WITH this exact prefix. A send can outlive a
@@ -3636,7 +3647,27 @@
       x: finalControl.x, y: finalControl.y, ...diagnostic() })
   }
 
+  /**
+   * DSML left over in the answer's prose is a native tool call that could not be read, never an
+   * answer for the transcript. Code and quotations are excluded: there the markup is something
+   * being discussed, not a call, and so is DSML inside a JSON request.
+   */
+  const dsmlInProse = (text, node) => {
+    if (!DSML_MARKUP.test(String(text || '')) || looksLikeJsonEnvelope(text)) return false
+    const root = node ? replyRootOf(node) : null
+    if (!root) return true
+    let prose = String(root.textContent || '')
+    for (const quoted of root.querySelectorAll('pre, code, blockquote')) {
+      if (!quoted.parentElement?.closest('pre, code, blockquote')) prose = prose.replace(String(quoted.textContent || ''), '')
+    }
+    return DSML_MARKUP.test(normalizeDsmlToolCalls(prose))
+  }
+  // Such a reply would otherwise settle as plain text and end the task. A malformed computer call
+  // keeps its protocol feedback instead.
+  const dsmlLeaked = (text, node) => !!PAGE.nativeEdit?.retryDsmlByEditing && !looksLikeDsmlComputerCall(text) && dsmlInProse(text, node)
+
   const replyLeakKind = (text, node = null) => {
+    if (dsmlLeaked(text, node)) return 'dsml'
     for (const kind of ['analysis', 'safety']) {
       const source = PAGE.nativeEdit?.[`${kind}LeakPattern`]
       if (!source) continue
@@ -4773,7 +4804,8 @@
         state.taskActive = false
         resetTaskPrompt()
       }
-      report({ event: 'assistant-message', messageId, text: markdown })
+      // A resend that gave up still ends the task, but its raw DSML never enters the transcript.
+      if (!dsmlInProse(text, latest)) report({ event: 'assistant-message', messageId, text: markdown })
       report({ event: 'task-finished', messageId, completed, live: true,
         taskPromptGeneration: completion.generation, pagePath: completion.path,
         ...completionSource, computerPageEpoch })
@@ -4882,7 +4914,8 @@
     }
     // DeepSeek can leak an analysis recap containing old command JSON or placeholders.
     // Retry the preceding user message before any protocol parser can act on those examples.
-    if (replyLeakKind(text, node) === 'analysis') {
+    // Unreadable DSML is retried the same way, before a partly converted call can run.
+    if (['analysis', 'dsml'].includes(replyLeakKind(text, node))) {
       settleAssistantReply(messageId, text)
       return
     }
@@ -6080,6 +6113,7 @@
       if (typeof config.promptInjectionEnabled === 'boolean') state.promptInjectionEnabled = config.promptInjectionEnabled
       if (typeof config.prefix === 'string') state.prefix = config.prefix
       if (['full', 'delta', 'reminder', 'none', null].includes(config.injectionMode)) state.injectionMode = config.injectionMode
+      if (typeof config.injectionReason === 'string' || config.injectionReason === null) state.injectionReason = config.injectionReason
       if (typeof config.injectionPlanToken === 'string' || config.injectionPlanToken === null) state.injectionPlanToken = config.injectionPlanToken
       if (typeof config.replyProtocolPrefix === 'string') state.replyProtocolPrefix = config.replyProtocolPrefix
       state.contextPrefixUsage = config.contextPrefixUsage
@@ -6873,7 +6907,8 @@
         if (!rendered.has(node)) rendered.set(node, readReplyMarkdown(node))
         return rendered.get(node)
       }
-      const protocolReply = raw => looksLikeCommandReply(raw) || looksLikeQuestionReply(raw) || extractCommand(raw) ||
+      // Unreadable DSML is a failed tool call (edit-and-resend replaces it), not an answer to show.
+      const protocolReply = (raw, node) => looksLikeCommandReply(raw) || looksLikeQuestionReply(raw) || extractCommand(raw) || dsmlInProse(raw, node) ||
         (state.enabled && state.awaitingReplySince !== 0 &&
           (raw.trim().startsWith('{') || raw.trim().startsWith(String.fromCharCode(96).repeat(3) + 'json')))
       const smartReplies = rules.smartUi ? queryAllAssistant().filter(node => isVisibleElement(node) &&
@@ -6884,7 +6919,7 @@
           // Rich-content refreshes obey the same protocol filter as the live answer.
           // Otherwise a saved command segment or a readable clarification can be
           // overwritten with its protocol JSON. DIL wrappers also contain ordinary code blocks.
-          if (protocolReply(readReplyText(node))) return []
+          if (protocolReply(readReplyText(node), node)) return []
           const answer = markdownOf(node)
           if (looksLikeCommandReply(answer) || looksLikeQuestionReply(answer)) return []
           // Never replace a complete saved answer with a truncated live copy or cut
@@ -6941,7 +6976,7 @@
           } catch { return [] }
         })
         const raw = answer ? readReplyText(node) : ''
-        const protocol = protocolReply(raw)
+        const protocol = protocolReply(raw, node)
         reply = { sourceMessageId: node ? turnKeyOf(node) : '', parts,
           answer: answer && !protocol ? markdownOf(node).slice(0, 250000) : '' }
       }

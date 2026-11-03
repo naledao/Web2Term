@@ -2345,7 +2345,7 @@ export class SessionRuntime {
       !this.taskCoordinator.waitingForUser(context.platformId) && context.machine.id === this.options.localMachineId && context.machine.platform === process.platform && context.machine.arch === process.arch && this.taskCoordinator.ownsToolStep(context)
   }
 
-  /** A tagged reply is never downgraded to an unowned command when its task is stale or busy. */
+  /** A tagged reply is never downgraded to an unowned command when its task is stale or busy; only one no task ever owned. */
   private routeTaskCommand(command: ParsedAction, conversationIdOverride?: string): boolean {
     const trace = (event: 'skipped' | 'deferred', reason: NonNullable<CommandDiagnostic['reason']>): true => {
       const task = this.taskCoordinator.current(this.activePlatformId)
@@ -2366,7 +2366,14 @@ export class SessionRuntime {
     if (!command.live || this.disposed || (!this.active && !this.canRunConversationInBackground(platformId)) || !supportsComputerUsePlatform(platformId) || !entry?.embed || !capability.scopeSupported || !capability.computerUseEnabled) return trace('skipped', 'task-context-unavailable')
     const conversationId = entry.platform.conversationIdFromPath(source.pagePath)
     let task = this.taskCoordinator.current(platformId)
-    if (!task || task.sourceSubmissionId !== source.sourceSubmissionId) return trace('skipped', 'task-source-mismatch')
+    // Sent from a remote terminal, then switched back to local: no task owns this reply, so it is an
+    // ordinary command. A finished, stopped or superseded task keeps its record and stays rejected.
+    if (!task && this.taskCoordinator.neverTracked(platformId, source.sourceSubmissionId)) {
+      this.traceCommand(this.activePlatform, { event: 'received', reason: 'task-source-untracked', messageId: command.messageId, taskSourcePresent: true })
+      return this.runner.handleDetected(command, conversationIdOverride)
+    }
+    if (!task) return trace('skipped', 'task-missing')
+    if (task.sourceSubmissionId !== source.sourceSubmissionId) return trace('skipped', 'task-source-mismatch')
     if (!conversationId || entry.embed.getState().conversationId !== conversationId) return trace('skipped', 'task-conversation-mismatch')
     if (task.conversationId === null && entry.conversationId === null) task = this.syncAutonomousTask(platformId, conversationId)?.task ?? null
     if (!task || task.conversationId !== conversationId || entry.conversationId !== null && entry.conversationId !== conversationId) return trace('skipped', 'task-conversation-mismatch')

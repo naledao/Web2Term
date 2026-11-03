@@ -17,6 +17,7 @@ import {
   SCHEDULED_TASKS_GUIDE_URL,
   CONVERSATION_COMPACTION_GUIDE_URL,
   MAIL_NOTIFICATIONS_GUIDE_URL,
+  WINDOWS_AGENT_GUIDE_URL,
 } from './site-config'
 
 type Step = {
@@ -450,7 +451,8 @@ export default function Home() {
         <div className="connections-intro">
           <h2 id="web2term-title">你的 Linux 设备，<br /><span>接进同一段对话。</span></h2>
           <p>{PRODUCT_NAME} 桌面客户端与 Linux 小工具主动连接同一后端，登录同一账号后即可选择设备。继续手动输入命令、让模型执行并接收结果，无需设备运行 SSH 服务。</p>
-          <p className="connections-platform">Windows / macOS 桌面端 + Linux x86_64 设备工具</p>
+          <p className="connections-platform">Windows / macOS 桌面端 + Linux x86_64 设备工具 + Windows 本机远程终端</p>
+          <p>Windows 客户端也能把本机作为 PowerShell 远程设备开放给同一后端、同一账号的其他客户端，无需安装 sshd：在「设置 → web2term 设备」开启后，换一台客户端刷新设备列表即可连接。详见 <a className="text-link" href={WINDOWS_AGENT_GUIDE_URL} target="_blank" rel="noreferrer">Windows 本机远程终端说明 <ArrowIcon /></a>。</p>
           <a className="text-link" href={WEB2TERM_GUIDE_URL} target="_blank" rel="noreferrer">查看桌面连接指南 <ArrowIcon /></a>
           <details className="connection-notes">
             <summary>连接前要知道</summary>
@@ -568,7 +570,7 @@ export default function Home() {
           </div>
           <small>桌面端：Windows x64 / macOS arm64 · 设备工具：Linux x86_64 · 下载源：GitHub 最新 Release</small>
         </div>
-        <div className="download-terminal"><div className="download-terminal__head"><span>SESSION SETUP</span><span>工作区入口</span></div><dl className="download-environments"><div><dt>本机终端</dt><dd>Windows · PowerShell / macOS · zsh</dd></div><div><dt>Computer Use</dt><dd>Windows x64 · ChatGPT / DeepSeek · 本机</dd></div><div><dt>远程连接</dt><dd>SSH / web2term</dd></div><div><dt>工具箱</dt><dd>Git / MySQL / Redis / Nacos</dd></div><div><dt>模型</dt><dd>ChatGPT / Claude / Gemini / DeepSeek</dd></div></dl></div>
+        <div className="download-terminal"><div className="download-terminal__head"><span>SESSION SETUP</span><span>工作区入口</span></div><dl className="download-environments"><div><dt>本机终端</dt><dd>Windows · PowerShell / macOS · zsh</dd></div><div><dt>Computer Use</dt><dd>Windows x64 · ChatGPT / DeepSeek · 本机</dd></div><div><dt>本机远程终端</dt><dd>Windows · PowerShell · ConPTY</dd></div><div><dt>远程连接</dt><dd>SSH / web2term</dd></div><div><dt>工具箱</dt><dd>Git / MySQL / Redis / Nacos</dd></div><div><dt>模型</dt><dd>ChatGPT / Claude / Gemini / DeepSeek</dd></div></dl></div>
       </section>
 
       <footer className="site-footer">

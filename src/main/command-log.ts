@@ -11,7 +11,7 @@ const reasons = [
   'placeholder', 'manual-mode', 'paused', 'already-in-flight', 'missing-record', 'execution-status',
   'disposed', 'no-shell', 'superseded', 'conversation-changed', 'rejected', 'interrupted', 'exception',
   'task-ended', 'automation-blocked', 'waiting-user', 'tool-disabled', 'invalid-message-id',
-  'task-context-unavailable', 'task-source-mismatch', 'task-conversation-mismatch', 'interceptor-disabled',
+  'task-context-unavailable', 'task-source-mismatch', 'task-missing', 'task-source-untracked', 'task-conversation-mismatch', 'interceptor-disabled',
   'waiting-task-result', 'pending-task-command', 'task-step-unavailable'
 ] as const
 

@@ -209,7 +209,7 @@ test('a user-edited caption stops automatic submission without replacing the edi
   assert.equal(app.send.clicks, 0)
 })
 
-test('a due full prompt accompanies an attachment-only result once and confirms through sent-raw', () => {
+test('a due full prompt never accompanies an attachment result caption', () => {
   const files = [{ fileName: 'result.md', mimeType: 'text/markdown', sizeBytes: 100 }]
   const app = fixture(files), prefix = '【角色】\n完整的终端约定。\n\n'
   app.controller.configure({ enabled: true, promptInjectionEnabled: true, prefix,
@@ -217,23 +217,8 @@ test('a due full prompt accompanies an attachment-only result once and confirms 
     prefixIncludesReplyProtocol: true, replyProtocolVersion: 1, replyProtocolFullLength: 8,
     contextPrefixUsage: { estimatedTokens: 10, characters: prefix.length + 2 } })
   app.render(['result.md'])
-  assert.equal(app.controller.prepareFileSendCaption(token, ''), true)
-  assert.equal(app.composer.textContent, prefix + '\u2063\u2063')
-  assert.equal(app.reports.some(event => event.event === 'sent-raw'), false)
-  app.confirmOnSend()
-  assert.equal(app.submit(), true)
-  assert.equal(app.status().status, 'sent')
-  const report = app.reports.find(event => event.event === 'sent-raw')
-  assert.equal(report.promptInjected, true)
-  assert.equal(report.injectionPlanToken, 'attachment-refresh')
-  assert.equal(report.taskPromptGeneration, 0)
-  assert.equal(report.textLength, 0)
-  assert.equal(report.contextUsage.characters, prefix.length + 2)
-  assert.equal(app.reports.some(event => event.event === 'user-message'), false)
-  assert.equal(app.controller.beginFileSend('second-result', files), 'ok')
-  app.controller.fileSelectionApplied('second-result'); app.render(['result.md'])
-  assert.equal(app.controller.prepareFileSendCaption('second-result', '后续结果'), true)
-  assert.equal(app.composer.textContent, '后续结果', 'the confirmed full plan is not repeated before reconfiguration')
+  assert.equal(app.controller.prepareFileSendCaption(token, '文件结果'), true)
+  assert.equal(app.composer.textContent, '文件结果', 'the refresh waits for the next human send')
 })
 
 test('attachment result captions cannot confirm an injection after the task changes', () => {

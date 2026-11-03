@@ -1,4 +1,4 @@
-// User-run only: node --test tests/deepseek-analysis-retry.test.mjs tests/deepseek-reply-guards.test.mjs
+// User-run only: node --test tests/deepseek-analysis-retry.test.mjs tests/deepseek-reply-guards.test.mjs tests/deepseek-computer-requests.test.mjs
 // Actual retry helpers and native click bridge, fake DOM/timers only. No Electron, session or network.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -14,7 +14,8 @@ function initializer(name) {
   assert.ok(value, name)
   return value.getText(pageSource)
 }
-const helpers = ['nativeEditRows', 'latestUserRow', 'nativeEditor', 'nativeEditRejection', 'startNativeEditRetry',
+const helpers = ['DSML_OPEN', 'DSML_COMPUTER_START', 'DSML_MARKUP', 'looksLikeJsonEnvelope', 'looksLikeDsmlComputerCall', 'dsmlInProse', 'dsmlLeaked',
+  'nativeEditRows', 'latestUserRow', 'nativeEditor', 'nativeEditRejection', 'startNativeEditRetry',
   'nativeEditControl', 'nativeEditWait', 'nativeRetryPrefix', 'giveUpSafetyLeak', 'resendAfterSafetyLeak', 'replyLeakKind', 'retryReplyByEditing', 'handleSafetyLeak']
 const code = helpers.map(name => `const ${name} = ${initializer(name)};`).join('\n')
 const tick = async () => { for (let i = 0; i < 8; i++) await Promise.resolve() }
@@ -24,7 +25,7 @@ function fixture() {
   const events = [], timers = [], sent = []
   let now = 1000, opened = false, generating = false, failOpen = false, covered = false, sendCovered = false, sendPresent = true
   const rules = { rowSelector: '[data-virtual-list-item-key]', buttonSelector: '.edit', editorSelector: '.editor', submitSelector: '.send',
-    analysisLeakPattern: '^<analysis>\\s*\\S', safetyLeakPattern: '^<ds_safety>[\\s\\S]*</ds_safety>\\s*Safe$', retryStoppedByEditing: true }
+    analysisLeakPattern: '^<analysis>\\s*\\S', safetyLeakPattern: '^<ds_safety>[\\s\\S]*</ds_safety>\\s*Safe$', retryStoppedByEditing: true, retryDsmlByEditing: true }
   const edit = { x: 10, y: 0 }, send = { x: 30, y: 0 }
   let sendButton = send
   for (const button of [edit, send]) Object.assign(button, {
@@ -58,14 +59,16 @@ function fixture() {
     computerBaselineOf: () => ({ ids: new Set([reply.id]) }), lastAssistantId: () => reply.id,
     findStopButton: () => generating ? {} : null,
     readReplyMarkdown: node => node.markdown,
+    // The real normalizer leaves an unreadable invoke as it is, which is all these tests need.
+    replyRootOf: node => node?.root || null, normalizeDsmlToolCalls: text => text,
     setReplyWaiting(since) { state.awaitingReplySince = since }, scheduleCheck() {},
     setTimeout(callback, delay) { timers.push({ callback, at: now + delay }) },
     window: { innerWidth: 1000, innerHeight: 800 },
     document: { elementFromPoint: x => covered || (sendCovered && x !== 15) ? { contains: () => false } : x === 15 ? edit : sendButton },
     report(event) {
       events.push(event)
-      if (['analysis-leak-edit-click', 'stopped-retry-edit-click'].includes(event.reason) && !failOpen) opened = true
-      if (['analysis-leak-send-click', 'stopped-retry-send-click'].includes(event.reason)) { sent.push(editor.value); opened = false; generating = true }
+      if (['analysis-leak-edit-click', 'dsml-leak-edit-click', 'stopped-retry-edit-click'].includes(event.reason) && !failOpen) opened = true
+      if (['analysis-leak-send-click', 'dsml-leak-send-click', 'stopped-retry-send-click'].includes(event.reason)) { sent.push(editor.value); opened = false; generating = true }
     }
   }
   context.api = new Script(code + '\n({ handleSafetyLeak, resendAfterSafetyLeak, replyLeakKind, retryReplyByEditing })').runInNewContext(context)
@@ -303,15 +306,49 @@ test('code examples and other platforms have no analysis recovery rule', () => {
   assert.equal(f.context.api.replyLeakKind('<analysis>正文', f.reply), null)
 })
 
+// User screenshot 2026-11-03: the command sits inside the invoke tag, closed by a parameter tag that was never opened.
+const malformedDsml = [
+  '< | | DSML | | calls>',
+  '< | | DSML | | invoke name="command">rg -n "^###? " README.md</ | | DSML | | parameter>',
+  '< | | DSML | | parameter name="description" string="true">列出 README 所有标题</ | | DSML | | parameter>',
+  '</ | | DSML | | invoke>',
+  '</ | | DSML | | calls>'
+].join('\n')
+
+test('unreadable DSML in the answer clicks edit then send and resends the original message unchanged', async () => {
+  const f = fixture(), original = f.editor.value
+  f.reply.markdown = malformedDsml
+  assert.equal(f.context.api.replyLeakKind(malformedDsml, f.reply), 'dsml')
+  assert.equal(f.recover(), true)
+  await ready(f)
+  assert.deepEqual(f.events.filter(event => event.reason.endsWith('-click')).map(event => event.reason), ['dsml-leak-edit-click', 'dsml-leak-send-click'])
+  assert.deepEqual(f.sent, [original])
+  f.advance(200)
+  assert.ok(f.events.some(event => event.reason === 'native-edit-retry'))
+  assert.equal(f.state.lastCommandMessageId, null)
+})
+
+test('DSML in code or quotations, computer calls, and adapters without the rule are not retried', () => {
+  const f = fixture()
+  const quoted = { textContent: malformedDsml, parentElement: { closest: () => null } }
+  f.reply.root = { textContent: '示例如下：\n' + malformedDsml, querySelectorAll: () => [quoted] }
+  assert.equal(f.context.api.replyLeakKind(malformedDsml, f.reply), null)
+  f.reply.root = null
+  const computer = '<｜DSML｜invoke name="computer"><｜DSML｜parameter name="action" string="true">screenshot'
+  assert.equal(f.context.api.replyLeakKind(computer, f.reply), null)
+  f.context.PAGE.nativeEdit = { ...f.context.PAGE.nativeEdit, retryDsmlByEditing: false }
+  assert.equal(f.context.api.replyLeakKind(malformedDsml, f.reply), null)
+})
+
 const embedSource = ts.createSourceFile('embed.ts', readFileSync(new URL('../src/main/embed.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)
 const embed = embedSource.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'ChatGptEmbed')
 const click = embed.members.find(node => node.name?.getText(embedSource) === 'clickNativeEdit')
 const Bridge = new Script(compile(`class Bridge { ${click.getText(embedSource)} }; Bridge`)).runInNewContext({ URL })
 
 test('native clicks are scoped to an active DeepSeek task, current generation and current URL', () => {
-  for (const condition of ['valid', 'stopped-retry', 'stopped-disabled', 'platform', 'generation', 'route', 'stopped', 'question', 'safety-disabled']) {
+  for (const condition of ['valid', 'stopped-retry', 'stopped-disabled', 'dsml-retry', 'dsml-disabled', 'platform', 'generation', 'route', 'stopped', 'question', 'safety-disabled']) {
     const clicks = [], bridge = Object.assign(new Bridge(), {
-      platform: { id: 'deepseek', page: { nativeEdit: { retryStoppedByEditing: true } }, allowedOriginPattern: /^https:\/\/chat\.deepseek\.com\// },
+      platform: { id: 'deepseek', page: { nativeEdit: { retryStoppedByEditing: true, retryDsmlByEditing: true } }, allowedOriginPattern: /^https:\/\/chat\.deepseek\.com\// },
       interceptor: { enabled: true, taskFinishedAt: null, pendingQuestion: null }, taskPromptGeneration: 4,
       computerUseRecognitionEnabled: false,
       liveContents: () => ({ getURL: () => 'https://chat.deepseek.com/a/chat/s/one' }),
@@ -327,7 +364,9 @@ test('native clicks are scoped to an active DeepSeek task, current generation an
     if (condition === 'safety-disabled') event.reason = 'safety-leak-edit-click'
     if (condition === 'stopped-retry' || condition === 'stopped-disabled') event.reason = 'stopped-retry-send-click'
     if (condition === 'stopped-disabled') bridge.platform.page.nativeEdit.retryStoppedByEditing = false
+    if (condition === 'dsml-retry' || condition === 'dsml-disabled') event.reason = 'dsml-leak-send-click'
+    if (condition === 'dsml-disabled') bridge.platform.page.nativeEdit.retryDsmlByEditing = false
     bridge.clickNativeEdit(event)
-    assert.equal(clicks.length, condition === 'valid' || condition === 'stopped-retry' ? 1 : 0, condition)
+    assert.equal(clicks.length, ['valid', 'stopped-retry', 'dsml-retry'].includes(condition) ? 1 : 0, condition)
   }
 })
