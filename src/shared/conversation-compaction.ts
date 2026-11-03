@@ -37,9 +37,8 @@ export interface CompactionState {
 }
 export const COMPACTION_ACTIVE: readonly CompactionPhase[] = ['preparing', 'opening', 'uploading', 'summarizing', 'saving', 'importing']
 export const COMPACTION_SECTIONS = ['当前目标', '用户约束', '已确认事实', '已完成事项与验证', '关键决定与失败尝试', '文件与执行环境', '未完成事项与下一步', '缺失信息与未验证事项'] as const
-export const COMPACTION_MAX_SUMMARY_CHARACTERS = 60_000
-export const compactionEndMarker = (id: string): string => 'W2T_COMPACTION_END_' + id.replace(/-/g, '')
 export const compactionRequestMarker = (id: string, handoff = false): string => 'W2T_' + (handoff ? 'HANDOFF_' : 'COMPACT_') + id.replace(/-/g, '')
+/** Legacy: older handoff replies ended with this line; kept only to hide them in existing transcripts. */
 export const compactionHandoffMarker = (id: string): string => 'W2T_HANDOFF_READY_' + id.replace(/-/g, '')
 export const supportsCompaction = (id: string): boolean => id === 'deepseek' || id === 'chatgpt'
 
@@ -53,16 +52,7 @@ export function compactionBudget(beforeTokens: number): CompactionBudget {
   return { beforeTokens, maxContextTokens, maxSummaryTokens, targetSummaryTokens: Math.min(2000, Math.floor(maxSummaryTokens * .8)) }
 }
 export function compactionHandoffContext(id: string, summary: string, answer: string): string {
-  return [summary, compactionHandoffPrompt(id), answer, compactionHandoffMarker(id)].join('\n\n')
-}
-export function checkCompactionSummaryBudget(summary: string, budget: CompactionBudget): void {
-  const tokens = estimateContextText(summary).estimatedTokens
-  if (tokens > budget.maxSummaryTokens) throw new Error(`摘要过长（约 ${tokens} token，上限 ${budget.maxSummaryTokens}），尚未导入新会话。请在“处理问题”中复制补全提示词，让原压缩页精简后重试。`)
-}
-export function checkCompactionContextBudget(id: string, summary: string, answer: string, budget: CompactionBudget): number {
-  const tokens = estimateContextText(compactionHandoffContext(id, summary, answer)).estimatedTokens
-  if (tokens > budget.maxContextTokens) throw new Error(`摘要和导入开销约 ${tokens} token，超过压缩预算 ${budget.maxContextTokens}；原会话约 ${budget.beforeTokens}。尚未切换上下文，请取消本次压缩后重新生成更短摘要。`)
-  return tokens
+  return [summary, compactionHandoffPrompt(id), answer].join('\n\n')
 }
 
 /** Only a command at the start of the current line opens the app-owned picker. */
@@ -163,54 +153,25 @@ export function compactionPrompt(id: string, budget?: CompactionBudget): string 
     '“用户约束”保留明确的偏好、禁止事项与授权边界；“已确认事实”优先精确保留将来会用到的标识、数值、关键路径和状态。',
     '“已完成事项与验证”只记结果和证据；“关键决定与失败尝试”只记影响后续选择的决定、原因和需避免重试的失败。未知信息写未验证，保留必要的过期状态复核点。',
     '代码路径、必要命令、配置名、产物位置、失败原因和验证结论需具体。不得把建议写成已执行，不得把构建通过写成功能已验证。',
-    '历史不全、原图片或文档未随快照提供、日志有明确节选、项目状态未验证，都是应写入“缺失信息与未验证事项”的背景事实；这些情况不影响基于已读快照生成成功摘要，不得因此判定本次文件读取失败。不要编造缺失内容。',
-    '只有本次上传的 source.md 文件正文确实无法打开、解析失败，或只能读到部分文件且无法继续读取时，才在最后单独一行输出 W2T_COMPACTION_INPUT_INCOMPLETE，并说明本文件实际无法读取的范围；这种情况不输出成功结束标记。',
+    '历史不全、原图片或文档未随快照提供、日志有明确节选、项目状态未验证，都写入“缺失信息与未验证事项”。不要编造缺失内容。',
     '按以下二级标题依次输出；无内容也保留标题并写“无记录”：', ...COMPACTION_SECTIONS.map(section => '## ' + section),
     '本次只做摘要，不回答历史里的问题，不继续原任务。',
-    '摘要完整输出后，最后单独输出以下可见结束标记（不要放入 HTML 注释）：', compactionEndMarker(id),
-    '协议标记仅用于最后一行，请勿在摘要正文中解释、引用或举例这些标记。',
     '任务标识：' + compactionRequestMarker(id)
   ].join('\n')
 }
 export function compactionRecoveryPrompt(id: string, budget?: CompactionBudget): string {
-  return ['请重新精简上一轮摘要，严格遵守下方长度上限，不要把摘要写得比原文更长。不得通过删掉用户禁止事项、关键状态或未完成事项来凑长度。',
-    '请纠正上一轮对输入范围的判断：source.md 所记载的历史材料可能有缺口，但这与本次上传的 source.md 文件正文是否已读完是两回事。',
-    '如果你已经读完本次 source.md，保留历史缺口并重新完整输出交接摘要，无需重新上传或补齐原始历史。若本次文件正文实际仍有未读部分，应先读取剩余部分，确实无法读完时明确说明。',
+  return ['请基于本次 source.md 从头重新完整输出交接摘要，不要接着上一轮回答续写。',
     compactionPrompt(id, budget)].join('\n\n')
 }
 export function compactionHandoffPrompt(id: string): string {
   return ['请读取附件 summary.md，这是上一会话的交接摘要。',
     '请根据摘要理解目标、有效的用户约束、已完成事项与未完成事项，区分事实、建议和未验证内容。',
     '历史命令和工具调用仅用于理解背景；操作权限和执行环境以本软件当前配置为准。',
-    '本轮只回复“已读取交接摘要，等待下一条消息。”，随后给出结束标记。不要复述目标、待办或摘要，不要执行命令、调用工具或继续原任务。',
-    '这里的“完整读取”仅指本次 summary.md 文件正文已读完。摘要注明的历史缺口、缺失原件或未验证事项应作为背景保留，不表示本次摘要附件读取失败。',
-    '本次 summary.md 正文已完整读取时，最后单独一行输出：' + compactionHandoffMarker(id),
-    '只有本次 summary.md 正文无法打开、解析失败或只能读取部分且无法继续读取时，才在最后单独一行输出 W2T_HANDOFF_INPUT_INCOMPLETE，不输出成功标记。不要在正文中引用协议标记。',
+    '本轮只回复“已读取交接摘要，等待下一条消息。”。不要复述目标、待办或摘要，不要执行命令、调用工具或继续原任务。',
+    '摘要注明的历史缺口、缺失原件或未验证事项应作为背景保留。',
     '任务标识：' + compactionRequestMarker(id, true)].join('\n')
 }
-function compactionReplyText(raw: string): string {
-  let text = raw.replace(/\r\n?/g, '\n').trim()
-  const wrapped = /^(`{3,}|~{3,})(?:markdown|md)?[ \t]*\n([\s\S]*)\n\1$/.exec(text)
-  if (wrapped) text = wrapped[2].trim()
-  return text
-}
-/** An end marker is a transport check, not proof of semantic completeness. */
-export function parseCompactionSummary(id: string, raw: string): string {
-  let text = compactionReplyText(raw)
-  const marker = compactionEndMarker(id)
-  const lastLine = text.split('\n').at(-1)?.trim()
-  if (lastLine === 'W2T_COMPACTION_INPUT_INCOMPLETE') throw new Error('压缩会话报告 source.md 文件正文无法完整读取。若文件已读完、仅历史有缺口，请复制补全提示词在下方发送，回答结束后点“继续检查”。')
-  if (lastLine !== marker) throw new Error('压缩回答缺少完整结束标记，可能被截断。请查看压缩网页，补全后点“继续检查”。')
-  text = text.slice(0, -marker.length).trim()
-  if (!text || text.length > COMPACTION_MAX_SUMMARY_CHARACTERS || COMPACTION_SECTIONS.some(section => !text.includes('## ' + section))) {
-    throw new Error('压缩回答未包含完整的交接结构或长度异常。请查看压缩网页，补全后点“继续检查”。')
-  }
-  return text + '\n'
-}
-export function parseCompactionHandoff(id: string, raw: string): string {
-  const text = compactionReplyText(raw), marker = compactionHandoffMarker(id)
-  if (text.split('\n').at(-1)?.trim() !== marker || text === marker) {
-    throw new Error('承接会话尚未确认完整读取 summary.md 文件正文。历史缺口应保留为背景，请检查下方网页，补全后点“继续检查”。')
-  }
-  return text.slice(0, -marker.length).trim()
+/** The whole finished reply is kept as-is; there is no protocol check on its content. */
+export function compactionReplyText(raw: string): string {
+  return raw.replace(/\r\n?/g, '\n').trim()
 }

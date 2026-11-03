@@ -42,7 +42,7 @@ function diagnosticSnapshot(value: unknown): Record<string, unknown> {
     return {
       index: Number.isSafeInteger(name.index) && Number(name.index) >= 0 ? name.index : null,
       nameLength: Number.isSafeInteger(name.nameLength) && Number(name.nameLength) >= 0 ? name.nameLength : null,
-      method: ['exact', 'normalized', 'renamed', 'truncated', 'image', 'missing'].includes(String(name.method)) ? name.method : 'missing'
+      method: ['exact', 'normalized', 'renamed', 'truncated', 'split', 'image', 'missing'].includes(String(name.method)) ? name.method : 'missing'
     }
   })
   if (Array.isArray(snapshot.fileInputs)) result.fileInputs = snapshot.fileInputs.slice(0, 12).map((raw) => {
@@ -78,6 +78,30 @@ function diagnosticSnapshot(value: unknown): Record<string, unknown> {
       if (typeof ancestor[key] === 'boolean' || typeof ancestor[key] === 'number') safe[key] = ancestor[key] as boolean | number
     }
     return safe
+  })
+  const pick = (raw: unknown, keys: string[]): Record<string, boolean | number> => {
+    const source = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+    const safe: Record<string, boolean | number> = {}
+    for (const key of keys) if (typeof source[key] === 'boolean' || typeof source[key] === 'number') safe[key] = source[key] as boolean | number
+    return safe
+  }
+  const words = (raw: unknown, allowed: string[]): string[] => Array.isArray(raw) ? raw.filter((word) => allowed.includes(String(word))).map(String) : []
+  if (snapshot.attachmentShape && typeof snapshot.attachmentShape === 'object') {
+    const shape = snapshot.attachmentShape as Record<string, unknown>
+    result.attachmentShape = {
+      ...pick(shape, ['textLength', 'labelLength', 'removeControls', 'progress', 'images', 'svgs']),
+      typeWords: words(shape.typeWords, ['markdown', 'document', 'file', 'text', 'pdf', '文档', '文件', '文本']),
+      cards: Array.isArray(shape.cards) ? shape.cards.slice(0, 5).map((card) =>
+        pick(card, ['visible', 'textLength', 'labelLength', 'images', 'svgs', 'progress', 'stemSeen', 'extensionSeen', 'nameSeen'])) : [],
+      files: Array.isArray(shape.files) ? shape.files.slice(0, 5).map((file) =>
+        pick(file, ['index', 'nameText', 'nameLabel', 'stemText', 'stemLabel', 'extensionText', 'extensionLabel'])) : []
+    }
+  }
+  if (Array.isArray(snapshot.pageAlerts)) result.pageAlerts = snapshot.pageAlerts.slice(0, 6).map((raw) => {
+    const alert = raw as Record<string, unknown>
+    return { ...pick(alert, ['inComposer', 'textLength']),
+      role: ['alert', 'status', 'toast', 'live'].includes(String(alert.role)) ? alert.role : 'live',
+      keywords: words(alert.keywords, ['失败', '无法', '不支持', '错误', '过大', '上限', '重试', 'error', 'failed', 'unable', 'unsupported', 'too large', 'limit', 'try again']) }
   })
   if (Array.isArray(snapshot.draftImages)) result.draftImages = snapshot.draftImages.slice(0, 8).map((raw) => {
     const image = raw as Record<string, unknown>
@@ -292,6 +316,7 @@ export async function sendPageFiles(
     let previousSnapshot = ''
     let lastSnapshotAt = 0
     let lastPageDiagnosticsAt = 0
+    const baselinesLogged = new Set<string>()
     while (Date.now() < deadline) {
       if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
       if (detached || uploadError) return finish('upload-failed', detached ? 'debugger-detached' : 'upload-network-error')
@@ -306,6 +331,12 @@ export async function sendPageFiles(
       if (snapshot?.status === 'uploading' && snapshot.namesSeen === false && (!lastPageDiagnosticsAt || Date.now() - lastPageDiagnosticsAt >= 10000)) {
         try { log('page-diagnostics', diagnosticSnapshot(await call('attachmentDiagnostics'))) } catch { log('page-diagnostics-unavailable') }
         lastPageDiagnosticsAt = Date.now()
+      }
+      // Baselines for the stall above: the form while the name is still shown, and once the page reports ready.
+      const baseline = snapshot?.status === 'ready' ? 'ready' : snapshot?.namesSeen === true ? 'named' : ''
+      if (baseline && !baselinesLogged.has(baseline)) {
+        baselinesLogged.add(baseline)
+        try { log('page-diagnostics-' + baseline, diagnosticSnapshot(await call('attachmentDiagnostics'))) } catch { log('page-diagnostics-unavailable') }
       }
       if (snapshot?.status === 'busy') return finish('busy', 'draft-changed')
       if (snapshot?.status === 'stale' || snapshot?.status === 'no-composer' || snapshot?.status === 'upload-failed') return finish('upload-failed', snapshot.status)

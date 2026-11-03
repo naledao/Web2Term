@@ -236,6 +236,8 @@ export interface PageAdapter {
   fileImagesMayUseNames?: boolean
   /** The native uploader can insert a positive duplicate counter before the extension. */
   fileDuplicateNameSuffix?: boolean
+  /** A card may show a file's stem and extension apart (stem in text, extension in labels), never "name.ext". */
+  fileSplitNameCards?: boolean
   /** Restrict file evidence to measured native attachment cards, excluding message text. */
   fileAttachmentCardSelector?: string
   /** Some sites use different native cards in the composer and sent message. */
@@ -709,6 +711,11 @@ export const CHATGPT_PAGE: PageAdapter = {
   fileUserTurnIdAttr: 'data-turn-key',
   // 2026-10-11 upload: user_login_api.md becomes user_login_api(1).md.
   fileDuplicateNameSuffix: true,
+  /*
+   * 2026-11-03 compaction upload: once uploaded, the draft card for source.md kept "source" in its text and
+   * "md" only in its labels; "source.md" appeared nowhere and the send waited out its 120 s deadline.
+   */
+  fileSplitNameCards: true,
   // 2026-10-05 attachment capture: this button contains the selected model.
   // Version text such as GPT-6.1 must not look like a file draft or uncleared upload.
   fileDraftIgnoreSelector: 'button[aria-label="选择 ChatGPT 模型"]',

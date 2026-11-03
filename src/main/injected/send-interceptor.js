@@ -78,6 +78,7 @@
     fileUserTurnIdAttr: 'data-turn-key',
     fileImagesMayUseNames: false,
     fileDuplicateNameSuffix: true,
+    fileSplitNameCards: true,
     fileAttachmentCardSelector: ''
   }
 
@@ -5445,12 +5446,37 @@
           (PAGE.fileUploadProgressSelector && card.querySelector(PAGE.fileUploadProgressSelector)))
         : !!root.querySelector('[role="progressbar"], [aria-busy="true"]'),
       error: !!root.querySelector('[role="alert"], [aria-invalid="true"]'),
-      inputFiles
+      inputFiles, cardTexts: attachmentCardTexts(root, true)
     }
+  }
+  /*
+   * Each attachment card read as one unit, its text plus its labels, so a stem and an extension shown
+   * apart can still be matched together (PAGE.fileSplitNameCards). A draft card is the block around a
+   * remove control, kept apart from the composer; a sent message has no such control, so its whole
+   * attachment root is the unit.
+   */
+  const attachmentCardTexts = (root, draft) => {
+    if (!PAGE.fileSplitNameCards || !root) return []
+    const labelsOf = (node) => [node, ...node.querySelectorAll('[title], [aria-label], [alt]')]
+      .flatMap((item) => [item.getAttribute('title'), item.getAttribute('aria-label'), item.getAttribute('alt')]).filter(Boolean)
+    const composer = draft ? getComposer() : null
+    const units = !draft ? [root] : [...new Set([...root.querySelectorAll(CONTROL_SELECTOR)]
+      .filter((control) => /remove|delete|\u5220\u9664|\u79fb\u9664/i.test([control.getAttribute('aria-label'), control.getAttribute('title')].filter(Boolean).join(' ')) &&
+        !(composer && control.contains(composer)))
+      .map((control) => {
+        let card = control
+        for (let level = 0; level < 4 && card.parentElement && card.parentElement !== root && !(composer && card.parentElement.contains(composer)); level++) card = card.parentElement
+        return card
+      }))]
+    return units.map((unit) => {
+      const clone = unit.cloneNode(true)
+      clone.querySelectorAll('textarea, [contenteditable]:not([contenteditable="false"]), input').forEach((node) => node.remove())
+      return collapse([clone.textContent || '', ...labelsOf(unit)].join(' '))
+    })
   }
   const normalizeAttachmentName = (text) => String(text || '').normalize('NFC')
     .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, '').replace(/\s+/g, ' ').trim()
-  const attachmentNameEvidence = (sources, files) => {
+  const attachmentNameEvidence = (sources, files, cardTexts = []) => {
     const raw = (Array.isArray(sources) ? sources : [sources]).map((source) => String(source || ''))
     const normalized = raw.map(normalizeAttachmentName)
     const names = files.map((file) => normalizeAttachmentName(file.fileName))
@@ -5517,6 +5543,21 @@
         })
         if (candidates.length === 1 && evidence[candidates[0]].method === 'missing') evidence[candidates[0]].method = 'truncated'
       }
+    }
+    // A split card must show both the stem and the extension of exactly ONE file in this batch,
+    // and acknowledges at most that one file; similarly named files never share a card.
+    const asciiNameCharacter = (character) => !!character && /[A-Za-z0-9_-]/.test(character)
+    const containsStem = (source, stem) => {
+      const text = source.toLowerCase(), value = stem.toLowerCase()
+      for (let offset = text.indexOf(value); value && offset !== -1; offset = text.indexOf(value, offset + 1)) {
+        if (!asciiNameCharacter(text[offset - 1]) && !asciiNameCharacter(text[offset + value.length])) return true
+      }
+      return false
+    }
+    for (const card of cardTexts.map(normalizeAttachmentName)) {
+      const candidates = nameParts.flatMap(({ stem, extension }, index) => stem && extension.length > 1 && containsStem(card, stem) &&
+        new RegExp(`(^|[^\\p{L}\\p{N}])\\.?${escapePattern(extension.slice(1))}($|[^\\p{L}\\p{N}])`, 'iu').test(card) ? [index] : [])
+      if (candidates.length === 1 && evidence[candidates[0]].method === 'missing') evidence[candidates[0]].method = 'split'
     }
     return evidence
   }
@@ -5664,7 +5705,7 @@
     const images = allImages.filter(imageLooksLikeAttachment)
     const nameSources = cards.flatMap((card) => attachmentNameSources(card))
     const imagesExpected = files.filter((file) => file.mimeType.startsWith('image/')).length
-    const names = attachmentNameEvidence(nameSources, files)
+    const names = attachmentNameEvidence(nameSources, files, attachmentCardTexts(root, false))
     if (PAGE.fileImagesMayUseNames && names.every((name) => name.method !== 'missing')) return true
     return images.length >= imagesExpected && files.every((file, index) => file.mimeType.startsWith('image/') || names[index].method !== 'missing')
   }
@@ -5764,7 +5805,7 @@
     if (fileSend.edited || draftText !== String(fileSend.caption || '').replace(/\s+/g, '')) return { status: 'busy' }
     if (snapshot.error) return { status: 'upload-failed', ...snapshot }
     const imagesExpected = fileSend.files.filter((item) => item.mimeType.startsWith('image/')).length
-    const nameEvidence = attachmentNameEvidence(snapshot.nameSources, fileSend.files)
+    const nameEvidence = attachmentNameEvidence(snapshot.nameSources, fileSend.files, snapshot.cardTexts)
     nameEvidence.forEach((name, index) => {
       if (name.method === 'missing' && fileSend.files[index].mimeType.startsWith('image/') && snapshot.images >= imagesExpected) name.method = 'image'
     })
@@ -5796,7 +5837,7 @@
         if (fileSend.edited) return 'busy'
         state.programmatic = true
         const snapshot = attachmentSnapshot()
-        if (fileSend.files.length && !snapshot.images && !snapshot.inputFiles && !snapshot.uploading && attachmentNameEvidence(snapshot.nameSources, fileSend.files).every((name) => name.method === 'missing')) fileSend.selected = false
+        if (fileSend.files.length && !snapshot.images && !snapshot.inputFiles && !snapshot.uploading && attachmentNameEvidence(snapshot.nameSources, fileSend.files, snapshot.cardTexts).every((name) => name.method === 'missing')) fileSend.selected = false
         if (!fileSend.selected) { fileSend.chooserControls = new WeakSet(); fileSend.chooserSteps = {} }
         return fileSend.selected ? 'resume' : 'ok'
       }
@@ -5924,7 +5965,7 @@
       return {
         ...snapshot, composerFound: !!composer,
         rootIsForm: !!root?.matches('form'),
-        nameEvidence: attachmentNameEvidence(snapshot.nameSources, files),
+        nameEvidence: attachmentNameEvidence(snapshot.nameSources, files, snapshot.cardTexts),
         nameSourceCount: snapshot.nameSources.length,
         sendFound: !!send, sendDisabled: send ? controlDisabled(send) : null,
         draftEmpty: composer ? collapse(readComposer(composer)) === '' : null, stopFound: !!findStopButton(),
@@ -5948,6 +5989,69 @@
           }
           return ancestors
         })(),
+        // How the composer form shows each file once its full name is gone: booleans, counts,
+        // lengths and fixed keywords only. Tells a removed card from a renamed or split label.
+        attachmentShape: (() => {
+          const scope = composer?.closest('form') || root
+          if (!scope) return null
+          const clone = scope.cloneNode(true)
+          clone.querySelectorAll('textarea, [contenteditable]:not([contenteditable="false"]), input').forEach((node) => node.remove())
+          const text = collapse(clone.textContent || '')
+          const labelsOf = (node) => [node, ...node.querySelectorAll('[title], [aria-label], [alt]')]
+            .map((item) => [item.getAttribute('title'), item.getAttribute('aria-label'), item.getAttribute('alt')].filter(Boolean).join(' ')).join(' ')
+          const labels = labelsOf(scope)
+          const lower = (value) => String(value || '').toLowerCase()
+          const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          const parts = (file) => {
+            const name = String(file.fileName || ''), dot = name.lastIndexOf('.')
+            return { name, stem: dot > 0 ? name.slice(0, dot) : name, extension: dot > 0 ? name.slice(dot + 1) : '' }
+          }
+          const hasStem = (source, stem) => !!stem && lower(source).includes(lower(stem))
+          const hasExtension = (source, extension) => !!extension &&
+            new RegExp(`(^|[^\\p{L}\\p{N}])\\.?${escape(extension)}($|[^\\p{L}\\p{N}])`, 'iu').test(source)
+          const typeWords = ['markdown', 'document', 'file', 'text', 'pdf', '文档', '文件', '文本'].filter((word) => lower(text + ' ' + labels).includes(word))
+          const removePattern = /remove|delete|删除|移除|close|关闭|取消/i
+          const removeControls = [...scope.querySelectorAll(CONTROL_SELECTOR)].filter((node) =>
+            removePattern.test([node.getAttribute('aria-label'), node.getAttribute('title')].filter(Boolean).join(' ')) && !node.contains(composer))
+          // The nearest container of each remove control that is still apart from the composer: the card itself.
+          const cards = removeControls.slice(0, 5).map((control) => {
+            let card = control
+            for (let level = 0; level < 4 && card.parentElement && card.parentElement !== scope && !card.parentElement.contains(composer); level++) card = card.parentElement
+            const cardText = collapse(card.textContent || ''), cardLabels = labelsOf(card)
+            return {
+              visible: isVisibleElement(card), textLength: cardText.length, labelLength: cardLabels.length,
+              images: card.querySelectorAll('img').length, svgs: card.querySelectorAll('svg').length,
+              progress: card.querySelectorAll('[role="progressbar"], progress, [class*="animate-spin"]').length,
+              stemSeen: files.some((file) => hasStem(cardText + ' ' + cardLabels, parts(file).stem)),
+              extensionSeen: files.some((file) => hasExtension(cardText + ' ' + cardLabels, parts(file).extension)),
+              nameSeen: files.some((file) => !!file.fileName && (cardText + ' ' + cardLabels).includes(file.fileName))
+            }
+          })
+          return {
+            textLength: text.length, labelLength: labels.length, typeWords,
+            removeControls: removeControls.length, cards,
+            progress: scope.querySelectorAll('[role="progressbar"], progress, [class*="animate-spin"]').length,
+            images: scope.querySelectorAll('img').length, svgs: scope.querySelectorAll('svg').length,
+            files: files.slice(0, 5).map((file, index) => {
+              const { name, stem, extension } = parts(file)
+              return { index, nameText: !!name && text.includes(name), nameLabel: !!name && labels.includes(name),
+                stemText: hasStem(text, stem), stemLabel: hasStem(labels, stem),
+                extensionText: hasExtension(text, extension), extensionLabel: hasExtension(labels, extension) }
+            })
+          }
+        })(),
+        // Page-level notices (toasts, alerts) the site may show when it drops a file. Length and fixed keywords only.
+        pageAlerts: [...document.querySelectorAll('[role="alert"], [role="status"], [aria-live="assertive"], [aria-live="polite"], [data-sonner-toast], .toast')]
+          .filter((node) => isVisibleElement(node) && collapse(node.textContent || ''))
+          .slice(0, 6).map((node) => {
+            const text = collapse(node.textContent || '').toLowerCase()
+            return {
+              role: ['alert', 'status'].includes(node.getAttribute('role')) ? node.getAttribute('role') : node.hasAttribute('data-sonner-toast') ? 'toast' : 'live',
+              inComposer: !!composer?.closest('form')?.contains(node), textLength: text.length,
+              keywords: ['失败', '无法', '不支持', '错误', '过大', '上限', '重试', 'error', 'failed', 'unable', 'unsupported', 'too large', 'limit', 'try again']
+                .filter((word) => text.includes(word))
+            }
+          }),
         // Where each image counted in `images` sits, so a page icon mistaken for a
         // draft preview can be told apart from a real one. Never the full src.
         draftImages: (() => {
@@ -6167,7 +6271,7 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, computerUseRequests: false, conversationPathPattern: '', ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileUserTurnIdAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, computerUseRequests: false, conversationPathPattern: '', ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileUserTurnIdAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileSplitNameCards: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
         observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing

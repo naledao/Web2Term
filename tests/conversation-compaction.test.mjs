@@ -41,7 +41,7 @@ const seed = () => ({ session: { id: owner.sessionId, title: '原会话', platfo
   sshHostId: '', sshAttached: false, sshReconnect: false, sshCwd: '', sendDelaySeconds: 3, createdAt: 1 },
   preferences: { fileReadingEnabled: true, backgroundTasksEnabled: false, scheduledTasksEnabled: false, mailNotificationsEnabled: false,
     computerUseEnabled: false, desktopControlEnabled: false, desktopPointClickEnabled: false, computerResultDelaySeconds: 0 } })
-const complete = id => shared.COMPACTION_SECTIONS.map(section => '## ' + section + '\n无记录').join('\n\n') + '\n' + shared.compactionEndMarker(id)
+const complete = () => shared.COMPACTION_SECTIONS.map(section => '## ' + section + '\n无记录').join('\n\n')
 
 test('skill trigger respects line starts, URLs, search text and caret position', () => {
   assert.equal(shared.compactionSkillQuery('//', 2).matches, true)
@@ -96,48 +96,33 @@ test('long logs explicitly mark the omitted middle', () => {
   assert.ok(markdown.includes('字符省略') && markdown.includes('最终错误'))
 })
 
-test('summary requires this job’s visible end marker and all sections; unreadable input cannot become success', () => {
-  const id = '11111111-1111-4111-8111-111111111111'
-  assert.ok(shared.parseCompactionSummary(id, complete(id)).includes('用户约束'))
-  assert.ok(!shared.parseCompactionSummary(id, complete(id)).includes('W2T_COMPACTION_END'))
-  assert.throws(() => shared.parseCompactionSummary(id, complete('another-job')), /结束标记/)
-  assert.throws(() => shared.parseCompactionSummary(id, '短摘要\n' + shared.compactionEndMarker(id)), /交接结构/)
-  assert.throws(() => shared.parseCompactionSummary(id, complete(id) + '\nW2T_COMPACTION_INPUT_INCOMPLETE'), /无法完整读取/)
+test('the whole finished reply is kept without any marker, section or length check', () => {
+  assert.equal(shared.compactionReplyText('\r\n只有一句话\r\n'), '只有一句话')
+  const fenced = '```markdown\n## 当前目标\n无记录\n```'
+  assert.equal(shared.compactionReplyText(fenced), fenced, 'wrapping fences are part of the output too')
+  const long = '你'.repeat(80_000)
+  assert.equal(shared.compactionReplyText(long), long)
+  const quoted = complete() + '\nW2T_COMPACTION_INPUT_INCOMPLETE'
+  assert.equal(shared.compactionReplyText(quoted), quoted, 'former protocol lines are ordinary text')
 })
 
-test('missing historical material is retained as background while actual file-read failure remains blocking', () => {
+test('prompts no longer ask for end or failure markers', () => {
   const id = '11111111-1111-4111-8111-111111111111'
-  const prompt = shared.compactionPrompt(id), handoff = shared.compactionHandoffPrompt(id)
-  assert.ok(prompt.includes('输入范围仅为 source.md 本身'))
-  assert.ok(prompt.includes('这些情况不影响基于已读快照生成成功摘要'))
-  assert.ok(handoff.includes('不表示本次摘要附件读取失败'))
-  const summary = complete(id).replace('## 缺失信息与未验证事项\n无记录',
-    '## 缺失信息与未验证事项\n已读取 source.md 全部 2164 行；原历史和原附件不完整，项目状态待验证。')
-  assert.ok(shared.parseCompactionSummary(id, summary).includes('原历史和原附件不完整'))
-  assert.throws(() => shared.parseCompactionSummary(id, summary + '\nW2T_COMPACTION_INPUT_INCOMPLETE'), /文件正文无法完整读取/)
+  for (const prompt of [shared.compactionPrompt(id), shared.compactionRecoveryPrompt(id), shared.compactionHandoffPrompt(id)]) {
+    for (const marker of ['W2T_COMPACTION_END', 'W2T_COMPACTION_INPUT_INCOMPLETE', 'W2T_HANDOFF_READY', 'W2T_HANDOFF_INPUT_INCOMPLETE', '结束标记']) {
+      assert.ok(!prompt.includes(marker), marker)
+    }
+  }
+  assert.ok(shared.compactionPrompt(id).includes('输入范围仅为 source.md 本身'))
+  assert.ok(shared.compactionPrompt(id).split('\n').at(-1) === '任务标识：' + shared.compactionRequestMarker(id))
+  assert.ok(shared.compactionHandoffPrompt(id).split('\n').at(-1) === '任务标识：' + shared.compactionRequestMarker(id, true))
 })
 
-test('protocol decisions use the final line, so quoted failures inside a successful summary are not transport failures', () => {
-  const id = '11111111-1111-4111-8111-111111111111'
-  const summary = complete(id).replace('## 关键决定与失败尝试\n无记录',
-    '## 关键决定与失败尝试\n上一轮错误地输出了 W2T_COMPACTION_INPUT_INCOMPLETE，已纠正范围。')
-  assert.ok(shared.parseCompactionSummary(id, summary).includes('已纠正范围'))
-  assert.throws(() => shared.parseCompactionSummary(id, summary.replace(shared.compactionEndMarker(id), '引用：' + shared.compactionEndMarker(id))), /结束标记/)
-  assert.equal(shared.parseCompactionHandoff(id, '已接收；摘要记录过 W2T_HANDOFF_INPUT_INCOMPLETE。\n' + shared.compactionHandoffMarker(id)),
-    '已接收；摘要记录过 W2T_HANDOFF_INPUT_INCOMPLETE。')
-  assert.throws(() => shared.parseCompactionHandoff(id, 'summary.md 只读到部分。\nW2T_HANDOFF_INPUT_INCOMPLETE'), /文件正文/)
-})
-
-test('relative budgets prevent the observed 5.1K to 5.8K expansion and reserve transport overhead', () => {
+test('relative budgets guide the prompt length and reserve transport overhead', () => {
   const budget = shared.compactionBudget(5100)
   assert.equal(budget.maxSummaryTokens, 2550)
   assert.ok(budget.targetSummaryTokens <= 2000)
   assert.equal(budget.maxContextTokens, 3570)
-  assert.throws(() => shared.checkCompactionSummaryBudget('你'.repeat(5251), budget), /摘要过长/)
-  const id = '11111111-1111-4111-8111-111111111111'
-  const after = shared.checkCompactionContextBudget(id, '你'.repeat(budget.maxSummaryTokens), '已读取交接摘要，等待下一条消息。', budget)
-  assert.ok(after < budget.beforeTokens && after <= budget.maxContextTokens)
-  assert.throws(() => shared.checkCompactionContextBudget(id, '你'.repeat(2000), '你'.repeat(2500), budget), /超过压缩预算/)
   assert.throws(() => shared.compactionBudget(800), /上下文较短/)
   const long = shared.compactionBudget(80_000)
   assert.ok(long.maxSummaryTokens <= 3000)
@@ -177,7 +162,7 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
           await settingsOptions.beforeRead?.({ record, page: this })
           return { ready: true, nativeDraft: false, uploadReady: true, generating: 'idle', hasHistory: !!record,
             requestFound: record?.marker === marker, answer: record?.answer ?? '', replyId: record ? this.url : '',
-            cutOff: false, sendFailure: false, oversized: false }
+            cutOff: !!record?.cutOff, sendFailure: false, oversized: false }
         }, async send(path, prompt, signal, current, beforeSubmit) {
           const handoff = path.endsWith('summary.md')
           const content = await readFile(path, 'utf8')
@@ -190,11 +175,11 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
           calls.push({ handoff, content, prompt })
           this.url = (platform === 'deepseek' ? 'https://chat.deepseek.com/a/chat/s/' : 'https://chatgpt.com/c/') +
             (handoff ? '22222222-2222-4222-8222-222222222222' : '11111111-1111-4111-8111-111111111111')
-          records.set(this.url, { marker: shared.compactionRequestMarker(stored.state.id, handoff), answer: handoff
-            ? (settingsOptions.verboseHandoff ? '你'.repeat(6000) : '已接收上下文') + '\n' + shared.compactionHandoffMarker(stored.state.id)
-            : settingsOptions.verboseSummary ? complete(stored.state.id).replace('## 当前目标\n无记录', '## 当前目标\n' + '你'.repeat(6000))
-              : settingsOptions.incomplete ? '输出被截断' : settingsOptions.historyGap ?
-              complete(stored.state.id).replace('## 缺失信息与未验证事项\n无记录', '## 缺失信息与未验证事项\n文件已读完，历史附件原件未提供。') : complete(stored.state.id) })
+          records.set(this.url, { marker: shared.compactionRequestMarker(stored.state.id, handoff), cutOff: !handoff && !!settingsOptions.cutOff,
+            answer: handoff ? (settingsOptions.verboseHandoff ? '你'.repeat(6000) : '已接收上下文')
+              : settingsOptions.verboseSummary ? complete().replace('## 当前目标\n无记录', '## 当前目标\n' + '你'.repeat(6000))
+              : settingsOptions.cutOff ? '输出被截断' : settingsOptions.freeform ? '没有按章节写的摘要' : settingsOptions.historyGap ?
+              complete().replace('## 缺失信息与未验证事项\n无记录', '## 缺失信息与未验证事项\n文件已读完，历史附件原件未提供。') : complete() })
           onUrl(this.url)
           return settingsOptions.unknown && calls.length === 1 ? 'unknown' : 'ok'
         } }
@@ -259,7 +244,7 @@ test('sidebar summaries publish background compression and clear the marker afte
 })
 
 test('a failed background compression clears its sidebar marker', async t => {
-  const f = fixture(t, new Map(), { incomplete: true }), { runtime, updates } = backgroundRuntime(f)
+  const f = fixture(t, new Map(), { cutOff: true }), { runtime, updates } = backgroundRuntime(f)
   runtime.active = false
   await f.start()
   assert.equal((await settled(f)).phase, 'failed')
@@ -379,33 +364,21 @@ test('cancel and emergency pause still stop a background upload and require expl
   }
 })
 
-test('oversize model summaries stop before creating C and can be manually corrected on the same B page', async t => {
-  const f = fixture(t, new Map(), { verboseSummary: true })
-  await f.start()
-  const state = await settled(f)
-  assert.equal(state.phase, 'failed')
-  assert.equal(state.hasSummary, false)
-  assert.ok(state.message.includes('摘要过长'))
-  assert.equal(f.calls.length, 1)
-  assert.equal(f.created.length, 0)
-  assert.ok(f.service.recoveryPrompt().includes('3000'))
-  for (const record of f.records.values()) record.answer = complete(state.id)
-  await f.service.resume(owner)
-  assert.equal((await settled(f)).phase, 'completed')
-  assert.equal(f.calls.filter(call => !call.handoff).length, 1)
-})
-
-test('unexpectedly verbose handoff acknowledgements cannot be installed as a successful compression', async t => {
-  const f = fixture(t, new Map(), { verboseHandoff: true })
-  await f.start()
-  const state = await settled(f)
-  assert.equal(state.phase, 'failed')
-  assert.ok(state.message.includes('超过压缩预算'))
-  assert.equal(f.calls.length, 2)
-  assert.equal(f.created.length, 0)
-  const submissions = f.calls.length
-  await f.service.resume(owner)
-  assert.equal(f.calls.length, submissions, 'retry never repeats the oversized imported context')
+test('long, unstructured or verbose replies are saved in full and the compression completes', async t => {
+  for (const options of [{ verboseSummary: true }, { freeform: true }, { verboseHandoff: true }]) {
+    await t.test(Object.keys(options)[0], async t => {
+      const f = fixture(t, new Map(), options)
+      await f.start()
+      const state = await settled(f)
+      assert.equal(state.phase, 'completed')
+      assert.equal(f.calls.length, 2)
+      assert.equal(f.created.length, 1)
+      const answer = [...f.records.values()].find(record => !record.marker.includes('HANDOFF')).answer
+      assert.equal(await readFile(join(f.directory, state.id, 'summary.md'), 'utf8'), answer + '\n')
+      const stored = JSON.parse(f.settings.get('conversationCompaction:' + owner.sessionId))
+      assert.equal(stored.handoffAnswer, options.verboseHandoff ? '你'.repeat(6000) : '已接收上下文')
+    })
+  }
 })
 
 test('short contexts stay in the source workspace without creating any processing pages', async t => {
@@ -474,17 +447,18 @@ test('DeepSeek uses its own home and conversation identity throughout both submi
   assert.equal(f.created[0].seed.session.platformId, 'deepseek')
 })
 
-test('invalid summary stops before handoff; manual completion resumes the existing B conversation', async t => {
-  const f = fixture(t, new Map(), { incomplete: true })
+test('a platform cut-off stops before handoff; manual completion resumes the existing B conversation', async t => {
+  const f = fixture(t, new Map(), { cutOff: true })
   await f.start()
   const state = await settled(f)
   assert.equal(state.phase, 'failed')
+  assert.ok(state.message.includes('截断'))
   assert.equal(state.hasSummary, false)
   assert.equal(f.calls.length, 1)
   const recovery = f.service.recoveryPrompt()
-  assert.ok(recovery.includes(shared.compactionEndMarker(state.id)))
-  assert.ok(recovery.includes('无需重新上传或补齐原始历史'))
-  for (const record of f.records.values()) record.answer = complete(state.id)
+  assert.ok(recovery.includes('从头重新完整输出交接摘要'))
+  assert.ok(!recovery.includes('W2T_COMPACTION_END'))
+  for (const record of f.records.values()) { record.answer = complete(); record.cutOff = false }
   await f.service.resume(owner)
   assert.equal((await settled(f)).phase, 'completed')
   assert.equal(f.calls.length, 2)
@@ -557,7 +531,7 @@ test('an emergency pause requires explicit recovery and retains the submitted co
 })
 
 test('troubleshooting pages open only on request and hiding them does not disable background recovery', async t => {
-  const f = fixture(t, new Map(), { incomplete: true })
+  const f = fixture(t, new Map(), { cutOff: true })
   await f.start()
   const state = await settled(f)
   assert.equal(state.phase, 'failed')
@@ -572,7 +546,7 @@ test('troubleshooting pages open only on request and hiding them does not disabl
   assert.equal(f.service.state(owner).workerVisible, false)
   assert.equal(f.pages[0].visible, false)
   assert.equal(f.pages[0].available, true)
-  for (const record of f.records.values()) record.answer = complete(state.id)
+  for (const record of f.records.values()) { record.answer = complete(); record.cutOff = false }
   await f.service.resume(owner)
   assert.equal((await settled(f)).phase, 'completed')
   assert.equal(f.calls.length, 2)

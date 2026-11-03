@@ -13,8 +13,8 @@ import type { ConversationToolPreferences } from '../shared/conversation-tools'
 import type { Web2termSessionBinding } from './web2term-shell'
 import type { CompactionPhase, CompactionSource, CompactionState, CompactionBudget } from '../shared/conversation-compaction'
 import { COMPACTION_ACTIVE, compactionSourceMarkdown, compactionPrompt, compactionHandoffPrompt, compactionRequestMarker,
-  compactionHandoffMarker, compactionRecoveryPrompt, parseCompactionHandoff, parseCompactionSummary, supportsCompaction } from '../shared/conversation-compaction'
-import { compactionBudget, checkCompactionSummaryBudget, checkCompactionContextBudget } from '../shared/conversation-compaction'
+  compactionRecoveryPrompt, compactionReplyText, supportsCompaction } from '../shared/conversation-compaction'
+import { compactionBudget } from '../shared/conversation-compaction'
 import { estimateContextText } from '../shared/focus-token-usage'
 import { isQuestionChatHome, selectionQuestionConversation } from '../shared/deepseek-question'
 
@@ -184,9 +184,8 @@ export class ConversationCompaction {
         this.current(controller.signal)
         const answer = await this.exchange(false, controller.signal)
         this.current(controller.signal)
-        const summary = parseCompactionSummary(this.job.state.id, answer)
+        const summary = compactionReplyText(answer) + '\n'
         this.job.state.summaryTokens = estimateContextText(summary).estimatedTokens
-        checkCompactionSummaryBudget(summary, this.job.budget)
         this.update('saving', '正在保存交接摘要…')
         const temporary = join(this.options.directory, this.job.state.id, `summary-${randomUUID()}.tmp`)
         await writeFile(temporary, summary, { encoding: 'utf8', flag: 'wx', mode: 0o600, signal: controller.signal })
@@ -200,15 +199,13 @@ export class ConversationCompaction {
       }
       this.current(controller.signal)
       const summary = await this.checkedFile('summary.md', this.job.summaryHash)
-      if (estimateContextText(summary).estimatedTokens > this.job.budget.maxSummaryTokens) throw new Error('已保存的旧摘要超过压缩预算，尚未切换会话。请取消本次任务后重新压缩。')
       this.current(controller.signal)
       if (!this.job.handoffAnswer) {
         const answer = await this.exchange(true, controller.signal)
         this.current(controller.signal)
-        this.job.handoffAnswer = parseCompactionHandoff(this.job.state.id, answer)
+        this.job.handoffAnswer = compactionReplyText(answer)
         this.save()
       }
-      checkCompactionContextBudget(this.job.state.id, summary, this.job.handoffAnswer, this.job.budget)
       // The isolated pages can finish in the background. Adoption also waits for
       // the source platform and its shared runtime to be safe to replace.
       if (this.options.canAdopt?.(this.job.state.owner) === false) {
@@ -325,14 +322,10 @@ export class ConversationCompaction {
           const signature = snapshot.replyId + '\n' + snapshot.answer
           if (signature !== last || snapshot.generating !== 'idle') { last = signature; stableSince = this.now() }
           const stable = this.now() - stableSince
-          if (snapshot.answer.trim() && snapshot.generating === 'idle' && !snapshot.cutOff && !snapshot.nativeDraft && stable >= 2400) {
-            if (handoff) {
-              if (snapshot.replyId) job.handoffReplyId = snapshot.replyId
-              if (snapshot.answer.trim().endsWith(compactionHandoffMarker(id)) || stable >= 6500) return snapshot.answer
-            } else {
-              try { parseCompactionSummary(id, snapshot.answer); return snapshot.answer }
-              catch (error) { if (stable >= 6500) throw error }
-            }
+          // No content protocol: the reply is done once the page is idle and unchanged for a while.
+          if (snapshot.answer.trim() && snapshot.generating === 'idle' && !snapshot.cutOff && !snapshot.nativeDraft && stable >= 6500) {
+            if (handoff && snapshot.replyId) job.handoffReplyId = snapshot.replyId
+            return snapshot.answer
           }
           if (snapshot.cutOff && snapshot.generating === 'idle') throw new Error('回答被平台截断，请在下方点“继续生成”，结束后点“继续检查”。')
         }

@@ -627,6 +627,41 @@ test('a duplicate alias cannot also acknowledge an explicitly requested numbered
   assert.equal(app.status().status, 'ready')
 })
 
+// 2026-11-03: after upload, ChatGPT's card for source.md showed "source" as text and "md" only in labels.
+const splitCard = (stem, extensionLabel, remove = true) => element('div', { 'data-fixture-card': '' }, [
+  element('span', {}, stem), element('span', { 'aria-label': extensionLabel }, '文件'),
+  ...(remove ? [element('button', { 'aria-label': '移除文件' })] : [])
+])
+
+test('ChatGPT split stem and extension on one draft card allow submission and sent confirmation', () => {
+  const app = fixture([{ fileName: 'source.md', mimeType: 'text/markdown', sizeBytes: 100 }])
+  app.render(['source.md'])
+  assert.deepEqual(Array.from(app.status().nameEvidence, (name) => name.method), ['exact'])
+  app.cards.replaceChildren(splitCard('source', 'MD'))
+  assert.equal(app.status().status, 'ready')
+  assert.deepEqual(Array.from(app.status().nameEvidence, (name) => name.method), ['split'])
+  app.confirmOnSend()
+  assert.equal(app.submit(), true)
+  assert.equal(app.status().status, 'sent')
+  assert.equal(app.send.clicks, 1)
+})
+
+test('a split card needs the stem, the extension, a remove control and exactly one matching file', () => {
+  const file = { fileName: 'source.md', mimeType: 'text/markdown', sizeBytes: 100 }
+  for (const card of [splitCard('source', ''), splitCard('resource', 'md'), splitCard('source', 'txt'), splitCard('source', 'md', false)]) {
+    const app = fixture([file])
+    app.cards.replaceChildren(card)
+    assert.equal(app.status().namesSeen, false)
+    assert.equal(app.submit(), false)
+  }
+  const both = fixture([file, { fileName: 'source.txt', mimeType: 'text/plain', sizeBytes: 100 }])
+  both.cards.replaceChildren(splitCard('source', 'md'))
+  assert.deepEqual(Array.from(both.status().nameEvidence, (name) => name.method), ['split', 'missing'])
+  const disabled = fixture([file], { fileSplitNameCards: false })
+  disabled.cards.replaceChildren(splitCard('source', 'md'))
+  assert.equal(disabled.status().namesSeen, false)
+})
+
 test('duplicate-name compatibility is opt-in and does not carry across page reconfiguration', () => {
   const file = requestedFiles[1]
   const disabled = fixture([file], { fileDuplicateNameSuffix: false })
