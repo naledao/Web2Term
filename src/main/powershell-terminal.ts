@@ -18,7 +18,7 @@ export function parsePowerShellBootstrapFailure(line: string, ready: string): Po
   return { bootstrapStage: stage as PowerShellBootstrapFailure['bootstrapStage'], errorId }
 }
 
-/** The Console.ReadLine limit also applies inside ConPTY, including after initialization. */
+/** Keep command frames short; initialization still passes through Console.ReadLine. */
 export function powerShellEnvelope(token: string, seq: number, command: string): string {
   const encoded = Buffer.from(command, 'utf8').toString('base64')
   const script = [
@@ -52,21 +52,27 @@ export function powerShellBootstrap(ready: string): string {
   const script = [
     "$ErrorActionPreference = 'Continue'",
     'Remove-Module PSReadLine -ErrorAction SilentlyContinue',
-    "$w2tStage = 'console_type'",
-    "Add-Type -ErrorAction Stop -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class W2TConsole { [DllImport(\"kernel32.dll\")] public static extern IntPtr GetStdHandle(int n); [DllImport(\"kernel32.dll\")] public static extern bool GetConsoleMode(IntPtr h, out uint m); [DllImport(\"kernel32.dll\")] public static extern bool SetConsoleMode(IntPtr h, uint m); }'",
     "$w2tStage = 'console_mode'",
-    '$w2tInputHandle = [W2TConsole]::GetStdHandle(-10); [uint32]$w2tInputMode = 0',
-    'if (-not [W2TConsole]::GetConsoleMode($w2tInputHandle, [ref]$w2tInputMode)) { throw "CONSOLE_UNAVAILABLE" }',
-    // ECHO_INPUT; retain processed input, so a raw Ctrl+C still reaches the console.
-    'if (-not [W2TConsole]::SetConsoleMode($w2tInputHandle, ($w2tInputMode -band [uint32]4294967291))) { throw "CONSOLE_MODE_UNAVAILABLE" }',
+    'if ([Console]::IsInputRedirected) { throw "CONSOLE_UNAVAILABLE" }',
+    // ReadKey(true) suppresses protocol echo without compiling a native console wrapper.
+    // Retain processed Ctrl+C for the raw terminal; managed interruption closes the PTY.
+    '[Console]::TreatControlCAsInput = $false',
     "$w2tStage = 'encoding'",
     '$OutputEncoding = New-Object Text.UTF8Encoding $false; [Console]::OutputEncoding = $OutputEncoding; [Console]::InputEncoding = $OutputEncoding',
-    "if ($PSVersionTable.PSVersion.Major -ge 7) { $PSStyle.OutputRendering = 'PlainText' }",
+    "if ($null -ne (Get-Variable PSStyle -ErrorAction SilentlyContinue)) { $PSStyle.OutputRendering = 'PlainText' }",
     "$w2tStage = 'command_loop'",
     '$w2tFrame = New-Object Text.StringBuilder',
+    '$w2tLineBuffer = New-Object Text.StringBuilder',
     `[Console]::WriteLine([Environment]::NewLine + '${ready}')`,
     'while ($true) {',
-    '$w2tLine = [Console]::ReadLine(); if ($null -eq $w2tLine) { break }',
+    '$w2tKey = [Console]::ReadKey($true)',
+    'if ($w2tKey.Key -ne [ConsoleKey]::Enter) {',
+    'if ($w2tKey.KeyChar -eq [char]0 -or $w2tKey.KeyChar -eq [char]10) { continue }',
+    'if ($w2tLineBuffer.Length -ge 4096) { throw "INPUT_LINE_TOO_LARGE" }',
+    '[void]$w2tLineBuffer.Append($w2tKey.KeyChar)',
+    'continue',
+    '}',
+    '$w2tLine = $w2tLineBuffer.ToString(); [void]$w2tLineBuffer.Clear()',
     "if ($w2tLine.Length -lt 1) { continue }; if ($w2tLine[0] -ne '+' -and $w2tLine[0] -ne '=') { continue }",
     'if ($w2tFrame.Length + $w2tLine.Length -gt 2097152) { throw "Command too large" }',
     '[void]$w2tFrame.Append($w2tLine.Substring(1))',

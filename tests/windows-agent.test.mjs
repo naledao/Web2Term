@@ -390,7 +390,11 @@ test('bootstrap survives a receiver limited to 254 characters per line and check
   const script = Buffer.from(encoded, 'base64').toString('utf8')
   assert.ok(script.includes(`[Console]::WriteLine([Environment]::NewLine + '${token}')`))
   assert.ok(script.endsWith('\nexit'))
-  for (const stage of ['console_type', 'console_mode', 'encoding', 'command_loop']) assert.ok(script.includes(`$w2tStage = '${stage}'`))
+  for (const stage of ['console_mode', 'encoding', 'command_loop']) assert.ok(script.includes(`$w2tStage = '${stage}'`))
+  // The remote machine must not need a working C# compiler/reference assembly set to open a terminal.
+  assert.doesNotMatch(script, /Add-Type|DllImport|W2TConsole/u)
+  assert.ok(script.includes('[Console]::ReadKey($true)'), 'framed input must be read without echo')
+  assert.ok(script.includes('[Console]::TreatControlCAsInput = $false'), 'raw Ctrl+C must keep console interrupt semantics')
 })
 
 test('bootstrap error metadata accepts only fixed stages and short identifiers', () => {
