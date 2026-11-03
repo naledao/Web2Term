@@ -87,12 +87,14 @@ export function powerShellBootstrap(ready: string): string {
     "if ($w2tErrorId -notmatch '^[A-Za-z0-9_.:-]{1,40}$') { $w2tErrorId = 'unknown' }",
     "[Console]::WriteLine([Environment]::NewLine + $w2tFailure + ' ' + $w2tStage + ' ' + $w2tErrorId)",
     '}',
+    // Native ConsoleHost submits a multiline block only when it receives a blank line.
+    '',
     '$w2tStartup = New-Object Text.StringBuilder'
   ]
   for (let offset = 0; offset < encoded.length; offset += LINE_DATA) lines.push(`[void]$w2tStartup.Append('${encoded.slice(offset, offset + LINE_DATA)}')`)
   lines.push('try {',
     `if ($w2tStartup.Length -ne ${encoded.length}) { throw 'BOOTSTRAP_LENGTH_MISMATCH' }`,
     'Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($w2tStartup.ToString())))',
-    '} catch { W2TBootstrapFailure $_ }')
+    '} catch { W2TBootstrapFailure $_ }', '')
   return lines.join('\r') + '\r'
 }

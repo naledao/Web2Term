@@ -405,6 +405,36 @@ test('bootstrap error metadata accepts only fixed stages and short identifiers',
   }
 })
 
+test('native ConsoleHost submits both bootstrap blocks before waiting for more input', () => {
+  // Model ConsoleHost.InputLoop: after incomplete input, only a blank line submits the block.
+  // Closing braces alone do not leave block mode. No PowerShell process is started here.
+  function nativeInput(input) {
+    const commands = []
+    let pending = null
+    for (const line of input.split('\r').slice(0, -1)) {
+      if (pending) {
+        if (line.trim() === '') { commands.push(pending.join('\n')); pending = null }
+        else pending.push(line)
+      } else if (/^(?:function\b.*|try)\s*\{$/.test(line)) pending = [line]
+      else if (line.trim() !== '') commands.push(line)
+    }
+    return { commands, pending }
+  }
+  const bootstrap = powershell.powerShellBootstrap('__FIXTURE_READY__')
+  const received = nativeInput(bootstrap)
+  assert.equal(received.pending, null, 'the final try/catch must execute instead of waiting at the continuation prompt')
+  const reporter = received.commands.find(command => command.startsWith('function '))
+  assert.ok(reporter)
+  assert.ok(!reporter.includes('$w2tStartup'), 'payload lines must execute after the reporter is defined')
+  assert.ok(received.commands.includes('$w2tStartup = New-Object Text.StringBuilder'))
+  assert.ok(received.commands.filter(command => command.startsWith('[void]$w2tStartup.Append(')).length > 1)
+  assert.ok(received.commands.at(-1).startsWith('try {\n'))
+  assert.ok(received.commands.at(-1).includes('Invoke-Expression'))
+  const missingTerminators = nativeInput(bootstrap.replaceAll('\r\r', '\r'))
+  assert.ok(missingTerminators.pending, 'the model must reproduce the old stalled continuation prompt')
+  assert.ok(!missingTerminators.commands.includes('$w2tStartup = New-Object Text.StringBuilder'))
+})
+
 function bootstrapFixture(kind = 'windows') {
   const timers = new Map(), writes = [], logs = [], sessions = []
   let receive, closes = 0, ready = 0
