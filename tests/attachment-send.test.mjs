@@ -111,7 +111,8 @@ const requestedFiles = [
 const shortenedNames = ['api-user-auth-intro...', 'user_login_api.md', 'user_service_login_…']
 const token = 'files-offline-regression'
 
-function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div', inputAccept = '') {
+function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div', inputAccept = '', startPath = '/c/offline-fixture') {
+  const location = { pathname: startPath }
   const composer = element(composerTag, composerTag === 'textarea' ? { placeholder: '发送消息' } : { contenteditable: 'true', role: 'textbox' })
   const cards = element('div')
   const add = element('button', { 'aria-label': '添加文件等内容' })
@@ -133,7 +134,7 @@ function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div'
   }
   const window = { getSelection: () => ({ removeAllRanges() {}, addRange() {} }) }
   new Script(interceptorSource).runInNewContext({
-    window, document, location: { pathname: '/c/offline-fixture' },
+    window, document, location,
     Element: ElementFixture, HTMLInputElement: ElementFixture, HTMLTextAreaElement: ElementFixture,
     Node: { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_PRECEDING: 2 },
     MouseEvent: class { constructor(type) { this.type = type } },
@@ -150,6 +151,7 @@ function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div'
   controller.fileSelectionApplied(token)
   return {
     controller, composer, cards, send, root, body, reports,
+    navigate(path) { location.pathname = path },
     render(names, attributes = []) {
       cards.replaceChildren(...names.map((name, index) => element('div', { 'data-fixture-card': '' }, [
         element('span', attributes[index] || {}, name)
@@ -230,6 +232,43 @@ test('attachment result captions cannot confirm an injection after the task chan
   assert.equal(app.status().status, 'busy')
   assert.equal(app.submit(), false)
   assert.equal(app.reports.some(event => event.event === 'sent-raw'), false)
+})
+
+// 2026-11-03 compaction logs: a send from the new-chat page stayed busy once the site moved to the conversation it created.
+const newConversation = '/c/6ae9a301-5d94-83e8-953a-c604b6fafcdc'
+test('a caption sent from the new-chat page confirms after the site moves to the conversation it creates', () => {
+  const files = [{ fileName: 'source.md', mimeType: 'text/markdown', sizeBytes: 100 }]
+  const app = fixture(files, {}, 'div', '', '/')
+  app.render(['source.md'])
+  assert.equal(app.controller.prepareFileSendCaption(token, '请压缩附件中的对话'), true)
+  app.confirmOnSend()
+  assert.equal(app.submit(), true)
+  app.navigate(newConversation)
+  assert.equal(app.status().status, 'sent')
+})
+
+test('only that one move is followed: an existing conversation, a non-conversation route or a second move stay busy', () => {
+  const files = [{ fileName: 'source.md', mimeType: 'text/markdown', sizeBytes: 100 }]
+  for (const [start, moves] of [[newConversation, ['/c/0123456789abcdef']], ['/', ['/library']], ['/', [newConversation, '/c/0123456789abcdef']]]) {
+    const app = fixture(files, {}, 'div', '', start)
+    app.render(['source.md'])
+    assert.equal(app.controller.prepareFileSendCaption(token, '结果'), true)
+    // Without the caption in the turn it stays confirming, so an intermediate check cannot finish the send.
+    app.confirmOnSend({ includeCaption: false })
+    assert.equal(app.submit(), true)
+    for (const move of moves) { app.navigate(move); app.status() }
+    assert.equal(app.status().status, 'busy', `${start} -> ${moves.join(' -> ')}`)
+  }
+})
+
+test('the new-chat route is not followed before the message is submitted', () => {
+  const files = [{ fileName: 'source.md', mimeType: 'text/markdown', sizeBytes: 100 }]
+  const app = fixture(files, {}, 'div', '', '/')
+  app.render(['source.md'])
+  assert.equal(app.controller.prepareFileSendCaption(token, '结果'), true)
+  app.navigate(newConversation)
+  assert.equal(app.status().status, 'busy')
+  assert.equal(app.submit(), false)
 })
 
 test('DeepSeek textarea uploads Markdown before inserting its caption and acknowledges both in the new virtual row', () => {

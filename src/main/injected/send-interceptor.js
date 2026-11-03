@@ -5675,7 +5675,14 @@
   const fileSendStatus = (token) => {
     if (confirmedFileSends.has(token)) return { status: 'sent' }
     if (!fileSend || fileSend.token !== token) return { status: 'stale' }
-    if (fileSend.resultScope && (fileSend.resultScope.generation !== state.taskPromptGeneration || fileSend.resultScope.path !== location.pathname)) return { status: 'busy' }
+    // A send from the new-chat page lands on the conversation it creates: the site changes the route itself
+    // (ChatGPT and DeepSeek alike), so compaction and question chats always move. Follow that one move after
+    // submit; any other route, or a later change, still blocks confirmation.
+    const scope = fileSend.resultScope
+    const conversationRoute = (path) => !!PAGE.conversationPathPattern && new RegExp(PAGE.conversationPathPattern).test(path)
+    if (scope && fileSend.submitted && !scope.rebound && scope.path !== location.pathname &&
+      !conversationRoute(scope.path) && conversationRoute(location.pathname)) Object.assign(scope, { path: location.pathname, rebound: true })
+    if (scope && (scope.generation !== state.taskPromptGeneration || scope.path !== location.pathname)) return { status: 'busy' }
     if (fileSend.computer && (fileSend.computer.generation !== state.taskPromptGeneration || fileSend.computer.path !== location.pathname || !state.computerUseEnabled)) return { status: 'busy' }
     if (fileSend.focus && fileSend.focus.generation !== state.taskPromptGeneration) return { status: 'busy' }
     const composer = getComposer()
