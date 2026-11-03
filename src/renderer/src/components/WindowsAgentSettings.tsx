@@ -37,7 +37,7 @@ export default function WindowsAgentSettings({ onBusyChange }: Props): ReactElem
   if (state && !state.supported) return null
   return <section className="settings-devices__local" aria-label="Windows 本机远程终端">
     <div className="settings-devices__local-heading">
-      <div><strong>将此 Windows 电脑作为远程设备</strong><p>开启后，同一账号的客户端可以连接本机 PowerShell，最多同时使用 3 个终端。</p></div>
+      <div><strong>将此 Windows 电脑作为远程设备</strong><p>开启后，同一账号的客户端可以连接本机 PowerShell。</p></div>
       <button type="button" className="settings-outline-btn" disabled={!state || busy} onClick={() => void toggle()}>{busy ? '保存中…' : state?.enabled ? '关闭本机远程终端' : '开启本机远程终端'}</button>
     </div>
     {state ? <>
@@ -47,7 +47,6 @@ export default function WindowsAgentSettings({ onBusyChange }: Props): ReactElem
       </div>
       {state.deviceId ? <div className="settings-devices__info"><strong>{state.deviceName}</strong><code>{state.deviceId}</code></div> : null}
       {state.message ? <p className={state.status === 'error' ? 'settings-feedback' : 'settings-devices__local-message'} role={state.status === 'error' ? 'alert' : undefined}>{state.message}</p> : null}
-      <p className="settings-devices__local-help">远程终端使用当前 Windows 用户权限。客户端在托盘中运行时保持在线；退出客户端会关闭远程终端。开启状态会保留，下次启动客户端并登录原账号后自动上线。</p>
       {state.logPath ? <p className="settings-devices__log">运行日志：{state.logPath}</p> : null}
     </> : <p role="status">正在读取本机设备状态…</p>}
     {error ? <p className="settings-feedback" role="alert">{error}</p> : null}

@@ -126,8 +126,23 @@ class Socket extends EventEmitter {
   readyState = 0
   bufferedAmount = 0
   sent = []
+  deferWrites = false
+  pendingSends = []
   terminated = false
-  send(value, callback) { this.sent.push(JSON.parse(value)); callback?.() }
+  send(value, callback) {
+    this.sent.push(JSON.parse(value))
+    if (this.deferWrites) {
+      const bytes = Buffer.byteLength(value)
+      this.bufferedAmount += bytes
+      this.pendingSends.push({ callback, bytes })
+    } else callback?.()
+  }
+  completeSend(index = 0, error) {
+    const [write] = this.pendingSends.splice(index, 1)
+    assert.ok(write, 'A deferred send must exist')
+    this.bufferedAmount -= write.bytes
+    write.callback?.(error)
+  }
   terminate() { this.terminated = true; this.readyState = 3 }
   open() { this.readyState = Socket.OPEN; this.emit('open') }
   message(value) { this.emit('message', Buffer.from(JSON.stringify(value)), false) }
@@ -142,7 +157,17 @@ function agentFixture() {
     getState: () => ({ status: signedIn ? 'signed-in' : 'signed-out', backendUrl, user: signedIn ? { publicId: owner } : null }),
     getConnectionCredentials: () => signedIn ? { backendUrl, accessToken: 'fixture-secret-never-log', expiresAt: 100000 } : null
   }
-  const schedule = (callback, milliseconds) => { const handle = { unref() {} }; timers.set(handle, { callback, milliseconds }); return handle }
+  const schedule = (callback, milliseconds) => { const handle = { unref() {} }; timers.set(handle, { callback, milliseconds, dueAt: now + milliseconds }); return handle }
+  const advance = milliseconds => {
+    const target = now + milliseconds
+    for (;;) {
+      const next = [...timers.entries()].filter(([, timer]) => timer.dueAt <= target)
+        .sort((a, b) => a[1].dueAt - b[1].dueAt)[0]
+      if (!next) break
+      timers.delete(next[0]); now = Math.max(now, next[1].dueAt); next[1].callback()
+    }
+    now = target
+  }
   const { WindowsAgent, agentWebSocketUrl } = load('../src/main/windows-agent.ts', {
     'node:fs': { appendFileSync: forbidden, mkdirSync: forbidden, writeFileSync: forbidden }, 'node:crypto': crypto,
     'node:os': { ...os, hostname: () => 'fixture-pc' }, 'node:path': path, 'node:module': { createRequire: forbidden },
@@ -156,7 +181,7 @@ function agentFixture() {
     spawn: () => { const pty = new Pty(); ptys.push(pty); return { pty, shell: 'powershell.exe' } },
     createSocket(url, options) { const socket = new Socket(); sockets.push({ socket, url, options }); return socket }
   })
-  return { agent, sockets, states, settings, logs, timers, ptys, agentWebSocketUrl,
+  return { agent, sockets, states, settings, logs, timers, ptys, agentWebSocketUrl, advance,
     setIdentity(value) { owner = value }, setSignedIn(value) { signedIn = value }, setBackend(value) { backendUrl = value }, setNow(value) { now = value },
     fire(milliseconds) { const found = [...timers.entries()].find(([, timer]) => timer.milliseconds === milliseconds); assert.ok(found, `Timer ${milliseconds} missing`); timers.delete(found[0]); found[1].callback() }
   }
@@ -181,6 +206,94 @@ test('agent is opt-in; keeps auth in headers; online requires ack; paths and hea
   assert.equal(socket.sent.at(-1).type, 'heartbeat')
   assert.ok(!JSON.stringify([f.agent.getState(), f.states, f.logs, [...f.settings]]).includes('fixture-secret'))
   assert.equal(f.agentWebSocketUrl('http://[::1]:8080/context/'), 'ws://[::1]:8080/context/ws/agent')
+  f.agent.dispose()
+})
+
+test('terminal requests before the first heartbeat ack are processed in order while status stays connecting', () => {
+  const f = agentFixture(); f.agent.setEnabled(true)
+  const socket = f.sockets[0].socket; socket.open()
+  socket.message(packet('terminal_open', DEVICE))
+  assert.equal(f.ptys.length, 1)
+  assert.equal(f.agent.getState().terminalCount, 1)
+  assert.equal(socket.sent.at(-1).type, 'terminal_ready')
+  socket.message(packet('terminal_input', DEVICE, { data: Buffer.from('early input').toString('base64') }))
+  socket.message(packet('terminal_resize', DEVICE, { cols: 132, rows: 43 }))
+  assert.deepEqual(f.ptys[0].input, ['early input'])
+  assert.deepEqual(f.ptys[0].sizes, [{ cols: 132, rows: 43 }])
+  socket.message(packet('terminal_close', DEVICE))
+  assert.equal(f.ptys[0].killed, 1)
+  f.ptys[0].exit()
+  assert.equal(socket.sent.at(-1).type, 'terminal_exit')
+  assert.equal(f.agent.getState().terminalCount, 0)
+  assert.equal(f.agent.getState().status, 'connecting')
+  assert.ok(!socket.sent.some(message => message.type === 'agent_hello'))
+  socket.message({ type: 'heartbeat_ack' })
+  assert.equal(f.agent.getState().status, 'online')
+  assert.equal(socket.sent.at(-1).type, 'agent_hello')
+  f.agent.dispose()
+})
+
+test('a completed send cannot expire a fresh output queued just before its old deadline', () => {
+  const f = agentFixture(); f.agent.setEnabled(true)
+  const socket = f.sockets[0].socket; socket.open(); socket.message({ type: 'heartbeat_ack' })
+  socket.message(packet('terminal_open', DEVICE))
+  assert.ok(![...f.timers.values()].some(timer => timer.milliseconds === 10000), 'Completed writes must clear their timeout')
+  f.advance(9900)
+  socket.deferWrites = true
+  f.ptys[0].output('fresh output')
+  assert.ok(socket.bufferedAmount > 0)
+  f.advance(100)
+  assert.equal(f.agent.getState().status, 'online')
+  assert.equal(f.ptys[0].killed, 0)
+  socket.completeSend()
+  assert.ok(![...f.timers.values()].some(timer => timer.milliseconds === 10000))
+  f.advance(9900)
+  assert.equal(f.agent.getState().status, 'online')
+  assert.equal(f.ptys[0].killed, 0)
+  f.agent.dispose()
+})
+
+test('overlapping writes keep each remaining send deadline and still recycle a genuinely blocked socket', () => {
+  const f = agentFixture(); f.agent.setEnabled(true)
+  const socket = f.sockets[0].socket; socket.open(); socket.message({ type: 'heartbeat_ack' })
+  socket.message(packet('terminal_open', DEVICE))
+  socket.deferWrites = true
+  f.ptys[0].output('first output')
+  f.advance(4000)
+  f.ptys[0].output('second output')
+  f.advance(5000)
+  socket.completeSend()
+  f.advance(1000)
+  assert.equal(f.agent.getState().status, 'online', 'The second send must not inherit the first send deadline')
+  f.advance(3999)
+  assert.equal(f.ptys[0].killed, 0)
+  f.advance(1)
+  assert.equal(f.agent.getState().status, 'reconnecting')
+  assert.equal(socket.terminated, true)
+  assert.equal(f.ptys[0].killed, 1)
+  f.agent.dispose()
+  assert.equal(f.timers.size, 0)
+})
+
+test('late send callbacks from a retired socket cannot clear a replacement socket timeout', () => {
+  const f = agentFixture(); f.agent.setEnabled(true)
+  const first = f.sockets[0].socket; first.open(); first.message({ type: 'heartbeat_ack' })
+  first.message(packet('terminal_open', DEVICE))
+  first.deferWrites = true
+  f.ptys[0].output('old output')
+  first.emit('error', new Error('fixture failure'))
+  f.ptys[0].exit()
+  f.advance(1000)
+  const second = f.sockets[1].socket; second.open(); second.message({ type: 'heartbeat_ack' })
+  second.message(packet('terminal_open', id(1)))
+  second.deferWrites = true
+  f.ptys[1].output('new output')
+  first.completeSend()
+  assert.equal(f.agent.getState().status, 'online')
+  f.advance(10000)
+  assert.equal(f.agent.getState().status, 'reconnecting')
+  assert.equal(second.terminated, true)
+  assert.equal(f.ptys[1].killed, 1)
   f.agent.dispose()
 })
 

@@ -79,6 +79,7 @@ export class WindowsAgent {
   private readonly schedule: typeof setTimeout
   private readonly unschedule: typeof clearTimeout
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly pendingWrites = new Map<object, number>()
   private backoff = 1000
   private acknowledged = false
   private awaitingHeartbeat = false
@@ -177,7 +178,11 @@ export class WindowsAgent {
             this.log.write({ event: 'online' }); this.update('online', '本机已在线，可从同一账号的客户端连接 PowerShell。')
           }
           this.timer('heartbeat', 20_000, () => this.heartbeat())
-        } else if (this.acknowledged) this.terminals.receive(message)
+        } else {
+          // The authenticated relay can deliver requests before the first heartbeat ack.
+          // Only the online status waits for that ack; terminal requests retain their order.
+          this.terminals.receive(message)
+        }
       })
       socket.on('unexpected-response', (request, response) => {
         const status = response.statusCode ?? 0
@@ -214,14 +219,26 @@ export class WindowsAgent {
     if (!socket || socket.readyState !== WebSocket.OPEN) return false
     if (socket.bufferedAmount > 1024 * 1024) { this.retry('终端输出积压，正在回收会话。'); return false }
     try {
-      socket.send(JSON.stringify(message), error => { if (error && this.socket === socket) this.retry('设备消息发送失败。') })
-      if (this.socket !== socket) return false
-      // Bound blocked writes as well as queued bytes, without storing terminal content.
-      if (!this.timers.has('write')) this.timer('write', 10_000, () => {
-        if (this.socket === socket && socket.bufferedAmount > 0) this.retry('设备消息发送超时。')
+      const write = {}
+      this.pendingWrites.set(write, this.now() + 10_000)
+      if (this.pendingWrites.size === 1) this.watchWrite(socket)
+      socket.send(JSON.stringify(message), error => {
+        if (this.socket !== socket) return
+        if (error) { this.retry('设备消息发送失败。'); return }
+        const oldest = this.pendingWrites.keys().next().value
+        if (this.pendingWrites.delete(write) && oldest === write) this.watchWrite(socket)
       })
-      return true
+      return this.socket === socket
     } catch { this.retry('设备消息发送失败。'); return false }
+  }
+  private watchWrite(socket: WebSocket): void {
+    this.clearTimer('write')
+    // Store only deadlines, never terminal content. New writes cannot inherit an old timeout.
+    const oldest = this.pendingWrites.entries().next().value
+    if (!oldest) return
+    this.timer('write', Math.max(1, oldest[1] - this.now()), () => {
+      if (this.socket === socket && this.pendingWrites.has(oldest[0])) this.retry('设备消息发送超时。')
+    })
   }
   private retry(message: string): void {
     this.log.write({ event: 'reconnect', delayMs: this.backoff })
@@ -236,6 +253,7 @@ export class WindowsAgent {
   private release(): void {
     for (const timer of this.timers.values()) this.unschedule(timer)
     this.timers.clear()
+    this.pendingWrites.clear()
     const socket = this.socket; this.socket = null; this.acknowledged = false; this.awaitingHeartbeat = false
     this.terminals.disconnect()
     if (socket) { try { socket.terminate() } catch { /* Already closed. */ } }
