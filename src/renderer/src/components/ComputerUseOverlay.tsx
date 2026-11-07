@@ -22,7 +22,7 @@ export default function ComputerUseOverlay({ snapshot, error }: { snapshot: Comp
         <section className="computer-use-overlay__lane computer-use-overlay__lane--action">
           <div className="computer-use-overlay__label">{stopped ? '停止状态' : snapshot.completed ? '任务结果' : '当前动作'} <span>{error ? '进度暂不可用' : snapshot.actionStatus}</span></div>
           <div className="computer-use-overlay__action-text">{showingResult ? snapshot.result : snapshot.action}</div>
-          <div className="computer-use-overlay__current-detail">{stopped ? '解除急停后，需重新提交或恢复任务' : snapshot.completed ? '自动操作已结束，可返回对话查看结果' : <>第 {snapshot.steps} 步</>}</div>
+          <div className="computer-use-overlay__current-detail">{stopped ? '解除急停后，可开始新的 Computer Use 操作' : snapshot.completed ? '自动操作已结束，可返回对话查看结果' : <>第 {snapshot.steps} 步</>}</div>
         </section>
       </div> : <div className="computer-use-overlay__empty">{error || '收到 computer use 任务后，在这里展示模型的中文动作描述与实际执行进度。'}</div>}
 

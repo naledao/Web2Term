@@ -127,8 +127,8 @@ Computer Use 让模型在对话中发现和启动应用、查看真实窗口，�
 
 #### 停止、恢复与运行设置
 
-- **连续来回晃动鼠标可触发全局急停。** 在 Computer Use 控制期间，快速左右或上下来回晃动数次，会停止所有会话的自动操作与回传；顶部浮层显示急停状态 6 秒。当前识别条件为 1.2 秒内至少 4 次反向，每次反向移动至少 40 个物理像素。普通单向移动、轻微抖动及程序注入的移动不计入手势。
-- 界面上的 **全局急停** 按钮同样有效；原双击 Esc 和 `Ctrl+Alt+Shift+F12` 急停入口已移除。急停后需在客户端等待执行器退出并 **解除急停**，再重新提交或恢复任务，旧任务不会自行重启。后台进程保持独立运行。
+- **连续来回晃动鼠标可触发全局急停。** 在 Computer Use 控制期间，快速左右或上下来回晃动数次，会中断所有会话中的 Computer Use 桌面操作，并释放本次 helper 按下的键鼠；顶部浮层显示急停状态 6 秒。终端命令、普通会话发送、会话压缩、定时任务投递及后台工作不受影响。当前识别条件为 1.2 秒内至少 4 次反向，每次反向移动至少 40 个物理像素。普通单向移动、轻微抖动及程序注入的移动不计入手势。
+- 界面上的 **全局急停** 按钮同样有效；原双击 Esc 和 `Ctrl+Alt+Shift+F12` 急停入口已移除。急停后需等待 Computer Use 执行器和键鼠释放处理完成，再 **解除急停**；已中断的 Computer Use 操作不会自动恢复，其他任务继续运行。
 - **结束任务** 只停止当前会话。普通键鼠干预可能中断当前步骤，多次干预会暂停 Computer Use；因用户输入暂停的任务，可在同一对话发送新消息继续，继续时先重新观察。
 - **设置 → computer use** 可调整任务时限、单步执行时限、条件等待时限、步骤等运行上限，以及结果回传间隔。达到上限会保留未完成状态；恢复原任务沿用原预算。动作返回后可等待界面稳定再向模型回传结果，等待期间不会重做该动作。
 
@@ -189,7 +189,7 @@ Windows 客户端可以在设备设置中把本机变成一台 PowerShell 远程
 可以直接让 AI 查询、修改或删除当前对话的已有计划，例如“把刚才的任务改为每 6 分钟检查一次，并在邮件里列出新增用户”。AI 查询真实任务编号和版本后修改原计划，不需要删除重建。管理页可暂停、恢复、编辑、删除、立即运行和查看最近运行记录。计划与每次投递记录保存在本机，关闭页签保留计划，重启客户端后恢复。
 
 - **客户端需保持运行。** 退出或休眠期间无法准时投递；重新启动或唤醒后，错过的多个周期合并为最近一次。
-- **投递绑定原工作区、平台、对话、执行主机和目录。** 回到原上下文并启用终端模式、提示词注入及定时任务工具后才可投递；断线、忙碌、未发送草稿、暂停或全局急停时等待。
+- **投递绑定原工作区、平台、对话、执行主机和目录。** 回到原上下文并启用终端模式、提示词注入及定时任务工具后才可投递；断线、忙碌、未发送草稿或暂停时等待。全局急停只中断 Computer Use，不暂停定时任务投递。
 - **“已投递”表示任务消息已发送。** AI 的实际执行结果在原对话中查看；提交结果不确定时标记为需要核对，不自动重发。
 
 周期、运行记录和投递条件详见 [定时任务说明](docs/scheduled-tasks.md)。
@@ -492,9 +492,9 @@ Computer Use discovers and launches applications, observes real windows, and per
 
 Drag coordinates refer to the latest window screenshot. Cross-window paths and holding a button across separate requests are not supported. Region screenshots accept rectangle coordinates, but there is no dedicated user-operated drag-to-crop entry point. Successful input delivery alone does not establish that a file was saved, a message sent, or a drop accepted.
 
-**To emergency-stop automation, shake the mouse back and forth repeatedly while Computer Use controls the desktop.** The gesture stops automatic actions and result delivery across all sessions; the top overlay shows the stop state for six seconds. Detection requires at least four direction reversals within 1.2 seconds, with at least 40 physical pixels per reversal. Ordinary one-way movement, small jitter, and injected pointer movement do not contribute. The emergency-stop button remains available; double-Esc and `Ctrl+Alt+Shift+F12` are no longer stop gestures.
+**To emergency-stop Computer Use, shake the mouse back and forth repeatedly while it controls the desktop.** The gesture interrupts desktop operations across all sessions and releases keys or mouse buttons held by the helper; the top overlay shows the stop state for six seconds. Detection requires at least four direction reversals within 1.2 seconds, with at least 40 physical pixels per reversal. Ordinary one-way movement, small jitter, and injected pointer movement do not contribute. The emergency-stop button remains available; double-Esc and `Ctrl+Alt+Shift+F12` are no longer stop gestures.
 
-After an emergency stop, wait for executors to drain, release the emergency latch in the client, then submit or explicitly resume a task. Previous tasks do not restart automatically; background processes retain their independent lifecycles. “结束任务” stops only the current session. Repeated ordinary keyboard/mouse interference can pause Computer Use; a new message in the same conversation continues a task paused by user input, starting with a fresh observation.
+An emergency stop interrupts Computer Use desktop operations across sessions and releases keys or mouse buttons held by its helper. It does not stop terminal commands, conversation sends, compaction, scheduled deliveries, or other background work. Wait for the Computer Use executor and input release to finish, then release the latch; interrupted Computer Use work does not resume automatically. “结束任务” stops the current session task. Repeated ordinary keyboard/mouse interference can pause Computer Use; a new message in the same conversation continues a task paused by user input, starting with a fresh observation.
 
 Under **设置 → computer use**, configure task/action/wait timeouts, step and recovery limits, and the delay before results return to the model. Limits preserve an unfinished task rather than restarting it; resuming retains the original budget. Delaying result delivery does not repeat the action.
 
@@ -545,7 +545,7 @@ Open **＋ → 定时任务** to save a schedule and a natural-language task, or
 The AI can list, inspect, update, and delete existing plans in the current conversation. It uses the saved plan ID and revision to update the original plan without recreating it. The management tab supports pause/resume, editing, deletion, running immediately, and recent delivery records. Plans and delivery history persist locally across client restarts.
 
 - Keep the client running. After exit or sleep, missed occurrences merge into the latest one when the client resumes.
-- Delivery requires the original workspace, model platform, conversation, execution machine, and directory. Terminal mode, prompt injection, and the scheduled-task tool must be enabled. Busy pages, drafts, disconnections, pauses, and emergency stops hold delivery.
+- Delivery requires the original workspace, model platform, conversation, execution machine, and directory. Terminal mode, prompt injection, and the scheduled-task tool must be enabled. Busy pages, drafts, disconnections, and pauses hold delivery. A global emergency stop only interrupts Computer Use and does not hold scheduled task delivery.
 - A sent occurrence confirms delivery of the task message. Check the original conversation for the AI's actual work; uncertain submissions require review and are not automatically sent again.
 
 See the [scheduled-task guide](docs/scheduled-tasks.md) for calendar schedules, management, and delivery conditions.

@@ -65,7 +65,7 @@ function TaskDetails({ state }: { state: AutonomousTaskState }) {
       <p className="autonomous-task-summary__meta">{task.status === 'recorded'
         ? task.progress?.detail ?? '保留同一任务上下文；收到可用工具的实际结果后由模型决定下一步。'
         : '已保存任务要求；重新打开会话不会自动执行。'}</p>
-      {task.stop ? <p className="autonomous-task-summary__meta">{paused ? '因连续 3 次键鼠操作暂停；发送新消息即继续同一任务，继续时会先重新观察桌面' : task.stop.reason === 'global-emergency' ? '因全局急停结束' : '用户已结束任务'}；已发生的操作没有回滚，后台进程保持独立运行。</p> : null}
+      {task.stop ? <p className="autonomous-task-summary__meta">{paused ? '因连续 3 次键鼠操作暂停；发送新消息即继续同一任务，继续时会先重新观察桌面' : task.stop.reason === 'global-emergency' ? '因全局急停中断 Computer Use' : '用户已结束任务'}；已发生的操作没有回滚，后台进程保持独立运行。</p> : null}
       {task.recovery?.requiresObservation ? <p className="autonomous-task-summary__meta">恢复检查：需要重新观察实际界面，再决定后续桌面操作。</p> : null}
       {task.recovery ? <p className="autonomous-task-summary__meta">恢复记录：来自第 {task.recovery.sourceGeneration} 代 · 检查点 {new Date(task.recovery.checkpointAt).toLocaleString('zh-CN', { hour12: false })}
         {!task.recovery.requiresObservation ? ' · 已取得本次恢复所需的新观察，后续步骤仍按实际结果推进。' : ''}</p> : null}

@@ -250,10 +250,6 @@ windowsHelper.subscribeDesktopActivity(event => {
     console.warn('[desktop] computer use pause cancellation acknowledgement incomplete')
   })
 })
-windowsHelper.subscribe(() => {
-  const state = windowsHelper.getState()
-  desktopCoordinator.setNativeBlocked(state.pid !== null && state.phase !== 'ready')
-})
 const emergencyStop = new EmergencyStopController({ desktop: desktopCoordinator, helper: windowsHelper,
   gestureAvailable: () => {
     const desktop = desktopCoordinator.getState(), helper = windowsHelper.getState()
@@ -262,6 +258,10 @@ const emergencyStop = new EmergencyStopController({ desktop: desktopCoordinator,
   sessions: () => runtimes.values(), changed: state => {
     if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.emergencyStopChanged, state)
   } })
+windowsHelper.subscribe(() => {
+  const state = windowsHelper.getState()
+  desktopCoordinator.setNativeBlocked(!emergencyStop.isActive() && state.pid !== null && state.phase !== 'ready')
+})
 windowsHelper.subscribe(() => emergencyStop.refresh())
 desktopCoordinator.subscribe(() => emergencyStop.refresh())
 let currentSessionId: string | null = null
@@ -1054,8 +1054,7 @@ function createSession(
     qqMail: qqMail ?? undefined,
     scheduledTasks: scheduledTasks ?? undefined,
     windowsHelper,
-    automationBlocked: () => emergencyStop.isActive(),
-    onAutomationSafetyChanged: () => emergencyStop.refresh(),
+    computerUseBlocked: () => emergencyStop.isActive(),
     computerUseObservations: desktopObservations,
     desktopCoordinator,
     registerComputerUseTools: tool => {

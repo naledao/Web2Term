@@ -122,7 +122,7 @@ test('hiding a workspace during a terminal submission does not abort or duplicat
 
 test('hidden conversations retain pause, takeover, target, revision and conversation checks', () => {
   for (const change of [f => { f.state.paused = true }, f => { f.state.human = true },
-    f => { f.runtime.options.automationBlocked = () => true }, f => { f.runtime.stoppingTask = true },
+    f => { f.runtime.stoppingTask = true },
     f => { f.runtime.toolPreferences = () => ({ scheduledTasksEnabled: false }) },
     f => { f.state.conversationId = 'chat-b' }, f => { f.runtime.activePlatformId = 'deepseek' },
     f => { f.runtime.scheduledTarget = () => ({ ...f.target, key: 'host-b' }) }]) {
@@ -130,6 +130,9 @@ test('hidden conversations retain pause, takeover, target, revision and conversa
     assert.ok(f.runtime.scheduledTaskReady(f.task, f.run))
     assert.equal(f.runtime.scheduledOwnerCurrent(f.task), false)
   }
+  const emergency = fixture(); emergency.runtime.active = false
+  emergency.runtime.options.computerUseBlocked = () => true
+  assert.equal(emergency.runtime.scheduledOwnerCurrent(emergency.task), true, 'global emergency does not pause scheduled delivery')
   const f = fixture(); f.runtime.active = false
   f.runtime.options.scheduledTasks.store.get = () => ({ ...f.task, revision: 2 })
   assert.equal(f.runtime.scheduledOwnerCurrent(f.task), false)

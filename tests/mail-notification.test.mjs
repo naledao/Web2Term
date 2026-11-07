@@ -209,9 +209,9 @@ test('runtime admission rejects disabled, paused, stopped and stale conversation
   subject.toolPreferences = () => ({ mailNotificationsEnabled: false })
   assert.equal(subject.mailNotificationCurrent(call), false)
   subject.toolPreferences = () => ({ mailNotificationsEnabled: true })
-  subject.options.automationBlocked = () => true
-  assert.equal(subject.mailNotificationCurrent(call), false)
-  delete subject.options.automationBlocked
+  subject.options.computerUseBlocked = () => true
+  assert.equal(subject.mailNotificationCurrent(call), true, 'global emergency does not block notifications')
+  delete subject.options.computerUseBlocked
   subject.runner.getAutomation = () => ({ paused: true })
   assert.equal(subject.mailNotificationCurrent(call), false)
 })

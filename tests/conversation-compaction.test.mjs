@@ -221,7 +221,7 @@ function backgroundRuntime(f) {
     activeEmbed() { return this.embeds.get(this.activePlatformId) }, taskRunning: () => false,
     ssh: { getState: () => ({ attached: false }) },
     runner: { hasInFlightWork: () => state.executing }, options: { store: f.options.store,
-      automationBlocked: () => state.blocked, onCompactionTargetOpen: id => selected.push(id),
+      computerUseBlocked: () => state.blocked, onCompactionTargetOpen: id => selected.push(id),
       onSummaryChanged: () => updates.push(runtime.summary()) } })
   Object.defineProperty(runtime, 'embed', { get() { return this.embeds.get(this.activePlatformId).embed } })
   const options = runtime.compactionService().options
@@ -305,7 +305,7 @@ test('switching platforms during upload finishes both exchanges and waits to ado
   assert.deepEqual(background.selected, [])
 })
 
-test('background compaction retains source ownership and emergency-stop guards', t => {
+test('background compaction retains source ownership while global emergency remains independent', t => {
   const f = fixture(t), { runtime, state, otherPlatformId } = backgroundRuntime(f)
   runtime.active = false
   runtime.activePlatformId = otherPlatformId
@@ -316,7 +316,7 @@ test('background compaction retains source ownership and emergency-stop guards',
   assert.equal(f.options.canWork(f.owner), false)
   state.conversationId = f.owner.conversationId
   state.blocked = true
-  assert.equal(f.options.canWork(f.owner), false)
+  assert.equal(f.options.canWork(f.owner), true)
   state.blocked = false
   runtime.disposed = true
   assert.equal(f.options.canWork(f.owner), false)

@@ -417,7 +417,9 @@ test('runtime checks send availability and owner controls without waiting for AI
   subject.getComputerUseCapability = () => ({ scopeSupported: true, computerUseEnabled: true })
   assert.match(subject.scheduledTaskReady(task, run), /工作区/, 'desktop-tool tasks still require the selected workspace')
   subject.getComputerUseCapability = () => ({}); subject.active = true
-  subject.options.automationBlocked = () => true; assert.match(subject.scheduledTaskReady(task, run), /急停/); delete subject.options.automationBlocked
+  subject.options.computerUseBlocked = () => true
+  assert.equal(subject.scheduledTaskReady(task, run), null, 'global emergency does not block terminal scheduled delivery')
+  delete subject.options.computerUseBlocked
   subject.options.desktopCoordinator = { getState: () => ({ humanControl: true }) }; assert.match(subject.scheduledTaskReady(task, run), /接管/); delete subject.options.desktopCoordinator
   subject.scheduledTarget = () => ({ ...target, cwd: 'C:\\other' }); assert.match(subject.scheduledTaskReady(task, run), /工作目录/)
   subject.scheduledTarget = () => target; subject.taskEnded = false; subject.taskRunning = () => true

@@ -30,14 +30,11 @@ export class TaskCoordinator {
   // Also protect synthetic/in-memory stores; production adds the durable unique constraints.
   private readonly computerClaims = new Map<string, { answers: Set<string>; tokens: Set<string> }>()
   private readonly clocks = new Map<string, { last: number; elapsed: number; suspended: boolean }>()
-  private dispatchBlocked = false
   private paused = false
 
   constructor(private readonly sessionId: string, private readonly store: AutonomousTaskStore,
     private readonly changed: (state: AutonomousTaskState, completedNow: boolean) => void,
     private readonly timing: { now?(): number } = {}) {}
-
-  setDispatchBlocked(blocked: boolean): void { this.dispatchBlocked = blocked; if (blocked) this.computerTokens.clear() }
 
   private now(): number { return this.timing.now?.() ?? (typeof performance === 'undefined' ? Date.now() : performance.now()) }
   private control(task: AutonomousTask): ComputerProgressState {
@@ -76,7 +73,7 @@ export class TaskCoordinator {
   }
   waitingForUser(platformId: string): boolean {
     const state = this.entries.get(platformId)
-    return !this.dispatchBlocked && !state?.error && state?.task?.status === 'recorded' && !!pendingTaskQuestion(state.task)
+    return !state?.error && state?.task?.status === 'recorded' && !!pendingTaskQuestion(state.task)
   }
 
   recordQuestion(lease: TaskLease, question: TaskQuestion, source: TaskQuestionSource): boolean {
@@ -181,7 +178,6 @@ export class TaskCoordinator {
     resume?: { taskId: string; generation: number; userText?: boolean }
   }): AutonomousTask | null {
     const { platformId, conversationId, submission, capability } = input
-    if (this.dispatchBlocked) return null
     if (!submission || !submission.id || !['goal', 'clarification'].includes(submission.kind)) return null
     if (!capability.scopeSupported || !capability.computerUseEnabled ||
       capability.context.sessionId !== this.sessionId || capability.context.platformId !== platformId || !input.text.trim()) return null
@@ -256,7 +252,7 @@ export class TaskCoordinator {
       task.stop = { reason, requestedAt: Date.now() }
       if (task.progress) task.progress.detail = reason === 'input-paused'
         ? `检测到连续 3 次用户键鼠操作，computer use 已暂停；保留要求和执行事实，用户发送新消息后继续同一任务并先重新观察，不因焦点恢复或空闲而自动继续。`
-        : reason === 'global-emergency' ? '用户触发全局急停；已撤销自动执行和回传，后台进程保持独立生命周期，已发生操作没有回滚。' : '用户结束任务；已撤销自动执行和回传，后台进程保持独立生命周期，已发生操作没有回滚。'
+        : reason === 'global-emergency' ? '用户触发全局急停；Computer Use 操作已中断，已发生操作没有回滚。' : '用户结束任务；自动执行和回传已撤销，后台进程保持独立生命周期，已发生操作没有回滚。'
     }
     this.store.saveAutonomousTasks([task])
     this.computerTokens.delete(platformId)
@@ -290,16 +286,16 @@ export class TaskCoordinator {
   }
   current(platformId: string): AutonomousTask | null {
     const state = this.entries.get(platformId)
-    return !this.dispatchBlocked && state?.task?.status === 'recorded' && !state.error ? structuredClone(state.task) : null
+    return state?.task?.status === 'recorded' && !state.error ? structuredClone(state.task) : null
   }
   /**
    * A goal sent while computer use was out of scope (a remote terminal) never became a task, yet its
    * replies are tagged with it once the terminal is local again. True only when nothing owns them:
-   * no running task, no error or dispatch block, and no task ever recorded for that submission.
+   * no running task, no error, and no task ever recorded for that submission.
    */
   neverTracked(platformId: string, submissionId: string): boolean {
     const state = this.entries.get(platformId)
-    if (this.dispatchBlocked || state?.error || state?.task?.status === 'recorded') return false
+    if (state?.error || state?.task?.status === 'recorded') return false
     try { return !this.store.autonomousTaskBySubmission(this.sessionId, platformId, submissionId) } catch { return false }
   }
   hasError(platformId: string, conversationId: string | null): boolean {
@@ -367,7 +363,7 @@ export class TaskCoordinator {
 
   /** A pre-send grant may be published before the first human send creates its task. */
   computerStepToken(platformId: string): string | null {
-    if (this.dispatchBlocked || this.waitingForUser(platformId)) return null
+    if (this.waitingForUser(platformId)) return null
     const task = this.current(platformId)
     let grant = this.computerTokens.get(platformId)
     if (!grant || grant.taskId !== (task?.id ?? null) || grant.generation !== (task?.generation ?? null)) {
@@ -375,6 +371,12 @@ export class TaskCoordinator {
       this.computerTokens.set(platformId, grant)
     }
     return grant.pending ? null : grant.value
+  }
+
+  invalidateComputerStepToken(platformId: string, taskId: string, generation: number): void {
+    const task = this.current(platformId)
+    if (!task || task.id !== taskId || task.generation !== generation) return
+    this.computerTokens.set(platformId, { value: this.newComputerToken(), taskId, generation, pending: false })
   }
 
   isComputerStepToken(lease: TaskLease, token: string, allowSending = false): boolean {

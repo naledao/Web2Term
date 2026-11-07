@@ -155,10 +155,10 @@ test('a native mouse shake stops the exact watch immediately and retains any acc
 
 for (const snapshotFails of [false, true]) test(`mouse shake stops every session and receives native release acknowledgement (overlay failure: ${snapshotFails})`, async () => {
   const f = fixture(), calls = [], sessions = ['A', 'B'].map(name => ({
-    emergencyStop: async () => { calls.push('stop-' + name) }, isAutomationDraining: () => false, releaseEmergencyStop() {}
+    interruptComputerUse: async () => { calls.push('stop-' + name) }, isComputerUseDraining: () => false, releaseEmergencyStop() {}
   }))
   const emergencyStop = new EmergencyStopController({
-    desktop: { setEmergencyStopped: value => calls.push('block-' + value), getState: () => ({ executing: 0, nativeBlocked: false }) },
+    desktop: { setEmergencyStopped: value => calls.push('block-' + value), getState: () => ({ desktopExecuting: 0, nativeBlocked: false }) },
     helper: f.manager, sessions: () => sessions, gestureAvailable: () => true, changed() {}
   })
   const source = ts.createSourceFile('index.ts', readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true)

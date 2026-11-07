@@ -142,7 +142,7 @@ export const supportsComputerUsePlatform = (platformId: string | null | undefine
   typeof platformId === 'string' && COMPUTER_USE_PLATFORM_IDS.includes(platformId)
 
 const MESSAGES: Record<ComputerUseReason, string> = {
-  'emergency-stopped': '全局急停已锁定自动操作，请在客户端明确解除。',
+  'emergency-stopped': '全局急停已中断 Computer Use 桌面操作；解除急停后可开始新的桌面操作。',
   'no-session': '请在 DeepSeek 或 ChatGPT 本机会话中查看桌面能力。',
   'remote-session': '远程会话暂不提供本机桌面控制，请使用 DeepSeek 或 ChatGPT 本机会话。',
   'unsupported-platform': '桌面能力目前仅适配 DeepSeek 和 ChatGPT，请切换到其中一个本机会话。',

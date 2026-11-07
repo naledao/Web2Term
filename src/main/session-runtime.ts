@@ -245,8 +245,7 @@ export interface SessionRuntimeOptions {
   scheduledTasks?: ScheduledTasks
   windowsHelper?: WindowsHelperManager
   computerUseObservations?: WindowsObservationService
-  onAutomationSafetyChanged?: () => void
-  automationBlocked?: () => boolean
+  computerUseBlocked?: () => boolean
   desktopCoordinator?: DesktopCoordinator
   registerComputerUseTools?: (tool: ComputerUseTool) => () => void
   web2term?: { binding: Web2termSessionBinding; connection: Web2termConnection }
@@ -489,6 +488,7 @@ export class SessionRuntime {
   private readonly focusChat: FocusChat
   private taskEnded = false
   private stoppingTask: Promise<InterceptorStatus> | null = null
+  private computerUseStop: Promise<void> | null = null
   private readonly completedTaskNotifications = new Set<string>()
   private readonly computerOverlayLifetime = new ComputerOverlayLifetime()
   private readonly taskCoordinator: TaskCoordinator
@@ -581,8 +581,6 @@ export class SessionRuntime {
       }
       if (state.platformId === this.activePlatformId) this.send(IpcChannels.autonomousTaskChanged, state)
     })
-    this.taskEnded = options.automationBlocked?.() === true
-    this.taskCoordinator.setDispatchBlocked(options.automationBlocked?.() === true)
     this.taskBackgroundWait = new TaskBackgroundWait({ coordinator: this.taskCoordinator,
       tasks: () => this.backgroundTasks.getState().tasks, consume: (id, kinds) => this.backgroundTaskResults.consume(id, kinds) })
     this.taskContinuity = new TaskContinuityService(this.taskCoordinator)
@@ -591,8 +589,8 @@ export class SessionRuntime {
       onLateReceipt: (request, event) => this.recordFocusComputerReceipt(request, event),
       isCurrent: lease => !this.disposed && this.active && lease.sessionId === this.id &&
         lease.platformId === this.activePlatformId && this.embeds.get(lease.platformId)?.embed?.getState().conversationId === lease.conversationId &&
-        this.getComputerUseCapability(lease.platformId).scopeSupported && this.getComputerUseCapability(lease.platformId).computerUseEnabled,
-      canRun: lease => !this.taskCoordinator.waitingForUser(lease.platformId) && !!this.runner?.canSendAutomaticResult() && !this.focusSending && !this.backgroundTaskResults.isSending &&
+        !options.computerUseBlocked?.() && this.getComputerUseCapability(lease.platformId).scopeSupported && this.getComputerUseCapability(lease.platformId).computerUseEnabled,
+      canRun: lease => !options.computerUseBlocked?.() && !this.taskCoordinator.waitingForUser(lease.platformId) && !!this.runner?.canSendAutomaticResult() && !this.focusSending && !this.backgroundTaskResults.isSending &&
         !this.embeds.get(lease.platformId)?.embed?.getInterceptorStatus().pendingQuestion,
       machine: lease => this.taskToolMachine(lease.platformId),
       acquire: async (call, lease, signal, waiting) => {
@@ -750,12 +748,12 @@ export class SessionRuntime {
           task_progress_control: this.taskCoordinator.progressSummary(context), task_completion_context: this.taskCoordinator.completionSummary(context),
           task_clarification_context: this.taskCoordinator.clarificationSummary(context), client_execution_settings: this.runner.getAutomation() })
       },
-      onIdle: () => { options.onAutomationSafetyChanged?.(); options.desktopCoordinator?.reconcile(); this.flushTaskTools(); void this.taskProgression.wake(); this.refreshRemoteRipgrep() },
+      onIdle: () => { options.desktopCoordinator?.reconcile(); this.flushTaskTools(); void this.taskProgression.wake(); this.refreshRemoteRipgrep() },
       fileContext: () => this.fileReadContext(),
       filePlatform: () => this.web2term || !this.toolPreferences().fileReadingEnabled ? null : fileReadingPlatform(this.activePlatform.id),
       prepareFiles: (request, signal) => prepareFiles(request, signal, (path, limit, abort) => this.ssh.readFileForModel(path, request.context.hostId, limit, abort), fileReadingPlatform(this.activePlatform.id)?.id),
       sendFilesToPage: (result, token, current, signal) => this.embed.sendFileResult(result, token, current, signal),
-      executionAllowed: () => !this.stoppingTask && options.automationBlocked?.() !== true,
+      executionAllowed: () => !this.stoppingTask,
       terminalModeEnabled: () => !this.disposed && this.embed.getInterceptorStatus().enabled,
       remoteShell: () => this.web2term ?? this.remoteShell,
       terminalTransport: () => this.web2term?.transport,
@@ -794,7 +792,6 @@ export class SessionRuntime {
       onTaskStarted: () => this.embed.startTerminalTask(),
       onTerminalChanged: (state) => {
         this.send(IpcChannels.terminalChanged, state)
-        if (options.automationBlocked?.()) options.onAutomationSafetyChanged?.()
         this.refreshDirectoryNotes()
         if (state.cwd !== this.lastPersistedLocalCwd) {
           this.lastPersistedLocalCwd = state.cwd
@@ -903,7 +900,7 @@ export class SessionRuntime {
   }
 
   private backgroundNotificationCurrent(task: BackgroundTask, owner: BackgroundTaskOwner): boolean {
-    if (this.taskEnded || this.options.automationBlocked?.() === true) return false
+    if (this.taskEnded) return false
     if (!Object.hasOwn(task, 'taskContext')) return true
     const context = parseTaskToolContext(task.taskContext), current = this.taskCoordinator?.current(owner.platformId)
     return !!context && !!current && context.platformId === owner.platformId && context.conversationId === owner.conversationId &&
@@ -1070,7 +1067,7 @@ export class SessionRuntime {
           this.lastSubmissions.set(platform.id, submission.id)
         }
         if (controlsCurrent && record().conversationId === null) this.conversationTools.submitted(platform.id)
-        if (!automatic && controlsCurrent && this.options.automationBlocked?.() !== true && !this.stoppingTask && this.options.desktopCoordinator?.canReleaseHumanControl() !== false &&
+        if (!automatic && controlsCurrent && !this.stoppingTask && this.options.desktopCoordinator?.canReleaseHumanControl() !== false &&
           (submission?.kind !== 'clarification' || !!submission.answerTo && this.taskCoordinator.waitingForUser(platform.id))) this.taskEnded = false
         const revision = this.focusRevision
         if (editToken && (!revision || revision.acknowledged || revision.token !== editToken || revision.platformId !== platform.id ||
@@ -1088,7 +1085,7 @@ export class SessionRuntime {
         if (editToken && revision) revision.acknowledged = true
         // A late send may remain in its original history, but cannot reopen task authority after handover.
         if (submission && !controlsCurrent) return turnId
-        if (submission && (this.taskEnded || this.options.automationBlocked?.() === true)) return turnId
+        if (submission && this.taskEnded) return turnId
         if (submission && this.options.desktopCoordinator?.canReleaseHumanControl() === false) return turnId
         if (submission) {
           try {
@@ -1107,7 +1104,7 @@ export class SessionRuntime {
             const continuesPause = !automatic && !!paused && taskPausedByInput(paused)
             const submit = (resume?: { taskId: string; generation: number; userText?: boolean }): AutonomousTask | null =>
               this.taskCoordinator.submit({ platformId: platform.id, conversationId: record().conversationId,
-                submission, turnId, text: cleanFocusUserText(text), attachments: files ?? [], capability: this.getComputerUseCapability(platform.id),
+                submission, turnId, text: cleanFocusUserText(text), attachments: files ?? [], capability: this.getComputerUseCapability(platform.id, true),
                 ...(resume ? { resume } : {}),
                 machine: { id: this.options.localMachineId, label: '本机', platform: process.platform, arch: process.arch,
                   connection: 'local', workingDirectory: this.runner.getTerminalState().cwd || this.environment.workingDirectory || this.lastPersistedLocalCwd } })
@@ -1309,7 +1306,7 @@ export class SessionRuntime {
     )
     entry.embed.setPromptInjectionEnabled(this.promptInjectionEnabled)
     const capability = this.getComputerUseCapability(platformId)
-    entry.embed.setComputerUseRecognitionEnabled(capability.scopeSupported && capability.computerUseEnabled)
+    entry.embed.setComputerUseRecognitionEnabled(capability.scopeSupported && capability.computerUseEnabled && !this.options.computerUseBlocked?.())
     entry.embed.setSendBlock(null)
     // A lazy platform must inherit the real slot BEFORE attach starts its first navigation.
     // Hiding a zero-sized view first lets the outer bounds change while Chromium's native
@@ -1681,8 +1678,7 @@ export class SessionRuntime {
       // A compaction owns isolated pages, so selecting another workspace or
       // platform only hides its optional UI; it does not revoke the upload.
       canWork: owner => !this.disposed && owner.sessionId === this.id && !!owner.conversationId &&
-        this.embeds.get(owner.platformId)?.embed?.getState().conversationId === owner.conversationId &&
-        !this.options.automationBlocked?.(),
+        this.embeds.get(owner.platformId)?.embed?.getState().conversationId === owner.conversationId,
       canAdopt: owner => this.ownsFocus(owner) && !this.focusSending && !this.focusRevision && !this.runner.hasInFlightWork(),
       makePage: (platformId, url, onUrl) => {
         if (!this.window || this.window.isDestroyed()) throw new Error('应用窗口不可用。')
@@ -1740,7 +1736,6 @@ export class SessionRuntime {
     if (action === 'show-page') service.showPage()
     if (action === 'hide-page') service.hide()
     if (action === 'resume') {
-      if (this.options.automationBlocked?.()) throw new Error('请先解除全局急停，再点“继续检查”。')
       service.hide()
       void service.resume(request); return
     }
@@ -1889,7 +1884,7 @@ export class SessionRuntime {
       promptInjection: focusPromptInjectionState(owner.platformId,
         this.conversationTools.injectionLedger(owner.platformId, owner.conversationId), this.embed.getInterceptorStatus()),
       contextUsage,
-      sendBlock: computerUseSendBlock(this.getComputerUseCapability(owner.platformId)),
+      sendBlock: this.options.computerUseBlocked?.() ? '' : computerUseSendBlock(this.getComputerUseCapability(owner.platformId)),
       executions: sameExecutions ? undefined : [...(inherited?.executions ?? []), ...(owner.conversationId ? this.options.store.listExecutions(owner.conversationId, false).filter(record => !archivedExecutions.has(record.messageId)) : [])] }
   }
 
@@ -1931,7 +1926,7 @@ export class SessionRuntime {
           const status = this.embed.getInterceptorStatus()
           if (!status.installed || !status.enabled || !status.promptInjectionEnabled) return '请先启用当前对话的终端模式和提示词注入，再让 AI 协助登录。'
           if (status.taskStartedAt !== null && status.taskFinishedAt === null) return '当前 AI 正在处理任务，请结束后再试。'
-          return computerUseSendBlock(this.getComputerUseCapability())
+          return this.options.computerUseBlocked?.() ? null : computerUseSendBlock(this.getComputerUseCapability())
         },
         inspect: getGithubCliState,
         send: text => this.embed.sendUserTask(text)
@@ -1981,7 +1976,7 @@ export class SessionRuntime {
       const tools = this.getConversationTools(request)
       if (skills.some(id => focusSkillUnavailable(id, tools))) return 'unavailable'
     }
-    if (skills.includes('computer') && computerUseSendBlock(this.getComputerUseCapability(request.platformId))) return 'helper-not-ready'
+    if (skills.includes('computer') && !this.options.computerUseBlocked?.() && computerUseSendBlock(this.getComputerUseCapability(request.platformId))) return 'helper-not-ready'
     this.focusSending = true
     writeFocusDiagnostic(request, { event: 'send-request', inputLength: request.text.length, attachmentCount: request.files?.length ?? 0 })
     const controller = new AbortController()
@@ -2241,15 +2236,39 @@ export class SessionRuntime {
     await this.stopAutomation('input-paused', false)
   }
 
-  emergencyStop(): Promise<InterceptorStatus> {
-    this.compaction?.pauseTask('全局急停已暂停压缩。解除急停后，需点“继续检查”显式恢复。')
-    this.taskCoordinator.setDispatchBlocked(true)
-    return this.stopAutomation('global-emergency', true)
+  interruptComputerUse(): Promise<void> {
+    if (this.computerUseStop) return this.computerUseStop
+    const targets = [...this.embeds].flatMap(([platformId, entry]) => {
+      const task = this.taskCoordinator.current(platformId)
+      const step = task?.progress?.currentStep
+      const activeComputerStep = !!task && task.status === 'recorded' && !!step && (step.tool ?? 'computer') === 'computer' && step.status !== 'delivered'
+      const hasPendingComputer = this.pendingTaskComputer?.platformId === platformId
+      if (task && hasPendingComputer) {
+        this.pendingTaskComputer = null
+        this.taskCoordinator.invalidateComputerStepToken(platformId, task.id, task.generation)
+      }
+      return task && (activeComputerStep || hasPendingComputer) ? [{ platformId, embed: entry.embed }] : []
+    })
+    if (!targets.length) { this.refreshComputerUseCapabilities(); return Promise.resolve() }
+    for (const target of targets) {
+      this.stopAutonomousTask(target.platformId, 'stopped', 'global-emergency')
+      target.embed?.completeTask()
+    }
+    this.taskProgression.cancel()
+    this.refreshComputerUseCapabilities()
+    const stopping = Promise.allSettled(targets.flatMap(target => target.embed ? [target.embed.endTask()] : []))
+      .then(results => {
+        if (results.some(result => result.status === 'rejected' || result.value && typeof result.value === 'object' &&
+          'stopRequestAcknowledged' in result.value && result.value.stopRequestAcknowledged === false)) {
+          throw new Error('Computer Use 页面停止请求未全部确认。')
+        }
+      })
+    const tracked = stopping.finally(() => { if (this.computerUseStop === tracked) this.computerUseStop = null })
+    this.computerUseStop = tracked
+    return tracked
   }
-  isAutomationDraining(): boolean { return !!this.stoppingTask || this.runner.hasInFlightWork() || !!this.compaction?.busy }
+  isComputerUseDraining(): boolean { return this.computerUseStop !== null }
   releaseEmergencyStop(): void {
-    this.taskCoordinator.setDispatchBlocked(false)
-    // taskEnded remains set. Only a new confirmed human send or explicit recovery may start work.
     this.refreshComputerUseCapabilities()
   }
   private stopAutomation(reason: TaskStopReason, allPlatforms: boolean): Promise<InterceptorStatus> {
@@ -2294,7 +2313,6 @@ export class SessionRuntime {
       return selected?.getInterceptorStatus() ?? this.embed.getInterceptorStatus()
     }).finally(() => {
       if (this.stoppingTask === stopping) this.stoppingTask = null
-      this.options.onAutomationSafetyChanged?.()
     })
     this.stoppingTask = stopping
     return stopping
@@ -2337,7 +2355,7 @@ export class SessionRuntime {
   }
 
   private taskToolCurrent(context: TaskToolContext): boolean {
-    const capability = this.getComputerUseCapability(context.platformId)
+    const capability = this.getComputerUseCapability(context.platformId, true)
     return !this.disposed && !this.taskEnded && (this.active || this.canRunConversationInBackground(context.platformId)) && this.activePlatformId === context.platformId && context.sessionId === this.id &&
       (context.tool !== 'read_files' || this.toolPreferences(context.platformId).fileReadingEnabled) &&
       this.embeds.get(context.platformId)?.embed?.getState().conversationId === context.conversationId &&
@@ -2355,14 +2373,13 @@ export class SessionRuntime {
       return true
     }
     if (this.taskEnded) return trace('skipped', 'task-ended')
-    if (this.options.automationBlocked?.() === true) return trace('skipped', 'automation-blocked')
     if (this.taskCoordinator.waitingForUser(this.activePlatformId)) return trace('skipped', 'waiting-user')
     const preferences = this.toolPreferences(this.activePlatformId, conversationIdOverride ?? this.embeds.get(this.activePlatformId)?.conversationId ?? null)
     if ('type' in command ? !preferences.fileReadingEnabled || !!this.web2term : command.background === true && !preferences.backgroundTasksEnabled) return trace('skipped', 'tool-disabled')
     if (!command.taskSource) return this.runner.handleDetected(command, conversationIdOverride)
     if (typeof command.messageId !== 'string' || !command.messageId.trim() || command.messageId.length > 512) return trace('skipped', 'invalid-message-id')
     const platformId = this.activePlatformId, entry = this.embeds.get(platformId), source = command.taskSource
-    const capability = this.getComputerUseCapability(platformId)
+    const capability = this.getComputerUseCapability(platformId, true)
     if (!command.live || this.disposed || (!this.active && !this.canRunConversationInBackground(platformId)) || !supportsComputerUsePlatform(platformId) || !entry?.embed || !capability.scopeSupported || !capability.computerUseEnabled) return trace('skipped', 'task-context-unavailable')
     const conversationId = entry.platform.conversationIdFromPath(source.pagePath)
     let task = this.taskCoordinator.current(platformId)
@@ -2440,13 +2457,13 @@ export class SessionRuntime {
     return { scope: 'local', hostId: '', cwd: this.runner.getTerminalState().cwd || homedir() }
   }
 
-  getComputerUseCapability(platformId = this.activePlatformId): ComputerUseCapability {
+  getComputerUseCapability(platformId = this.activePlatformId, ignoreEmergencyStop = false): ComputerUseCapability {
     const connection = this.web2term ? 'web2term'
       : this.remoteShell || this.ssh?.getState().attached || (!this.ssh && this.options.initialSshAttached) ? 'ssh' : 'local'
     const capability = resolveComputerUseCapability(this.toolPreferences(platformId), {
       sessionId: this.id, platformId, hostPlatform: process.platform, hostArch: process.arch, connection
     }, this.computerUseTool.definitions(), this.options.windowsHelper?.getState())
-    return this.options.automationBlocked?.() ? { ...capability, enabled: false, available: false, actions: [], actionDefinitions: [], reason: 'emergency-stopped', message: '全局急停已锁定自动操作，请先在客户端明确解除；旧任务不会自动恢复。' } : capability
+    return !ignoreEmergencyStop && this.options.computerUseBlocked?.() ? { ...capability, enabled: false, desktopControlEnabled: false, available: false, actions: [], actionDefinitions: [], reason: 'emergency-stopped', message: '全局急停已中断 Computer Use；解除急停后可开始新的桌面操作。' } : capability
   }
 
   /** Low-level executor. Live page/protocol adapters use advanceComputerUse for ownership and delivery. */
@@ -2460,7 +2477,7 @@ export class SessionRuntime {
 
   /** Internal, owned live requests only. The raw page parser/protocol adapters are separate. */
   advanceComputerUse(request: ComputerUseStepRequest): StepAcceptance {
-    if (this.disposed || this.taskEnded || request.sessionId !== this.id || request.platformId !== this.activePlatformId) return 'inactive'
+    if (this.disposed || this.taskEnded || this.options.computerUseBlocked?.() || request.sessionId !== this.id || request.platformId !== this.activePlatformId) return 'inactive'
     const capability = this.getComputerUseCapability(request.platformId)
     if (!this.active) {
       if (!capability.scopeSupported || !capability.computerUseEnabled || !this.taskCoordinator.owns(request)) return 'inactive'
@@ -2486,7 +2503,7 @@ export class SessionRuntime {
 
   /** Page output is always re-parsed here; its claimed validity never authorizes dispatch. */
   private receiveComputerUseRequest(platformId: string, request: ComputerUsePageRequest): boolean {
-    if (this.disposed || !supportsComputerUsePlatform(platformId) || this.activePlatformId !== platformId) return false
+    if (this.disposed || this.options.computerUseBlocked?.() || !supportsComputerUsePlatform(platformId) || this.activePlatformId !== platformId) return false
     const capability = this.getComputerUseCapability(platformId)
     if (!capability.scopeSupported || !capability.computerUseEnabled) return false
     const entry = this.embeds.get(platformId)
@@ -2630,13 +2647,16 @@ export class SessionRuntime {
 
   private recordTaskQuestion(platformId: string, question: TaskQuestion, source: TaskQuestionSource): void {
     const entry = this.embeds.get(platformId), capability = this.getComputerUseCapability(platformId)
-    if (this.disposed || (!this.active && !this.canRunConversationInBackground(platformId)) || this.taskEnded || this.options.automationBlocked?.() || platformId !== this.activePlatformId ||
+    if (this.disposed || (!this.active && !this.canRunConversationInBackground(platformId)) || this.taskEnded || platformId !== this.activePlatformId ||
       !capability.scopeSupported || !capability.computerUseEnabled || !entry?.embed || entry.embed.getComputerUsePageEpoch() !== source.pageEpoch) return
     const conversationId = entry.platform.conversationIdFromPath(source.pagePath)
     if (!conversationId) return
     try {
       const task = this.syncAutonomousTask(platformId, conversationId)?.task
       if (!task || task.sourceSubmissionId !== source.sourceSubmissionId) return
+      const step = task.progress?.currentStep
+      const isComputerStep = !!step && (step.tool ?? (task.progress?.computerRequest ? 'computer' : undefined)) === 'computer' && step.status !== 'delivered'
+      if (this.options.computerUseBlocked?.() && isComputerStep) return
       const lease = { sessionId: this.id, platformId, conversationId, taskId: task.id, generation: task.generation }
       if (!this.taskCoordinator.recordQuestion(lease, question, source)) return
       entry.embed.setTaskQuestionContext(question.messageId, { ...lease, questionId: pendingTaskQuestion(this.taskCoordinator.current(platformId)!)!.id })
@@ -2841,11 +2861,11 @@ export class SessionRuntime {
     this.syncWindowsHelperDemand?.()
     for (const entry of this.embeds.values()) {
       const capability = this.getComputerUseCapability(entry.platform.id)
-      entry.embed?.setComputerUseRecognitionEnabled(capability.scopeSupported && capability.computerUseEnabled)
+      entry.embed?.setComputerUseRecognitionEnabled(capability.scopeSupported && capability.computerUseEnabled && !this.options.computerUseBlocked?.())
       entry.embed?.setSendBlock(null)
       const currentStep = this.taskCoordinator?.current(entry.platform.id)?.progress?.currentStep
-      if (!capability.computerUseEnabled || !capability.scopeSupported ||
-        (!capability.desktopControlEnabled && currentStep && (currentStep.tool ?? 'computer') === 'computer' && currentStep.status !== 'delivered')) this.stopAutonomousTask(entry.platform.id, 'interrupted')
+      if (!this.options.computerUseBlocked?.() && (!capability.computerUseEnabled || !capability.scopeSupported ||
+        !capability.desktopControlEnabled && currentStep && (currentStep.tool ?? 'computer') === 'computer' && currentStep.status !== 'delivered')) this.stopAutonomousTask(entry.platform.id, 'interrupted')
       const parts = buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id))
       const catalogChanged = entry.embed?.getInterceptorStatus?.()?.toolPrompt !== parts.toolPrompt
       entry.embed?.setPromptParts(parts,
@@ -2886,7 +2906,7 @@ export class SessionRuntime {
 
   private scheduledOwnerCurrent(task: ScheduledTask): boolean {
     if (this.disposed || (!this.active && !this.canRunConversationInBackground(task.owner.platformId)) || task.owner.sessionId !== this.id || this.activePlatformId !== task.owner.platformId ||
-      this.embed.getState().conversationId !== task.owner.conversationId || this.options.automationBlocked?.() || this.stoppingTask ||
+      this.embed.getState().conversationId !== task.owner.conversationId || this.stoppingTask ||
       this.runner.getAutomation().paused || this.options.desktopCoordinator?.getState().humanControl ||
       taskPausedByInput(this.taskCoordinator.latest(task.owner.platformId)) || !this.toolPreferences(task.owner.platformId).scheduledTasksEnabled) return false
     const latest = this.options.scheduledTasks?.store.get(task.id)
@@ -2915,7 +2935,7 @@ export class SessionRuntime {
   }
 
   private mailNotificationCurrent(call: MailNotificationCall): boolean {
-    if (this.disposed || (!this.active && !this.canRunConversationInBackground()) || this.taskEnded || this.stoppingTask || this.options.automationBlocked?.() ||
+    if (this.disposed || (!this.active && !this.canRunConversationInBackground()) || this.taskEnded || this.stoppingTask ||
       this.runner.getAutomation().paused || !this.toolPreferences().mailNotificationsEnabled ||
       this.options.desktopCoordinator?.getState().humanControl ||
       taskPausedByInput(this.taskCoordinator.latest(this.activePlatformId)) ||
@@ -2927,7 +2947,7 @@ export class SessionRuntime {
   }
 
   private toolPromptReadCurrent(call: ToolPromptReadCall): boolean {
-    if (this.disposed || (!this.active && !this.canRunConversationInBackground()) || this.taskEnded || this.stoppingTask || this.options.automationBlocked?.() ||
+    if (this.disposed || (!this.active && !this.canRunConversationInBackground()) || this.taskEnded || this.stoppingTask ||
       this.runner.getAutomation().paused || this.options.desktopCoordinator?.getState().humanControl ||
       taskPausedByInput(this.taskCoordinator.latest(this.activePlatformId)) ||
       this.lastSubmissions.get(this.activePlatformId) !== call.sourceSubmissionId ||
@@ -2958,7 +2978,6 @@ export class SessionRuntime {
     // A stale or unauthorised request is never answered to the AI, but it must not vanish without a trace.
     const ignored = !scheduledTasks ? '定时任务服务不可用。'
       : this.taskEnded ? '任务已结束。'
-      : this.options.automationBlocked?.() ? '全局急停中。'
       : this.runner.getAutomation().paused ? '自动化已暂停。'
       : call.pageEpoch !== this.embed.getComputerUsePageEpoch() || (conversationId !== null && conversationId !== call.conversationId) ? '原对话已切换。'
       : !call.sourceSubmissionId || this.lastSubmissions.get(this.activePlatformId) !== call.sourceSubmissionId ? '该请求不属于最新一次发送。'
@@ -2997,7 +3016,6 @@ export class SessionRuntime {
     if (!this.active && !this.canRunConversationInBackground(task.owner.platformId)) return '等待选中原工作区以继续桌面操作任务。'
     if (this.activePlatformId !== task.owner.platformId || this.embed.getState().conversationId !== task.owner.conversationId) return '等待回到原 AI 平台和对话。'
     if (run.kind === 'receipt' && (this.taskEnded || task.receiptSubmissionId !== this.lastSubmissions.get(task.owner.platformId))) return 'cancel:原任务已切换或结束，创建确认不再自动回传；计划仍已保存。'
-    if (this.options.automationBlocked?.()) return '全局急停中，等待手动解除。'
     if (this.runner.getAutomation().paused || this.options.desktopCoordinator?.getState().humanControl || taskPausedByInput(this.taskCoordinator.latest(task.owner.platformId))) return '自动化已暂停或由用户接管，等待用户继续。'
     if (!this.toolPreferences().scheduledTasksEnabled) return '当前对话已关闭定时任务工具。'
     try {
@@ -3008,8 +3026,6 @@ export class SessionRuntime {
     const status = this.embed.getInterceptorStatus()
     if (!status.enabled || !status.installed || !status.promptInjectionEnabled) return '等待启用原对话的终端模式和提示词注入。'
     if (status.pendingQuestion || this.taskCoordinator.waitingForUser(task.owner.platformId)) return '等待用户回答原任务的问题。'
-    const block = computerUseSendBlock(this.getComputerUseCapability(task.owner.platformId))
-    if (block) return '等待 computer use 能力恢复。'
     // An unfinished AI task does not block delivery; the scheduler retries busy sends.
     return null
   }
@@ -4398,7 +4414,7 @@ export class SessionRuntime {
   }
 
   private notifyQuestion(question: string, count: number): void {
-    if (this.taskEnded || this.options.automationBlocked?.()) return
+    if (this.taskEnded) return
     const window = this.window
     if (this.active && window && !window.isDestroyed() && window.isFocused()) return
     const summary = question.replace(/\s+/g, ' ').trim()
@@ -4408,7 +4424,7 @@ export class SessionRuntime {
       () => { this.focusNotification(target) })
   }
   private notifyTaskCompleted(body: string): void {
-    if (this.taskEnded || this.options.automationBlocked?.()) return
+    if (this.taskEnded) return
     if (this.taskCoordinator.hasError(this.activePlatformId, this.embed.getState().conversationId) ||
       !this.taskCoordinator.completionNotificationAllowed(this.activePlatformId, this.embed.getState().conversationId)) return
     const completedTaskId = this.taskCoordinator.completedTaskId(this.activePlatformId, this.embed.getState().conversationId)

@@ -666,7 +666,7 @@ test('a reply tagged with a goal that never became a task runs as an ordinary co
   assert.equal(f.coordinator.current('deepseek'), null, 'running it creates no task')
 })
 
-test('a running task, or a dispatch block, keeps rejecting replies tagged with an unknown goal', async t => {
+test('a running or stopped task keeps rejecting replies tagged with an unknown goal', async t => {
   const f = fixture(t)
   const tagged = messageId => ({ messageId, command: 'Write-Output report', description: 'Prepare report',
     timeoutSeconds: 30, live: true, taskSource: { sourceSubmissionId: 'user:remote-goal:1', taskPromptGeneration: 7, pagePath: path } })
@@ -675,7 +675,6 @@ test('a running task, or a dispatch block, keeps rejecting replies tagged with a
   assert.equal(f.runs.length, 0)
   assert.ok(f.diagnostics.some(item => item.reason === 'task-source-mismatch' && item.messageId === 'other-goal'))
   f.coordinator.stop('deepseek', 'stopped')
-  f.coordinator.setDispatchBlocked(true)
   f.route(tagged('blocked-goal'))
   await f.settled()
   assert.equal(f.runs.length, 0)

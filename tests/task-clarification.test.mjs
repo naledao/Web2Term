@@ -181,7 +181,7 @@ test('a stale dialog cannot answer or close a new task even when the assistant m
   assert.equal(r.calls.length, 0); assert.equal(task(f).progress.phase, 'waiting-user'); assert.equal(task(f).inputs.length, 1)
 })
 
-test('actual runtime question handling clears queued work, cancels only live dispatch and binds the dialog owner', t => {
+test('actual runtime question handling continues during global emergency for non-Computer-Use work', t => {
   const f = fixture(t), observed = [], owners = [], cancelled = []
   const Subject = actualClass('../src/main/session-runtime.ts', 'SessionRuntime', ['recordTaskQuestion'])
   const subject = Object.assign(new Subject(), { id: f.first.sessionId, disposed: false, active: true, taskEnded: false, activePlatformId: 'deepseek',
@@ -190,7 +190,7 @@ test('actual runtime question handling clears queued work, cancels only live dis
     getComputerUseCapability: () => ({ scopeSupported: true, computerUseEnabled: true }), syncAutonomousTask: (...args) => f.coordinator.context(...args),
     taskCoordinator: f.coordinator, taskProgression: { cancel: () => { cancelled.push(true); f.loop.cancel() } },
     pendingTaskCommand: {}, pendingTaskComputer: {}, pendingTaskReply: {}, deferredCommands: new Map([['old', {}]]), computerUseTool: {},
-    options: { computerUseObservations: { invalidateInput: (...args) => observed.push(args) }, desktopCoordinator: { reconcile() {} } } })
+    options: { computerUseBlocked: () => true, computerUseObservations: { invalidateInput: (...args) => observed.push(args) }, desktopCoordinator: { reconcile() {} } } })
   subject.recordTaskQuestion('deepseek', questionFor(), sourceFor(f))
   assert.equal(cancelled.length, 1); assert.equal(observed.length, 1); assert.equal(subject.deferredCommands.size, 0)
   assert.equal(subject.pendingTaskCommand, null); assert.equal(subject.pendingTaskComputer, null)

@@ -37,9 +37,10 @@ export class DesktopCoordinator {
 
   constructor(private readonly leaseChanged: () => void = () => {}) {}
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener) }
-  getState(): { owner: DesktopOwner | null; draining: boolean; humanControl: boolean; nativeBlocked: boolean; queued: number; executing: number } {
+  getState(): { owner: DesktopOwner | null; draining: boolean; humanControl: boolean; nativeBlocked: boolean; queued: number; executing: number; desktopExecuting: number } {
     return { owner: this.owner ? { ...this.owner.value } : null, draining: this.owner?.revoked ?? false,
-      humanControl: this.humanControl, nativeBlocked: this.nativeBlocked, queued: this.queue.length, executing: this.running.size }
+      humanControl: this.humanControl, nativeBlocked: this.nativeBlocked, queued: this.queue.length, executing: this.running.size,
+      desktopExecuting: [...this.running.values()].filter(entry => entry.kind === 'desktop').length }
   }
   /** A physical input belongs to the exact live desktop watch, never a historical session. */
   takeHumanControl(owner: DesktopOwner): boolean {
@@ -54,18 +55,21 @@ export class DesktopCoordinator {
   }
   setEmergencyStopped(active: boolean): void {
     this.emergencyStopped = active
-    if (active) { for (const entry of [...this.queue]) this.cancel(entry); if (this.owner) this.owner.revoked = true }
+    if (active) {
+      for (const entry of [...this.queue]) if (entry.kind === 'desktop') this.cancel(entry)
+      if (this.owner) this.owner.revoked = true
+    }
     this.reconcile()
   }
   /** A retired helper may have resolved its request before its native process actually exits. */
   setNativeBlocked(blocked: boolean): void { if (this.nativeBlocked !== blocked) { this.nativeBlocked = blocked; this.reconcile() } }
   authorizes(permit: DesktopPermit | undefined, lease: TaskLease, kind: DesktopRequest['kind']): boolean {
     const entry = permit && this.running.get(permit)
-    return !this.disposed && !this.emergencyStopped && !this.humanControl && !this.nativeBlocked && !!entry && entry.kind === kind && sameTask(entry.owner, lease) &&
+    return !this.disposed && !this.nativeBlocked && !(kind === 'desktop' && (this.emergencyStopped || this.humanControl)) && !!entry && entry.kind === kind && sameTask(entry.owner, lease) &&
       !entry.signal.aborted && check(entry.current) && (kind !== 'desktop' || this.owner?.key === entry.key && !this.owner.revoked)
   }
   acquire(request: DesktopRequest): Promise<DesktopPermit> {
-    if (this.disposed || this.emergencyStopped || request.signal.aborted || !check(request.current)) return Promise.reject(new Error('desktop-request-cancelled'))
+    if (this.disposed || this.nativeBlocked || request.kind === 'desktop' && this.emergencyStopped || request.signal.aborted || !check(request.current)) return Promise.reject(new Error('desktop-request-cancelled'))
     if (this.queue.length >= 256) return Promise.reject(new Error('desktop-queue-full'))
     const owner = request.owner
     if (![owner.sessionId, owner.platformId, owner.conversationId, owner.taskId, owner.machineId].every(v => typeof v === 'string' && !!v.trim() && v.length <= 512 && !/[\x00-\x1f\x7f]/.test(v)) ||
@@ -119,15 +123,16 @@ export class DesktopCoordinator {
     for (const entry of [...this.queue]) if (this.disposed || entry.signal.aborted || !check(entry.current)) this.cancel(entry)
     if (this.owner && (!check(this.owner.keep) || this.disposed)) this.owner.revoked = true
     if (this.owner?.revoked && ![...this.running.values()].some(e => e.key === this.owner!.key)) this.changeOwner(null)
-    if (this.disposed || this.emergencyStopped || this.humanControl || this.nativeBlocked || this.owner?.revoked) return
+    if (this.disposed || this.humanControl || this.owner?.revoked) return
     if (this.owner) {
       if (this.running.size) return
+      if (this.emergencyStopped || this.nativeBlocked) { this.changeOwner(null); return this.pump() }
       const next = this.queue.find(e => e.key === this.owner!.key && check(e.eligible))
       if (next) this.grant(next)
       return
     }
     while (true) {
-      const next = this.queue.find(e => check(e.eligible))
+      const next = this.queue.find(e => !this.nativeBlocked && (e.kind !== 'desktop' || !this.emergencyStopped) && check(e.eligible))
       if (!next) return
       if (next.kind === 'desktop') {
         if (this.running.size) return

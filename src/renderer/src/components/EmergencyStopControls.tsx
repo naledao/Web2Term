@@ -40,11 +40,11 @@ export default function EmergencyStopControls() {
   }
   return <div className={'emergency-stop' + (state?.active ? ' emergency-stop--active' : '')}>
     <button type="button" className="emergency-stop__trigger" onClick={() => void trigger()}
-      title="停止所有会话的自动操作，释放本次 helper 按下的键鼠；后台进程保持独立运行。Computer Use 运行时也可连续来回晃动鼠标急停。">
+      title="中断 Computer Use 桌面操作并释放本次 helper 按下的键鼠；终端命令、会话压缩及其他后台工作继续运行。">
       {state?.active ? '全局急停已触发' : '全局急停'}
     </button>
     {state?.active ? <>
-      <span className="emergency-stop__status" role="status">{state.message}{state.failedSessions ? ` ${state.failedSessions} 项停止请求未确认，请查看实际状态。` : ''}</span>
+      <span className="emergency-stop__status" role="status">{state.message}{state.failedSessions ? ` ${state.failedSessions} 项 Computer Use 停止请求未确认，请查看实际状态。` : ''}</span>
       <button type="button" disabled={!state.canReset || busy} onClick={() => void reset()}>{busy ? '正在解除…' : state.canReset ? '解除急停' : '等待退场…'}</button>
     </> : <span className="emergency-stop__hint">{state?.gestureAvailable ? '连续来回晃动鼠标，立即急停' : state ? 'Computer Use 控制期间可连续晃动鼠标急停；也可点击全局急停' : '读取急停状态…'}</span>}
     {warning && !state?.active ? <span className="emergency-stop__warning" role="status">

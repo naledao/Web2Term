@@ -8,6 +8,7 @@ export interface EmergencyStopState {
   gestureAvailable: boolean
   pendingSessions: number
   failedSessions: number
+  /** Currently executing Computer Use desktop operations; unrelated terminal commands are excluded. */
   executing: number
   helperRunning: boolean
   inputRelease: InputReleaseStatus

@@ -36,7 +36,7 @@ export function computerOverlayEmergencySnapshot(snapshot: ComputerOverlaySnapsh
   if (!snapshot || !stop.active || stop.triggeredAt === null || now < stop.triggeredAt || now >= stop.triggeredAt + COMPUTER_OVERLAY_COMPLETION_MS) return null
   return { ...snapshot, completed: false, emergencyStopped: true, tone: 'error',
     status: stop.canReset ? '自动操作已停止' : '正在停止自动操作', actionStatus: '已急停',
-    result: stop.source === 'mouse-gesture' ? '检测到连续晃动鼠标，已触发所有会话的全局急停。' : '已触发所有会话的全局急停。',
+    result: stop.source === 'mouse-gesture' ? '检测到连续晃动鼠标，已中断所有会话中的 Computer Use 桌面操作。' : '已中断所有会话中的 Computer Use 桌面操作。',
     resultTone: 'error', updatedAt: stop.triggeredAt }
 }
 

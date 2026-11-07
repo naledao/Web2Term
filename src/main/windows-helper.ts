@@ -453,7 +453,7 @@ export class WindowsHelperManager {
     const pending = run.action
     if (!pending) return
     if (run.activityCause) result = { ...result, ok: false, code: run.activityCause,
-      message: run.activityCause === 'emergency_stopped' ? '用户连续晃动鼠标，已触发全局急停；实际执行回执已保留。停止所有自动操作与回传，等待用户解除急停并重新提交或恢复任务。'
+      message: run.activityCause === 'emergency_stopped' ? '用户连续晃动鼠标，已触发全局急停；Computer Use 桌面操作已中断，实际执行回执已保留。解除急停后可开始新的桌面操作。'
         : run.activityCause === 'human_paused' ? 'computer use 已因用户键鼠操作暂停，本步实际执行回执已保留；不要再发起 computer 请求，等待用户发送新消息后继续同一任务，继续时先重新观察。'
         : run.activityCause === 'human_input' ? `检测到用户键鼠操作（第 ${run.activityStrike}/${HUMAN_PAUSE_STRIKES} 次），本步已中断；动作是否生效须重新观察核对，不重放原动作。请继续原任务，连续 ${HUMAN_PAUSE_STRIKES} 次将暂停 computer use，直到用户发送新消息。`
         : run.activityCause === 'input_monitor_unavailable' ? '桌面输入监测已不可用，本轮控制已停止；请核对实际状态。' : '其他来源输入已中断本轮控制，请重新观察真实界面后继续判断；不重放原动作。' }
