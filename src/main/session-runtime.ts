@@ -2241,7 +2241,8 @@ export class SessionRuntime {
     const targets = [...this.embeds].flatMap(([platformId, entry]) => {
       const task = this.taskCoordinator.current(platformId)
       const step = task?.progress?.currentStep
-      const activeComputerStep = !!task && task.status === 'recorded' && !!step && (step.tool ?? 'computer') === 'computer' && step.status !== 'delivered'
+      const stepTool = step?.tool ?? (step?.action === 'command' || step?.action === 'read_files' ? step.action : 'computer')
+      const activeComputerStep = !!task && task.status === 'recorded' && !!step && stepTool === 'computer' && step.status !== 'delivered'
       const hasPendingComputer = this.pendingTaskComputer?.platformId === platformId
       if (task && hasPendingComputer) {
         this.pendingTaskComputer = null
@@ -2646,7 +2647,7 @@ export class SessionRuntime {
   }
 
   private recordTaskQuestion(platformId: string, question: TaskQuestion, source: TaskQuestionSource): void {
-    const entry = this.embeds.get(platformId), capability = this.getComputerUseCapability(platformId)
+    const entry = this.embeds.get(platformId), capability = this.getComputerUseCapability(platformId, true)
     if (this.disposed || (!this.active && !this.canRunConversationInBackground(platformId)) || this.taskEnded || platformId !== this.activePlatformId ||
       !capability.scopeSupported || !capability.computerUseEnabled || !entry?.embed || entry.embed.getComputerUsePageEpoch() !== source.pageEpoch) return
     const conversationId = entry.platform.conversationIdFromPath(source.pagePath)

@@ -165,6 +165,15 @@ test('global emergency interrupts only active Computer Use steps and does not st
   assert.equal(f.subject.isComputerUseDraining(), false)
 })
 
+for (const action of ['command', 'read_files']) test(`global emergency leaves legacy ${action} steps running`, async () => {
+  const f = runtimeSubject(), task = { id: 'task-a', generation: 1, status: 'recorded', progress: { currentStep: { action, status: 'executing' } } }
+  f.subject.taskCoordinator.current = platformId => platformId === 'deepseek' ? task : null
+  await f.subject.interruptComputerUse()
+  assert.equal(f.calls.includes('complete:deepseek'), false)
+  assert.equal(f.calls.includes('page:deepseek'), false)
+  assert.equal(f.calls.includes('cancel-progression'), false)
+})
+
 
 test('a new session created while latched interrupts only Computer Use before reset', async () => {
   const f = control(); f.controller.trigger('button'); await new Promise(setImmediate)

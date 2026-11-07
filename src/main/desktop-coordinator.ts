@@ -69,7 +69,7 @@ export class DesktopCoordinator {
       !entry.signal.aborted && check(entry.current) && (kind !== 'desktop' || this.owner?.key === entry.key && !this.owner.revoked)
   }
   acquire(request: DesktopRequest): Promise<DesktopPermit> {
-    if (this.disposed || this.nativeBlocked || request.kind === 'desktop' && this.emergencyStopped || request.signal.aborted || !check(request.current)) return Promise.reject(new Error('desktop-request-cancelled'))
+    if (this.disposed || request.kind === 'desktop' && this.emergencyStopped || request.signal.aborted || !check(request.current)) return Promise.reject(new Error('desktop-request-cancelled'))
     if (this.queue.length >= 256) return Promise.reject(new Error('desktop-queue-full'))
     const owner = request.owner
     if (![owner.sessionId, owner.platformId, owner.conversationId, owner.taskId, owner.machineId].every(v => typeof v === 'string' && !!v.trim() && v.length <= 512 && !/[\x00-\x1f\x7f]/.test(v)) ||
