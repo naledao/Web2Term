@@ -110,7 +110,11 @@ export class CompactionPage {
       `${readinessSource}\n;window.__questionChatReady(${JSON.stringify(this.platform.page)})`)
     return { ...snapshot, uploadReady: ready.uploadReady === true }
   }
-  send(path: string, prompt: string, signal: AbortSignal, isCurrent: () => boolean, beforeSubmit: () => void): ReturnType<typeof sendQuestionChatAttachment> {
+  send(path: string, prompt: string, signal: AbortSignal, isCurrent: () => boolean, beforeSubmit: () => void,
+    queuedSend?: (contents: Electron.WebContents, platform: ChatPlatform, path: string, prompt: string, signal: AbortSignal,
+      isCurrent: () => boolean, beforeSubmit: () => void) => ReturnType<typeof sendQuestionChatAttachment>): ReturnType<typeof sendQuestionChatAttachment> {
+    if (queuedSend) return queuedSend(this.view.webContents, this.platform, path, prompt, signal,
+      () => this.available && isCurrent(), beforeSubmit)
     return sendQuestionChatAttachment(this.view.webContents, this.platform, path, prompt, signal,
       () => this.available && isCurrent(), beforeSubmit, 'unlimited')
   }

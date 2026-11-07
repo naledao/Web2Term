@@ -9,6 +9,10 @@ import type { SavedQuestionContextReader } from '../shared/deepseek-context-mark
 import type { AppTheme } from '../shared/types'
 import type { ChatPlatform } from '../shared/platforms'
 import type { BrowserWindow } from 'electron'
+import type { FileSendOutcome } from '../shared/file-requests'
+
+type QuestionChatSender = (contextPath: string, prompt: string, signal: AbortSignal, isCurrent: () => boolean,
+  beforeSubmit?: () => void) => Promise<FileSendOutcome>
 
 export class SelectionQuestion {
   readonly reportTag: string
@@ -24,7 +28,8 @@ export class SelectionQuestion {
     private readonly platform: ChatPlatform,
     private readonly theme: () => AppTheme,
     private readonly onState: (state: QuestionChatState | null) => void,
-    private readonly readContext: SavedQuestionContextReader
+    private readonly readContext: SavedQuestionContextReader,
+    private readonly sendChat: QuestionChatSender
   ) {
     this.reportTag = '[' + platform.id + '-question-' + randomUUID() + '] '
     contents.on('before-input-event', (_event, input) => {
@@ -72,7 +77,7 @@ export class SelectionQuestion {
     this.chat = null
     previous?.close()
     this.chat = new QuestionChat(this.parent, this.platform, this.theme(), this.contents.getUserAgent(),
-      '', '', this.onState, '')
+      '', '', this.onState, '', this.sendChat)
     this.chat.setOwnerVisible(this.visible)
     void this.contents.executeJavaScript('window.__cmdTerminalSelectionQuestion?.dismiss();true').catch(() => {})
     return this.chat.getState()
@@ -155,7 +160,7 @@ export class SelectionQuestion {
       if (!isCurrent()) return false
       this.chat?.close()
       this.chat = new QuestionChat(this.parent, this.platform, this.theme(), this.contents.getUserAgent(),
-        selectionQuestionPrompt(draft, platformId), draft.selectedText, this.onState, contextPath)
+        selectionQuestionPrompt(draft, platformId), draft.selectedText, this.onState, contextPath, this.sendChat)
       this.chat.setOwnerVisible(this.visible)
       // Clear ownership before dismiss() reports a cancellation of the busy UI.
       this.active = null

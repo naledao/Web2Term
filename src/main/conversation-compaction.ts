@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import type { ManagedSessionRecord } from './db'
 import type { CompactionPage } from './compaction-page'
 import type { CompactionPageSnapshot } from './compaction-page'
+import type { WebContents } from 'electron'
 import { compactionViewKey } from './conversation-continuity'
 import type { ConversationViewSnapshot } from './conversation-continuity'
 import type { FocusOwner } from '../shared/focus-chat'
@@ -52,6 +53,8 @@ interface Options {
   isAdopted?(job: StoredCompaction): boolean
   now?: () => number
   pause?: () => Promise<void>
+  sendPageMessage?(owner: FocusOwner, contents: WebContents, platform: import('../shared/platforms').ChatPlatform,
+    path: string, prompt: string, signal: AbortSignal, current: () => boolean, beforeSubmit: () => void): Promise<import('../shared/file-requests').FileSendOutcome>
 }
 const sameOwner = (a: FocusOwner, b: FocusOwner): boolean => a.sessionId === b.sessionId && a.platformId === b.platformId && a.conversationId === b.conversationId
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
@@ -298,7 +301,10 @@ export class ConversationCompaction {
                 this.current(signal)
                 if (!this.options.canWork(job.state.owner)) throw new Error('原会话当前不可操作。')
                 job[deliveryKey] = 'uncertain'; this.save()
-              })
+              }, this.options.sendPageMessage
+                ? (contents, chatPlatform, path, prompt, sendSignal, current, beforeSubmit) => this.options.sendPageMessage!(job.state.owner,
+                  contents, chatPlatform, path, prompt, sendSignal, current, beforeSubmit)
+                : undefined)
             this.current(signal)
             if (result === 'ok') {
               const conversation = selectionQuestionConversation(platform, page.url)

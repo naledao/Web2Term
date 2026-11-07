@@ -1597,6 +1597,10 @@ function registerIpcHandlers(): void {
     if (!runtime || typeof request.text !== 'string' || request.text.length > 20000) return 'invalid'
     return runtime.sendFocusMessage(request)
   })
+  ipcMain.handle(IpcChannels.focusChatQueueResolve, (event, owner, itemId, action) =>
+    typeof itemId === 'string' && ['acknowledge-skip'].includes(action)
+      ? focusRuntime(event, owner)?.resolveFocusOutboundQueue(owner, itemId, action) ?? false : false)
+  ipcMain.handle(IpcChannels.focusChatQueueRetry, (event, owner) => focusRuntime(event, owner)?.retryFocusOutboundQueue(owner) ?? false)
   ipcMain.handle(IpcChannels.focusChatStopGeneration, (event, owner) =>
     focusRuntime(event, owner)?.stopFocusGeneration(owner) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatAsk, (event, request) =>

@@ -38,7 +38,7 @@ import type { DesktopCoordinator, DesktopOwner } from './desktop-coordinator'
 import { TaskProgression } from './task-progression'
 import { TaskContinuityService } from './task-continuity'
 import { TaskBackgroundWait, backgroundBelongsTo, reusableBackgroundTask } from './task-background-wait'
-import type { ComputerUseStepRequest, StepAcceptance } from './task-progression'
+import type { ComputerUseStepRequest, StepAcceptance, TaskResultSendOutcome } from './task-progression'
 import type { AutonomousTask, AutonomousTaskState, TaskLease, TaskToolContext, TaskMachine, TaskResumeRequest, TaskStopReason } from '../shared/autonomous-task'
 import { computerRecoveryMessage, recoverySendBlockedMessage } from './computer-recovery'
 import { taskToolResultContext, parseTaskToolContext, taskPausedByInput } from '../shared/autonomous-task'
@@ -82,7 +82,7 @@ import { normalizeComputerResultDelay } from '../shared/computer-progress'
 import { computerUseProtocol } from '../shared/computer-use-protocol'
 import type { ComputerUseProtocolError } from '../shared/computer-use-protocol'
 import type { ComputerUseCapability, ComputerUsePageRequest, ComputerUsePreferences, ComputerUseToolCall, ComputerUseToolResult } from '../shared/computer-use'
-import type { FileReadContext } from '../shared/file-requests'
+import type { FileReadContext, FileSendOutcome } from '../shared/file-requests'
 import { prepareFiles } from './file-access'
 import { homedir } from 'node:os'
 import type { ChatPlatform } from '../shared/platforms'
@@ -164,6 +164,8 @@ import { Web2termShell } from './web2term-shell'
 import type { Web2termSessionBinding } from './web2term-shell'
 import type { Web2termConnection } from './web2term-connection'
 import { normalizeTerminalNotesDirectory } from './terminal-notes'
+import { AiOutboundQueue } from './ai-outbound-queue'
+import type { AiOutboundOwner } from './ai-outbound-queue'
 
 const SETTING_EXECUTION_MODE = 'executionMode'
 const SETTING_LOCAL_NOTES = 'localTerminalNotes'
@@ -391,9 +393,10 @@ export class SessionRuntime {
         && embed.getInterceptorStatus().enabled && !embed.getInterceptorStatus().pendingQuestion)
     },
     send: (text, owner, task, signal) => task.taskContext
-      ? this.embeds.get(owner.platformId)!.embed!.sendTaskResult(text, owner.conversationId, signal,
-        () => (this.active || this.canRunConversationInBackground(owner.platformId)) && !this.taskEnded && this.activePlatformId === owner.platformId && this.backgroundNotificationCurrent(task, owner))
-      : this.embeds.get(owner.platformId)!.embed!.sendRaw(text, { conversationId: owner.conversationId, requireIdle: true }),
+      ? this.enqueueTaskResult(text, { ...owner, sessionId: this.id }, signal,
+        () => (this.active || this.canRunConversationInBackground(owner.platformId)) && !this.taskEnded && this.activePlatformId === owner.platformId && this.backgroundNotificationCurrent(task, owner),
+        task.id + ':' + (task.deliveryStatus ?? 'finished'))
+      : this.enqueueRawResult(text, { ...owner, sessionId: this.id }, signal),
     onStatus: (id, status, message, kind) => this.backgroundTasks.setDelivery(id, status, message, kind),
     onOutcome: (task, outcome) => {
       try {
@@ -499,6 +502,8 @@ export class SessionRuntime {
   private pendingTaskComputer: ComputerUseStepRequest | null = null
   private pendingTaskReply: { lease: TaskLease; messageId: string; kind: 'response' | 'question' } | null = null
   private legacyToolSend: { context: TaskToolContext; abort: AbortController } | null = null
+  /** All messages that mutate an AI conversation share this FIFO lane. */
+  private readonly aiOutboundQueue = new AiOutboundQueue()
   private focusSending = false
   private focusFileRequest: { token: string; ownerKey: string } | null = null
   private focusFileCache: { token: string; ownerKey: string; file: CapturedFocusFile } | null = null
@@ -506,27 +511,22 @@ export class SessionRuntime {
     observe: call => this.observeFocusTool('send_email', call),
     mail: () => this.options.qqMail,
     current: call => this.mailNotificationCurrent(call),
-    send: (text, call, signal, current) => this.embed.sendTaskResult(text, call.conversationId, signal, current),
+    send: (text, call, signal, current) => this.enqueueTaskResult(text, { sessionId: this.id, platformId: this.activePlatformId, conversationId: call.conversationId }, signal, current, call.messageId),
     note: message => this.runner.refreshTerminal(message)
   })
   private readonly toolPromptReads = new ToolPromptReads({
     observe: call => this.observeFocusTool('read_tool_prompt', call),
     current: call => this.toolPromptReadCurrent(call),
     lookup: name => this.fullToolPrompt(name, this.activePlatformId),
-    send: (text, call, signal, current) => this.embed.sendTaskResult(text, call.conversationId, signal, current),
+    send: (text, call, signal, current) => this.enqueueTaskResult(text, { sessionId: this.id, platformId: this.activePlatformId, conversationId: call.conversationId }, signal, current, call.messageId),
     note: message => this.runner.refreshTerminal(message)
   })
   private readonly scheduledTaskTools = new ScheduledTaskTools({
     observe: call => this.observeFocusTool('scheduled_task', call),
     current: call => !!call.sourceSubmissionId && this.toolPreferences().scheduledTasksEnabled &&
       this.toolPromptReadCurrent({ ...call, sourceSubmissionId: call.sourceSubmissionId }),
-    send: async (text, call, signal, current) => {
-      if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork() || this.mailNotifications?.busy ||
-        this.toolPromptReads?.busy || this.backgroundTaskResults.isSending) return 'busy'
-      this.focusSending = true
-      try { return await this.embed.sendTaskResult(text, call.conversationId, signal, current) }
-      finally { this.focusSending = false; this.options.scheduledTasks?.wake() }
-    },
+    send: async (text, call, signal, current) => this.enqueueTaskResult(text,
+      { sessionId: this.id, platformId: this.activePlatformId, conversationId: call.conversationId }, signal, current, call.messageId),
     note: message => this.runner.refreshTerminal(message)
   })
   private scheduledSendAbort: AbortController | null = null
@@ -626,19 +626,19 @@ export class SessionRuntime {
         return { actions: live && capability.available ? capability.actions : [],
           otherTools: live ? fileReadingPlatform(lease.platformId) && !this.web2term && this.toolPreferences(lease.platformId).fileReadingEnabled ? ['command', 'read_files'] : ['command'] : [] }
       },
-      send: async (text, lease, signal, references) => {
+      send: async (text, lease, signal, references, stepId) => {
         const embed = this.embeds.get(lease.platformId)?.embed
         if (!embed) return 'no-composer'
         const current = (): boolean => !signal.aborted && !this.disposed && !this.taskEnded && this.active && this.activePlatformId === lease.platformId &&
           this.taskCoordinator.owns(lease) && this.embeds.get(lease.platformId)?.embed === embed && embed.getState().conversationId === lease.conversationId
         if (!current()) return 'stale'
-        if (!references?.length) return embed.sendTaskResult(text, lease.conversationId, signal, current)
+        if (!references?.length) return this.enqueueTaskResult(text, lease, signal, current, lease.taskId + ':' + lease.generation + ':' + stepId)
         if (!options.computerUseObservations) return 'failed'
         let attachments: Awaited<ReturnType<NonNullable<typeof options.computerUseObservations>['prepare']>>
         try { attachments = await options.computerUseObservations.prepare(references, lease) }
         catch { return signal.aborted || !this.taskCoordinator.owns(lease) ? 'stale' : 'failed' }
-        return embed.sendTaskObservation(text, lease.conversationId, signal, attachments, references[0].id, () =>
-          current() && this.getComputerUseCapability(lease.platformId).enabled)
+        return this.enqueueTaskObservation(text, lease, signal, attachments, references[0].id, () =>
+          current() && this.getComputerUseCapability(lease.platformId).enabled, lease.taskId + ':' + lease.generation + ':' + stepId)
       },
       resultDelaySeconds: () => normalizeComputerResultDelay(this.toolPreferences().computerResultDelaySeconds),
       release: (references, lease) => options.computerUseObservations?.release(references, lease),
@@ -724,10 +724,10 @@ export class SessionRuntime {
         }
       },
       sendRawToPage: async (text, context) => {
-        if (!context) return this.embed.sendRaw(text)
+        if (!context) return this.enqueueRawResult(text, { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.embed.getState().conversationId })
         if (!this.taskToolCurrent(context)) return 'stale'
         const operation = { context, abort: new AbortController() }; this.legacyToolSend = operation
-        try { return await this.embeds.get(context.platformId)!.embed!.sendTaskResult(text, context.conversationId, operation.abort.signal, () => this.taskToolCurrent(context)) }
+        try { return await this.enqueueTaskResult(text, context, operation.abort.signal, () => this.taskToolCurrent(context), context.stepId + ':' + context.sourceMessageId) }
         finally { if (this.legacyToolSend === operation) this.legacyToolSend = null }
       },
       taskTools: {
@@ -752,7 +752,7 @@ export class SessionRuntime {
       fileContext: () => this.fileReadContext(),
       filePlatform: () => this.web2term || !this.toolPreferences().fileReadingEnabled ? null : fileReadingPlatform(this.activePlatform.id),
       prepareFiles: (request, signal) => prepareFiles(request, signal, (path, limit, abort) => this.ssh.readFileForModel(path, request.context.hostId, limit, abort), fileReadingPlatform(this.activePlatform.id)?.id),
-      sendFilesToPage: (result, token, current, signal) => this.embed.sendFileResult(result, token, current, signal),
+      sendFilesToPage: (result, token, current, signal) => this.enqueueFileResult(result, token, current, signal),
       executionAllowed: () => !this.stoppingTask,
       terminalModeEnabled: () => !this.disposed && this.embed.getInterceptorStatus().enabled,
       remoteShell: () => this.web2term ?? this.remoteShell,
@@ -965,6 +965,9 @@ export class SessionRuntime {
       onQuestionChat: state => {
         if (isActive()) this.send(IpcChannels.questionChatState, state)
       },
+      sendQuestionChat: (chatPlatform, contents, contextPath, prompt, signal, current, beforeSubmit) =>
+        this.enqueuePageFileMessage({ sessionId: this.id, platformId: chatPlatform.id, conversationId: null }, contents,
+          chatPlatform, contextPath, prompt, signal, current, beforeSubmit ?? (() => {})),
       readQuestionContext: conversationId => {
         if (record().conversationId !== conversationId) return null
         const conversation = this.options.store.list().find(item => item.id === conversationId)
@@ -1008,6 +1011,7 @@ export class SessionRuntime {
         if (state.conversationId !== entry.conversationId) {
           const previousConversationId = entry.conversationId
           const createdNewChat = previousConversationId === null && state.conversationId !== null
+          if (createdNewChat) this.aiOutboundQueue.bindUnassigned(platform.id, state.conversationId!)
           if (!createdNewChat && isActive()) this.remoteRipgrepSend?.controller.abort()
           if (!createdNewChat) this.interruptTaskControl(platform.id)
           this.conversationTools.bind(platform.id, previousConversationId, state.conversationId)
@@ -1041,6 +1045,7 @@ export class SessionRuntime {
       },
       onConversation: (conversation) => {
         this.options.store.upsert(conversation, this.currentConversationProject())
+        this.aiOutboundQueue.bindUnassigned(platform.id, conversation.id)
         this.flushContextUsage(platform.id, conversation.id)
         this.flushDeferredCommands(conversation.id)
         this.flushPendingGoal(conversation.id)
@@ -1270,7 +1275,8 @@ export class SessionRuntime {
           const ledger = this.updateInjectionLedger(platform.id, noteInjectionViolation)
           if (ledger) writeInjectionLedgerDiagnostic(platform.id, 'injection-violation', record().conversationId === null ? 'draft' : 'saved', ledger)
         }
-        if (payload.live === true) void record().embed?.recoverCommand((this.active || this.canRunConversationInBackground(platform.id)) && this.runner.canSendAutomaticResult())
+        if (payload.live === true) void this.enqueueCommandRecovery(platform.id,
+          (this.active || this.canRunConversationInBackground(platform.id)) && this.runner.canSendAutomaticResult(), false)
       },
       onCommandRecovery: recovery => {
         if (isActive()) this.focusChat.commandRecovery(platform.id, recovery)
@@ -1686,6 +1692,8 @@ export class SessionRuntime {
         if (!platform) throw new Error('压缩平台不可用。')
         return new CompactionPage(this.window, platform, this.options.settings().theme, url, onUrl, this.lastBounds ?? undefined)
       },
+      sendPageMessage: (owner, contents, platform, path, prompt, signal, current, beforeSubmit) =>
+        this.enqueuePageFileMessage(owner, contents, platform, path, prompt, signal, current, beforeSubmit, true),
       createTarget: (job, summary) => {
         if (!this.options.onCompactionTarget) throw new Error('无法创建承接会话。')
         return this.options.onCompactionTarget(job, summary)
@@ -1885,7 +1893,18 @@ export class SessionRuntime {
         this.conversationTools.injectionLedger(owner.platformId, owner.conversationId), this.embed.getInterceptorStatus()),
       contextUsage,
       sendBlock: this.options.computerUseBlocked?.() ? '' : computerUseSendBlock(this.getComputerUseCapability(owner.platformId)),
+      outboundQueue: this.aiOutboundQueue.stateFor({ sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId }),
       executions: sameExecutions ? undefined : [...(inherited?.executions ?? []), ...(owner.conversationId ? this.options.store.listExecutions(owner.conversationId, false).filter(record => !archivedExecutions.has(record.messageId)) : [])] }
+  }
+
+  resolveFocusOutboundQueue(owner: FocusOwner, itemId: string, action: 'acknowledge-skip'): boolean {
+    if (!this.ownsFocus(owner) || action !== 'acknowledge-skip' || typeof itemId !== 'string' || itemId.length > 128) return false
+    return this.aiOutboundQueue.acknowledgeBlocked(itemId)
+  }
+
+  retryFocusOutboundQueue(owner: FocusOwner): boolean {
+    if (!this.ownsFocus(owner) || this.focusSending || this.focusRevision || this.runner.hasInFlightWork()) return false
+    return this.aiOutboundQueue.resumeBlocked()
   }
 
   readFocusExecutionOutput(owner: FocusOwner, messageId: string): string | null {
@@ -1929,7 +1948,9 @@ export class SessionRuntime {
           return this.options.computerUseBlocked?.() ? null : computerUseSendBlock(this.getComputerUseCapability())
         },
         inspect: getGithubCliState,
-        send: text => this.embed.sendUserTask(text)
+        send: text => this.enqueueUserTask(text, { sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId },
+          { current: () => !this.disposed && owner.platformId === this.activePlatformId && owner.conversationId === this.embed.getState().conversationId,
+            sourceId: 'github-login:' + randomUUID() })
       })
     } finally {
       if (this.focusUploadAbort === controller) this.focusUploadAbort = null
@@ -1938,7 +1959,7 @@ export class SessionRuntime {
   }
 
   /** Retry the rejected native message; never run its associated shell command again. */
-  async retryFocusSend(owner: FocusOwner, failureId: string): Promise<FocusSendOutcome> {
+  private async performRetryFocusSend(owner: FocusOwner, failureId: string): Promise<FocusSendOutcome> {
     if (!this.ownsFocus(owner)) return 'unavailable'
     if (this.focusSending || this.runner.hasInFlightWork()) return 'busy'
     this.focusSending = true
@@ -1950,10 +1971,38 @@ export class SessionRuntime {
     } finally { this.focusSending = false }
   }
 
+  async retryFocusSend(owner: FocusOwner, failureId: string): Promise<FocusSendOutcome> {
+    if (!this.ownsFocus(owner) || typeof failureId !== 'string' || !failureId || failureId.length > 512) return 'unavailable'
+    return this.aiOutboundQueue.enqueue<FocusSendOutcome>({ kind: 'user', owner, sourceId: 'retry:' + failureId,
+      execute: () => this.performRetryFocusSend(owner, failureId), retryable: outcome => outcome === 'busy' || outcome === 'no-composer' || outcome === 'insert-failed',
+      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+      describeFailure: () => '重发消息的结果未确认，请先核对原始对话，再决定是否跳过队首消息。',
+      cancelled: () => 'cancelled', failed: () => 'unknown',
+      dedupeKey: `focus-retry:${this.id}:${owner.platformId}:${owner.conversationId}:${failureId}`
+    }).completion
+  }
+
   async retryCommandRecovery(owner: FocusOwner, token: number): Promise<string> {
     if (this.disposed || !this.active || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId ||
       owner.conversationId !== this.embed.getState().conversationId || this.embed.getInterceptorStatus().commandRecovery?.token !== token) return 'stale'
-    return this.embed.recoverCommand(this.runner.canSendAutomaticResult(), true)
+    return this.enqueueCommandRecovery(owner.platformId, this.runner.canSendAutomaticResult(), true)
+  }
+
+  private async enqueueCommandRecovery(platformId: string, allowSend: boolean, manual: boolean): Promise<string> {
+    const entry = this.embeds.get(platformId), embed = entry?.embed
+    if (!embed) return 'stale'
+    if (!allowSend) return embed.recoverCommand(false, manual)
+    const recovery = embed.getInterceptorStatus().commandRecovery
+    if (!recovery) return 'stale'
+    const owner: AiOutboundOwner = { sessionId: this.id, platformId, conversationId: embed.getState().conversationId }
+    return this.aiOutboundQueue.enqueue<string>({ kind: 'recovery', owner, sourceId: String(recovery.token), text: 'command-recovery',
+      execute: (signal) => signal.aborted ? Promise.resolve('stale') : embed.recoverCommand(allowSend, manual),
+      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
+      blockOnFailure: outcome => outcome === 'stuck' || outcome === 'unknown',
+      describeFailure: () => '格式恢复消息的发送结果未确认，请先核对原始对话，再决定是否跳过队首消息。',
+      cancelled: () => 'stale', failed: () => 'stuck',
+      dedupeKey: `command-recovery:${this.id}:${platformId}:${recovery.token}`
+    }).completion
   }
 
   async stopFocusGeneration(owner: FocusOwner): Promise<FocusSendOutcome> {
@@ -1963,12 +2012,115 @@ export class SessionRuntime {
     return this.ownsFocus(owner) && this.embed === embed ? outcome : 'cancelled'
   }
 
+  private enqueueTaskResult(text: string, owner: AiOutboundOwner, signal: AbortSignal, current: () => boolean, sourceId?: string): Promise<Exclude<TaskResultSendOutcome, 'failed'>> {
+    return this.aiOutboundQueue.enqueue<Exclude<TaskResultSendOutcome, 'failed'>>({
+      kind: 'tool-result', owner, sourceId, text,
+      execute: (queueSignal, item) => {
+        const embed = this.embeds.get(item.owner.platformId)?.embed
+        if (!embed || !current() || queueSignal.aborted) return Promise.resolve('stale')
+        return embed.sendTaskResult(text, item.owner.conversationId ?? '', queueSignal, current)
+      },
+      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
+      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+      describeFailure: () => '发送结果可能已经提交，请先核对原始对话，再决定是否跳过队首消息。',
+      cancelled: () => 'stale', aborted: result => result === 'unknown' || result === 'stuck' ? result : 'stale', failed: () => 'unknown', signal,
+      ...(sourceId ? { dedupeKey: `result:${owner.sessionId}:${owner.platformId}:${owner.conversationId}:${sourceId}` } : {})
+    }).completion
+  }
+
+  private enqueueUserTask(text: string, owner: AiOutboundOwner, options: { force?: boolean; runId?: string; current: () => boolean; sourceId: string }): Promise<FocusSendOutcome> {
+    return this.aiOutboundQueue.enqueue<FocusSendOutcome>({ kind: options.runId ? 'scheduled' : 'recovery', owner, sourceId: options.sourceId, text,
+      execute: async (signal, item) => {
+        const embed = this.embeds.get(item.owner.platformId)?.embed
+        if (!embed || signal.aborted) return Promise.resolve('unavailable')
+        if (!options.current()) return Promise.resolve('cancelled')
+        if (options.runId) return embed.sendScheduledUser(text, item.owner.conversationId ?? '', options.runId, signal, options.current)
+        this.focusSending = true
+        try { return await embed.sendUserTask(text, options.force === true) }
+        finally { this.focusSending = false }
+      },
+      retryable: outcome => outcome === 'busy' || outcome === 'no-composer' || outcome === 'insert-failed',
+      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck' || outcome === 'unavailable' || outcome === 'upload-failed' || outcome === 'unsupported-file-type',
+      describeFailure: outcome => outcome === 'unknown' || outcome === 'stuck'
+        ? '消息可能已经提交，请先核对原始对话。' : '队列中的消息未能发送，请检查原始对话后重试或跳过。',
+      cancelled: () => 'cancelled', failed: () => 'unknown',
+      dedupeKey: `user-task:${this.id}:${owner.platformId}:${owner.conversationId}:${options.sourceId}`
+    }).completion
+  }
+
+  private enqueueRawResult(text: string, owner: AiOutboundOwner, signal?: AbortSignal, sourceId?: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'> {
+    return this.aiOutboundQueue.enqueue<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'>({
+      kind: 'auxiliary', owner, sourceId, text,
+      execute: (queueSignal, item) => {
+        if (queueSignal.aborted) return Promise.resolve('busy')
+        const embed = this.embeds.get(item.owner.platformId)?.embed
+        if (!embed) return Promise.resolve('no-composer')
+        return embed.sendRaw(text, item.owner.conversationId ? { conversationId: item.owner.conversationId, requireIdle: true } : undefined)
+      },
+      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
+      blockOnFailure: outcome => outcome === 'stuck',
+      describeFailure: () => '辅助消息发送结果未确认，请先核对原始对话。',
+      cancelled: () => 'stale', failed: () => 'stuck', signal,
+      ...(sourceId ? { dedupeKey: `raw:${owner.sessionId}:${owner.platformId}:${owner.conversationId}:${sourceId}` } : {})
+    }).completion
+  }
+
+  private enqueueTaskObservation(text: string, owner: AiOutboundOwner, signal: AbortSignal, attachments: import('./file-access').PreparedAttachment[], imageId: string,
+    current: () => boolean, sourceId?: string): Promise<TaskResultSendOutcome> {
+    return this.aiOutboundQueue.enqueue<TaskResultSendOutcome>({ kind: 'tool-result', owner, sourceId, text,
+      attachments: attachments.map(file => ({ name: file.fileName, size: file.sizeBytes })),
+      execute: (queueSignal, item) => {
+        const embed = this.embeds.get(item.owner.platformId)?.embed
+        if (!embed || !current() || queueSignal.aborted) return Promise.resolve('stale')
+        return embed.sendTaskObservation(text, item.owner.conversationId ?? '', queueSignal, attachments, imageId, current)
+      },
+      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
+      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+      describeFailure: () => '截图结果可能已经提交，请先核对原始对话。', cancelled: () => 'stale', aborted: result => result === 'unknown' || result === 'stuck' ? result : 'stale', failed: () => 'unknown', signal,
+      ...(sourceId ? { dedupeKey: `observation:${owner.sessionId}:${owner.platformId}:${owner.conversationId}:${sourceId}` } : {})
+    }).completion
+  }
+
+  private enqueueFileResult(result: import('./file-access').PreparedFileResult, token: string, current: () => boolean, signal: AbortSignal): Promise<FileSendOutcome> {
+    const owner: AiOutboundOwner = { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.embed.getState().conversationId }
+    return this.aiOutboundQueue.enqueue<FileSendOutcome>({
+      kind: 'tool-result', owner, sourceId: token, text: result.text,
+      attachments: result.attachments.map(file => ({ name: file.fileName, size: file.sizeBytes })),
+      execute: (queueSignal, item) => {
+        const embed = this.embeds.get(item.owner.platformId)?.embed
+        if (!embed || queueSignal.aborted || !current()) return Promise.resolve('cancelled')
+        return embed.sendFileResult(result, token, current, queueSignal)
+      },
+      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
+      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+      describeFailure: () => '文件结果可能已经提交，请先核对原始对话，再决定是否跳过队首消息。',
+      cancelled: () => 'cancelled', aborted: result => ['unknown', 'stuck', 'upload-failed'].includes(String(result)) ? result! : 'cancelled', failed: () => 'unknown', signal,
+      dedupeKey: `file:${this.id}:${owner.platformId}:${owner.conversationId}:${token}`
+    }).completion
+  }
+
+  private enqueuePageFileMessage(owner: AiOutboundOwner, contents: Electron.WebContents, platform: ChatPlatform, path: string, prompt: string,
+    signal: AbortSignal, current: () => boolean, beforeSubmit: () => void, unlimited = false): Promise<FileSendOutcome> {
+    return this.aiOutboundQueue.enqueue<FileSendOutcome>({ kind: 'question', owner, sourceId: path, text: prompt,
+      attachments: [{ name: path.split(/[\\/]/).at(-1) ?? 'context.md', size: 0 }], signal,
+      execute: async queueSignal => {
+        if (queueSignal.aborted || !current()) return 'cancelled'
+        const { sendQuestionChatAttachment } = await import('./question-chat-send')
+        return sendQuestionChatAttachment(contents, platform, path, prompt, queueSignal, current, beforeSubmit, unlimited ? 'unlimited' : undefined)
+      },
+      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
+      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+      describeFailure: () => '附件和提问的发送结果未确认，请先核对目标 AI 会话，再决定是否跳过队首消息。',
+      cancelled: () => 'cancelled', aborted: result => result === 'unknown' || result === 'stuck' ? result : 'cancelled',
+      failed: () => 'unknown', dedupeKey: `page-message:${this.id}:${owner.platformId}:${path}:${prompt.slice(0, 120)}`
+    }).completion
+  }
+
   async sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome> {
     if (!this.ownsFocus(request)) return 'unavailable'
     if (typeof request.text !== 'string' || request.text.length > 20000 ||
       !validFocusToolSkills(request.skills ?? []) ||
       !validFocusFiles(request.files ?? []) || (!request.text.trim() && !request.files?.length)) return 'invalid'
-    if (this.focusSending) return 'busy'
     const skills = [...(request.skills ?? [])]
     if (skills.length) {
       const status = this.embed.getInterceptorStatus()
@@ -1977,43 +2129,60 @@ export class SessionRuntime {
       if (skills.some(id => focusSkillUnavailable(id, tools))) return 'unavailable'
     }
     if (skills.includes('computer') && !this.options.computerUseBlocked?.() && computerUseSendBlock(this.getComputerUseCapability(request.platformId))) return 'helper-not-ready'
-    this.focusSending = true
     writeFocusDiagnostic(request, { event: 'send-request', inputLength: request.text.length, attachmentCount: request.files?.length ?? 0 })
-    const controller = new AbortController()
-    this.focusUploadAbort = controller
-    const embed = this.embed
     const text = focusSkillMessage(request.text, skills)
     const skillUsageId = 'skill:' + randomUUID()
-    // The page uploader pins the first created conversation after its single submit.
-    // The runtime guard owns the workspace/platform; it must not reject that home -> chat binding.
-    const uploadCurrent = (): boolean => !this.disposed && !controller.signal.aborted &&
-      this.focusUploadAbort === controller && this.activePlatformId === request.platformId && this.embed === embed &&
-      (request.conversationId === null || embed.getState().conversationId === request.conversationId)
-    let staged: Awaited<ReturnType<typeof stageFocusAttachments>> | undefined
-    try {
-      if (request.files?.length) staged = await stageFocusAttachments(request.files)
-      const outcome = controller.signal.aborted || !this.ownsFocus(request) ? 'cancelled' : staged
-        ? await embed.sendFocusFiles(text, staged.attachments, 'focus:' + randomUUID(), uploadCurrent, controller.signal,
-          (request.files ?? []).filter(file => file.mimeType.startsWith('image/')).map(file => ({ ...file, width: null, height: null })), skills)
-        : await this.embed.sendFocusUser(text, skills)
-      if (skills.length && ['ok', 'unknown', 'stuck'].includes(outcome)) {
-        const conversationId = request.conversationId ?? embed.getState().conversationId
-        this.recordContextUsage(request.platformId, { id: skillUsageId, conversationId,
-          turnId: this.focusChat.contextUsageTurnId(request.platformId, conversationId) ?? null,
-          sourceMessageId: null, category: 'injection', state: outcome === 'ok' ? 'sent' : 'unknown',
-          ...estimateContextText(focusSkillPrefix(skills)), images: 0, files: 0, createdAt: Date.now() })
-      }
-      writeFocusDiagnostic(request, { event: 'send-outcome', outcome })
-      return outcome
-    }
-    catch {
-      writeFocusDiagnostic(request, { event: 'send-outcome', outcome: 'upload-failed' })
-      return 'upload-failed'
-    } finally {
-      await staged?.cleanup().catch(() => {})
-      if (this.focusUploadAbort === controller) this.focusUploadAbort = null
-      this.focusSending = false
-    }
+    const files = (request.files ?? []).map(file => ({ ...file }))
+    const requestId = typeof request.clientRequestId === 'string' && /^[\w-]{1,128}$/.test(request.clientRequestId)
+      ? request.clientRequestId : randomUUID()
+    const existing = this.aiOutboundQueue.findByDedupeKey(`user:${this.id}:${request.platformId}:${requestId}`)
+    if (existing) return 'queued'
+    this.aiOutboundQueue.enqueue<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: requestId, text,
+      attachments: files.map(file => ({ name: file.fileName, size: file.sizeBytes })),
+      execute: async (signal, item) => {
+        const owner = { sessionId: this.id, platformId: item.owner.platformId, conversationId: item.owner.conversationId }
+        if (!this.ownsFocus(owner) || signal.aborted) return 'cancelled'
+        const embed = this.embeds.get(item.owner.platformId)?.embed
+        if (!embed) return 'unavailable'
+        const staged = files.length ? await stageFocusAttachments(files) : undefined
+        const controller = new AbortController()
+        const abort = (): void => controller.abort()
+        signal.addEventListener('abort', abort, { once: true })
+        this.focusSending = true
+        this.focusUploadAbort = controller
+        // A new conversation is bound after the page acknowledges its first send.
+        const uploadCurrent = (): boolean => !this.disposed && !signal.aborted && !controller.signal.aborted &&
+          this.activePlatformId === item.owner.platformId && this.embeds.get(item.owner.platformId)?.embed === embed &&
+          (item.owner.conversationId === null || embed.getState().conversationId === item.owner.conversationId)
+        try {
+          const outcome = staged
+            ? await embed.sendFocusFiles(text, staged.attachments, 'focus:' + item.id, uploadCurrent, controller.signal,
+              files.filter(file => file.mimeType.startsWith('image/')).map(file => ({ ...file, width: null, height: null })), skills)
+            : await embed.sendFocusUser(text, skills)
+          if (skills.length && ['ok', 'unknown', 'stuck'].includes(outcome)) {
+            const conversationId = item.owner.conversationId ?? embed.getState().conversationId
+            this.recordContextUsage(item.owner.platformId, { id: skillUsageId, conversationId,
+              turnId: this.focusChat.contextUsageTurnId(item.owner.platformId, conversationId) ?? null,
+              sourceMessageId: null, category: 'injection', state: outcome === 'ok' ? 'sent' : 'unknown',
+              ...estimateContextText(focusSkillPrefix(skills)), images: 0, files: 0, createdAt: Date.now() })
+          }
+          writeFocusDiagnostic(owner, { event: 'send-outcome', outcome })
+          return outcome
+        } catch { return 'upload-failed' }
+        finally {
+          signal.removeEventListener('abort', abort)
+          await staged?.cleanup().catch(() => {})
+          if (this.focusUploadAbort === controller) this.focusUploadAbort = null
+          this.focusSending = false
+        }
+      },
+      retryable: outcome => outcome === 'busy' || outcome === 'no-composer' || outcome === 'insert-failed',
+      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+      describeFailure: () => '普通消息的发送结果未确认，请先核对原始对话，再决定是否跳过队首消息。',
+      cancelled: () => 'cancelled', failed: () => 'unknown',
+      dedupeKey: `user:${this.id}:${request.platformId}:${requestId}`
+    })
+    return 'queued'
   }
 
   async setFocusComposerMode(request: FocusComposerModeRequest): Promise<FocusSendOutcome> {
@@ -2138,7 +2307,7 @@ export class SessionRuntime {
     finally { this.focusSending = false }
   }
 
-  async actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome> {
+  private async performActOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome> {
     if (!this.ownsFocus(request) || request.platformId !== 'chatgpt' || !request.conversationId) return 'unavailable'
     if (!validFocusUiAction(request)) return 'invalid'
     const status = this.embed.getInterceptorStatus()
@@ -2180,7 +2349,18 @@ export class SessionRuntime {
     }
   }
 
-  async editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome> {
+  async actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome> {
+    if (!this.ownsFocus(request) || !validFocusUiAction(request)) return 'unavailable'
+    const key = `focus-ui:${this.id}:${request.platformId}:${request.conversationId}:${request.sourceMessageId}:${request.signature}:${request.kind}:${request.selectedValue}:${request.optionValue ?? ''}:${request.buttonIndex ?? ''}`
+    return this.aiOutboundQueue.enqueue<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: key.slice(-128), text: request.kind,
+      execute: () => this.performActOnFocusUi(request), retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
+      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+      describeFailure: () => '交互卡片的提交结果未确认，请先核对原始对话，再决定是否跳过队首消息。',
+      cancelled: () => 'cancelled', failed: () => 'unknown', dedupeKey: key
+    }).completion
+  }
+
+  private async performEditFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome> {
     if (!this.ownsFocus(request) || request.platformId !== 'chatgpt' || !request.conversationId) return 'unavailable'
     if (typeof request.text !== 'string' || !request.text.trim() || request.text.length > 20000 ||
       typeof request.messageId !== 'string' || request.messageId.length > 512) return 'invalid'
@@ -2219,6 +2399,17 @@ export class SessionRuntime {
       if (this.focusRevision === revision) this.focusRevision = null
       this.focusSending = false
     }
+  }
+
+  async editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome> {
+    if (!this.ownsFocus(request)) return 'unavailable'
+    const key = `focus-edit:${this.id}:${request.platformId}:${request.conversationId}:${request.messageId}:${request.text}`
+    return this.aiOutboundQueue.enqueue<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: request.messageId, text: request.text,
+      execute: () => this.performEditFocusMessage(request), retryable: outcome => outcome === 'busy' || outcome === 'no-composer' || outcome === 'insert-failed',
+      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+      describeFailure: () => '编辑并重发的结果未确认，请先核对原始对话，再决定是否跳过队首消息。',
+      cancelled: () => 'cancelled', failed: () => 'unknown', dedupeKey: key
+    }).completion
   }
 
   endTask(): Promise<InterceptorStatus> { return this.stopAutomation('user-ended', false) }
@@ -2668,7 +2859,7 @@ export class SessionRuntime {
     } catch { this.taskCoordinator.fail(platformId, conversationId) }
   }
 
-  async answerQuestion(messageId: string, answer: string, owner?: TaskQuestionRequest): Promise<InterceptorStatus> {
+  private async performAnswerQuestion(messageId: string, answer: string, owner?: TaskQuestionRequest, alreadySending = false): Promise<InterceptorStatus> {
     const task = this.taskCoordinator.current(this.activePlatformId), question = task && pendingTaskQuestion(task)
     if (!task || !question) {
       if (owner !== undefined) throw new Error('原任务的问题已失效，请查看当前会话。')
@@ -2681,7 +2872,7 @@ export class SessionRuntime {
     if (this.disposed || !this.active || !task.conversationId || question.messageId !== messageId || pending?.messageId !== messageId ||
       JSON.stringify(pending.questions) !== JSON.stringify(question.questions) || question.source.pageEpoch !== this.embed.getComputerUsePageEpoch()) throw new Error('问题或原会话已变化，请查看当前任务。')
     const lease = { sessionId: this.id, platformId: this.activePlatformId, conversationId: task.conversationId, taskId: task.id, generation: task.generation }
-    if (!this.taskCoordinator.questionState(lease, messageId, 'sending')) throw new Error('回答正在提交或上次发送尚未确认，请先核对原对话；不会重复发送。')
+    if (!alreadySending && !this.taskCoordinator.questionState(lease, messageId, 'sending')) throw new Error('回答正在提交或上次发送尚未确认，请先核对原对话；不会重复发送。')
     const answered = (): boolean => this.taskCoordinator.owns(lease) && this.taskCoordinator.current(lease.platformId)?.clarifications?.items.some(q => q.id === question.id && q.state === 'answered') === true
     try {
       const status = await this.embed.answerQuestion(messageId, answer, question.source)
@@ -2695,6 +2886,38 @@ export class SessionRuntime {
         ['busy', 'insert-failed', 'no-composer', 'unavailable', 'invalid-answer', 'stale'].includes(String(outcome)) ? 'pending' : 'uncertain')
       throw error
     }
+  }
+
+  async answerQuestion(messageId: string, answer: string, owner?: TaskQuestionRequest): Promise<InterceptorStatus> {
+    const task = this.taskCoordinator.current(this.activePlatformId), question = task && pendingTaskQuestion(task)
+    const queueOwner: AiOutboundOwner = owner
+      ? { sessionId: owner.sessionId, platformId: owner.platformId, conversationId: owner.conversationId }
+      : { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.embed.getState().conversationId }
+    const key = `answer:${this.id}:${queueOwner.platformId}:${queueOwner.conversationId}:${messageId}`
+    let claimed = false
+    if (task && question && owner && validTaskQuestionRequest(owner) && this.taskCoordinator.owns(owner) && owner.questionId === question.id) {
+      claimed = this.taskCoordinator.questionState({ sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId,
+        taskId: owner.taskId, generation: owner.generation }, messageId, 'sending')
+      if (!claimed) throw new Error('回答正在提交或上次发送尚未确认，请先核对原对话；不会重复发送。')
+    }
+    type AnswerResult = { status?: InterceptorStatus; error?: unknown }
+    const result = await this.aiOutboundQueue.enqueue<AnswerResult>({ kind: 'question', owner: queueOwner, sourceId: messageId, text: answer,
+      execute: async () => {
+        try { return { status: await this.performAnswerQuestion(messageId, answer, owner, claimed) } }
+        catch (error) { return { error } }
+      },
+      retryable: result => {
+        const outcome = result.error && typeof result.error === 'object' && 'questionOutcome' in result.error ? String(result.error.questionOutcome) : ''
+        return ['busy', 'insert-failed', 'no-composer'].includes(outcome)
+      },
+      blockOnFailure: result => !!result.error && !['busy', 'insert-failed', 'no-composer', 'unavailable', 'invalid-answer', 'stale'].includes(
+        result.error && typeof result.error === 'object' && 'questionOutcome' in result.error ? String(result.error.questionOutcome) : ''),
+      describeFailure: () => '回答的发送结果未确认，请先核对原始对话；不会自动重发或视为授权。',
+      cancelled: () => ({ error: Object.assign(new Error('回答发送已取消。'), { questionOutcome: 'stale' }) }),
+      failed: error => ({ error }), dedupeKey: key
+    }).completion
+    if (result.error) throw result.error
+    return result.status!
   }
 
   async cancelQuestion(messageId: string, owner?: TaskQuestionRequest): Promise<InterceptorStatus> {
@@ -2781,7 +3004,10 @@ export class SessionRuntime {
     this.taskRecoverySend = send
     this.focusSending = true
     try {
-      const outcome = await this.embed.sendUserTask(text, true)
+      const outcome = await this.enqueueUserTask(text, request,
+        { force: true, current: () => !this.disposed && this.active && this.taskRecoverySend === send &&
+          this.activePlatformId === request.platformId && this.embed.getState().conversationId === request.conversationId,
+          sourceId: request.taskId + ':' + request.generation + ':' + send.pageEpoch })
       if (send.acknowledged) return ''
       // Known pre-submit rejection can be retried by the user. Lost acknowledgements cannot.
       if (['busy', 'no-composer', 'insert-failed', 'unavailable', 'invalid'].includes(outcome)) {
@@ -2990,9 +3216,11 @@ export class SessionRuntime {
       observe?.({ status: 'blocked', result: message })
       this.runner.refreshTerminal('定时任务操作未完成：' + message)
       const owner = this.toolsOwner(), epoch = this.embed.getComputerUsePageEpoch()
-      void this.embed.sendTaskResult('【定时任务操作未完成】\n' + message,
-        call.conversationId, new AbortController().signal, () => !this.disposed && (this.active || this.canRunConversationInBackground()) && sameConversationToolsOwner(owner, this.toolsOwner()) &&
-          epoch === this.embed.getComputerUsePageEpoch() && this.lastSubmissions.get(owner.platformId) === call.sourceSubmissionId)
+      void this.enqueueTaskResult('【定时任务操作未完成】\n' + message,
+        { sessionId: this.id, platformId: owner.platformId, conversationId: call.conversationId }, new AbortController().signal,
+        () => !this.disposed && (this.active || this.canRunConversationInBackground(owner.platformId)) && sameConversationToolsOwner(owner, this.toolsOwner()) &&
+          epoch === this.embeds.get(owner.platformId)?.embed?.getComputerUsePageEpoch() && this.lastSubmissions.get(owner.platformId) === call.sourceSubmissionId,
+        call.messageId + ':scheduled-refusal')
         .then(outcome => observe?.({ delivery: focusToolDelivery(outcome) })).catch(() => observe?.({ delivery: 'unknown' }))
     }
     if (!this.toolPreferences().scheduledTasksEnabled) { refuse('当前对话已关闭定时任务工具，不要再输出 scheduled_task 请求。'); return }
@@ -3037,13 +3265,12 @@ export class SessionRuntime {
     const controller = new AbortController(), abort = (): void => controller.abort()
     this.scheduledSendAbort = controller
     signal.addEventListener('abort', abort, { once: true })
-    this.focusSending = true
     const current = (): boolean => !controller.signal.aborted && this.scheduledOwnerCurrent(task) &&
       (run.kind !== 'receipt' || !this.taskEnded && task.receiptSubmissionId === this.lastSubmissions.get(task.owner.platformId))
     try {
       if (!current()) return { outcome: 'cancelled' }
       if (run.kind === 'receipt') {
-        const outcome = await this.embed.sendTaskResult(run.text, task.owner.conversationId, controller.signal, current)
+        const outcome = await this.enqueueTaskResult(run.text, task.owner, controller.signal, current, task.id + ':' + run.id)
         this.recordFocusScheduledReceipt(task, outcome)
         return { outcome }
       }
@@ -3052,7 +3279,7 @@ export class SessionRuntime {
         '这是本次需要执行的任务，请按当前工具能力处理：', '', task.prompt].join('\n')
       const submission = { task, runId: run.id, text, autonomousTaskId: null as string | null }
       this.scheduledSubmission = submission
-      const outcome = await this.embed.sendScheduledUser(text, task.owner.conversationId, run.id, controller.signal, current)
+      const outcome = await this.enqueueUserTask(text, task.owner, { runId: run.id, current, sourceId: run.id })
       let message: string | undefined
       if (outcome === 'busy') {
         const reason = await this.embed.userSendBlockReason()
@@ -4172,7 +4399,9 @@ export class SessionRuntime {
     try {
       return await this.remoteRipgrep.request(request.connectionId, async () => {
         if (!current()) return 'cancelled'
-        return embed.sendScopedUserTask(remoteRipgrepInstallPrompt(target, this.environment.osCaption, this.environment.architecture), sending.controller.signal, current)
+        const prompt = remoteRipgrepInstallPrompt(target, this.environment.osCaption, this.environment.architecture)
+        return this.enqueueUserTask(prompt, { sessionId: this.id, platformId: request.platformId, conversationId: request.conversationId },
+          { current, sourceId: 'remote-ripgrep:' + sending.connectionId })
       })
     } finally {
       if (this.remoteRipgrepSend === sending) this.remoteRipgrepSend = null
@@ -4253,6 +4482,7 @@ export class SessionRuntime {
     this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel()
     this.scheduledSendAbort?.abort()
     if (this.disposed) return
+    this.aiOutboundQueue.dispose()
     this.disposed = true
     this.remoteRipgrep.observe(null)
     this.options.desktopCoordinator?.releaseSession(this.id)

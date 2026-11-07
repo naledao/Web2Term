@@ -20,6 +20,8 @@ const config = defineConfig({
     } } }
   },
   renderer: {
+    // Windows reserves 5140-5239 on this machine, which includes Vite's 5173.
+    server: { host: '127.0.0.1', port: 5300, strictPort: true },
     resolve: {
       alias: {
         '@renderer': resolve(__dirname, 'src/renderer/src'),

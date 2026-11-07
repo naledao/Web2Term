@@ -248,6 +248,8 @@ export interface FocusChatState extends FocusOwner {
   contextUsage?: ContextUsageSummary
   /** Set while computer use is on and the Windows helper is not ready: why sending waits. */
   sendBlock?: string | null
+  /** Messages waiting for the single session-wide AI outbound lane. */
+  outboundQueue?: FocusOutboundQueueState
 }
 /** Revisions are scoped to an owner; omitted collections mean reuse that owner's snapshot. */
 export interface FocusHistoryCursor {
@@ -273,11 +275,28 @@ export function focusDelivery(record: ExecutionRecord, delivery?: FocusDelivery)
     record.deliveryStatus === 'failed' || record.deliveryStatus === 'unknown' ? 'failed' :
       record.deliveryStatus === 'pending' || record.deliveryStatus === 'uploading' ? 'pending' : undefined
 }
-export type FocusSendOutcome = 'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable' | 'invalid' | 'upload-failed' | 'unsupported-file-type' | 'unknown' | 'cancelled' | 'helper-not-ready'
+export type FocusSendOutcome = 'ok' | 'queued' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unavailable' | 'invalid' | 'upload-failed' | 'unsupported-file-type' | 'unknown' | 'cancelled' | 'helper-not-ready'
+export interface FocusOutboundQueueItem {
+  id: string
+  kind: 'user' | 'tool-result' | 'scheduled' | 'question' | 'recovery' | 'auxiliary'
+  platformId: string
+  conversationId: string | null
+  sourceId?: string
+  text?: string
+  attachments?: { name: string; size: number }[]
+}
+export interface FocusOutboundQueueState {
+  pending: number
+  active: FocusOutboundQueueItem | null
+  blocked: FocusOutboundQueueItem | null
+  blockedReason?: string
+}
+export interface FocusOutboundQueueResolution extends FocusOwner { itemId: string; action: 'acknowledge-skip' }
 export interface FocusSendRequest extends FocusOwner {
   text: string
   files?: FocusAttachmentInput[]
   skills?: import('./focus-skills').FocusToolSkill[]
+  clientRequestId?: string
 }
 export interface FocusEditRequest extends FocusOwner { messageId: string; text: string }
 /** Metadata only, produced by the page's edit pipeline; no message or prompt text. */

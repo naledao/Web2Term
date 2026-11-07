@@ -651,7 +651,6 @@ function FocusChatView(props: Props): JSX.Element {
   const sendFailure = state?.sendFailure
   const working = !sendFailure && (props.needsAnswer || state?.waiting === true || state?.generating === 'active' || lastTurn?.status === 'working')
   const nativeGenerating = state?.generating === 'active'
-  const composerBusy = state?.generating !== 'idle'
   const ready = state?.ready === true
   // Computer use waits for its Windows helper; the composer keeps the draft meanwhile.
   const skillModeUnavailable = state?.promptInjection?.phase === 'disabled' ? '请先启用终端模式和提示词注入，再使用按需技能。' : ''
@@ -785,7 +784,7 @@ function FocusChatView(props: Props): JSX.Element {
     const text = draftRef.current
     const submittedSkills = [...selectedSkills]
     const sourceFiles = filesRef.current
-    if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || composerBusy || props.needsAnswer || sendFailure || !ready || state?.nativeDraft || sendBlock || compaction.blocked) return
+    if ((!text.trim() && !sourceFiles.length) || sendLock.current || editingId || props.needsAnswer || sendFailure || !ready || state?.nativeDraft || sendBlock || compaction.blocked) return
     sendLock.current = true
     sendCancelled.current = false
     setSending(true)
@@ -794,10 +793,9 @@ function FocusChatView(props: Props): JSX.Element {
       const files = await Promise.all(sourceFiles.map(item => encodeFile(item.file)))
       // Reading files can finish after a conversation change; never send an abandoned draft.
       if (!alive.current || sendCancelled.current) return
-      const result = await window.api.sendFocusMessage({ ...owner, text, files, skills: submittedSkills })
-      // Clearing the source draft after a first-send route change is safe only
-      // when its exact value still belongs to this confirmed submission.
-      if (result === 'ok') {
+      const result = await window.api.sendFocusMessage({ ...owner, text, files, skills: submittedSkills, clientRequestId: crypto.randomUUID() })
+      // The main process owns an immutable copy of the payload once it accepts the queue item.
+      if (result === 'ok' || result === 'queued') {
         // A home -> chat navigation may unmount this composer before the result.
         if (JSON.stringify(readSkillDraft(viewOwnerKey)) === JSON.stringify(submittedSkills)) saveSkillDraft(viewOwnerKey, [])
         if (alive.current) setSelectedSkills([])
@@ -809,9 +807,11 @@ function FocusChatView(props: Props): JSX.Element {
           filesRef.current = []
           setDraftFiles([])
         }
+        if (alive.current && result === 'queued' && state?.outboundQueue?.pending) setError('已加入 AI 发送队列，将按顺序发送。')
       } else if (alive.current) {
         const descriptions: Record<string, string> = {
           busy: '页面正在处理或保留着草稿，消息未重发。可稍后再试或切回原始视图处理。',
+          queued: '已加入 AI 发送队列，将按顺序发送。',
           stuck: '发送结果尚未确认。草稿已保留，请先到原始视图核对，避免重复发送。',
           'no-composer': '尚未找到网页输入框，请切回原始视图完成登录或页面验证。',
           'insert-failed': '网页没有接受输入，草稿已保留。请切回原始视图处理。',
@@ -1053,6 +1053,16 @@ function FocusChatView(props: Props): JSX.Element {
     <div className="focus-chat__bottom">
       {props.needsAnswer ? <div className="focus-chat__notice" role="status">{modelLabel} 需要你的回答，任务正在等待。<button type="button" onClick={props.onQuestion}>回答问题</button></div> : null}
       {ready && sendBlock ? <div className="focus-chat__notice" role="status"><span className="focus-chat__pulse" aria-hidden="true" />{sendBlock} 可以先输入，草稿会保留。</div> : null}
+      {state?.outboundQueue?.pending ? <div className="focus-chat__notice" role="status">AI 发送队列：{state.outboundQueue.pending} 条待处理{state.outboundQueue.active ? '，当前正在发送' : ''}。</div> : null}
+      {state?.outboundQueue?.blocked ? <div className="focus-send-failure" role="alert">
+        <div className="focus-send-failure__text"><strong>发送队列已暂停</strong><p>{state.outboundQueue.blockedReason || '队首消息的发送状态尚未确认。'}</p>
+          <small>请先到原始视图核对队首消息；核对后可跳过该消息继续发送后续内容。</small></div>
+        <div className="focus-send-failure__actions">
+          <button type="button" onClick={props.onOriginal}>查看原始视图</button>
+          <button type="button" onClick={() => void window.api.retryFocusOutboundQueue(owner)}>重试队首</button>
+          <button type="button" onClick={() => void window.api.resolveFocusOutboundQueue(owner, state.outboundQueue!.blocked!.id, 'acknowledge-skip')}>已核对，跳过队首</button>
+        </div>
+      </div> : null}
       {!ready ? <div className="focus-chat__notice">网页尚未就绪。<button type="button" onClick={props.onOriginal}>切回原始视图完成登录或检查页面</button></div> : null}
       {state?.nativeDraft && !sending ? <div className="focus-chat__notice">原网页输入框中保留着内容，专注视图不会覆盖。<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       {sendFailure ? <div className="focus-send-failure" role="alert" aria-busy={actionId === 'native-send-retry'}>
@@ -1130,7 +1140,7 @@ function FocusChatView(props: Props): JSX.Element {
                 return
               }
             }
-            if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!composerBusy && !sending && ready && !sendBlock && !compaction.blocked) event.currentTarget.form?.requestSubmit() }
+            if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!sending && ready && !sendBlock && !compaction.blocked) event.currentTarget.form?.requestSubmit() }
           }} />
         <input ref={fileInput} type="file" multiple hidden onChange={event => { addFiles([...event.currentTarget.files ?? []]); event.currentTarget.value = '' }} />
         <div className="focus-composer__tools"><div className="focus-composer__left">
@@ -1139,7 +1149,7 @@ function FocusChatView(props: Props): JSX.Element {
             pending={changingMode} onChange={(id, active) => { void changeMode(id, active) }} /> : null}
         </div><span>{modelLabel}</span>
           {nativeGenerating || stopping ? <button type="button" className="focus-composer__send" disabled={stopping || sending || !ready} onClick={() => void stop()} aria-label="停止生成">{stopping ? <ComposerPendingIcon /> : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
-            <button type="submit" className="focus-composer__send" disabled={composerBusy || sending || props.needsAnswer || !!sendFailure || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || !!sendBlock || compaction.blocked || skillsOpen || (!draft.trim() && !draftFiles.length)} aria-label="发送消息" title={sendBlock || undefined}>{sending ? <ComposerPendingIcon /> : '↑'}</button>}
+            <button type="submit" className="focus-composer__send" disabled={sending || props.needsAnswer || !!sendFailure || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || !!sendBlock || compaction.blocked || skillsOpen || (!!state?.outboundQueue?.blocked) || (!draft.trim() && !draftFiles.length)} aria-label="发送消息" title={state?.outboundQueue?.blockedReason || sendBlock || undefined}>{sending ? <ComposerPendingIcon /> : '↑'}</button>}
         </div>
       </form><p className="focus-composer__hint">Enter 发送 · Shift+Enter 换行</p>
     </div>

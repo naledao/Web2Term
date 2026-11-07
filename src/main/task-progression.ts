@@ -24,7 +24,7 @@ interface ProgressionDependencies {
   machine?(lease: TaskLease): TaskMachine
   invoke(call: ComputerUseToolCall, lease: TaskLease, signal: AbortSignal, step: { id: string; token: string | null; sourceMessageId: string }, permit?: DesktopPermit): Promise<ComputerUseToolResult>
   acquire?(call: ComputerUseToolCall, lease: TaskLease, signal: AbortSignal, waiting: () => void): Promise<DesktopPermit | null>
-  send(text: string, lease: TaskLease, signal: AbortSignal, attachments?: ComputerUseImageReference[]): Promise<TaskResultSendOutcome>
+  send(text: string, lease: TaskLease, signal: AbortSignal, attachments?: ComputerUseImageReference[], sourceId?: string): Promise<TaskResultSendOutcome>
   release?(attachments: ComputerUseImageReference[], lease: TaskLease): void
   continuity?(call: ComputerUseToolCall, result: ComputerUseToolResult, lease: TaskLease, stepId: string): unknown
   diagnosticContext?(lease: TaskLease): ComputerDiagnosticContext
@@ -319,7 +319,7 @@ export class TaskProgression {
     const attemptId = randomUUID()
     if (!this.save(op, { event: 'delivery-start', attemptId })) return
     let outcome: TaskResultSendOutcome
-    try { outcome = await this.deps.send(step.resultText!, op.request, op.abort.signal, op.attachments) }
+    try { outcome = await this.deps.send(step.resultText!, op.request, op.abort.signal, op.attachments, step.id) }
     catch { outcome = 'unknown' }
     const deliveryEvent: ComputerActionEvent = { event: 'delivery-outcome', attemptId,
       outcome: outcome === 'ok' || outcome === 'busy' || outcome === 'no-composer' || outcome === 'failed' ? outcome : outcome === 'insert-failed' ? 'failed' : 'unknown' }

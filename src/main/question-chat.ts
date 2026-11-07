@@ -6,7 +6,7 @@ import type { QuestionChatAction, QuestionChatState } from '../shared/deepseek-q
 import senderSource from './injected/question-chat-sender.js?raw'
 import themeSource from './injected/theme.js?raw'
 import { questionPageCall, writeQuestionLog } from './question-chat-page'
-import { sendQuestionChatAttachment } from './question-chat-send'
+import type { FileSendOutcome } from '../shared/file-requests'
 import type { AppTheme } from '../shared/types'
 import type { ChatPlatform, ComposerKind } from '../shared/platforms'
 
@@ -23,6 +23,9 @@ interface QuestionChatReadiness {
   uploadEntryCount: number
   uploadRootFound: boolean
 }
+
+type QuestionChatSender = (contextPath: string, prompt: string, signal: AbortSignal, isCurrent: () => boolean,
+  beforeSubmit?: () => void) => Promise<FileSendOutcome>
 
 /** Native chat in the renderer's right-sidebar slot; no additional BrowserWindow. */
 export class QuestionChat {
@@ -53,7 +56,8 @@ export class QuestionChat {
     private readonly prompt: string,
     private readonly selectedText: string,
     private readonly onState: (state: QuestionChatState | null) => void,
-    private readonly contextPath: string
+    private readonly contextPath: string,
+    private readonly sendChat: QuestionChatSender
   ) {
     this.statusText = `正在打开新的 ${platform.label} 聊天…`
     this.view = new WebContentsView({ webPreferences: {
@@ -198,9 +202,9 @@ export class QuestionChat {
       this.status('正在上传本地对话 Markdown 并发送问题…', false)
       writeQuestionLog('CHAT-SEND-START', { platformId: this.platform.id, context: 'local-markdown', promptLength: this.prompt.length })
       const timeout = setTimeout(() => this.uploadAbort.abort(), 150000)
-      let result: Awaited<ReturnType<typeof sendQuestionChatAttachment>>
+      let result: FileSendOutcome
       try {
-        result = await sendQuestionChatAttachment(contents, this.platform, this.contextPath, this.prompt, this.uploadAbort.signal,
+        result = await this.sendChat(this.contextPath, this.prompt, this.uploadAbort.signal,
           () => !this.closed && !contents.isDestroyed())
       } finally { clearTimeout(timeout) }
       if (this.closed) return

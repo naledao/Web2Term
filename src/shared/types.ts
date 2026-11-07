@@ -52,6 +52,8 @@ export const IpcChannels = {
   compactionAction: 'compaction:action',
   compactionViewport: 'compaction:viewport',
   focusChatSend: 'focus-chat:send',
+  focusChatQueueResolve: 'focus-chat:queue-resolve',
+  focusChatQueueRetry: 'focus-chat:queue-retry',
   focusChatStopGeneration: 'focus-chat:stop-generation',
   focusChatRetrySend: 'focus-chat:retry-send',
   focusChatEdit: 'focus-chat:edit',
@@ -2397,6 +2399,8 @@ export interface AppApi {
   pollFocusChat(owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null>
   readFocusExecutionOutput(owner: FocusOwner, messageId: string): Promise<string | null>
   sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome>
+  resolveFocusOutboundQueue(owner: FocusOwner, itemId: string, action: 'acknowledge-skip'): Promise<boolean>
+  retryFocusOutboundQueue(owner: FocusOwner): Promise<boolean>
   stopFocusGeneration(owner: FocusOwner): Promise<FocusSendOutcome>
   retryFocusSend(owner: FocusOwner, failureId: string): Promise<FocusSendOutcome>
   editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome>

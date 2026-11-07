@@ -29,6 +29,7 @@ import type { SavedQuestionContextReader } from '../shared/deepseek-context-mark
 import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo, FocusEditDiagnostic, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
 import { supportsFocusView, validFocusComposerModes, validFocusModelSettings, validFocusSendFailure } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
+import { sendQuestionChatAttachment } from './question-chat-send'
 import { writeRawSendDiagnostic } from './raw-send-log'
 import { writeInjectionPlanDiagnostic, writePromptDiagnostic } from './prompt-log'
 import type { InjectionPlan } from '../shared/prompt-injection'
@@ -439,6 +440,8 @@ export interface EmbedHandlers {
   onContextUsage?(entry: ContextUsageEntry): void
   onState(state: EmbedState): void
   onQuestionChat?(state: QuestionChatState | null): void
+  sendQuestionChat?(platform: ChatPlatform, contents: Electron.WebContents, contextPath: string, prompt: string,
+    signal: AbortSignal, isCurrent: () => boolean, beforeSubmit?: () => void): Promise<FileSendOutcome>
   readQuestionContext?: SavedQuestionContextReader
   /** A conversation the page just navigated to (auto-saved). */
   onConversation(conversation: ScrapedConversation): void
@@ -702,7 +705,10 @@ export class ChatGptEmbed {
     contents.setUserAgent(baseUserAgent)
     if (supportsSelectionQuestion(this.platform.id)) {
       this.selectionQuestion = new SelectionQuestion(contents, parent, this.platform, () => this.theme,
-        state => this.handlers.onQuestionChat?.(state), id => this.handlers.readQuestionContext?.(id) ?? null)
+        state => this.handlers.onQuestionChat?.(state), id => this.handlers.readQuestionContext?.(id) ?? null,
+        (contextPath, prompt, signal, isCurrent, beforeSubmit) => this.handlers.sendQuestionChat
+          ? this.handlers.sendQuestionChat(this.platform, contents, contextPath, prompt, signal, isCurrent, beforeSubmit)
+          : sendQuestionChatAttachment(contents, this.platform, contextPath, prompt, signal, isCurrent, beforeSubmit))
       this.selectionQuestion.setVisible(this.visible)
     }
 
