@@ -667,42 +667,82 @@
     return roots.flatMap(dil => {
       const sourceMessageId = dil.getAttribute(rules.sourceIdAttr)
       if (!sourceMessageId || sourceMessageId !== messageIdOf(node)) return []
-      const cards = [...new Set([...dil.querySelectorAll(rules.groupSelector)].map(group => group.closest(rules.cardSelector)))]
-        .filter(card => card && dil.contains(card) && card.closest(rules.rootSelector) === dil).slice(0, 8)
+      // A card may ask several questions (one radiogroup each) above one shared submit button
+      // (user screenshot 2026-11-07). A group's nearest bordered box can then be a per-question
+      // box without the button, so climb to the bordered box that holds an action.
+      const cardOf = group => {
+        let card = group.closest(rules.cardSelector)
+        while (card && dil.contains(card) && !card.querySelector(rules.actionSelector)) card = card.parentElement?.closest(rules.cardSelector) || null
+        return card
+      }
+      let cards = [...new Set([...dil.querySelectorAll(rules.groupSelector)].map(cardOf))]
+        .filter(card => card && dil.contains(card) && card.closest(rules.rootSelector) === dil)
+      cards = cards.filter(card => !cards.some(other => other !== card && other.contains(card))).slice(0, 8)
+      const labels = [...dil.querySelectorAll('label')]
       return cards.flatMap((element, index) => {
-        const groups = [...element.querySelectorAll(rules.groupSelector)]
-        if (groups.length !== 1) return []
-        const group = groups[0], controls = [...group.querySelectorAll(rules.optionSelector)]
+        const groupElements = [...element.querySelectorAll(rules.groupSelector)].filter(group => !group.parentElement?.closest(rules.groupSelector))
+        if (groupElements.length < 1 || groupElements.length > 8) return []
         const buttons = [...element.querySelectorAll(rules.actionSelector)]
-        if (controls.length < 2 || controls.length > 32 || buttons.length < 1 || buttons.length > 4) return []
-        const labels = [...dil.querySelectorAll('label')]
-        const options = controls.map(control => {
-          const labelNode = control.closest('label') || labels.find(label => label.htmlFor === control.id)
-          const label = collapse(labelNode?.textContent || control.getAttribute('aria-label') || control.textContent)
-          const candidateTitle = collapse(labelNode?.querySelector('strong, b, [data-d-default-strong]')?.textContent).slice(0, 500)
-          const title = label.startsWith(candidateTitle) ? candidateTitle : ''
-          return { value: control.getAttribute('value') || '', label: label.slice(0, 3000), title,
-            description: title && label.startsWith(title) ? label.slice(title.length).trim().slice(0, 3000) : '',
-            selected: control.getAttribute('aria-checked') === 'true', disabled: controlDisabled(control) }
-        })
-        if (options.some(option => !option.value || option.value.length > 500 || !option.label) ||
-          new Set(options.map(option => option.value)).size !== options.length || options.filter(option => option.selected).length > 1) return []
+        if (buttons.length < 1 || buttons.length > 4) return []
+        const multiple = groupElements.length > 1
+        const title = collapse(element.querySelector('h1, h2, h3, h4, h5, h6')?.textContent).slice(0, 500)
+        // Unmeasured: how DIL names each question. Prefer ARIA, else the nearest text block
+        // before the group inside the card (stopping at another group or the actions).
+        const groupLabelOf = group => {
+          const own = collapse(group.getAttribute('aria-label'))
+          if (own || !multiple) return own
+          const ids = String(group.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+          const labelled = collapse(ids.map(id => document.getElementById(id)?.textContent || '').join(' '))
+          if (labelled) return labelled
+          const blocks = sibling => sibling.matches(rules.groupSelector) || !!sibling.querySelector(rules.groupSelector) ||
+            sibling.matches(rules.actionSelector) || !!sibling.querySelector(rules.actionSelector)
+          for (let at = group; at && at !== element; at = at.parentElement) {
+            for (let sibling = at.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+              if (blocks(sibling)) return ''
+              const value = collapse(sibling.textContent)
+              if (value) return value === title ? '' : value
+            }
+          }
+          return ''
+        }
+        const controls = []
+        const groups = []
+        for (const group of groupElements) {
+          const groupControls = [...group.querySelectorAll(rules.optionSelector)]
+          if (groupControls.length < 2 || groupControls.length > 32) return []
+          const options = groupControls.map(control => {
+            const labelNode = control.closest('label') || labels.find(label => label.htmlFor === control.id)
+            const label = collapse(labelNode?.textContent || control.getAttribute('aria-label') || control.textContent)
+            const candidateTitle = collapse(labelNode?.querySelector('strong, b, [data-d-default-strong]')?.textContent).slice(0, 500)
+            const optionTitle = label.startsWith(candidateTitle) ? candidateTitle : ''
+            return { value: control.getAttribute('value') || '', label: label.slice(0, 3000), title: optionTitle,
+              description: optionTitle && label.startsWith(optionTitle) ? label.slice(optionTitle.length).trim().slice(0, 3000) : '',
+              selected: control.getAttribute('aria-checked') === 'true', disabled: controlDisabled(control) }
+          })
+          if (options.some(option => !option.value || option.value.length > 500 || !option.label) ||
+            new Set(options.map(option => option.value)).size !== options.length || options.filter(option => option.selected).length > 1) return []
+          controls.push(groupControls)
+          groups.push({ label: groupLabelOf(group).slice(0, 500), disabled: controlDisabled(group), options })
+        }
         const actions = buttons.map(button => ({ label: collapse(button.textContent).slice(0, 500), disabled: controlDisabled(button) }))
         if (actions.some(button => !button.label)) return []
-        const identity = JSON.stringify([options.map(option => [option.value, option.label]), actions.map(action => action.label)])
+        const pairs = groups.map(group => group.options.map(option => [option.value, option.label]))
+        // A single-question card keeps its earlier signature.
+        const identity = JSON.stringify([multiple ? pairs : pairs[0], actions.map(action => action.label)])
         let hash = 2166136261
         for (let at = 0; at < identity.length; at++) hash = Math.imul(hash ^ identity.charCodeAt(at), 16777619)
-        const data = { version: 1, sourceMessageId, index, signature: (hash >>> 0).toString(16).padStart(8, '0'),
-          title: collapse(element.querySelector('h1, h2, h3, h4, h5, h6')?.textContent).slice(0, 500),
-          description: collapse(element.querySelector(':scope > p')?.textContent).slice(0, 3000),
-          label: collapse(group.getAttribute('aria-label')).slice(0, 500), disabled: controlDisabled(group), options, buttons: actions }
+        let description = collapse(element.querySelector(':scope > p')?.textContent).slice(0, 3000)
+        if (groups.some(group => group.label && group.label === description)) description = ''
+        const data = { version: 2, sourceMessageId, index, signature: (hash >>> 0).toString(16).padStart(8, '0'), title, description,
+          disabled: groups.every(group => group.disabled), groups, buttons: actions }
         return [{ element, controls, buttons, data }]
       })
     })
   }
   const smartUiMarkdown = data => {
     const json = JSON.stringify(data).replace(/</g, '\\u003c')
-    const fallback = [data.title, data.description, ...data.options.map(option => (option.selected ? '[x] ' : '[ ] ') + option.label), ...data.buttons.map(button => button.label)]
+    const fallback = [data.title, data.description, ...data.groups.flatMap(group => [group.label,
+      ...group.options.map(option => (option.selected ? '[x] ' : '[ ] ') + option.label)]), ...data.buttons.map(button => button.label)]
       .filter(Boolean).join('\n').split('\n').map(line => '> ' + line).join('\n')
     return '\n\n<!--focus-ui ' + json + ' -->\n' + fallback + '\n\n'
   }
@@ -1316,16 +1356,26 @@
         current.getAttribute('role') === 'button' || current.getAttribute('aria-hidden') === 'true') return ''
       return [...current.childNodes].map(headerText).join('')
     }
-    const pres = [...(root.tagName?.toLowerCase() === 'pre' ? [root] : []), ...(root.querySelectorAll?.('pre') || [])]
-      .filter(element => element.tagName?.toLowerCase() === 'pre')
+    // User screenshot 2026-11-07: DIL answers render a code block as a `toml` header with
+    // wrap/copy buttons above a bare multi-line <code>, with no <pre>. Inline code never holds
+    // a line break, so a <code> outside <pre> with one (or laid out as a block) is a block.
+    const blockCode = element => {
+      if (element.tagName?.toLowerCase() !== 'code' || element.closest('pre') || element.getAttribute('data-markdown-copy') === 'inline-code') return false
+      if (/\n/.test(String(element.textContent || '').trim())) return true
+      const display = getComputedStyle(element).display
+      return !!PAGE.focus?.smartUi && !!element.closest(PAGE.focus.smartUi.rootSelector) && ['block', 'flex', 'grid'].includes(display)
+    }
+    const pres = [...(root.tagName?.toLowerCase() === 'pre' || blockCode(root) ? [root] : []), ...(root.querySelectorAll?.('pre, code') || [])]
+      .filter(element => element.tagName?.toLowerCase() === 'pre' || blockCode(element))
+    const blockCount = element => pres.filter(block => block === element || element.contains(block)).length
     for (const pre of pres) {
-      const code = pre.querySelector('code') || pre
+      const code = pre.tagName.toLowerCase() === 'pre' ? pre.querySelector('code') || pre : pre
       let language = codeLanguage(code) || codeLanguage(pre)
       let card = pre
       let parent = pre === root ? null : pre.parentElement
       for (let depth = 0; parent && depth < 4; depth++, parent = parent.parentElement) {
-        if (parent.querySelectorAll('pre').length !== 1) break
-        const headers = [...parent.children].filter(child => child !== pre && ![...child.querySelectorAll('pre')].includes(pre))
+        if (blockCount(parent) !== 1) break
+        const headers = [...parent.children].filter(child => child !== pre && !child.contains(pre))
         const labels = headers.map(child => headerText(child).trim()).filter(Boolean)
         const headerLanguage = labels.map(label => languageOf(label)).find(Boolean)
         const controls = headers.some(child => child.querySelector('button, [role="button"]'))
@@ -2985,6 +3035,13 @@
     }
     let card = locate()
     if (!card || card.data.disabled) return finish('unavailable', card ? 'component-disabled' : 'component-missing')
+    const groupIndex = request.groupIndex === undefined ? 0 : request.groupIndex
+    if (!Number.isSafeInteger(groupIndex) || groupIndex < 0 || groupIndex >= card.data.groups.length) return finish('invalid', 'invalid-request')
+    const optionsOf = live => live?.data.groups[groupIndex]?.options || []
+    const selectedValues = Array.isArray(request.selectedValues) ? request.selectedValues : [request.selectedValue]
+    // Submit only the selection the user saw: every group, in order, exactly as rendered.
+    const formReady = live => !!live && selectedValues.length === live.data.groups.length && live.data.groups.every((group, index) =>
+      typeof selectedValues[index] === 'string' && !!selectedValues[index] && group.options.some(option => option.value === selectedValues[index] && option.selected))
     const token = { token: request.token, generation: state.taskPromptGeneration, submitted: false }
     const current = () => focusEditing === token && location.pathname === expectedPath && state.taskPromptGeneration === token.generation
     const pause = () => new Promise(resolve => setTimeout(resolve, 60))
@@ -2995,11 +3052,10 @@
       const live = locate()
       if (!live || live.data.disabled) return null
       if (request.kind === 'choose') {
-        const index = live.data.options.findIndex(option => option.value === request.optionValue && !option.disabled)
-        return index < 0 ? null : live.controls[index]
+        const index = optionsOf(live).findIndex(option => option.value === request.optionValue && !option.disabled)
+        return index < 0 || live.data.groups[groupIndex].disabled ? null : live.controls[groupIndex][index]
       }
-      return live.data.options.some(option => option.value === request.selectedValue && option.selected) &&
-        !live.data.buttons[request.buttonIndex]?.disabled ? live.buttons[request.buttonIndex] : null
+      return formReady(live) && !live.data.buttons[request.buttonIndex]?.disabled ? live.buttons[request.buttonIndex] : null
     }
     const guardClick = event => {
       const click = token.nativeClick
@@ -3044,9 +3100,10 @@
     }
     try {
       if (request.kind === 'choose') {
-        const index = card.data.options.findIndex(option => option.value === request.optionValue && !option.disabled)
+        const index = optionsOf(card).findIndex(option => option.value === request.optionValue && !option.disabled)
         if (index < 0) return finish('invalid', 'invalid-request')
-        if (card.data.options[index].selected) return finish('ok', 'option-confirmed')
+        if (card.data.groups[groupIndex].disabled) return finish('unavailable', 'component-disabled')
+        if (optionsOf(card)[index].selected) return finish('ok', 'option-confirmed')
         diagnostic.stage = 'confirm'
         requestClick()
         const deadline = Date.now() + 2500
@@ -3054,18 +3111,18 @@
           await pause()
           if (token.nativeClick.failure) return finish('stuck', token.nativeClick.failure)
           card = locate()
-          if (token.nativeClick.received && card?.data.options.some(option => option.value === request.optionValue && option.selected)) {
+          if (token.nativeClick.received && optionsOf(card).some(option => option.value === request.optionValue && option.selected)) {
             // Native Radix/React state gets a turn to settle before enabling submit.
             await pause(); await pause(); await pause()
             if (!current()) return finish('cancelled', 'cancelled')
-            return locate()?.data.options.some(option => option.value === request.optionValue && option.selected)
+            return optionsOf(locate()).some(option => option.value === request.optionValue && option.selected)
               ? finish('ok', 'option-confirmed') : finish('stuck', 'option-unconfirmed')
           }
         }
         return current() ? finish('stuck', diagnostic.nativeClickReceived ? 'option-unconfirmed' : 'native-click-not-received') : finish('cancelled', 'cancelled')
       }
       if (!Number.isSafeInteger(request.buttonIndex) || !card.buttons[request.buttonIndex] || card.data.buttons[request.buttonIndex].disabled ||
-        !request.selectedValue || !card.data.options.some(option => option.value === request.selectedValue && option.selected)) return finish('unavailable', 'form-not-ready')
+        !formReady(card)) return finish('unavailable', 'form-not-ready')
       const baseline = queryAllAssistant().map(messageIdOf).filter(Boolean)
       for (const id of baseline) focusEditExcludedIds.add(id)
       token.submitted = true
@@ -7056,6 +7113,19 @@
       let node = focusReplyPosition === null ? latestReplyNode(rows) :
         rows.find(item => focusReplyAnchor(item) === focusReplyPosition)
       if (!node || (focusReplyPosition === null && turnKeyOf(node) === focusReplyBaseline)) node = null
+      /*
+       * This send's reply follows the newest user message. The baseline id alone is not enough:
+       * reply log 2026-11-07T12:40:58 — the page's newest reply at send time was the command turn,
+       * then ChatGPT re-rendered the thread and the answer after it (already saved in an earlier
+       * focus turn) became the newest node while the new reply was still thinking without an id.
+       * It was adopted and pinned as this send's reply. An answer above the newest user row is history.
+       */
+      if (node && focusReplyPosition === null && PAGE.focus?.edit) {
+        const userRows = queryAll([PAGE.focus.edit.userTextSelector, ...(PAGE.fileUserTurnFallbackSelector ? [PAGE.fileUserTurnFallbackSelector] : [])])
+          .filter(isVisibleElement)
+        const newestUser = userRows.reduce((last, row) => !last || (last.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING) ? row : last, null)
+        if (newestUser && !node.contains(newestUser) && (node.compareDocumentPosition(newestUser) & Node.DOCUMENT_POSITION_FOLLOWING)) node = null
+      }
       if (node && focusReplyPosition === null) {
         const anchor = focusReplyAnchor(node)
         // A virtual position is valid only during this send, never persisted as an identity;

@@ -44,6 +44,8 @@ test('widget parser bounds untrusted data and rejects ambiguous or malformed con
   }
   assert.equal(validFocusUiAction({ ...widget(), kind: 'submit', selectedValue: '两者结合', buttonIndex: -1 }), false)
   assert.equal(validFocusUiAction({ ...widget(), kind: 'choose', selectedValue: '两者结合', optionValue: '业务流' }), true)
+  // Version 1 markers saved before multi-question cards fold into one group.
+  assert.deepEqual(Array.from(parseFocusUi(JSON.stringify(widget())).groups, group => group.label), ['产品选择'])
 })
 
 function extractionFixture() {
@@ -74,15 +76,15 @@ function extractionFixture() {
 test('measured native card extraction retains labels, values and surrounding prose without flattening controls', () => {
   const f = extractionFixture(), cards = f.extract({})
   assert.equal(cards.length, 1)
-  assert.deepEqual(Array.from(cards[0].data.options, item => item.value), ['工具箱', '业务流', '两者结合'])
-  assert.equal(cards[0].data.options[2].selected, true)
+  assert.deepEqual(Array.from(cards[0].data.groups[0].options, item => item.value), ['工具箱', '业务流', '两者结合'])
+  assert.equal(cards[0].data.groups[0].options[2].selected, true)
+  assert.equal(cards[0].data.groups[0].label, '产品选择')
   assert.ok(parseFocusUi(JSON.stringify(cards[0].data)))
   const markdown = f.markdown({})
   assert.match(markdown, /之前的段落[\s\S]*<!--focus-ui /)
   assert.match(markdown, /> \[x\] 两者结合 说明[\s\S]*之后的段落/)
-  f.data.title = '标题 --> <script>'
-  const serialized = f.context.smartUiMarkdown(f.data)
-  assert.equal(serialized.includes('<!--focus-ui {"version":1'), true)
+  const serialized = f.context.smartUiMarkdown({ ...cards[0].data, title: '标题 --> <script>' })
+  assert.equal(serialized.includes('<!--focus-ui {"version":2'), true)
   assert.equal(serialized.split(' -->')[0].includes('<script>'), false, 'untrusted text cannot terminate a machine marker')
   const signature = cards[0].data.signature
   f.data.options[2].selected = false; f.data.options[1].selected = true
@@ -93,7 +95,7 @@ function requestBody(value = '两者结合') {
   return { conversation_id: 'one', parent_message_id: 'answer-1', action: 'next', messages: [{ id: 'new-user', author: { role: 'user' },
     content: { content_type: 'text', parts: ['原生按钮生成的实际消息，不是按钮标题'] } }], genui_state_snapshots: [{ message_id: 'answer-1', root: { choice: value } }] }
 }
-const expected = { origin: 'https://chatgpt.com', path: rules.submissionPath, conversationId: 'one', sourceMessageId: 'answer-1', selectedValue: '两者结合' }
+const expected = { origin: 'https://chatgpt.com', path: rules.submissionPath, conversationId: 'one', sourceMessageId: 'answer-1', selectedValues: ['两者结合'] }
 const request = body => ({ method: 'POST', url: expected.origin + rules.submissionPath, uploadData: [{ bytes: Buffer.from(JSON.stringify(body)) }] })
 test('native submission owns the real user message independently of optional component state', () => {
   const result = smartUiSubmission(request(requestBody()), expected)
@@ -119,6 +121,26 @@ test('native submission owns the real user message independently of optional com
   assert.equal(smartUiSubmission({ ...request({}), uploadData: [{ file: 'C:/private.txt' }] }, expected).reason, 'request-body-unavailable')
 })
 
+test('multi-question cards keep one group per radiogroup and submit every selection', () => {
+  const { label, options, ...base } = widget()
+  const multi = { ...base, version: 2, groups: [{ label, disabled: false, options }, { label: '服务器位置', disabled: false, options: [choice('海外', true), choice('两者结合')] }] }
+  const parsed = parseFocusUi(JSON.stringify(multi))
+  assert.equal(parsed.groups.length, 2)
+  assert.equal(parsed.groups[1].options[0].selected, true)
+  // Values only need to be unique inside their own group.
+  assert.equal(parseFocusUi(JSON.stringify({ ...multi, groups: [...multi.groups, { label: '', disabled: false, options }] })).groups.length, 3)
+  assert.equal(parseFocusUi(JSON.stringify({ ...multi, groups: [] })), null)
+  assert.equal(parseFocusUi(JSON.stringify({ ...multi, groups: Array(9).fill(multi.groups[0]) })), null)
+  const submit = { ...base, kind: 'submit', buttonIndex: 0, selectedValue: '两者结合', selectedValues: ['两者结合', '海外'] }
+  assert.equal(validFocusUiAction(submit), true)
+  assert.equal(validFocusUiAction({ ...submit, selectedValues: ['工具箱', '海外'] }), false, 'the first selection mirrors selectedValue')
+  assert.equal(validFocusUiAction({ ...base, kind: 'choose', selectedValue: '两者结合', optionValue: '海外', groupIndex: 1 }), true)
+  assert.equal(validFocusUiAction({ ...base, kind: 'choose', selectedValue: '两者结合', optionValue: '海外', groupIndex: 8 }), false)
+  const body = requestBody(); body.genui_state_snapshots[0].root = { first: '两者结合', second: '海外' }
+  assert.equal(smartUiSubmission(request(body), { ...expected, selectedValues: ['两者结合', '海外'] }).requestStateMatches, true)
+  assert.equal(smartUiSubmission(request(body), { ...expected, selectedValues: ['两者结合', '中国大陆'] }).requestStateMatches, false)
+})
+
 function actionFixture() {
   const data = widget(), calls = [], reports = [], listeners = new Map()
   let now = 100, observed = true, matched = true, newId = 'new-user', cancel = false, receipt
@@ -129,7 +151,7 @@ function actionFixture() {
   const state = { taskPromptGeneration: 4, programmatic: false, awaitingReplySince: 0, pendingQuestion: null }
   const composer = { draft: '' }
   const sourceNode = { id: data.sourceMessageId }
-  const card = () => ({ element: {}, data, controls, buttons: [button] })
+  const card = () => ({ element: {}, data: { ...data, groups: [{ label: data.label, disabled: false, options: data.options }] }, controls: [controls], buttons: [button] })
   const context = createContext({ PAGE, state, fileSend: null, focusEditing: null, focusEditExcludedIds: new Set(),
     focusReplyBaseline: null, focusBaselinePosition: null, focusReplyPosition: null, draftRejected: false,
     Date: { now: () => now }, Promise, queueMicrotask, SEND_TIMEOUT_MS: 600, location: { pathname: '/c/one' }, collapse,

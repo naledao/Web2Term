@@ -1765,7 +1765,7 @@ export class ChatGptEmbed {
       if (request.kind === 'submit') stopObserving = observeFocusPageRequest(contents, url.origin, details => {
         if (!current() || details.method !== 'POST') return
         const summary = smartUiSubmission(details, { origin: url.origin, path: rules.submissionPath, conversationId,
-          sourceMessageId: request.sourceMessageId, selectedValue: request.selectedValue })
+          sourceMessageId: request.sourceMessageId, selectedValues: request.selectedValues ?? [request.selectedValue] })
         diagnose({ stage: 'request', reason: summary?.reason ?? 'request-unrelated', requestCount: ++requestCount,
           requestPathMatches: new URL(details.url).pathname === rules.submissionPath,
           ...(summary ? { requestStateMatches: summary.requestStateMatches, requestStatePresent: summary.requestStatePresent,

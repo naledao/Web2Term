@@ -92,6 +92,8 @@
 .focus-smart-ui h3{margin:0 0 8px;font-size:16px;line-height:1.5;font-weight:650}
 .focus-smart-ui__description{margin:0 0 10px}
 .focus-smart-ui fieldset{min-width:0;margin:0;padding:0;border:0}
+.focus-smart-ui__group+.focus-smart-ui__group{margin-top:10px;padding-top:12px;border-top:1px solid var(--fc-border)}
+.focus-smart-ui__question{padding:0;margin:0 0 2px;font-size:14px;line-height:1.6;color:var(--fc-text);opacity:.8}
 .focus-smart-ui__legend{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .focus-smart-ui__option{display:flex;align-items:flex-start;gap:10px;min-height:44px;padding:9px 2px;cursor:pointer}
 .focus-smart-ui__option:has(input:disabled){cursor:default;opacity:.6}

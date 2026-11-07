@@ -1,7 +1,7 @@
 import type { OnBeforeRequestListenerDetails } from 'electron'
 /** Read only an already submitted native request. No endpoint replay or saved payload. */
 export function smartUiSubmission(details: Pick<OnBeforeRequestListenerDetails, 'url' | 'method' | 'uploadData'>,
-  expected: { origin: string; path: string; conversationId: string; sourceMessageId: string; selectedValue: string }):
+  expected: { origin: string; path: string; conversationId: string; sourceMessageId: string; selectedValues: string[] }):
   { matched: boolean; messageId: string | null; text: string; reason: string;
     requestStatePresent?: boolean; requestStateMatches?: boolean; requestSnapshotCount?: number } | null {
   const url = new URL(details.url)
@@ -20,7 +20,7 @@ export function smartUiSubmission(details: Pick<OnBeforeRequestListenerDetails, 
     const snapshots = Array.isArray(body.genui_state_snapshots) ? body.genui_state_snapshots : []
     const snapshot = snapshots.find((item: { message_id?: string }) => item?.message_id === expected.sourceMessageId)
     const requestStateMatches = !!snapshot?.root && typeof snapshot.root === 'object' && !Array.isArray(snapshot.root) &&
-      Object.values(snapshot.root).includes(expected.selectedValue)
+      expected.selectedValues.length > 0 && expected.selectedValues.every(value => Object.values(snapshot.root).includes(value))
     // A state discrepancy is diagnostic, not grounds to discard a message ChatGPT
     // already sent. Ownership comes from origin/conversation/parent, then trusted
     // target input and the actual new native user id are checked on the page.

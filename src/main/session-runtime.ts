@@ -2464,7 +2464,7 @@ export class SessionRuntime {
   async actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome> {
     if (!this.ownsFocus(request)) return 'unavailable'
     if (!validFocusUiAction(request)) return 'invalid'
-    const key = `focus-ui:${this.id}:${request.platformId}:${request.conversationId}:${request.sourceMessageId}:${request.signature}:${request.kind}:${request.selectedValue}:${request.optionValue ?? ''}:${request.buttonIndex ?? ''}`
+    const key = `focus-ui:${this.id}:${request.platformId}:${request.conversationId}:${request.sourceMessageId}:${request.signature}:${request.kind}:${JSON.stringify(request.selectedValues ?? [request.selectedValue])}:${request.groupIndex ?? 0}:${request.optionValue ?? ''}:${request.buttonIndex ?? ''}`
     return this.queueSend<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: key.slice(-128), text: request.kind,
       // Reported to the user at once, like retryFocusSend: never spin on local locks inside the lane.
       execute: () => this.performActOnFocusUi(request), retryable: () => false,

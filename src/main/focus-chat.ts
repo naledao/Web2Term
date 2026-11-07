@@ -179,6 +179,9 @@ export class FocusChat {
     const current = this.current(platformId)
     if (!current || !page.reply || current.turn.status === 'stopped') return
     const { entry, turn } = current
+    // An answer already owned by an earlier turn is history the page re-rendered, never this turn's reply.
+    if (page.reply.sourceMessageId && entry.turns.some(other => other !== turn &&
+      other.segments.some(item => item.sourceMessageId === page.reply!.sourceMessageId))) return
     const segment = this.segment(entry, turn)
     // A settled Markdown read is authoritative; a late streaming sample cannot replace it.
     if (segment.settled) {
