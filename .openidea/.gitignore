@@ -1,0 +1,3 @@
+# Local IDE metadata; keep generated changelists out of Git.
+*
+!.gitignore
