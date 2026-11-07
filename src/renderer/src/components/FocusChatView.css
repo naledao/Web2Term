@@ -210,6 +210,39 @@
 .focus-composer__tools .focus-composer__send{width:34px;height:34px;border:0;border-radius:50%;display:grid;place-items:center;padding:0;background:var(--fc-accent);color:var(--fc-bg);font-size:19px;line-height:1}
 .focus-composer__send .focus-composer__stop-icon,.focus-composer__send .focus-composer__pending-icon{display:block;width:16px;height:16px}
 .focus-send-failure__actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+/* AI outbound queue: a tray docked to the top edge of the composer. */
+.focus-queue{width:100%;max-width:880px;box-sizing:border-box;border:1px solid var(--fc-border);border-bottom:0;border-radius:13px 13px 0 0;background:var(--fc-soft);font-size:12px;color:var(--fc-muted)}
+.focus-composer.has-queue{border-top-left-radius:0;border-top-right-radius:0}
+.focus-queue__head{display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:8px 14px;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;border-radius:13px 13px 0 0}
+.focus-queue__head:focus-visible{outline:2px solid var(--fc-accent);outline-offset:-2px}
+.focus-queue__dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--fc-accent);animation:focus-chat-pulse 900ms ease-in-out infinite alternate}
+.focus-queue__dot.is-waiting{background:var(--fc-muted)}
+.focus-queue__title{flex:none;color:var(--fc-text);font-weight:600}
+.focus-queue__count{flex:none;padding:0 7px;border-radius:999px;background:var(--fc-bg);border:1px solid var(--fc-border);font-size:11px;line-height:18px}
+.focus-queue__peek{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.focus-queue__chevron{flex:none;transition:transform 150ms ease}
+.focus-queue.is-collapsed .focus-queue__chevron{transform:rotate(-90deg)}
+.focus-queue__list{list-style:none;margin:0;padding:0 8px 6px;display:flex;flex-direction:column;max-height:232px;overflow-y:auto}
+.focus-queue__item{display:flex;align-items:center;gap:10px;min-width:0;padding:6px 6px;border-radius:8px}
+.focus-queue__item:hover{background:var(--fc-bg)}
+.focus-queue__marker{flex:none;display:grid;place-items:center;width:20px;height:20px;border-radius:50%;border:1px solid var(--fc-border);background:var(--fc-bg);font-size:11px;font-variant-numeric:tabular-nums}
+.focus-queue__item.is-active .focus-queue__marker{border-color:var(--fc-accent)}
+.focus-queue__marker>span{width:7px;height:7px;border-radius:50%;background:var(--fc-accent);animation:focus-chat-pulse 900ms ease-in-out infinite alternate}
+.focus-queue__marker.is-waiting{border-color:var(--fc-border)}
+.focus-queue__marker.is-waiting>span{background:var(--fc-muted);animation:none}
+.focus-queue__body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px}
+.focus-queue__line{display:flex;align-items:center;gap:6px;min-width:0}
+.focus-queue__kind{flex:none;padding:0 6px;border-radius:5px;background:var(--fc-bg);border:1px solid var(--fc-border);font-size:11px;line-height:18px}
+.focus-queue__text{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--fc-text)}
+.focus-queue__meta{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px}
+.focus-queue__item.is-active .focus-queue__meta{color:var(--fc-accent)}
+.focus-queue__actions{flex:none;display:flex;gap:4px}
+.focus-queue__actions button{padding:3px 9px;border:1px solid var(--fc-border);border-radius:6px;background:var(--fc-bg);color:var(--fc-text);font-size:11px;cursor:pointer}
+.focus-queue__actions button:hover{border-color:var(--fc-accent);color:var(--fc-accent)}
+.focus-queue__actions button.is-danger{border-color:var(--fc-danger);color:var(--fc-danger)}
+.focus-queue__actions button:focus-visible{outline:2px solid var(--fc-accent);outline-offset:1px}
+.focus-queue__more{padding:4px 36px;font-size:11px}
+@media(prefers-reduced-motion:reduce){.focus-queue__dot,.focus-queue__marker>span{animation:none}.focus-queue__chevron{transition:none}}
 .focus-chat .focus-composer__hint{display:block;width:100%;max-width:880px;text-align:center;margin:7px 0 0;font-size:11px;color:var(--fc-muted)}
 .focus-chat__status{color:var(--fc-accent)}
 .focus-chat__pulse{width:6px;height:6px;background:var(--fc-accent);border-radius:50%;animation:focus-chat-pulse 900ms ease-in-out infinite alternate;flex:none}

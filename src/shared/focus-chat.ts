@@ -284,8 +284,12 @@ export interface FocusOutboundQueueItem {
   sourceId?: string
   text?: string
   attachments?: { name: string; size: number }[]
-  /** A composer message whose draft can be handed back with 'restore-skip'. */
+  /** A composer message: its draft can be handed back (edit/delete while waiting, 'restore-skip' when blocked). */
   restorable?: boolean
+  /** Active item only: attempts made so far (1 while the first send runs). */
+  attempt?: number
+  /** Active item only, between attempts: the pre-submit refusal it is waiting out ('busy', 'no-composer', …). */
+  retryReason?: string
 }
 /** A queued composer message that finished without being sent; its draft can be restored. */
 export interface FocusOutboundFailure {
@@ -301,6 +305,8 @@ export interface FocusOutboundFailure {
 export interface FocusOutboundQueueState {
   pending: number
   active: FocusOutboundQueueItem | null
+  /** Waiting behind the active one, in send order (at most a few; `pending` has the full count). */
+  queued?: FocusOutboundQueueItem[]
   blocked: FocusOutboundQueueItem | null
   blockedReason?: string
   failures?: FocusOutboundFailure[]

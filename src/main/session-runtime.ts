@@ -151,7 +151,7 @@ import { getGithubCliState } from './github-cli'
 import { dispatchGithubLoginTask } from './github-login-task'
 import type { GithubLoginTaskResult } from '../shared/github'
 import type { FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusToolKind, FocusToolObserver,
-  FocusOutboundFailure, FocusOutboundQueueAction } from '../shared/focus-chat'
+  FocusOutboundFailure, FocusOutboundQueueAction, FocusOutboundQueueItem } from '../shared/focus-chat'
 import type { EmbedHandlers } from './embed'
 import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseRemoteWindowsEnvironment, parseWindowsEnvironment } from './environment'
 import { RemoteRipgrepSetup } from './remote-ripgrep'
@@ -165,7 +165,7 @@ import { Web2termShell } from './web2term-shell'
 import type { Web2termSessionBinding } from './web2term-shell'
 import type { Web2termConnection } from './web2term-connection'
 import { normalizeTerminalNotesDirectory } from './terminal-notes'
-import { AiOutboundQueue } from './ai-outbound-queue'
+import { AiOutboundQueue, queuePreview } from './ai-outbound-queue'
 import type { AiOutboundEnqueue, AiOutboundKind, AiOutboundOwner, AiOutboundTicket } from './ai-outbound-queue'
 import { sendQuestionChatAttachment } from './question-chat-send'
 import { statSync } from 'node:fs'
@@ -1919,8 +1919,14 @@ export class SessionRuntime {
       (failure.owner.conversationId === null || owner.conversationId === null || failure.owner.conversationId === owner.conversationId))
       .map(({ owner: _owner, ...failure }) => ({ ...failure, ...(failure.attachments ? { attachments: failure.attachments.map(file => ({ ...file })) } : {}) }))
     const state = this.aiOutboundQueue.stateFor(queueOwner)
-    const blocked = state.blocked && this.pendingFocusSends.has(state.blocked.id) ? { ...state.blocked, restorable: true } : state.blocked
-    return { ...state, blocked, ...(failures.length ? { failures } : {}) }
+    // A composer message is summarized by what the user typed, not by the skill-prefixed text sent to the page.
+    const summarize = <T extends FocusOutboundQueueItem | null>(item: T): T => {
+      const pending = item && this.pendingFocusSends.get(item.id)
+      return (pending ? { ...item, text: queuePreview(pending.text), restorable: true } : item) as T
+    }
+    const blocked = summarize(state.blocked)
+    return { ...state, active: summarize(state.active), ...(state.queued ? { queued: state.queued.map(summarize) } : {}),
+      blocked, ...(failures.length ? { failures } : {}) }
   }
 
   private recordFocusQueueFailure(owner: AiOutboundOwner, sourceId: string, outcome: FocusSendOutcome, text: string,
@@ -1940,7 +1946,8 @@ export class SessionRuntime {
     }
     // Only the items this owner's focus view shows can be acted on from it.
     const state = this.aiOutboundQueue.stateFor({ sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId })
-    if (action === 'cancel' && state.active?.id === itemId) return this.aiOutboundQueue.cancel(itemId)
+    // Cancelling a waiting composer message hands its draft back (its completion records the failure).
+    if (action === 'cancel' && (state.active?.id === itemId || state.queued?.some(item => item.id === itemId))) return this.aiOutboundQueue.cancel(itemId)
     if (state.blocked?.id !== itemId) return false
     // A blocked head: 'acknowledge-skip' (and 'cancel') means it was sent; 'restore-skip' means it was not.
     const pending = this.pendingFocusSends.get(itemId)

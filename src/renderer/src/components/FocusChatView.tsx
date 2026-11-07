@@ -31,7 +31,7 @@ import { parseFocusLayout } from '@shared/focus-layout'
 import type { FocusLayoutData } from '@shared/focus-layout'
 import { parseFocusUi } from '@shared/focus-smart-ui'
 import type { FocusUiAction, FocusUiWidget } from '@shared/focus-smart-ui'
-import type { FocusSendOutcome, FocusComposerModeId, FocusModelSettingKind, FocusOutboundFailure } from '@shared/focus-chat'
+import type { FocusSendOutcome, FocusComposerModeId, FocusModelSettingKind, FocusOutboundFailure, FocusOutboundQueueItem, FocusOutboundQueueState } from '@shared/focus-chat'
 import deepseekIcon from '../assets/DeepSeek.svg'
 import chatgptIcon from '../assets/ChatGPT.svg'
 // The view's brand icon per focus platform (`FOCUS_PLATFORMS`); a platform without one shows its name.
@@ -184,6 +184,88 @@ function sendOutcomeDescription(result: string, modelLabel: string): string {
     'helper-not-ready': 'Windows 桌面助手尚未就绪，消息未发送，草稿已保留。就绪后再发送即可。'
   }
   return descriptions[result] || '消息未发送，草稿已保留。'
+}
+const QUEUE_KIND_LABELS: Record<FocusOutboundQueueItem['kind'], string> = {
+  user: '你的消息', 'tool-result': '工具结果', scheduled: '定时任务', question: '回答', recovery: '恢复消息', auxiliary: '辅助消息'
+}
+const QUEUE_RETRY_LABELS: Record<string, string> = {
+  busy: '等待页面空闲', 'no-composer': '等待网页输入框', 'insert-failed': '网页未接受输入，稍后重试'
+}
+const QUEUE_COLLAPSED_KEY = 'focus-outbound-queue-collapsed'
+function readQueueCollapsed(): boolean {
+  try { return localStorage.getItem(QUEUE_COLLAPSED_KEY) === '1' } catch { return false }
+}
+function activeQueueStatus(item: FocusOutboundQueueItem): string {
+  if (!item.retryReason) return (item.attempt ?? 1) > 1 ? `发送中 · 第 ${item.attempt} 次尝试` : '发送中'
+  return `${QUEUE_RETRY_LABELS[item.retryReason] ?? '等待重试'} · 已尝试 ${item.attempt ?? 1} 次`
+}
+interface QueueTrayProps {
+  queue: FocusOutboundQueueState
+  collapsed: boolean
+  onToggle(): void
+  onCancelActive(id: string): void
+  onEdit(item: FocusOutboundQueueItem): void
+  onDelete(item: FocusOutboundQueueItem): void
+}
+/**
+ * The AI outbound lane for this conversation, docked to the top of the composer: what is being sent
+ * now and why it may be waiting, then what follows in order. Only the user's own waiting messages can
+ * be edited or deleted — automated items (tool results, scheduled runs, answers) must keep their order.
+ */
+function OutboundQueueTray({ queue, collapsed, onToggle, onCancelActive, onEdit, onDelete }: QueueTrayProps): JSX.Element | null {
+  const [confirming, setConfirming] = useState<string | null>(null)
+  useEffect(() => {
+    if (!confirming) return
+    const timer = setTimeout(() => setConfirming(null), 4000)
+    return () => clearTimeout(timer)
+  }, [confirming])
+  const { active } = queue
+  const queued = queue.queued ?? []
+  if (!active && !queued.length) return null
+  // The blocked head has its own banner; it is counted in `pending` but not listed here.
+  const waiting = queue.pending - (queue.blocked ? 1 : 0)
+  const hidden = waiting - (active ? 1 : 0) - queued.length
+  const kind = (item: FocusOutboundQueueItem): string => QUEUE_KIND_LABELS[item.kind] ?? '消息'
+  const files = (item: FocusOutboundQueueItem): string => item.attachments?.length ? `附件：${item.attachments.map(file => file.name).join('、')}` : ''
+  return <section className={'focus-queue' + (collapsed ? ' is-collapsed' : '')} aria-label="AI 发送队列">
+    <button type="button" className="focus-queue__head" aria-expanded={!collapsed} onClick={onToggle}>
+      <span className={'focus-queue__dot' + (active?.retryReason ? ' is-waiting' : '')} aria-hidden="true" />
+      <span className="focus-queue__title">发送队列</span>
+      <span className="focus-queue__count">{waiting} 条</span>
+      <span className="focus-queue__peek">{collapsed && active ? `${activeQueueStatus(active)}：${active.text || kind(active)}` : '按顺序自动发出'}</span>
+      <svg className="focus-queue__chevron" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+        <path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+    </button>
+    {collapsed ? null : <ol className="focus-queue__list">
+      {active ? <li className="focus-queue__item is-active" aria-live="polite">
+        <span className={'focus-queue__marker' + (active.retryReason ? ' is-waiting' : '')} aria-hidden="true"><span /></span>
+        <span className="focus-queue__body">
+          <span className="focus-queue__line"><span className="focus-queue__kind">{kind(active)}</span>
+            <span className="focus-queue__text" title={active.text}>{active.text || '（无文字）'}</span></span>
+          <span className="focus-queue__meta">{[activeQueueStatus(active), files(active)].filter(Boolean).join(' · ')}</span>
+        </span>
+        <span className="focus-queue__actions">
+          <button type="button" className={confirming === active.id ? 'is-danger' : undefined}
+            title="停止这条消息的发送；如果已经提交到网页，结果需要到原始视图核对"
+            onClick={() => { if (confirming === active.id) { setConfirming(null); onCancelActive(active.id) } else setConfirming(active.id) }}>
+            {confirming === active.id ? '确认取消？' : '取消'}</button>
+        </span>
+      </li> : null}
+      {queued.map((item, index) => <li key={item.id} className="focus-queue__item">
+        <span className="focus-queue__marker" aria-label={`第 ${index + 1} 条等待`}>{index + 1}</span>
+        <span className="focus-queue__body">
+          <span className="focus-queue__line"><span className="focus-queue__kind">{kind(item)}</span>
+            <span className="focus-queue__text" title={item.text}>{item.text || '（无文字）'}</span></span>
+          <span className="focus-queue__meta">{[item.restorable ? '等待发送' : '自动发送，保持顺序', files(item)].filter(Boolean).join(' · ')}</span>
+        </span>
+        {item.restorable ? <span className="focus-queue__actions">
+          <button type="button" title="移出队列并放回输入框修改" onClick={() => onEdit(item)}>编辑</button>
+          <button type="button" title="移出队列，不再发送" onClick={() => onDelete(item)}>删除</button>
+        </span> : null}
+      </li>)}
+      {hidden > 0 ? <li className="focus-queue__more">还有 {hidden} 条等待发送</li> : null}
+    </ol>}
+  </section>
 }
 function FilePreview({ file, onPreview }: { file: File; onPreview(source: string, name: string): void }): JSX.Element {
   const [source, setSource] = useState('')
@@ -561,6 +643,13 @@ function FocusChatView(props: Props): JSX.Element {
   /** Queue failures already restored or dismissed here, while their dismissal reaches the main process. */
   const handledQueueFailures = useRef(new Set<string>())
   const [, setHandledQueueFailureCount] = useState(0)
+  const [queueCollapsed, setQueueCollapsed] = useState(readQueueCollapsed)
+  /**
+   * Waiting composer messages the user pulled out of the queue, by clientRequestId. Their cancellation
+   * reaches the main process as a failure: 'restored' (draft already back) and 'discard' are dismissed
+   * silently; 'restore' (no local draft, e.g. after a reload) restores the text the main process kept.
+   */
+  const queuePullbacks = useRef(new Map<string, 'restored' | 'restore' | 'discard'>())
   const [error, setError] = useState('')
   const [actionId, setActionId] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -802,6 +891,13 @@ function FocusChatView(props: Props): JSX.Element {
       return
     }
     for (const failure of outboundFailures) {
+      const pullback = queuePullbacks.current.get(failure.sourceId)
+      if (pullback && !handledQueueFailures.current.has(failure.id)) {
+        queuePullbacks.current.delete(failure.sourceId)
+        if (pullback === 'restore') restoreQueuedFailure(failure)
+        else dismissQueueFailure(failure.id)
+        continue
+      }
       const saved = queuedDrafts.get(failure.sourceId)
       // A possibly-submitted message is never restored silently: restoring could invite a duplicate send.
       if (!saved || failure.uncertain || handledQueueFailures.current.has(failure.id)) continue
@@ -818,8 +914,38 @@ function FocusChatView(props: Props): JSX.Element {
     dismissQueueFailure(failure.id)
   }
   // Failures left to the user: possibly-submitted ones, and ones whose draft this renderer no longer holds (e.g. after a reload).
-  const promptQueueFailures = (outboundFailures ?? []).filter(failure =>
+  const promptQueueFailures = (outboundFailures ?? []).filter(failure => !queuePullbacks.current.has(failure.sourceId) &&
     (failure.uncertain || !queuedDrafts.has(failure.sourceId)) && !handledQueueFailures.current.has(failure.id))
+  const outboundQueue = state?.outboundQueue
+  const queueTrayVisible = !!outboundQueue && (!!outboundQueue.active || !!outboundQueue.queued?.length)
+  const lastEditableQueued = [...(outboundQueue?.queued ?? [])].reverse().find(item => item.restorable && item.sourceId)
+  const toggleQueue = (): void => {
+    const next = !queueCollapsed
+    setQueueCollapsed(next)
+    try { localStorage.setItem(QUEUE_COLLAPSED_KEY, next ? '1' : '0') } catch { /* Per-viewer convenience only. */ }
+  }
+  /** Takes a waiting composer message out of the lane; 'edit' puts it back in the composer, 'discard' drops it. */
+  const pullQueued = async (item: FocusOutboundQueueItem, mode: 'edit' | 'discard'): Promise<void> => {
+    const sourceId = item.sourceId
+    if (!sourceId) return
+    let removed = false
+    try { removed = await window.api.resolveFocusOutboundQueue(owner, item.id, 'cancel') } catch { removed = false }
+    if (!alive.current) return
+    if (!removed) { setError('这条消息已经开始发送，无法再修改。'); return }
+    const saved = queuedDrafts.get(sourceId)
+    queuedDrafts.delete(sourceId)
+    if (mode === 'discard') { queuePullbacks.current.set(sourceId, 'discard'); return }
+    if (saved) {
+      restoreQueuedDraft(saved.text, saved.skills, saved.files)
+      queuePullbacks.current.set(sourceId, 'restored')
+    } else queuePullbacks.current.set(sourceId, 'restore')
+    requestAnimationFrame(() => composerInput.current?.focus())
+  }
+  const cancelActiveQueued = (id: string): void => {
+    void window.api.resolveFocusOutboundQueue(owner, id, 'cancel').then(ok => {
+      if (!ok && alive.current) setError('这条消息的发送已经结束，无需取消。')
+    }).catch(() => {})
+  }
   const compactionDisabled = !owner.conversationId ? '请先开始一个对话，再压缩已有记录。' :
     working || sending || stopping || !!editingId || settingPending !== null || !ready || !!state?.nativeDraft || !!sendFailure
       ? '请等待当前回答、发送或编辑结束后再压缩。' : compaction.blocked ? '正在处理压缩任务。' :
@@ -1118,8 +1244,6 @@ function FocusChatView(props: Props): JSX.Element {
     <div className="focus-chat__bottom">
       {props.needsAnswer ? <div className="focus-chat__notice" role="status">{modelLabel} 需要你的回答，任务正在等待。<button type="button" onClick={props.onQuestion}>回答问题</button></div> : null}
       {ready && sendBlock ? <div className="focus-chat__notice" role="status"><span className="focus-chat__pulse" aria-hidden="true" />{sendBlock} 可以先输入，草稿会保留。</div> : null}
-      {state?.outboundQueue?.pending ? <div className="focus-chat__notice" role="status">AI 发送队列：{state.outboundQueue.pending} 条待处理{state.outboundQueue.active ? '，当前正在发送' : ''}。
-        {state.outboundQueue.active ? <button type="button" onClick={() => void window.api.resolveFocusOutboundQueue(owner, state.outboundQueue!.active!.id, 'cancel')}>取消当前发送</button> : null}</div> : null}
       {promptQueueFailures.map(failure => {
         const local = queuedDrafts.has(failure.sourceId)
         return <div key={failure.id} className="focus-send-failure" role="alert">
@@ -1159,7 +1283,9 @@ function FocusChatView(props: Props): JSX.Element {
       {settingError ? <div className="focus-chat__error" role="alert">{settingError}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       {error ? <div className="focus-chat__error" role="alert">{error}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       <FocusCompaction owner={owner} visible={visible} state={compaction.state} pending={compaction.pending} error={compaction.error} act={compaction.act} />
-      <form className="focus-composer" onSubmit={event => void submit(event)}>
+      {queueTrayVisible ? <OutboundQueueTray queue={outboundQueue!} collapsed={queueCollapsed} onToggle={toggleQueue}
+        onCancelActive={cancelActiveQueued} onEdit={item => void pullQueued(item, 'edit')} onDelete={item => void pullQueued(item, 'discard')} /> : null}
+      <form className={'focus-composer' + (queueTrayVisible ? ' has-queue' : '')} onSubmit={event => void submit(event)}>
         {skillsOpen ? <div className="focus-skills" id={'focus-skills-' + owner.sessionId} role="listbox" aria-label="选择技能">
           <div className="focus-skills__label">技能 · ↑↓ 选择 · Enter 确定 · Esc 关闭</div>
           {matchingSkills.length ? matchingSkills.map((skill, index) => <div className="focus-skills__row" key={skill.id} role="presentation"><button type="button" role="option" aria-selected={activeSkill?.id === skill.id} id={'focus-skill-' + skill.id + '-' + owner.sessionId}
@@ -1186,7 +1312,8 @@ function FocusChatView(props: Props): JSX.Element {
             <span className="focus-draft-file__name" title={item.file.name}>{item.file.name}<small>{fileSize(item.file.size)} · {sending ? '上传并发送中…' : '待发送'}</small></span>
             <button type="button" disabled={sending} aria-label={'移除附件 ' + item.file.name} onClick={() => removeFile(item.id)}>×</button>
           </div>)}</div> : null}
-        <textarea ref={composerInput} value={draft} disabled={!!editingId || compaction.blocked} maxLength={20000} rows={2} aria-label="消息" placeholder="描述你想完成的任务… 输入 // 选择技能"
+        <textarea ref={composerInput} value={draft} disabled={!!editingId || compaction.blocked} maxLength={20000} rows={2} aria-label="消息"
+          placeholder={queueTrayVisible ? '继续输入，新消息会排在队列后按顺序发送… 输入 // 选择技能' : '描述你想完成的任务… 输入 // 选择技能'}
           aria-expanded={skillsOpen} aria-controls={skillsOpen ? 'focus-skills-' + owner.sessionId : undefined}
           aria-activedescendant={skillsOpen && activeSkill ? 'focus-skill-' + activeSkill.id + '-' + owner.sessionId : undefined}
           onSelect={event => setSkillCaret(event.currentTarget.selectionStart)}
@@ -1222,6 +1349,13 @@ function FocusChatView(props: Props): JSX.Element {
                 return
               }
             }
+            // As in terminal agents: ↑ in an empty composer pulls the last waiting message back for editing.
+            if (event.key === 'ArrowUp' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
+              !draftRef.current && !filesRef.current.length && lastEditableQueued) {
+              event.preventDefault()
+              void pullQueued(lastEditableQueued, 'edit')
+              return
+            }
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!sending && ready && !sendBlock && !compaction.blocked) event.currentTarget.form?.requestSubmit() }
           }} />
         <input ref={fileInput} type="file" multiple hidden onChange={event => { addFiles([...event.currentTarget.files ?? []]); event.currentTarget.value = '' }} />
@@ -1233,7 +1367,7 @@ function FocusChatView(props: Props): JSX.Element {
           {nativeGenerating || stopping ? <button type="button" className="focus-composer__send" disabled={stopping || sending || !ready} onClick={() => void stop()} aria-label="停止生成">{stopping ? <ComposerPendingIcon /> : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
             <button type="submit" className="focus-composer__send" disabled={sending || props.needsAnswer || !!sendFailure || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || !!sendBlock || compaction.blocked || skillsOpen || (!!state?.outboundQueue?.blocked) || (!draft.trim() && !draftFiles.length)} aria-label="发送消息" title={state?.outboundQueue?.blockedReason || sendBlock || undefined}>{sending ? <ComposerPendingIcon /> : '↑'}</button>}
         </div>
-      </form><p className="focus-composer__hint">Enter 发送 · Shift+Enter 换行</p>
+      </form><p className="focus-composer__hint">Enter 发送 · Shift+Enter 换行{lastEditableQueued ? ' · ↑ 编辑排队的消息' : ''}</p>
     </div>
     </FocusFilePreviewProvider></section></FocusSmartUiContext.Provider></FocusCitationContext.Provider>
 }

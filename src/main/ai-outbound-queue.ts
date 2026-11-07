@@ -22,6 +22,15 @@ export type AiOutboundQueueState = FocusOutboundQueueState
 
 /** Retryable outcomes stop being retried after this many attempts (about five minutes at the default delay). */
 export const DEFAULT_MAX_ATTEMPTS = 120
+/** How many waiting items a queue state lists; the rest are only counted. */
+const MAX_LISTED_QUEUED = 5
+const PREVIEW_LENGTH = 160
+
+/** Collapses whitespace and shortens text for a one-line summary. */
+export function queuePreview(text: string): string {
+  const line = text.replace(/\s+/g, ' ').trim()
+  return line.length > PREVIEW_LENGTH ? line.slice(0, PREVIEW_LENGTH) + '…' : line
+}
 
 interface Job<T> extends AiOutboundQueueItem {
   execute(signal: AbortSignal, item: AiOutboundQueueItem): Promise<T>
@@ -41,6 +50,9 @@ interface Job<T> extends AiOutboundQueueItem {
   abortListener?: () => void
   /** The caller has been answered. */
   settled?: boolean
+  attempt?: number
+  /** Set while waiting between attempts: the refusal being waited out. */
+  retryReason?: string
 }
 
 export interface AiOutboundEnqueue<T> {
@@ -129,10 +141,14 @@ export class AiOutboundQueue {
   findByDedupeKey(key: string): AiOutboundTicket<unknown> | null { return this.deduplicated.get(key) ?? null }
 
   stateFor(owner: AiOutboundOwner): AiOutboundQueueState {
-    const active = this.current && this.belongsTo(this.current, owner) ? this.publicItem(this.current) : null
+    const current = this.current
+    const active = current && this.belongsTo(current, owner) ? { ...this.publicItem(current), ...(current.attempt ? { attempt: current.attempt } : {}),
+      ...(current.retryReason !== undefined ? { retryReason: current.retryReason } : {}) } : null
     const blocked = this.blocked && this.belongsTo(this.blocked, owner) ? this.publicItem(this.blocked) : null
-    const pending = this.jobs.filter(job => this.belongsTo(job, owner)).length + (active ? 1 : 0) + (blocked ? 1 : 0)
-    return { pending, active, blocked, ...(blocked && this.blockedReason ? { blockedReason: this.blockedReason } : {}) }
+    const waiting = this.jobs.filter(job => this.belongsTo(job, owner))
+    const pending = waiting.length + (active ? 1 : 0) + (blocked ? 1 : 0)
+    const queued = waiting.slice(0, MAX_LISTED_QUEUED).map(job => this.publicItem(job))
+    return { pending, active, ...(queued.length ? { queued } : {}), blocked, ...(blocked && this.blockedReason ? { blockedReason: this.blockedReason } : {}) }
   }
 
   enqueue<T>(request: AiOutboundEnqueue<T>): AiOutboundTicket<T> {
@@ -218,6 +234,8 @@ export class AiOutboundQueue {
       let aborted = false
       const maxAttempts = Math.max(1, job.maxAttempts ?? DEFAULT_MAX_ATTEMPTS)
       for (let attempt = 1; !this.disposed && !controller.signal.aborted; attempt++) {
+        job.attempt = attempt
+        if (job.retryReason !== undefined) { job.retryReason = undefined; this.changed() }
         try { result = await job.execute(controller.signal, job) }
         catch (error) { result = job.failed(error) }
         if (controller.signal.aborted || this.disposed) {
@@ -227,6 +245,9 @@ export class AiOutboundQueue {
         }
         // Exhausted retries are reported to the caller as-is; they never pause the lane.
         if (!job.retryable(result) || attempt >= maxAttempts) break
+        // Tell the focus view why the head is not moving.
+        job.retryReason = String(result)
+        this.changed()
         const waited = await wait(Math.min(5000, job.retryDelayMs ?? 2500), controller.signal)
         if (!waited && (controller.signal.aborted || this.disposed)) {
           result = job.aborted ? job.aborted(result) : job.cancelled()
@@ -258,9 +279,10 @@ export class AiOutboundQueue {
       (job.owner.conversationId === owner.conversationId || job.owner.conversationId === null || owner.conversationId === null)
   }
 
+  /** The focus view polls this; carry a one-line preview, not a whole tool result or file. */
   private publicItem(job: Job<unknown>): FocusOutboundQueueItem {
     return { id: job.id, kind: job.kind, platformId: job.owner.platformId, conversationId: job.owner.conversationId,
-      ...(job.sourceId ? { sourceId: job.sourceId } : {}), ...(job.text !== undefined ? { text: job.text } : {}),
+      ...(job.sourceId ? { sourceId: job.sourceId } : {}), ...(job.text !== undefined ? { text: queuePreview(job.text) } : {}),
       ...(job.attachments ? { attachments: job.attachments.map(file => ({ ...file })) } : {}) }
   }
 
