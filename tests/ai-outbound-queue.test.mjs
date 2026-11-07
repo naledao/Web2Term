@@ -75,28 +75,83 @@ test('blocks later jobs when the result is unknown', async () => {
   let laterRan = false
   const first = queue.enqueue(request({ execute: async () => 'unknown', blockOnFailure: result => result === 'unknown' }))
   const second = queue.enqueue(request({ sourceId: 'second', execute: async () => { laterRan = true; return 'ok' } }))
+  // The caller is answered at once; only the lane waits for the user.
   assert.equal(await first.completion, 'unknown')
   await settle()
   assert.equal(laterRan, false)
   assert.equal(queue.state().blocked?.id, first.item.id)
+  assert.equal(queue.isBlocked(first.item.id), true)
   assert.equal(queue.acknowledgeBlocked(first.item.id), true)
   assert.equal(await second.completion, 'ok')
   assert.equal(laterRan, true)
 })
 
-test('resumes a blocked job without duplicating its completion', async () => {
+test('keeps a blocked message deduplicated until it is skipped, and never re-sends it', async () => {
   const Queue = loadQueue()
   const queue = new Queue()
   let attempts = 0
-  const ticket = queue.enqueue(request({ retryDelayMs: 1, execute: async () => ++attempts === 1 ? 'unknown' : 'ok',
-    blockOnFailure: result => result === 'unknown', retryable: result => result === 'unknown' }))
-  assert.equal(await ticket.completion, 'unknown')
-  await new Promise(resolve => setTimeout(resolve, 5))
-  assert.equal(queue.state().blocked?.id, ticket.item.id)
-  assert.equal(queue.resumeBlocked(), true)
-  await new Promise(resolve => setTimeout(resolve, 5))
+  const make = () => request({ dedupeKey: 'blocked-source', execute: async () => { attempts++; return 'unknown' },
+    blockOnFailure: result => result === 'unknown' })
+  const first = queue.enqueue(make())
+  assert.equal(await first.completion, 'unknown')
+  const again = queue.enqueue(make())
+  assert.equal(again.item.id, first.item.id, 'the same message cannot be queued again while unverified')
+  assert.equal(await again.completion, 'unknown')
+  assert.equal(attempts, 1)
+  assert.equal(queue.acknowledgeBlocked(first.item.id), true)
+  await settle()
+  assert.equal(attempts, 1)
   assert.equal(queue.state().blocked, null)
-  assert.equal(attempts, 2)
+})
+
+test('stops retrying after maxAttempts and returns the last result without blocking', async () => {
+  const Queue = loadQueue()
+  const queue = new Queue()
+  let attempts = 0
+  const ticket = queue.enqueue(request({ retryDelayMs: 1, maxAttempts: 3, execute: async () => { attempts++; return 'busy' },
+    retryable: result => result === 'busy' }))
+  const later = queue.enqueue(request({ sourceId: 'later' }))
+  assert.equal(await ticket.completion, 'busy')
+  assert.equal(attempts, 3)
+  assert.equal(await later.completion, 'ok')
+  assert.equal(queue.state().blocked, null)
+})
+
+test('cancels the active job during its retry wait', async () => {
+  const Queue = loadQueue()
+  const queue = new Queue()
+  const ticket = queue.enqueue(request({ retryDelayMs: 50, execute: async () => 'busy', retryable: result => result === 'busy' }))
+  await settle()
+  assert.equal(queue.cancel(ticket.item.id), true)
+  assert.equal(await ticket.completion, 'cancelled')
+})
+
+test('binds unassigned jobs only while a send for the new conversation is running', async () => {
+  const Queue = loadQueue()
+  const queue = new Queue()
+  const home = { ...owner, conversationId: null }
+  let release
+  const hold = new Promise(resolve => { release = resolve })
+  const first = queue.enqueue(request({ owner: home, execute: async () => { await hold; return 'ok' } }))
+  const second = queue.enqueue(request({ owner: home, sourceId: 'second' }))
+  await settle()
+  queue.bindUnassigned('chatgpt', 'created')
+  assert.equal(first.item.owner.conversationId, 'created')
+  assert.equal(second.item.owner.conversationId, 'created')
+  release()
+  await second.completion
+
+  // The running send belongs to an existing chat, so a conversation change is a navigation, not a creation.
+  let releaseExisting
+  const holdExisting = new Promise(resolve => { releaseExisting = resolve })
+  const existing = queue.enqueue(request({ sourceId: 'existing', execute: async () => { await holdExisting; return 'ok' } }))
+  const waiting = queue.enqueue(request({ owner: home, sourceId: 'waiting' }))
+  await settle()
+  queue.bindUnassigned('chatgpt', 'browsed')
+  assert.equal(waiting.item.owner.conversationId, null)
+  releaseExisting()
+  await existing.completion
+  await waiting.completion
 })
 
 test('cancels a queued job when its external signal aborts', async () => {

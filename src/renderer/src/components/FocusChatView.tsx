@@ -31,7 +31,7 @@ import { parseFocusLayout } from '@shared/focus-layout'
 import type { FocusLayoutData } from '@shared/focus-layout'
 import { parseFocusUi } from '@shared/focus-smart-ui'
 import type { FocusUiAction, FocusUiWidget } from '@shared/focus-smart-ui'
-import type { FocusSendOutcome, FocusComposerModeId, FocusModelSettingKind } from '@shared/focus-chat'
+import type { FocusSendOutcome, FocusComposerModeId, FocusModelSettingKind, FocusOutboundFailure } from '@shared/focus-chat'
 import deepseekIcon from '../assets/DeepSeek.svg'
 import chatgptIcon from '../assets/ChatGPT.svg'
 // The view's brand icon per focus platform (`FOCUS_PLATFORMS`); a platform without one shows its name.
@@ -159,6 +159,31 @@ function saveFileDraft(ownerKey: string, files: DraftFile[]): void {
   if (files.length) fileDrafts.set(ownerKey, files)
   else fileDrafts.delete(ownerKey)
   fileDraftListeners.get(ownerKey)?.forEach(listener => listener())
+}
+interface QueuedDraft { ownerKey: string; text: string; skills: FocusToolSkill[]; files: DraftFile[]; at: number }
+// The composer clears its draft once the main process queues a message. Keep that draft here, keyed by
+// clientRequestId, so a queued message that ends unsent can be handed back to the composer.
+const queuedDrafts = new Map<string, QueuedDraft>()
+const QUEUED_DRAFT_TTL_MS = 30 * 60_000
+function rememberQueuedDraft(requestId: string, draft: QueuedDraft): void {
+  for (const [id, item] of queuedDrafts) if (draft.at - item.at > QUEUED_DRAFT_TTL_MS) queuedDrafts.delete(id)
+  queuedDrafts.set(requestId, draft)
+}
+function sendOutcomeDescription(result: string, modelLabel: string): string {
+  const descriptions: Record<string, string> = {
+    busy: '页面正在处理或保留着草稿，消息未重发。可稍后再试或切回原始视图处理。',
+    stuck: '发送结果尚未确认。草稿已保留，请先到原始视图核对，避免重复发送。',
+    'no-composer': '尚未找到网页输入框，请切回原始视图完成登录或页面验证。',
+    'insert-failed': '网页没有接受输入，草稿已保留。请切回原始视图处理。',
+    unavailable: '当前页面不可用或会话已切换，草稿已保留。',
+    invalid: '请输入文字或添加附件；附件最多 3 个，单个 20 MB，合计 25 MB。',
+    'upload-failed': '附件上传未完成，附件已保留。请到原始视图检查是否留有上传草稿后再重试。',
+    'unsupported-file-type': modelLabel + ' 当前输入区不接受该附件类型，附件已保留。',
+    unknown: '附件消息是否发送成功尚未确认，附件已保留。请先到原始视图核对，避免重复发送。',
+    cancelled: '发送已取消，文字和附件仍保留。',
+    'helper-not-ready': 'Windows 桌面助手尚未就绪，消息未发送，草稿已保留。就绪后再发送即可。'
+  }
+  return descriptions[result] || '消息未发送，草稿已保留。'
 }
 function FilePreview({ file, onPreview }: { file: File; onPreview(source: string, name: string): void }): JSX.Element {
   const [source, setSource] = useState('')
@@ -533,6 +558,9 @@ function FocusChatView(props: Props): JSX.Element {
   const fileInput = useRef<HTMLInputElement>(null)
   const sendLock = useRef(false)
   const sendCancelled = useRef(false)
+  /** Queue failures already restored or dismissed here, while their dismissal reaches the main process. */
+  const handledQueueFailures = useRef(new Set<string>())
+  const [, setHandledQueueFailureCount] = useState(0)
   const [error, setError] = useState('')
   const [actionId, setActionId] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -742,6 +770,56 @@ function FocusChatView(props: Props): JSX.Element {
     setDraft(text)
     try { localStorage.setItem(draftKey(viewOwner), text) } catch { /* Keep the in-memory draft. */ }
   }
+  /** Hands an unsent queued message back to the composer, after anything the user typed since. */
+  const restoreQueuedDraft = (text: string, skills: FocusToolSkill[], files: DraftFile[]): void => {
+    const current = draftRef.current
+    if (text) setDraftText((current.trim() ? current + '\n\n' + text : text).slice(0, 20000))
+    if (skills.length) setSelectedSkills(previous => {
+      const next = [...new Set([...previous, ...skills])]
+      saveSkillDraft(viewOwnerKey, next)
+      return next
+    })
+    if (files.length) {
+      const merged = [...filesRef.current, ...files.filter(file => !filesRef.current.some(item => item.id === file.id))].slice(0, FOCUS_MAX_FILES)
+      filesRef.current = merged
+      saveFileDraft(viewOwnerKey, merged)
+      setDraftFiles(merged)
+    }
+  }
+  const dismissQueueFailure = (id: string): void => {
+    handledQueueFailures.current.add(id)
+    setHandledQueueFailureCount(handledQueueFailures.current.size)
+    void window.api.resolveFocusOutboundQueue(owner, id, 'dismiss-failure').catch(() => {})
+  }
+  const outboundFailures = state?.outboundQueue?.failures
+  const outboundPending = state?.outboundQueue?.pending ?? 0
+  useEffect(() => {
+    if (!alive.current) return
+    if (!outboundFailures?.length) {
+      // Settled without a failure: this view's remembered drafts were sent. Very recent entries may
+      // predate the snapshot that first counts them, so they are left for the next one.
+      if (!outboundPending) for (const [id, item] of queuedDrafts) if (item.ownerKey === viewOwnerKey && Date.now() - item.at > 5000) queuedDrafts.delete(id)
+      return
+    }
+    for (const failure of outboundFailures) {
+      const saved = queuedDrafts.get(failure.sourceId)
+      // A possibly-submitted message is never restored silently: restoring could invite a duplicate send.
+      if (!saved || failure.uncertain || handledQueueFailures.current.has(failure.id)) continue
+      restoreQueuedFailure(failure)
+      setError('排队的消息未发送：' + sendOutcomeDescription(failure.outcome, modelLabel))
+    }
+  }, [ownerKey, viewOwnerKey, outboundFailures, outboundPending])
+  /** Restores the full local draft when this renderer still holds it, otherwise the text the main process kept. */
+  function restoreQueuedFailure(failure: FocusOutboundFailure): void {
+    const saved = queuedDrafts.get(failure.sourceId)
+    queuedDrafts.delete(failure.sourceId)
+    if (saved) restoreQueuedDraft(saved.text, saved.skills, saved.files)
+    else restoreQueuedDraft(failure.text, [], [])
+    dismissQueueFailure(failure.id)
+  }
+  // Failures left to the user: possibly-submitted ones, and ones whose draft this renderer no longer holds (e.g. after a reload).
+  const promptQueueFailures = (outboundFailures ?? []).filter(failure =>
+    (failure.uncertain || !queuedDrafts.has(failure.sourceId)) && !handledQueueFailures.current.has(failure.id))
   const compactionDisabled = !owner.conversationId ? '请先开始一个对话，再压缩已有记录。' :
     working || sending || stopping || !!editingId || settingPending !== null || !ready || !!state?.nativeDraft || !!sendFailure
       ? '请等待当前回答、发送或编辑结束后再压缩。' : compaction.blocked ? '正在处理压缩任务。' :
@@ -793,8 +871,10 @@ function FocusChatView(props: Props): JSX.Element {
       const files = await Promise.all(sourceFiles.map(item => encodeFile(item.file)))
       // Reading files can finish after a conversation change; never send an abandoned draft.
       if (!alive.current || sendCancelled.current) return
-      const result = await window.api.sendFocusMessage({ ...owner, text, files, skills: submittedSkills, clientRequestId: crypto.randomUUID() })
+      const clientRequestId = crypto.randomUUID()
+      const result = await window.api.sendFocusMessage({ ...owner, text, files, skills: submittedSkills, clientRequestId })
       // The main process owns an immutable copy of the payload once it accepts the queue item.
+      if (result === 'queued') rememberQueuedDraft(clientRequestId, { ownerKey: viewOwnerKey, text, skills: submittedSkills, files: sourceFiles, at: Date.now() })
       if (result === 'ok' || result === 'queued') {
         // A home -> chat navigation may unmount this composer before the result.
         if (JSON.stringify(readSkillDraft(viewOwnerKey)) === JSON.stringify(submittedSkills)) saveSkillDraft(viewOwnerKey, [])
@@ -807,23 +887,8 @@ function FocusChatView(props: Props): JSX.Element {
           filesRef.current = []
           setDraftFiles([])
         }
-        if (alive.current && result === 'queued' && state?.outboundQueue?.pending) setError('已加入 AI 发送队列，将按顺序发送。')
       } else if (alive.current) {
-        const descriptions: Record<string, string> = {
-          busy: '页面正在处理或保留着草稿，消息未重发。可稍后再试或切回原始视图处理。',
-          queued: '已加入 AI 发送队列，将按顺序发送。',
-          stuck: '发送结果尚未确认。草稿已保留，请先到原始视图核对，避免重复发送。',
-          'no-composer': '尚未找到网页输入框，请切回原始视图完成登录或页面验证。',
-          'insert-failed': '网页没有接受输入，草稿已保留。请切回原始视图处理。',
-          unavailable: '当前页面不可用或会话已切换，草稿已保留。',
-          invalid: '请输入文字或添加附件；附件最多 3 个，单个 20 MB，合计 25 MB。',
-          'upload-failed': '附件上传未完成，附件已保留。请到原始视图检查是否留有上传草稿后再重试。',
-          'unsupported-file-type': modelLabel + ' 当前输入区不接受该附件类型，附件已保留。',
-          unknown: '附件消息是否发送成功尚未确认，附件已保留。请先到原始视图核对，避免重复发送。',
-          cancelled: '发送已取消，文字和附件仍保留。',
-          'helper-not-ready': 'Windows 桌面助手尚未就绪，消息未发送，草稿已保留。就绪后再发送即可。'
-        }
-        setError(descriptions[result] || '消息未发送，草稿已保留。')
+        setError(sendOutcomeDescription(result, modelLabel))
       }
     } catch { if (alive.current) setError('发送结果未确认，草稿已保留。请到原始视图核对后再操作。') }
     finally { sendLock.current = false; if (alive.current) setSending(false) }
@@ -1053,14 +1118,31 @@ function FocusChatView(props: Props): JSX.Element {
     <div className="focus-chat__bottom">
       {props.needsAnswer ? <div className="focus-chat__notice" role="status">{modelLabel} 需要你的回答，任务正在等待。<button type="button" onClick={props.onQuestion}>回答问题</button></div> : null}
       {ready && sendBlock ? <div className="focus-chat__notice" role="status"><span className="focus-chat__pulse" aria-hidden="true" />{sendBlock} 可以先输入，草稿会保留。</div> : null}
-      {state?.outboundQueue?.pending ? <div className="focus-chat__notice" role="status">AI 发送队列：{state.outboundQueue.pending} 条待处理{state.outboundQueue.active ? '，当前正在发送' : ''}。</div> : null}
+      {state?.outboundQueue?.pending ? <div className="focus-chat__notice" role="status">AI 发送队列：{state.outboundQueue.pending} 条待处理{state.outboundQueue.active ? '，当前正在发送' : ''}。
+        {state.outboundQueue.active ? <button type="button" onClick={() => void window.api.resolveFocusOutboundQueue(owner, state.outboundQueue!.active!.id, 'cancel')}>取消当前发送</button> : null}</div> : null}
+      {promptQueueFailures.map(failure => {
+        const local = queuedDrafts.has(failure.sourceId)
+        return <div key={failure.id} className="focus-send-failure" role="alert">
+          <div className="focus-send-failure__text"><strong>{failure.uncertain ? '排队的消息可能已发送' : '排队的消息未发送'}</strong>
+            <p>{failure.uncertain ? '发送中途被取消，结果未确认。请先到原始视图核对：已发送就忽略；未发送再恢复草稿。' : sendOutcomeDescription(failure.outcome, modelLabel)}</p>
+            <small>{failure.text.length > 120 ? failure.text.slice(0, 120) + '…' : failure.text}
+              {failure.attachments?.length && !local ? `（附件需重新添加：${failure.attachments.map(file => file.name).join('、')}）` : ''}</small></div>
+          <div className="focus-send-failure__actions">
+            {failure.uncertain ? <button type="button" onClick={props.onOriginal}>查看原始视图</button> : null}
+            {local || failure.text ? <button type="button" onClick={() => restoreQueuedFailure(failure)}>{local ? '恢复草稿' : '恢复文字到输入框'}</button> : null}
+            <button type="button" onClick={() => { queuedDrafts.delete(failure.sourceId); dismissQueueFailure(failure.id) }}>忽略</button>
+          </div>
+        </div>
+      })}
       {state?.outboundQueue?.blocked ? <div className="focus-send-failure" role="alert">
         <div className="focus-send-failure__text"><strong>发送队列已暂停</strong><p>{state.outboundQueue.blockedReason || '队首消息的发送状态尚未确认。'}</p>
-          <small>请先到原始视图核对队首消息；核对后可跳过该消息继续发送后续内容。</small></div>
+          <small>请先到原始视图核对队首消息，按核对结果跳过它，后续消息才会继续发送。</small></div>
         <div className="focus-send-failure__actions">
           <button type="button" onClick={props.onOriginal}>查看原始视图</button>
-          <button type="button" onClick={() => void window.api.retryFocusOutboundQueue(owner)}>重试队首</button>
-          <button type="button" onClick={() => void window.api.resolveFocusOutboundQueue(owner, state.outboundQueue!.blocked!.id, 'acknowledge-skip')}>已核对，跳过队首</button>
+          {state.outboundQueue.blocked.restorable ? <>
+            <button type="button" onClick={() => void window.api.resolveFocusOutboundQueue(owner, state.outboundQueue!.blocked!.id, 'acknowledge-skip')}>已发送，跳过</button>
+            <button type="button" onClick={() => void window.api.resolveFocusOutboundQueue(owner, state.outboundQueue!.blocked!.id, 'restore-skip')}>未发送，恢复草稿并跳过</button>
+          </> : <button type="button" onClick={() => void window.api.resolveFocusOutboundQueue(owner, state.outboundQueue!.blocked!.id, 'acknowledge-skip')}>已核对，跳过队首</button>}
         </div>
       </div> : null}
       {!ready ? <div className="focus-chat__notice">网页尚未就绪。<button type="button" onClick={props.onOriginal}>切回原始视图完成登录或检查页面</button></div> : null}

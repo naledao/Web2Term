@@ -5,7 +5,7 @@ import { COMPUTER_OVERLAY_GET, COMPUTER_OVERLAY_CHANGED, COMPUTER_OVERLAY_FIT, c
 import type { ComputerOverlaySnapshot } from '../shared/computer-overlay'
 import { ToolboxRouter } from './toolbox-router'
 import { TOOLBOX_METHODS } from '../shared/toolbox'
-import { DEFAULT_CHAT_VIEW, supportsFocusView } from '../shared/focus-chat'
+import { DEFAULT_CHAT_VIEW, focusOutboundQueueActions, supportsFocusView } from '../shared/focus-chat'
 import type { FocusOwner } from '../shared/focus-chat'
 import type { CompactionAction } from '../shared/conversation-compaction'
 import type { StoredCompaction } from './conversation-compaction'
@@ -1598,9 +1598,8 @@ function registerIpcHandlers(): void {
     return runtime.sendFocusMessage(request)
   })
   ipcMain.handle(IpcChannels.focusChatQueueResolve, (event, owner, itemId, action) =>
-    typeof itemId === 'string' && ['acknowledge-skip'].includes(action)
+    typeof itemId === 'string' && focusOutboundQueueActions.includes(action)
       ? focusRuntime(event, owner)?.resolveFocusOutboundQueue(owner, itemId, action) ?? false : false)
-  ipcMain.handle(IpcChannels.focusChatQueueRetry, (event, owner) => focusRuntime(event, owner)?.retryFocusOutboundQueue(owner) ?? false)
   ipcMain.handle(IpcChannels.focusChatStopGeneration, (event, owner) =>
     focusRuntime(event, owner)?.stopFocusGeneration(owner) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatAsk, (event, request) =>

@@ -706,9 +706,9 @@ export class ChatGptEmbed {
     if (supportsSelectionQuestion(this.platform.id)) {
       this.selectionQuestion = new SelectionQuestion(contents, parent, this.platform, () => this.theme,
         state => this.handlers.onQuestionChat?.(state), id => this.handlers.readQuestionContext?.(id) ?? null,
-        (contextPath, prompt, signal, isCurrent, beforeSubmit) => this.handlers.sendQuestionChat
-          ? this.handlers.sendQuestionChat(this.platform, contents, contextPath, prompt, signal, isCurrent, beforeSubmit)
-          : sendQuestionChatAttachment(contents, this.platform, contextPath, prompt, signal, isCurrent, beforeSubmit))
+        (chatContents, contextPath, prompt, signal, isCurrent, beforeSubmit) => this.handlers.sendQuestionChat
+          ? this.handlers.sendQuestionChat(this.platform, chatContents, contextPath, prompt, signal, isCurrent, beforeSubmit)
+          : sendQuestionChatAttachment(chatContents, this.platform, contextPath, prompt, signal, isCurrent, beforeSubmit))
       this.selectionQuestion.setVisible(this.visible)
     }
 

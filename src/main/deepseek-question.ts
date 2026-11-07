@@ -9,10 +9,7 @@ import type { SavedQuestionContextReader } from '../shared/deepseek-context-mark
 import type { AppTheme } from '../shared/types'
 import type { ChatPlatform } from '../shared/platforms'
 import type { BrowserWindow } from 'electron'
-import type { FileSendOutcome } from '../shared/file-requests'
-
-type QuestionChatSender = (contextPath: string, prompt: string, signal: AbortSignal, isCurrent: () => boolean,
-  beforeSubmit?: () => void) => Promise<FileSendOutcome>
+import type { QuestionChatSender } from './question-chat'
 
 export class SelectionQuestion {
   readonly reportTag: string

@@ -20,8 +20,11 @@ const config = defineConfig({
     } } }
   },
   renderer: {
-    // Windows reserves 5140-5239 on this machine, which includes Vite's 5173.
-    server: { host: '127.0.0.1', port: 5300, strictPort: true },
+    // Windows (Hyper-V/WinNAT) often reserves port ranges that include Vite's default 5173; see
+    // `netsh interface ipv4 show excludedportrange protocol=tcp`. Default to 5300, let WEB2TERM_DEV_PORT
+    // override it, and fall through to the next free port instead of failing when it is taken.
+    // electron-vite hands the port actually used to Electron, so nothing else pins it.
+    server: { host: '127.0.0.1', port: Number(process.env.WEB2TERM_DEV_PORT) || 5300, strictPort: false },
     resolve: {
       alias: {
         '@renderer': resolve(__dirname, 'src/renderer/src'),

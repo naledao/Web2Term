@@ -24,8 +24,9 @@ interface QuestionChatReadiness {
   uploadRootFound: boolean
 }
 
-type QuestionChatSender = (contextPath: string, prompt: string, signal: AbortSignal, isCurrent: () => boolean,
-  beforeSubmit?: () => void) => Promise<FileSendOutcome>
+/** Sends into `contents`, the question chat's own page — never the main conversation. */
+export type QuestionChatSender = (contents: Electron.WebContents, contextPath: string, prompt: string, signal: AbortSignal,
+  isCurrent: () => boolean, beforeSubmit?: () => void) => Promise<FileSendOutcome>
 
 /** Native chat in the renderer's right-sidebar slot; no additional BrowserWindow. */
 export class QuestionChat {
@@ -204,7 +205,7 @@ export class QuestionChat {
       const timeout = setTimeout(() => this.uploadAbort.abort(), 150000)
       let result: FileSendOutcome
       try {
-        result = await this.sendChat(this.contextPath, this.prompt, this.uploadAbort.signal,
+        result = await this.sendChat(contents, this.contextPath, this.prompt, this.uploadAbort.signal,
           () => !this.closed && !contents.isDestroyed())
       } finally { clearTimeout(timeout) }
       if (this.closed) return

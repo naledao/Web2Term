@@ -20,10 +20,14 @@ export interface AiOutboundQueueItem {
 
 export type AiOutboundQueueState = FocusOutboundQueueState
 
+/** Retryable outcomes stop being retried after this many attempts (about five minutes at the default delay). */
+export const DEFAULT_MAX_ATTEMPTS = 120
+
 interface Job<T> extends AiOutboundQueueItem {
   execute(signal: AbortSignal, item: AiOutboundQueueItem): Promise<T>
   retryable(result: T): boolean
   retryDelayMs?: number
+  maxAttempts?: number
   blockOnFailure?: (result: T) => boolean
   describeFailure?: (result: T) => string
   cancelled(): T
@@ -35,7 +39,8 @@ interface Job<T> extends AiOutboundQueueItem {
   controller?: AbortController
   externalSignal?: AbortSignal
   abortListener?: () => void
-  finished?: boolean
+  /** The caller has been answered. */
+  settled?: boolean
 }
 
 export interface AiOutboundEnqueue<T> {
@@ -47,6 +52,7 @@ export interface AiOutboundEnqueue<T> {
   execute(signal: AbortSignal, item: AiOutboundQueueItem): Promise<T>
   retryable(result: T): boolean
   retryDelayMs?: number
+  maxAttempts?: number
   blockOnFailure?: (result: T) => boolean
   describeFailure?: (result: T) => string
   cancelled(): T
@@ -73,6 +79,12 @@ const wait = (ms: number, signal: AbortSignal): Promise<boolean> => new Promise(
  *
  * The queue deliberately knows nothing about DOM or platform-specific outcomes. A job decides
  * which outcomes are safe to retry and which outcomes must stop the lane as unknown.
+ *
+ * A job that blocks the lane answers its caller at once with the uncertain outcome (the caller already
+ * knows how to report "check the original conversation"). The lane stays paused until the user has
+ * checked and skips it. The queue never re-sends a blocked message on its own: its caller has already
+ * been answered, so a re-send's outcome would reach no one and could duplicate the caller's own retry.
+ * Its dedupe key stays reserved while blocked, so the same message cannot be queued again meanwhile.
  */
 export class AiOutboundQueue {
   private readonly jobs: Job<unknown>[] = []
@@ -81,7 +93,6 @@ export class AiOutboundQueue {
   private current: Job<unknown> | null = null
   private blocked: Job<unknown> | null = null
   private blockedReason: string | undefined
-  private wakeTimer: ReturnType<typeof setTimeout> | null = null
   private disposed = false
   private readonly listeners = new Set<(state: AiOutboundQueueState) => void>()
 
@@ -96,11 +107,15 @@ export class AiOutboundQueue {
       blocked: this.blocked ? this.publicItem(this.blocked) : null, ...(this.blockedReason ? { blockedReason: this.blockedReason } : {}) }
   }
 
+  /**
+   * Binds jobs that were queued for a not-yet-created conversation. Only the send that is running
+   * for such a conversation can have created it; a mere navigation to another chat binds nothing.
+   */
   bindUnassigned(platformId: string, conversationId: string): void {
-    if (!conversationId) return
-    for (const job of this.jobs) if (job.owner.platformId === platformId && job.owner.conversationId === null) job.owner.conversationId = conversationId
-    if (this.current?.owner.platformId === platformId && this.current.owner.conversationId === null) this.current.owner.conversationId = conversationId
-    if (this.blocked?.owner.platformId === platformId && this.blocked.owner.conversationId === null) this.blocked.owner.conversationId = conversationId
+    if (!conversationId || this.current?.owner.platformId !== platformId || this.current.owner.conversationId !== null) return
+    for (const job of [this.current, ...this.jobs, ...(this.blocked ? [this.blocked] : [])]) {
+      if (job.owner.platformId === platformId && job.owner.conversationId === null) job.owner.conversationId = conversationId
+    }
     this.changed()
   }
 
@@ -111,26 +126,13 @@ export class AiOutboundQueue {
     return jobs.length
   }
 
-  countFor(owner: AiOutboundOwner): { pending: number; active: boolean; position: number; blocked: boolean } {
-    const matches = (job: Job<unknown>): boolean => job.owner.sessionId === owner.sessionId && job.owner.platformId === owner.platformId &&
-      (job.owner.conversationId === owner.conversationId || job.owner.conversationId === null || owner.conversationId === null)
-    const queued = this.jobs.filter(matches)
-    const active = this.current !== null && matches(this.current)
-    const before = this.jobs.findIndex(matches)
-    const blocked = this.blocked !== null && matches(this.blocked)
-    return { pending: queued.length + (active ? 1 : 0) + (blocked ? 1 : 0), active,
-      position: before < 0 ? (active ? 0 : -1) : before + (this.current && !matches(this.current) ? 1 : 0), blocked }
-  }
-
   findByDedupeKey(key: string): AiOutboundTicket<unknown> | null { return this.deduplicated.get(key) ?? null }
 
   stateFor(owner: AiOutboundOwner): AiOutboundQueueState {
-    const matches = (job: Job<unknown>): boolean => job.owner.sessionId === owner.sessionId && job.owner.platformId === owner.platformId &&
-      (job.owner.conversationId === owner.conversationId || job.owner.conversationId === null || owner.conversationId === null)
-    const active = this.current && matches(this.current) ? this.publicItem(this.current) : null
-    const blocked = this.blocked && matches(this.blocked) ? this.publicItem(this.blocked) : null
-    const count = this.countFor(owner)
-    return { pending: count.pending, active, blocked, ...(blocked && this.blockedReason ? { blockedReason: this.blockedReason } : {}) }
+    const active = this.current && this.belongsTo(this.current, owner) ? this.publicItem(this.current) : null
+    const blocked = this.blocked && this.belongsTo(this.blocked, owner) ? this.publicItem(this.blocked) : null
+    const pending = this.jobs.filter(job => this.belongsTo(job, owner)).length + (active ? 1 : 0) + (blocked ? 1 : 0)
+    return { pending, active, blocked, ...(blocked && this.blockedReason ? { blockedReason: this.blockedReason } : {}) }
   }
 
   enqueue<T>(request: AiOutboundEnqueue<T>): AiOutboundTicket<T> {
@@ -142,11 +144,10 @@ export class AiOutboundQueue {
       ...(request.text !== undefined ? { text: request.text } : {}), ...(request.attachments ? { attachments: request.attachments.map(file => ({ ...file })) } : {}) }
     let resolve!: (value: T) => void
     const completion = new Promise<T>(done => { resolve = done })
-    const job: Job<T> = { ...item, execute: request.execute, retryable: request.retryable, retryDelayMs: request.retryDelayMs,
+    const job: Job<T> = { ...item, execute: request.execute, retryable: request.retryable, retryDelayMs: request.retryDelayMs, maxAttempts: request.maxAttempts,
       blockOnFailure: request.blockOnFailure, describeFailure: request.describeFailure, cancelled: request.cancelled, failed: request.failed,
       aborted: request.aborted, resolve, completion, dedupeKey: request.dedupeKey, externalSignal: request.signal }
-    if (this.disposed) { job.resolve(job.cancelled()); return { item, completion } }
-    if (request.signal?.aborted) { job.resolve(job.cancelled()); return { item, completion } }
+    if (this.disposed || request.signal?.aborted) { job.resolve(job.cancelled()); return { item, completion } }
     const ticket = { item, completion }
     if (request.dedupeKey) {
       this.deduplicated.set(request.dedupeKey, ticket as AiOutboundTicket<unknown>)
@@ -163,39 +164,29 @@ export class AiOutboundQueue {
     return ticket
   }
 
+  /** User cancellation: stops the active send (or its retry wait), drops a queued one, or skips the blocked head. */
+  cancel(id: string): boolean {
+    if (this.disposed) return false
+    if (this.current?.id === id) { this.current.controller?.abort(); return true }
+    if (this.blocked?.id === id) return this.acknowledgeBlocked(id)
+    return this.cancelQueued(id)
+  }
+
   cancelQueued(id: string): boolean {
     if (!this.removeQueued(id)) return false
     this.changed()
     return true
   }
 
-  resumeBlocked(): boolean {
-    if (!this.blocked || this.disposed) return false
-    const job = this.blocked
-    this.blocked = null
-    this.blockedReason = undefined
-    if (job.externalSignal?.aborted) {
-      this.finish(job, job.cancelled())
-      this.changed()
-      void this.pump()
-      return true
-    }
-    if (job.externalSignal) {
-      const abort = (): void => this.abortJob(job.id)
-      job.abortListener = abort
-      job.externalSignal.addEventListener('abort', abort, { once: true })
-    }
-    this.jobs.unshift(job)
-    this.changed()
-    void this.pump()
-    return true
-  }
+  isBlocked(id: string): boolean { return this.blocked?.id === id }
 
+  /** The user checked the original conversation; the blocked head is dropped and the lane continues. */
   acknowledgeBlocked(id: string): boolean {
     if (!this.blocked || this.blocked.id !== id || this.disposed) return false
     const job = this.blocked
     this.blocked = null
     this.blockedReason = undefined
+    // The caller was answered when the job blocked; this only releases its dedupe key.
     this.finish(job, job.cancelled())
     this.changed()
     void this.pump()
@@ -205,8 +196,6 @@ export class AiOutboundQueue {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    if (this.wakeTimer) clearTimeout(this.wakeTimer)
-    this.wakeTimer = null
     this.current?.controller?.abort()
     const cancelled = [...this.jobs, ...(this.blocked ? [this.blocked] : [])]
     this.jobs.length = 0
@@ -227,7 +216,8 @@ export class AiOutboundQueue {
     try {
       let result: unknown
       let aborted = false
-      while (!this.disposed && !controller.signal.aborted) {
+      const maxAttempts = Math.max(1, job.maxAttempts ?? DEFAULT_MAX_ATTEMPTS)
+      for (let attempt = 1; !this.disposed && !controller.signal.aborted; attempt++) {
         try { result = await job.execute(controller.signal, job) }
         catch (error) { result = job.failed(error) }
         if (controller.signal.aborted || this.disposed) {
@@ -235,11 +225,9 @@ export class AiOutboundQueue {
           aborted = true
           break
         }
-        if (!job.retryable(result)) break
-        const delay = Math.min(5000, job.retryDelayMs ?? 2500)
-        this.wakeTimer = setTimeout(() => { this.wakeTimer = null }, delay)
-        const waited = await wait(delay, controller.signal)
-        this.wakeTimer = null
+        // Exhausted retries are reported to the caller as-is; they never pause the lane.
+        if (!job.retryable(result) || attempt >= maxAttempts) break
+        const waited = await wait(Math.min(5000, job.retryDelayMs ?? 2500), controller.signal)
         if (!waited && (controller.signal.aborted || this.disposed)) {
           result = job.aborted ? job.aborted(result) : job.cancelled()
           aborted = true
@@ -251,11 +239,9 @@ export class AiOutboundQueue {
       else if (job.blockOnFailure?.(result) === true) {
         this.blocked = job
         this.blockedReason = job.describeFailure?.(result) || '发送结果未确认，请先核对原始对话。'
-        this.finish(job, result, true)
-      } else if (job.retryable(result)) {
-        this.blocked = job
-        this.blockedReason = job.describeFailure?.(result) || '发送未能确认，请检查原始对话后处理队首消息。'
-        this.finish(job, result, true)
+        // Answer the caller now, but keep the dedupe key reserved until the user skips the head.
+        this.detach(job)
+        this.settle(job, result)
       } else {
         this.finish(job, result)
       }
@@ -267,6 +253,11 @@ export class AiOutboundQueue {
     }
   }
 
+  private belongsTo(job: Job<unknown>, owner: AiOutboundOwner): boolean {
+    return job.owner.sessionId === owner.sessionId && job.owner.platformId === owner.platformId &&
+      (job.owner.conversationId === owner.conversationId || job.owner.conversationId === null || owner.conversationId === null)
+  }
+
   private publicItem(job: Job<unknown>): FocusOutboundQueueItem {
     return { id: job.id, kind: job.kind, platformId: job.owner.platformId, conversationId: job.owner.conversationId,
       ...(job.sourceId ? { sourceId: job.sourceId } : {}), ...(job.text !== undefined ? { text: job.text } : {}),
@@ -275,8 +266,7 @@ export class AiOutboundQueue {
 
   private abortJob(id: string): void {
     if (this.current?.id === id) { this.current.controller?.abort(); return }
-    this.removeQueued(id)
-    this.changed()
+    if (this.removeQueued(id)) this.changed()
   }
 
   private removeQueued(id: string): boolean {
@@ -287,13 +277,21 @@ export class AiOutboundQueue {
     return true
   }
 
-  private finish<T>(job: Job<T>, result: T, keepDedupe = false): void {
+  private detach(job: Job<unknown>): void {
     if (job.abortListener && job.externalSignal) job.externalSignal.removeEventListener('abort', job.abortListener)
     job.abortListener = undefined
-    if (!keepDedupe && job.dedupeKey && this.deduplicated.get(job.dedupeKey)?.completion === job.completion) this.deduplicated.delete(job.dedupeKey)
-    if (job.finished) return
-    job.finished = true
+  }
+
+  private settle<T>(job: Job<T>, result: T): void {
+    if (job.settled) return
+    job.settled = true
     job.resolve(result)
+  }
+
+  private finish<T>(job: Job<T>, result: T): void {
+    this.detach(job as Job<unknown>)
+    if (job.dedupeKey && this.deduplicated.get(job.dedupeKey)?.completion === job.completion) this.deduplicated.delete(job.dedupeKey)
+    this.settle(job, result)
   }
 
   private changed(): void {

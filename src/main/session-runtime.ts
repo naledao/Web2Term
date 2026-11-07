@@ -150,7 +150,8 @@ import { writeFocusDiagnostic } from './focus-chat-log'
 import { getGithubCliState } from './github-cli'
 import { dispatchGithubLoginTask } from './github-login-task'
 import type { GithubLoginTaskResult } from '../shared/github'
-import type { FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusToolKind, FocusToolObserver } from '../shared/focus-chat'
+import type { FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusOwner, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusToolKind, FocusToolObserver,
+  FocusOutboundFailure, FocusOutboundQueueAction } from '../shared/focus-chat'
 import type { EmbedHandlers } from './embed'
 import { nodeFallback, parseLocalPosixEnvironment, parseRemoteEnvironment, parseRemoteWindowsEnvironment, parseWindowsEnvironment } from './environment'
 import { RemoteRipgrepSetup } from './remote-ripgrep'
@@ -165,7 +166,13 @@ import type { Web2termSessionBinding } from './web2term-shell'
 import type { Web2termConnection } from './web2term-connection'
 import { normalizeTerminalNotesDirectory } from './terminal-notes'
 import { AiOutboundQueue } from './ai-outbound-queue'
-import type { AiOutboundOwner } from './ai-outbound-queue'
+import type { AiOutboundEnqueue, AiOutboundKind, AiOutboundOwner, AiOutboundTicket } from './ai-outbound-queue'
+import { sendQuestionChatAttachment } from './question-chat-send'
+import { statSync } from 'node:fs'
+
+/** An AI send whose retry/pause/abort/throw handling falls back to SessionRuntime.queueSend's defaults. */
+type QueuedSend<T> = Omit<AiOutboundEnqueue<T>, 'retryable' | 'blockOnFailure' | 'aborted' | 'failed'> &
+  Partial<Pick<AiOutboundEnqueue<T>, 'retryable' | 'blockOnFailure' | 'aborted' | 'failed'>>
 
 const SETTING_EXECUTION_MODE = 'executionMode'
 const SETTING_LOCAL_NOTES = 'localTerminalNotes'
@@ -396,7 +403,7 @@ export class SessionRuntime {
       ? this.enqueueTaskResult(text, { ...owner, sessionId: this.id }, signal,
         () => (this.active || this.canRunConversationInBackground(owner.platformId)) && !this.taskEnded && this.activePlatformId === owner.platformId && this.backgroundNotificationCurrent(task, owner),
         task.id + ':' + (task.deliveryStatus ?? 'finished'))
-      : this.enqueueRawResult(text, { ...owner, sessionId: this.id }, signal),
+      : this.enqueueRawResult(text, { ...owner, sessionId: this.id }, { conversationId: owner.conversationId, requireIdle: true }, signal),
     onStatus: (id, status, message, kind) => this.backgroundTasks.setDelivery(id, status, message, kind),
     onOutcome: (task, outcome) => {
       try {
@@ -504,6 +511,12 @@ export class SessionRuntime {
   private legacyToolSend: { context: TaskToolContext; abort: AbortController } | null = null
   /** All messages that mutate an AI conversation share this FIFO lane. */
   private readonly aiOutboundQueue = new AiOutboundQueue()
+  /** One lane per side page (question chat, compaction page), keyed by webContents id. */
+  private readonly pageQueues = new Map<number, AiOutboundQueue>()
+  /** Queued composer messages that finished unsent; the focus view restores their drafts. */
+  private readonly focusQueueFailures: (FocusOutboundFailure & { owner: AiOutboundOwner })[] = []
+  /** Composer messages still in the main lane (or blocking it), by queue item id: what to hand back if unsent. */
+  private readonly pendingFocusSends = new Map<string, { requestId: string; text: string; attachments: { name: string; size: number }[] }>()
   private focusSending = false
   private focusFileRequest: { token: string; ownerKey: string } | null = null
   private focusFileCache: { token: string; ownerKey: string; file: CapturedFocusFile } | null = null
@@ -511,22 +524,24 @@ export class SessionRuntime {
     observe: call => this.observeFocusTool('send_email', call),
     mail: () => this.options.qqMail,
     current: call => this.mailNotificationCurrent(call),
-    send: (text, call, signal, current) => this.enqueueTaskResult(text, { sessionId: this.id, platformId: this.activePlatformId, conversationId: call.conversationId }, signal, current, call.messageId),
+    send: (text, call, signal, current) => this.enqueueTaskResult(text, { sessionId: this.id, platformId: this.activePlatformId, conversationId: call.conversationId }, signal, current, 'send_email:' + call.messageId),
     note: message => this.runner.refreshTerminal(message)
   })
   private readonly toolPromptReads = new ToolPromptReads({
     observe: call => this.observeFocusTool('read_tool_prompt', call),
     current: call => this.toolPromptReadCurrent(call),
     lookup: name => this.fullToolPrompt(name, this.activePlatformId),
-    send: (text, call, signal, current) => this.enqueueTaskResult(text, { sessionId: this.id, platformId: this.activePlatformId, conversationId: call.conversationId }, signal, current, call.messageId),
+    send: (text, call, signal, current) => this.enqueueTaskResult(text, { sessionId: this.id, platformId: this.activePlatformId, conversationId: call.conversationId }, signal, current, 'read_tool_prompt:' + call.messageId),
     note: message => this.runner.refreshTerminal(message)
   })
   private readonly scheduledTaskTools = new ScheduledTaskTools({
     observe: call => this.observeFocusTool('scheduled_task', call),
     current: call => !!call.sourceSubmissionId && this.toolPreferences().scheduledTasksEnabled &&
       this.toolPromptReadCurrent({ ...call, sourceSubmissionId: call.sourceSubmissionId }),
-    send: async (text, call, signal, current) => this.enqueueTaskResult(text,
-      { sessionId: this.id, platformId: this.activePlatformId, conversationId: call.conversationId }, signal, current, call.messageId),
+    // A deferred scheduled run waits for this tool reply; wake the scheduler once it settles.
+    send: (text, call, signal, current) => this.enqueueTaskResult(text,
+      { sessionId: this.id, platformId: this.activePlatformId, conversationId: call.conversationId }, signal, current, 'scheduled_task:' + call.messageId)
+      .finally(() => this.options.scheduledTasks?.wake()),
     note: message => this.runner.refreshTerminal(message)
   })
   private scheduledSendAbort: AbortController | null = null
@@ -724,7 +739,8 @@ export class SessionRuntime {
         }
       },
       sendRawToPage: async (text, context) => {
-        if (!context) return this.enqueueRawResult(text, { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.embed.getState().conversationId })
+        // As before queueing: a plain raw send, with no conversation pin or idle requirement.
+        if (!context) return this.enqueueRawResult(text, { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.embed.getState().conversationId }, undefined)
         if (!this.taskToolCurrent(context)) return 'stale'
         const operation = { context, abort: new AbortController() }; this.legacyToolSend = operation
         try { return await this.enqueueTaskResult(text, context, operation.abort.signal, () => this.taskToolCurrent(context), context.stepId + ':' + context.sourceMessageId) }
@@ -966,6 +982,7 @@ export class SessionRuntime {
         if (isActive()) this.send(IpcChannels.questionChatState, state)
       },
       sendQuestionChat: (chatPlatform, contents, contextPath, prompt, signal, current, beforeSubmit) =>
+        // The side chat is its own page and conversation; enqueuePageFileMessage gives it its own lane.
         this.enqueuePageFileMessage({ sessionId: this.id, platformId: chatPlatform.id, conversationId: null }, contents,
           chatPlatform, contextPath, prompt, signal, current, beforeSubmit ?? (() => {})),
       readQuestionContext: conversationId => {
@@ -1045,7 +1062,6 @@ export class SessionRuntime {
       },
       onConversation: (conversation) => {
         this.options.store.upsert(conversation, this.currentConversationProject())
-        this.aiOutboundQueue.bindUnassigned(platform.id, conversation.id)
         this.flushContextUsage(platform.id, conversation.id)
         this.flushDeferredCommands(conversation.id)
         this.flushPendingGoal(conversation.id)
@@ -1893,18 +1909,46 @@ export class SessionRuntime {
         this.conversationTools.injectionLedger(owner.platformId, owner.conversationId), this.embed.getInterceptorStatus()),
       contextUsage,
       sendBlock: this.options.computerUseBlocked?.() ? '' : computerUseSendBlock(this.getComputerUseCapability(owner.platformId)),
-      outboundQueue: this.aiOutboundQueue.stateFor({ sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId }),
+      outboundQueue: this.focusOutboundQueueState(owner),
       executions: sameExecutions ? undefined : [...(inherited?.executions ?? []), ...(owner.conversationId ? this.options.store.listExecutions(owner.conversationId, false).filter(record => !archivedExecutions.has(record.messageId)) : [])] }
   }
 
-  resolveFocusOutboundQueue(owner: FocusOwner, itemId: string, action: 'acknowledge-skip'): boolean {
-    if (!this.ownsFocus(owner) || action !== 'acknowledge-skip' || typeof itemId !== 'string' || itemId.length > 128) return false
-    return this.aiOutboundQueue.acknowledgeBlocked(itemId)
+  private focusOutboundQueueState(owner: FocusOwner): FocusChatState['outboundQueue'] {
+    const queueOwner: AiOutboundOwner = { sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId }
+    const failures = this.focusQueueFailures.filter(failure => failure.owner.sessionId === this.id && failure.owner.platformId === owner.platformId &&
+      (failure.owner.conversationId === null || owner.conversationId === null || failure.owner.conversationId === owner.conversationId))
+      .map(({ owner: _owner, ...failure }) => ({ ...failure, ...(failure.attachments ? { attachments: failure.attachments.map(file => ({ ...file })) } : {}) }))
+    const state = this.aiOutboundQueue.stateFor(queueOwner)
+    const blocked = state.blocked && this.pendingFocusSends.has(state.blocked.id) ? { ...state.blocked, restorable: true } : state.blocked
+    return { ...state, blocked, ...(failures.length ? { failures } : {}) }
   }
 
-  retryFocusOutboundQueue(owner: FocusOwner): boolean {
-    if (!this.ownsFocus(owner) || this.focusSending || this.focusRevision || this.runner.hasInFlightWork()) return false
-    return this.aiOutboundQueue.resumeBlocked()
+  private recordFocusQueueFailure(owner: AiOutboundOwner, sourceId: string, outcome: FocusSendOutcome, text: string,
+    attachments: { name: string; size: number }[], uncertain = false): void {
+    this.focusQueueFailures.push({ id: randomUUID(), owner: { ...owner }, sourceId, outcome, text,
+      ...(attachments.length ? { attachments } : {}), ...(uncertain ? { uncertain } : {}) })
+    if (this.focusQueueFailures.length > 10) this.focusQueueFailures.splice(0, this.focusQueueFailures.length - 10)
+  }
+
+  resolveFocusOutboundQueue(owner: FocusOwner, itemId: string, action: FocusOutboundQueueAction): boolean {
+    if (!this.ownsFocus(owner) || typeof itemId !== 'string' || !itemId || itemId.length > 128) return false
+    if (action === 'dismiss-failure') {
+      const index = this.focusQueueFailures.findIndex(failure => failure.id === itemId)
+      if (index < 0) return false
+      this.focusQueueFailures.splice(index, 1)
+      return true
+    }
+    // Only the items this owner's focus view shows can be acted on from it.
+    const state = this.aiOutboundQueue.stateFor({ sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId })
+    if (action === 'cancel' && state.active?.id === itemId) return this.aiOutboundQueue.cancel(itemId)
+    if (state.blocked?.id !== itemId) return false
+    // A blocked head: 'acknowledge-skip' (and 'cancel') means it was sent; 'restore-skip' means it was not.
+    const pending = this.pendingFocusSends.get(itemId)
+    const blockedOwner = { sessionId: this.id, platformId: state.blocked.platformId, conversationId: state.blocked.conversationId }
+    if (!this.aiOutboundQueue.acknowledgeBlocked(itemId)) return false
+    this.pendingFocusSends.delete(itemId)
+    if (action === 'restore-skip' && pending) this.recordFocusQueueFailure(blockedOwner, pending.requestId, 'cancelled', pending.text, pending.attachments)
+    return true
   }
 
   readFocusExecutionOutput(owner: FocusOwner, messageId: string): string | null {
@@ -1950,7 +1994,7 @@ export class SessionRuntime {
         inspect: getGithubCliState,
         send: text => this.enqueueUserTask(text, { sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId },
           { current: () => !this.disposed && owner.platformId === this.activePlatformId && owner.conversationId === this.embed.getState().conversationId,
-            sourceId: 'github-login:' + randomUUID() })
+            kind: 'auxiliary', sourceId: 'github-login:' + randomUUID() })
       })
     } finally {
       if (this.focusUploadAbort === controller) this.focusUploadAbort = null
@@ -1973,13 +2017,45 @@ export class SessionRuntime {
 
   async retryFocusSend(owner: FocusOwner, failureId: string): Promise<FocusSendOutcome> {
     if (!this.ownsFocus(owner) || typeof failureId !== 'string' || !failureId || failureId.length > 512) return 'unavailable'
-    return this.aiOutboundQueue.enqueue<FocusSendOutcome>({ kind: 'user', owner, sourceId: 'retry:' + failureId,
-      execute: () => this.performRetryFocusSend(owner, failureId), retryable: outcome => outcome === 'busy' || outcome === 'no-composer' || outcome === 'insert-failed',
-      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+    return this.queueSend<FocusSendOutcome>({ kind: 'user', owner, sourceId: 'retry:' + failureId,
+      // A user-clicked action reports 'busy' back at once. Retrying it here would spin on local locks
+      // (focusSending, in-flight runner work) whose owners may themselves be queued behind it.
+      execute: () => this.performRetryFocusSend(owner, failureId), retryable: () => false,
       describeFailure: () => '重发消息的结果未确认，请先核对原始对话，再决定是否跳过队首消息。',
-      cancelled: () => 'cancelled', failed: () => 'unknown',
+      cancelled: () => 'cancelled',
       dedupeKey: `focus-retry:${this.id}:${owner.platformId}:${owner.conversationId}:${failureId}`
     }).completion
+  }
+
+  /**
+   * Enqueues one AI send with the defaults every send shares: retry pre-submit refusals ('busy',
+   * 'no-composer'), pause the lane on a possibly-submitted outcome ('unknown', 'stuck'), keep such an
+   * outcome when the caller aborts mid-send, and treat a throw as 'unknown'. A request overrides any of them.
+   */
+  private queueSend<T extends string>(request: QueuedSend<T>, queue: AiOutboundQueue = this.aiOutboundQueue): AiOutboundTicket<T> {
+    const uncertain = (outcome: T | undefined): outcome is T => outcome === 'unknown' || outcome === 'stuck'
+    return queue.enqueue<T>({
+      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
+      blockOnFailure: uncertain,
+      aborted: outcome => uncertain(outcome) ? outcome : request.cancelled(),
+      failed: () => 'unknown' as unknown as T,
+      ...request
+    })
+  }
+
+  /** Side pages (question chats, compaction pages) are separate conversations with their own lane. */
+  private pageQueue(contents: Electron.WebContents): AiOutboundQueue | null {
+    if (contents.isDestroyed() || this.disposed) return null
+    const id = contents.id
+    const existing = this.pageQueues.get(id)
+    if (existing) return existing
+    const queue = new AiOutboundQueue()
+    this.pageQueues.set(id, queue)
+    contents.once('destroyed', () => {
+      queue.dispose()
+      if (this.pageQueues.get(id) === queue) this.pageQueues.delete(id)
+    })
+    return queue
   }
 
   async retryCommandRecovery(owner: FocusOwner, token: number): Promise<string> {
@@ -1995,10 +2071,8 @@ export class SessionRuntime {
     const recovery = embed.getInterceptorStatus().commandRecovery
     if (!recovery) return 'stale'
     const owner: AiOutboundOwner = { sessionId: this.id, platformId, conversationId: embed.getState().conversationId }
-    return this.aiOutboundQueue.enqueue<string>({ kind: 'recovery', owner, sourceId: String(recovery.token), text: 'command-recovery',
+    return this.queueSend<string>({ kind: 'recovery', owner, sourceId: String(recovery.token), text: 'command-recovery',
       execute: (signal) => signal.aborted ? Promise.resolve('stale') : embed.recoverCommand(allowSend, manual),
-      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
-      blockOnFailure: outcome => outcome === 'stuck' || outcome === 'unknown',
       describeFailure: () => '格式恢复消息的发送结果未确认，请先核对原始对话，再决定是否跳过队首消息。',
       cancelled: () => 'stale', failed: () => 'stuck',
       dedupeKey: `command-recovery:${this.id}:${platformId}:${recovery.token}`
@@ -2013,51 +2087,65 @@ export class SessionRuntime {
   }
 
   private enqueueTaskResult(text: string, owner: AiOutboundOwner, signal: AbortSignal, current: () => boolean, sourceId?: string): Promise<Exclude<TaskResultSendOutcome, 'failed'>> {
-    return this.aiOutboundQueue.enqueue<Exclude<TaskResultSendOutcome, 'failed'>>({
+    return this.queueSend<Exclude<TaskResultSendOutcome, 'failed'>>({
       kind: 'tool-result', owner, sourceId, text,
       execute: (queueSignal, item) => {
         const embed = this.embeds.get(item.owner.platformId)?.embed
         if (!embed || !current() || queueSignal.aborted) return Promise.resolve('stale')
         return embed.sendTaskResult(text, item.owner.conversationId ?? '', queueSignal, current)
       },
-      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
-      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
       describeFailure: () => '发送结果可能已经提交，请先核对原始对话，再决定是否跳过队首消息。',
-      cancelled: () => 'stale', aborted: result => result === 'unknown' || result === 'stuck' ? result : 'stale', failed: () => 'unknown', signal,
+      cancelled: () => 'stale', signal,
       ...(sourceId ? { dedupeKey: `result:${owner.sessionId}:${owner.platformId}:${owner.conversationId}:${sourceId}` } : {})
     }).completion
   }
 
-  private enqueueUserTask(text: string, owner: AiOutboundOwner, options: { force?: boolean; runId?: string; current: () => boolean; sourceId: string }): Promise<FocusSendOutcome> {
-    return this.aiOutboundQueue.enqueue<FocusSendOutcome>({ kind: options.runId ? 'scheduled' : 'recovery', owner, sourceId: options.sourceId, text,
+  /**
+   * Marks a queued send as owning `focusSending`, unless an outer operation (task recovery, GitHub login,
+   * remote rg install) already holds it while awaiting this very job — that holder keeps it.
+   */
+  private async withFocusSending<T>(work: () => Promise<T>): Promise<T> {
+    const owned = !this.focusSending
+    if (owned) this.focusSending = true
+    try { return await work() }
+    finally { if (owned) this.focusSending = false }
+  }
+
+  /**
+   * `signal` lets the caller withdraw a queued or running send. With `scoped`, the page re-checks
+   * `current` and the signal during the send itself (as `sendScopedUserTask` does).
+   */
+  private enqueueUserTask(text: string, owner: AiOutboundOwner, options: { force?: boolean; runId?: string; scoped?: boolean; signal?: AbortSignal;
+    kind?: AiOutboundKind; current: () => boolean; sourceId: string }): Promise<FocusSendOutcome> {
+    return this.queueSend<FocusSendOutcome>({ kind: options.kind ?? (options.runId ? 'scheduled' : 'recovery'), owner, sourceId: options.sourceId, text,
       execute: async (signal, item) => {
         const embed = this.embeds.get(item.owner.platformId)?.embed
-        if (!embed || signal.aborted) return Promise.resolve('unavailable')
-        if (!options.current()) return Promise.resolve('cancelled')
+        if (!embed || signal.aborted) return 'unavailable'
+        if (!options.current()) return 'cancelled'
         if (options.runId) return embed.sendScheduledUser(text, item.owner.conversationId ?? '', options.runId, signal, options.current)
-        this.focusSending = true
-        try { return await embed.sendUserTask(text, options.force === true) }
-        finally { this.focusSending = false }
+        return this.withFocusSending(() => options.scoped
+          ? embed.sendScopedUserTask(text, signal, options.current)
+          : embed.sendUserTask(text, options.force === true))
       },
       retryable: outcome => outcome === 'busy' || outcome === 'no-composer' || outcome === 'insert-failed',
-      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck' || outcome === 'unavailable' || outcome === 'upload-failed' || outcome === 'unsupported-file-type',
-      describeFailure: outcome => outcome === 'unknown' || outcome === 'stuck'
-        ? '消息可能已经提交，请先核对原始对话。' : '队列中的消息未能发送，请检查原始对话后重试或跳过。',
-      cancelled: () => 'cancelled', failed: () => 'unknown',
+      // Only a possibly-submitted message pauses the lane; known pre-submit failures go back to the caller.
+      describeFailure: () => '消息可能已经提交，请先核对原始对话。',
+      cancelled: () => 'cancelled', signal: options.signal,
       dedupeKey: `user-task:${this.id}:${owner.platformId}:${owner.conversationId}:${options.sourceId}`
     }).completion
   }
 
-  private enqueueRawResult(text: string, owner: AiOutboundOwner, signal?: AbortSignal, sourceId?: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'> {
-    return this.aiOutboundQueue.enqueue<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'>({
+  /** `rawOptions` is passed to `sendRaw` unchanged, so each caller keeps its own conversation/idle requirement. */
+  private enqueueRawResult(text: string, owner: AiOutboundOwner, rawOptions: { conversationId: string; requireIdle: boolean } | undefined,
+    signal?: AbortSignal, sourceId?: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'> {
+    return this.queueSend<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'>({
       kind: 'auxiliary', owner, sourceId, text,
       execute: (queueSignal, item) => {
         if (queueSignal.aborted) return Promise.resolve('busy')
         const embed = this.embeds.get(item.owner.platformId)?.embed
         if (!embed) return Promise.resolve('no-composer')
-        return embed.sendRaw(text, item.owner.conversationId ? { conversationId: item.owner.conversationId, requireIdle: true } : undefined)
+        return embed.sendRaw(text, rawOptions && { ...rawOptions })
       },
-      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
       blockOnFailure: outcome => outcome === 'stuck',
       describeFailure: () => '辅助消息发送结果未确认，请先核对原始对话。',
       cancelled: () => 'stale', failed: () => 'stuck', signal,
@@ -2067,23 +2155,21 @@ export class SessionRuntime {
 
   private enqueueTaskObservation(text: string, owner: AiOutboundOwner, signal: AbortSignal, attachments: import('./file-access').PreparedAttachment[], imageId: string,
     current: () => boolean, sourceId?: string): Promise<TaskResultSendOutcome> {
-    return this.aiOutboundQueue.enqueue<TaskResultSendOutcome>({ kind: 'tool-result', owner, sourceId, text,
+    return this.queueSend<TaskResultSendOutcome>({ kind: 'tool-result', owner, sourceId, text,
       attachments: attachments.map(file => ({ name: file.fileName, size: file.sizeBytes })),
       execute: (queueSignal, item) => {
         const embed = this.embeds.get(item.owner.platformId)?.embed
         if (!embed || !current() || queueSignal.aborted) return Promise.resolve('stale')
         return embed.sendTaskObservation(text, item.owner.conversationId ?? '', queueSignal, attachments, imageId, current)
       },
-      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
-      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
-      describeFailure: () => '截图结果可能已经提交，请先核对原始对话。', cancelled: () => 'stale', aborted: result => result === 'unknown' || result === 'stuck' ? result : 'stale', failed: () => 'unknown', signal,
+      describeFailure: () => '截图结果可能已经提交，请先核对原始对话。', cancelled: () => 'stale', signal,
       ...(sourceId ? { dedupeKey: `observation:${owner.sessionId}:${owner.platformId}:${owner.conversationId}:${sourceId}` } : {})
     }).completion
   }
 
   private enqueueFileResult(result: import('./file-access').PreparedFileResult, token: string, current: () => boolean, signal: AbortSignal): Promise<FileSendOutcome> {
     const owner: AiOutboundOwner = { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.embed.getState().conversationId }
-    return this.aiOutboundQueue.enqueue<FileSendOutcome>({
+    return this.queueSend<FileSendOutcome>({
       kind: 'tool-result', owner, sourceId: token, text: result.text,
       attachments: result.attachments.map(file => ({ name: file.fileName, size: file.sizeBytes })),
       execute: (queueSignal, item) => {
@@ -2091,29 +2177,30 @@ export class SessionRuntime {
         if (!embed || queueSignal.aborted || !current()) return Promise.resolve('cancelled')
         return embed.sendFileResult(result, token, current, queueSignal)
       },
-      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
-      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
       describeFailure: () => '文件结果可能已经提交，请先核对原始对话，再决定是否跳过队首消息。',
-      cancelled: () => 'cancelled', aborted: result => ['unknown', 'stuck', 'upload-failed'].includes(String(result)) ? result! : 'cancelled', failed: () => 'unknown', signal,
+      cancelled: () => 'cancelled', aborted: result => result === 'unknown' || result === 'stuck' || result === 'upload-failed' ? result : 'cancelled', signal,
       dedupeKey: `file:${this.id}:${owner.platformId}:${owner.conversationId}:${token}`
     }).completion
   }
 
   private enqueuePageFileMessage(owner: AiOutboundOwner, contents: Electron.WebContents, platform: ChatPlatform, path: string, prompt: string,
     signal: AbortSignal, current: () => boolean, beforeSubmit: () => void, unlimited = false): Promise<FileSendOutcome> {
-    return this.aiOutboundQueue.enqueue<FileSendOutcome>({ kind: 'question', owner, sourceId: path, text: prompt,
-      attachments: [{ name: path.split(/[\\/]/).at(-1) ?? 'context.md', size: 0 }], signal,
+    // The side page is its own conversation: it neither waits for nor pauses the main conversation's lane.
+    const queue = this.pageQueue(contents)
+    if (!queue) return Promise.resolve('cancelled')
+    let size = 0
+    try { size = statSync(path).size } catch { /* Display metadata only. */ }
+    return this.queueSend<FileSendOutcome>({ kind: 'question', owner, sourceId: path, text: prompt,
+      attachments: [{ name: path.split(/[\\/]/).at(-1) ?? 'context.md', size }], signal,
       execute: async queueSignal => {
         if (queueSignal.aborted || !current()) return 'cancelled'
-        const { sendQuestionChatAttachment } = await import('./question-chat-send')
         return sendQuestionChatAttachment(contents, platform, path, prompt, queueSignal, current, beforeSubmit, unlimited ? 'unlimited' : undefined)
       },
-      retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
-      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
-      describeFailure: () => '附件和提问的发送结果未确认，请先核对目标 AI 会话，再决定是否跳过队首消息。',
-      cancelled: () => 'cancelled', aborted: result => result === 'unknown' || result === 'stuck' ? result : 'cancelled',
-      failed: () => 'unknown', dedupeKey: `page-message:${this.id}:${owner.platformId}:${path}:${prompt.slice(0, 120)}`
-    }).completion
+      // Each side page sends once and its caller already reports an uncertain outcome; nobody would see a paused side lane.
+      blockOnFailure: () => false,
+      cancelled: () => 'cancelled',
+      dedupeKey: `page-message:${this.id}:${contents.id}:${owner.platformId}:${owner.conversationId}:${path}:${prompt.slice(0, 120)}`
+    }, queue).completion
   }
 
   async sendFocusMessage(request: FocusSendRequest): Promise<FocusSendOutcome> {
@@ -2137,24 +2224,30 @@ export class SessionRuntime {
       ? request.clientRequestId : randomUUID()
     const existing = this.aiOutboundQueue.findByDedupeKey(`user:${this.id}:${request.platformId}:${requestId}`)
     if (existing) return 'queued'
-    this.aiOutboundQueue.enqueue<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: requestId, text,
-      attachments: files.map(file => ({ name: file.fileName, size: file.sizeBytes })),
+    const attachments = files.map(file => ({ name: file.fileName, size: file.sizeBytes }))
+    const ticket = this.queueSend<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: requestId, text, attachments,
       execute: async (signal, item) => {
         const owner = { sessionId: this.id, platformId: item.owner.platformId, conversationId: item.owner.conversationId }
         if (!this.ownsFocus(owner) || signal.aborted) return 'cancelled'
         const embed = this.embeds.get(item.owner.platformId)?.embed
         if (!embed) return 'unavailable'
-        const staged = files.length ? await stageFocusAttachments(files) : undefined
+        // Composed for a chat that does not exist yet, but the page has since moved to another conversation.
+        if (item.owner.conversationId === null && embed.getState().conversationId !== null) return 'unavailable'
+        let staged: Awaited<ReturnType<typeof stageFocusAttachments>> | undefined
+        try { staged = files.length ? await stageFocusAttachments(files) : undefined }
+        catch {
+          writeFocusDiagnostic(owner, { event: 'send-outcome', outcome: 'upload-failed' })
+          return 'upload-failed'
+        }
         const controller = new AbortController()
         const abort = (): void => controller.abort()
         signal.addEventListener('abort', abort, { once: true })
-        this.focusSending = true
         this.focusUploadAbort = controller
         // A new conversation is bound after the page acknowledges its first send.
         const uploadCurrent = (): boolean => !this.disposed && !signal.aborted && !controller.signal.aborted &&
           this.activePlatformId === item.owner.platformId && this.embeds.get(item.owner.platformId)?.embed === embed &&
           (item.owner.conversationId === null || embed.getState().conversationId === item.owner.conversationId)
-        try {
+        return this.withFocusSending(async () => { try {
           const outcome = staged
             ? await embed.sendFocusFiles(text, staged.attachments, 'focus:' + item.id, uploadCurrent, controller.signal,
               files.filter(file => file.mimeType.startsWith('image/')).map(file => ({ ...file, width: null, height: null })), skills)
@@ -2168,19 +2261,31 @@ export class SessionRuntime {
           }
           writeFocusDiagnostic(owner, { event: 'send-outcome', outcome })
           return outcome
-        } catch { return 'upload-failed' }
-        finally {
+        } catch {
+          writeFocusDiagnostic(owner, { event: 'send-outcome', outcome: 'upload-failed' })
+          return 'upload-failed'
+        } finally {
           signal.removeEventListener('abort', abort)
           await staged?.cleanup().catch(() => {})
           if (this.focusUploadAbort === controller) this.focusUploadAbort = null
-          this.focusSending = false
-        }
+        } })
       },
       retryable: outcome => outcome === 'busy' || outcome === 'no-composer' || outcome === 'insert-failed',
-      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
-      describeFailure: () => '普通消息的发送结果未确认，请先核对原始对话，再决定是否跳过队首消息。',
-      cancelled: () => 'cancelled', failed: () => 'unknown',
+      describeFailure: () => '普通消息的发送结果未确认，请先核对原始对话：已发送就跳过；未发送可恢复草稿后跳过。',
+      cancelled: () => 'cancelled', aborted: result => result ?? 'cancelled',
       dedupeKey: `user:${this.id}:${request.platformId}:${requestId}`
+    })
+    const pending = { requestId, text: request.text, attachments }
+    this.pendingFocusSends.set(ticket.item.id, pending)
+    // The composer already cleared its draft on 'queued'; anything but a confirmed send hands it back.
+    void ticket.completion.then(outcome => {
+      if (this.disposed) return
+      // A blocked head waits for the user's verdict (skip as sent, or restore and skip), not for us.
+      if (this.aiOutboundQueue.isBlocked(ticket.item.id)) return
+      this.pendingFocusSends.delete(ticket.item.id)
+      if (outcome === 'ok') return
+      // 'unknown'/'stuck' here means the user cancelled mid-send: offer the draft, never restore it silently.
+      this.recordFocusQueueFailure(ticket.item.owner, requestId, outcome, request.text, attachments, outcome === 'unknown' || outcome === 'stuck')
     })
     return 'queued'
   }
@@ -2350,13 +2455,14 @@ export class SessionRuntime {
   }
 
   async actOnFocusUi(request: FocusUiRequest): Promise<FocusSendOutcome> {
-    if (!this.ownsFocus(request) || !validFocusUiAction(request)) return 'unavailable'
+    if (!this.ownsFocus(request)) return 'unavailable'
+    if (!validFocusUiAction(request)) return 'invalid'
     const key = `focus-ui:${this.id}:${request.platformId}:${request.conversationId}:${request.sourceMessageId}:${request.signature}:${request.kind}:${request.selectedValue}:${request.optionValue ?? ''}:${request.buttonIndex ?? ''}`
-    return this.aiOutboundQueue.enqueue<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: key.slice(-128), text: request.kind,
-      execute: () => this.performActOnFocusUi(request), retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
-      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+    return this.queueSend<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: key.slice(-128), text: request.kind,
+      // Reported to the user at once, like retryFocusSend: never spin on local locks inside the lane.
+      execute: () => this.performActOnFocusUi(request), retryable: () => false,
       describeFailure: () => '交互卡片的提交结果未确认，请先核对原始对话，再决定是否跳过队首消息。',
-      cancelled: () => 'cancelled', failed: () => 'unknown', dedupeKey: key
+      cancelled: () => 'cancelled', dedupeKey: key
     }).completion
   }
 
@@ -2404,11 +2510,11 @@ export class SessionRuntime {
   async editFocusMessage(request: FocusEditRequest): Promise<FocusSendOutcome> {
     if (!this.ownsFocus(request)) return 'unavailable'
     const key = `focus-edit:${this.id}:${request.platformId}:${request.conversationId}:${request.messageId}:${request.text}`
-    return this.aiOutboundQueue.enqueue<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: request.messageId, text: request.text,
-      execute: () => this.performEditFocusMessage(request), retryable: outcome => outcome === 'busy' || outcome === 'no-composer' || outcome === 'insert-failed',
-      blockOnFailure: outcome => outcome === 'unknown' || outcome === 'stuck',
+    return this.queueSend<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: request.messageId, text: request.text,
+      // Reported to the user at once: 'busy' here can come from a running task whose results are queued behind this edit.
+      execute: () => this.performEditFocusMessage(request), retryable: () => false,
       describeFailure: () => '编辑并重发的结果未确认，请先核对原始对话，再决定是否跳过队首消息。',
-      cancelled: () => 'cancelled', failed: () => 'unknown', dedupeKey: key
+      cancelled: () => 'cancelled', dedupeKey: key
     }).completion
   }
 
@@ -2859,11 +2965,14 @@ export class SessionRuntime {
     } catch { this.taskCoordinator.fail(platformId, conversationId) }
   }
 
-  private async performAnswerQuestion(messageId: string, answer: string, owner?: TaskQuestionRequest, alreadySending = false): Promise<InterceptorStatus> {
+  /** `beforeSubmit` runs right before the answer reaches the page; earlier throws are pre-send validation. */
+  private async performAnswerQuestion(messageId: string, answer: string, owner?: TaskQuestionRequest, alreadySending = false,
+    beforeSubmit: () => void = () => {}): Promise<InterceptorStatus> {
     const task = this.taskCoordinator.current(this.activePlatformId), question = task && pendingTaskQuestion(task)
     if (!task || !question) {
       if (owner !== undefined) throw new Error('原任务的问题已失效，请查看当前会话。')
       if (task && this.getComputerUseCapability().computerUseEnabled) throw new Error('此问题未关联当前任务，历史回放不能作为当前任务的授权；请关闭它并查看当前任务。')
+      beforeSubmit()
       return this.embed.answerQuestion(messageId, answer)
     }
     if (!validTaskQuestionRequest(owner) || !this.taskCoordinator.owns(owner) || owner.questionId !== question.id) throw new Error('弹窗所属任务或问题已变化，请重新打开当前任务的问题。')
@@ -2875,6 +2984,7 @@ export class SessionRuntime {
     if (!alreadySending && !this.taskCoordinator.questionState(lease, messageId, 'sending')) throw new Error('回答正在提交或上次发送尚未确认，请先核对原对话；不会重复发送。')
     const answered = (): boolean => this.taskCoordinator.owns(lease) && this.taskCoordinator.current(lease.platformId)?.clarifications?.items.some(q => q.id === question.id && q.state === 'answered') === true
     try {
+      beforeSubmit()
       const status = await this.embed.answerQuestion(messageId, answer, question.source)
       if (answered()) return status
       if (this.taskCoordinator.owns(lease)) this.taskCoordinator.questionState(lease, messageId, 'uncertain')
@@ -2895,27 +3005,34 @@ export class SessionRuntime {
       : { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.embed.getState().conversationId }
     const key = `answer:${this.id}:${queueOwner.platformId}:${queueOwner.conversationId}:${messageId}`
     let claimed = false
-    if (task && question && owner && validTaskQuestionRequest(owner) && this.taskCoordinator.owns(owner) && owner.questionId === question.id) {
-      claimed = this.taskCoordinator.questionState({ sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId,
-        taskId: owner.taskId, generation: owner.generation }, messageId, 'sending')
+    const claimLease = owner && { sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId, taskId: owner.taskId, generation: owner.generation }
+    if (task && question && owner && claimLease && validTaskQuestionRequest(owner) && this.taskCoordinator.owns(owner) && owner.questionId === question.id) {
+      claimed = this.taskCoordinator.questionState(claimLease, messageId, 'sending')
       if (!claimed) throw new Error('回答正在提交或上次发送尚未确认，请先核对原对话；不会重复发送。')
     }
-    type AnswerResult = { status?: InterceptorStatus; error?: unknown }
+    // `submitted` is false when performAnswerQuestion threw during validation, before the page saw the answer.
+    type AnswerResult = { status?: InterceptorStatus; error?: unknown; submitted?: boolean }
+    const outcomeOf = (result: AnswerResult): string =>
+      result.error && typeof result.error === 'object' && 'questionOutcome' in result.error ? String(result.error.questionOutcome) : ''
+    let attempts = 0
     const result = await this.aiOutboundQueue.enqueue<AnswerResult>({ kind: 'question', owner: queueOwner, sourceId: messageId, text: answer,
       execute: async () => {
-        try { return { status: await this.performAnswerQuestion(messageId, answer, owner, claimed) } }
-        catch (error) { return { error } }
+        let submitted = false
+        // Only the first attempt rides on the claim made above. A failed attempt hands the question back
+        // to 'pending', so a retry has to claim 'sending' again rather than send from 'pending'.
+        const alreadySending = claimed && attempts++ === 0
+        try { return { status: await this.performAnswerQuestion(messageId, answer, owner, alreadySending, () => { submitted = true }) } }
+        catch (error) { return { error, submitted } }
       },
-      retryable: result => {
-        const outcome = result.error && typeof result.error === 'object' && 'questionOutcome' in result.error ? String(result.error.questionOutcome) : ''
-        return ['busy', 'insert-failed', 'no-composer'].includes(outcome)
-      },
-      blockOnFailure: result => !!result.error && !['busy', 'insert-failed', 'no-composer', 'unavailable', 'invalid-answer', 'stale'].includes(
-        result.error && typeof result.error === 'object' && 'questionOutcome' in result.error ? String(result.error.questionOutcome) : ''),
+      retryable: result => ['busy', 'insert-failed', 'no-composer'].includes(outcomeOf(result)),
+      blockOnFailure: result => !!result.error && result.submitted === true &&
+        !['busy', 'insert-failed', 'no-composer', 'unavailable', 'invalid-answer', 'stale'].includes(outcomeOf(result)),
       describeFailure: () => '回答的发送结果未确认，请先核对原始对话；不会自动重发或视为授权。',
       cancelled: () => ({ error: Object.assign(new Error('回答发送已取消。'), { questionOutcome: 'stale' }) }),
       failed: error => ({ error }), dedupeKey: key
     }).completion
+    // Dropped before it ever ran (e.g. the session closed): release the claim so the question is not stuck in 'sending'.
+    if (claimed && attempts === 0 && claimLease && this.taskCoordinator.owns(claimLease)) this.taskCoordinator.questionState(claimLease, messageId, 'pending')
     if (result.error) throw result.error
     return result.status!
   }
@@ -3279,7 +3396,7 @@ export class SessionRuntime {
         '这是本次需要执行的任务，请按当前工具能力处理：', '', task.prompt].join('\n')
       const submission = { task, runId: run.id, text, autonomousTaskId: null as string | null }
       this.scheduledSubmission = submission
-      const outcome = await this.enqueueUserTask(text, task.owner, { runId: run.id, current, sourceId: run.id })
+      const outcome = await this.enqueueUserTask(text, task.owner, { runId: run.id, current, sourceId: run.id, signal: controller.signal })
       let message: string | undefined
       if (outcome === 'busy') {
         const reason = await this.embed.userSendBlockReason()
@@ -3292,8 +3409,9 @@ export class SessionRuntime {
     } finally {
       signal.removeEventListener('abort', abort)
       if (this.scheduledSendAbort === controller) this.scheduledSendAbort = null
+      // This method no longer takes focusSending (the queue serializes the send), so it must not clear
+      // a flag that another operation holds.
       this.scheduledSubmission = null
-      this.focusSending = false
     }
   }
 
@@ -4401,7 +4519,7 @@ export class SessionRuntime {
         if (!current()) return 'cancelled'
         const prompt = remoteRipgrepInstallPrompt(target, this.environment.osCaption, this.environment.architecture)
         return this.enqueueUserTask(prompt, { sessionId: this.id, platformId: request.platformId, conversationId: request.conversationId },
-          { current, sourceId: 'remote-ripgrep:' + sending.connectionId })
+          { current, scoped: true, signal: sending.controller.signal, kind: 'auxiliary', sourceId: 'remote-ripgrep:' + sending.connectionId })
       })
     } finally {
       if (this.remoteRipgrepSend === sending) this.remoteRipgrepSend = null
@@ -4483,6 +4601,8 @@ export class SessionRuntime {
     this.scheduledSendAbort?.abort()
     if (this.disposed) return
     this.aiOutboundQueue.dispose()
+    for (const queue of this.pageQueues.values()) queue.dispose()
+    this.pageQueues.clear()
     this.disposed = true
     this.remoteRipgrep.observe(null)
     this.options.desktopCoordinator?.releaseSession(this.id)

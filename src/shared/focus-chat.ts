@@ -284,14 +284,34 @@ export interface FocusOutboundQueueItem {
   sourceId?: string
   text?: string
   attachments?: { name: string; size: number }[]
+  /** A composer message whose draft can be handed back with 'restore-skip'. */
+  restorable?: boolean
+}
+/** A queued composer message that finished without being sent; its draft can be restored. */
+export interface FocusOutboundFailure {
+  id: string
+  /** The composer's clientRequestId. */
+  sourceId: string
+  outcome: FocusSendOutcome
+  text: string
+  attachments?: { name: string; size: number }[]
+  /** It may have been submitted (cancelled mid-send): offer the draft back, never restore it silently. */
+  uncertain?: boolean
 }
 export interface FocusOutboundQueueState {
   pending: number
   active: FocusOutboundQueueItem | null
   blocked: FocusOutboundQueueItem | null
   blockedReason?: string
+  failures?: FocusOutboundFailure[]
 }
-export interface FocusOutboundQueueResolution extends FocusOwner { itemId: string; action: 'acknowledge-skip' }
+/**
+ * acknowledge-skip: the blocked head was checked and had been sent; restore-skip: it had not been sent, so
+ * skip it and hand its draft back; cancel: stop the active send; dismiss-failure: forget a failure.
+ */
+export type FocusOutboundQueueAction = 'acknowledge-skip' | 'restore-skip' | 'cancel' | 'dismiss-failure'
+export const focusOutboundQueueActions: readonly FocusOutboundQueueAction[] = ['acknowledge-skip', 'restore-skip', 'cancel', 'dismiss-failure']
+export interface FocusOutboundQueueResolution extends FocusOwner { itemId: string; action: FocusOutboundQueueAction }
 export interface FocusSendRequest extends FocusOwner {
   text: string
   files?: FocusAttachmentInput[]
