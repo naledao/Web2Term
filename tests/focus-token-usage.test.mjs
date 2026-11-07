@@ -90,7 +90,7 @@ test('only observed requests and submitted results count; full local execution l
   assert.deepEqual(totals(estimateFocusConversation(input)), expected, 'changing a local log does not alter submitted context')
 })
 
-test('attachments are not assigned invented tokens, old gaps are disclosed, and full injection never resets context totals', () => {
+test('attachments count once by a size-based estimate, old gaps are disclosed, and full injection never resets context totals', () => {
   const observed = context.emptyContextUsage()
   observed.observedSince = 10000; observed.images = 1; observed.files = 2
   observed.injections = tokens.estimateContextText(prefix)
@@ -100,6 +100,9 @@ test('attachments are not assigned invented tokens, old gaps are disclosed, and 
   const before = estimateFocusConversation(input)
   assert.equal(before.details.images, 2, 'live and saved copies of the user image count once')
   assert.equal(before.details.files, 3)
+  // The live turn's image (fixed estimate) and a text file without a known size; the saved copy is not counted again.
+  assert.equal(before.details.attachments.estimatedTokens, tokens.IMAGE_ATTACHMENT_TOKENS)
+  assert.equal(before.estimatedTokens, sum(['检查附件']).estimatedTokens + observed.injections.estimatedTokens + tokens.IMAGE_ATTACHMENT_TOKENS)
   assert.equal(before.details.incompleteHistory, true)
   const refreshed = planner.commitInjection(committed(), planner.planInjection(null, prefix, 'chatgpt'), 200)
   assert.equal(focusPromptInjectionState('chatgpt', refreshed, status).charactersSinceFull, 0)

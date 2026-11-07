@@ -381,7 +381,9 @@ export async function sendPageFiles(
     if (clicked !== true) { submitted = false; return finish('upload-failed', 'submit-not-confirmed') }
     sendClicked = true
     stage = 'confirm'
-    const confirmDeadline = Date.now() + 10000
+    // Creating a new chat alone has taken ~4 s, and the page may then wait out an attachment
+    // preview grace period before it confirms; 10 s timed out on messages that were sent.
+    const confirmDeadline = Date.now() + 20000
     let previousConfirmation = ''
     let previousNavigation = ''
     let lastConfirmDiagnosticsAt = 0
@@ -391,14 +393,16 @@ export async function sendPageFiles(
       if (navigation !== previousNavigation) { log('confirm-navigation', context); previousNavigation = navigation }
       if ((!context.matches && !context.transitioning) || detached) return finish('unknown', 'page-changed-after-submit')
       // A fast next action can supersede this run; still read the acknowledgement.
-      const snapshot = await contents.executeJavaScript(`window.__cmdTerminalInterceptor?.fileSendStatus(${JSON.stringify(token)})`) as { status?: string }
+      const snapshot = await contents.executeJavaScript(`window.__cmdTerminalInterceptor?.fileSendStatus(${JSON.stringify(token)})`) as { status?: string; filesPending?: boolean }
       const diagnostics = diagnosticSnapshot(snapshot)
       const signature = JSON.stringify(diagnostics)
       if (signature !== previousConfirmation) { log('confirm-state', diagnostics); previousConfirmation = signature }
       // Recheck after the page call, which can itself race with SPA navigation.
       const afterRead = pageContext()
       if ((!afterRead.matches && !afterRead.transitioning) || detached) return finish('unknown', 'page-changed-after-submit')
-      if (afterRead.matches && snapshot?.status === 'sent') return finish('ok', 'message-confirmed')
+      if (afterRead.matches && snapshot?.status === 'sent') {
+        return finish('ok', snapshot.filesPending === true ? 'message-confirmed-attachment-preview-pending' : 'message-confirmed')
+      }
       if (!isCurrent() || signal.aborted) return finish('unknown', 'context-changed-after-submit')
       if (afterRead.matches && diagnostics.newTurnSeen === true && diagnostics.turnFilesSeen === false && (!lastConfirmDiagnosticsAt || Date.now() - lastConfirmDiagnosticsAt >= 3000)) {
         try { log('confirmation-diagnostics', diagnosticSnapshot(await call('attachmentDiagnostics'))) } catch { log('confirmation-diagnostics-unavailable') }

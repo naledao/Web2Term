@@ -9,10 +9,14 @@ export class ContextUsageRecorder {
   private readonly scope = randomUUID()
   constructor(private readonly owner: () => { conversationId: string | null; turnId: string | null },
     private readonly emit: (entry: ContextUsageEntry) => void) {}
-  begin(text: string, category: ContextUsageCategory, key: string = randomUUID(), media: { images: number; files: number } = { images: 0, files: 0 }): Ticket | undefined {
+  /** `media.estimatedTokens` adds the size-based estimate of attachments to the text's own. */
+  begin(text: string, category: ContextUsageCategory, key: string = randomUUID(),
+    media: { images: number; files: number; estimatedTokens?: number } = { images: 0, files: 0 }): Ticket | undefined {
     try {
       if (category === 'tool-result' && text.startsWith('【工具说明】')) category = 'tool-definition'
-      return { ...this.owner(), ...estimateContextText(text.replace(/\r\n?/g, '\n')), id: this.scope + ':' + key, sourceMessageId: null,
+      const usage = estimateContextText(text.replace(/\r\n?/g, '\n'))
+      const extra = Number.isSafeInteger(media.estimatedTokens) && media.estimatedTokens! > 0 ? media.estimatedTokens! : 0
+      return { ...this.owner(), ...usage, estimatedTokens: usage.estimatedTokens + extra, id: this.scope + ':' + key, sourceMessageId: null,
         category, images: media.images, files: media.files, createdAt: Date.now() }
     } catch { return undefined }
   }

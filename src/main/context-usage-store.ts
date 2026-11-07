@@ -53,7 +53,7 @@ export class ContextUsageStore {
         continue
       }
       const bucket = row.category === 'injection' ? result.injections : row.category === 'tool-definition' ? result.toolDefinitions : row.category === 'tool-result' ? result.toolResults
-        : row.category === 'tool-request' ? result.toolRequests : null
+        : row.category === 'tool-request' ? result.toolRequests : row.category === 'attachment' ? result.attachments : null
       if (bucket) { bucket.estimatedTokens += row.tokens; bucket.characters += row.characters }
       if (row.source_message_id) result.requestSourceIds.push(row.source_message_id)
       result.images += row.images; result.files += row.files

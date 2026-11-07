@@ -9,6 +9,8 @@ import type { ContextUsageSummary } from './context-usage'
 export interface FocusTextUsage { estimatedTokens: number; characters: number }
 export interface FocusContextUsage extends FocusTextUsage {
   details: { conversation: FocusTextUsage; recorded: ContextUsageSummary; visibleReasoning: FocusTextUsage;
+    /** Uploaded files and images plus read_files results, estimated by size. */
+    attachments: FocusTextUsage
     images: number; files: number; incompleteHistory: boolean }
 }
 export interface FocusPromptInjectionState {
@@ -39,6 +41,25 @@ export function estimateContextText(text: string): FocusTextUsage {
   }
   return { estimatedTokens: Math.ceil(units), characters: text.length }
 }
+/** Text-like uploads are read in full: about 3.5 bytes per token across English and UTF-8 CJK. */
+const TEXT_ATTACHMENT = /^text\/|^application\/(?:json|xml|yaml|x-yaml|toml|javascript|typescript|x-sh|x-python|sql|csv|x-ndjson)\b|\+(?:json|xml)$/i
+/** A full-detail image costs vision models roughly 0.8–1.1K tokens, whatever its file size. */
+export const IMAGE_ATTACHMENT_TOKENS = 1000
+/**
+ * Documents (PDF, Office, archives) are mostly markup, fonts and compression around far less text, and the
+ * site reads long ones selectively. Count a fraction of their bytes, capped per file.
+ */
+const DOCUMENT_BYTES_PER_TOKEN = 12
+const MAX_ATTACHMENT_TOKENS = 128_000
+
+/** Display estimate for one uploaded file; the page decides how much of it the model actually reads. */
+export function estimateAttachmentTokens(file: { mimeType: string; sizeBytes: number }): number {
+  const size = Number.isFinite(file.sizeBytes) && file.sizeBytes > 0 ? file.sizeBytes : 0
+  if (file.mimeType.startsWith('image/')) return IMAGE_ATTACHMENT_TOKENS
+  const tokens = Math.ceil(size / (TEXT_ATTACHMENT.test(file.mimeType) ? 3.5 : DOCUMENT_BYTES_PER_TOKEN))
+  return Math.min(MAX_ATTACHMENT_TOKENS, tokens)
+}
+
 /** Native presentation trees include binary/layout data and a readable text fallback. */
 export function estimateFocusText(text: string): FocusTextUsage {
   const readable = text.replace(/<!--focus-(?:chart|ui|layout) \{[^\n]*\} -->\n?/g, '')
@@ -67,8 +88,13 @@ export function estimateFocusConversation(input: {
   const total = { estimatedTokens: 0, characters: 0 }
   const visibleReasoning = { estimatedTokens: 0, characters: 0 }
   let images = recorded.images, files = recorded.files
-  const countFiles = (items: Array<{ mimeType: string }> = []): void => {
-    for (const file of items) if (file.mimeType.startsWith('image/')) images++; else files++
+  // read_files results are recorded with their own estimate; user uploads are estimated from their metadata here.
+  const attachments = { estimatedTokens: recorded.attachments.estimatedTokens, characters: recorded.attachments.characters }
+  const countFiles = (items: Array<{ mimeType: string; sizeBytes?: number }> = []): void => {
+    for (const file of items) {
+      if (file.mimeType.startsWith('image/')) images++; else files++
+      attachments.estimatedTokens += estimateAttachmentTokens({ mimeType: file.mimeType, sizeBytes: file.sizeBytes ?? 0 })
+    }
   }
   const add = (text: string): void => {
     const usage = estimateFocusText(text)
@@ -98,18 +124,20 @@ export function estimateFocusConversation(input: {
     }
   }
   const conversation = { ...total }
-  for (const usage of [recorded.injections, recorded.toolDefinitions, recorded.toolResults, recorded.toolRequests]) {
+  for (const usage of [recorded.injections, recorded.toolDefinitions, recorded.toolResults, recorded.toolRequests, attachments]) {
     total.estimatedTokens += usage.estimatedTokens; total.characters += usage.characters
   }
   const dates = [...messages.filter(message => !hidden.has(message.id)).map(message => message.createdAt), ...turns.map(turn => turn.createdAt)].filter(Number.isFinite)
   const earliest = dates.reduce((first, time) => Math.min(first, time), Infinity)
   const incompleteHistory = dates.length > 0 && (recorded.observedSince === null || earliest < recorded.observedSince - 1000)
-  return { ...total, details: { conversation, recorded, visibleReasoning, images, files, incompleteHistory } }
+  return { ...total, details: { conversation, recorded, visibleReasoning, attachments, images, files, incompleteHistory } }
 }
 
 /** Convert the real remaining characters using the observed transcript's token density. */
-export function remainingFocusInjectionTokens(injection: FocusPromptInjectionState, usage: FocusTextUsage): number {
+export function remainingFocusInjectionTokens(injection: FocusPromptInjectionState, usage: FocusTextUsage | FocusContextUsage): number {
   if (injection.phase === 'full-next') return 0
-  const density = usage.characters > 0 ? usage.estimatedTokens / usage.characters : 1 / 3
+  // Attachments add tokens without characters; the text density must not count them.
+  const textTokens = usage.estimatedTokens - ('details' in usage ? usage.details.attachments.estimatedTokens : 0)
+  const density = usage.characters > 0 ? textTokens / usage.characters : 1 / 3
   return Math.ceil(Math.max(0, injection.characterBudget - injection.charactersSinceFull) * density)
 }

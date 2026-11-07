@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { ContextUsageRecorder } from './context-usage-recorder'
 import type { ContextUsageEntry } from '../shared/context-usage'
-import { estimateContextText } from '../shared/focus-token-usage'
+import { estimateAttachmentTokens, estimateContextText } from '../shared/focus-token-usage'
 import type { ScheduledToolCall } from '../shared/scheduled-tasks'
 import type { MailNotificationCall } from '../shared/mail-notification'
 import type { ToolPromptReadCall } from '../shared/tool-prompts'
@@ -2088,7 +2088,8 @@ export class ChatGptEmbed {
     if (!guard()) return 'cancelled'
     const usage = this.contextUsage?.begin('', 'attachment', token, {
       images: result.attachments.filter(file => file.mimeType.startsWith('image/')).length,
-      files: result.attachments.filter(file => !file.mimeType.startsWith('image/')).length })
+      files: result.attachments.filter(file => !file.mimeType.startsWith('image/')).length,
+      estimatedTokens: result.attachments.reduce((sum, file) => sum + estimateAttachmentTokens(file), 0) })
     let outcome: FileSendOutcome = 'unknown'
     try { outcome = await sendPageFiles(contents, platform.id, result.attachments, token, guard, signal) }
     finally { this.contextUsage?.finish(usage, outcome) }

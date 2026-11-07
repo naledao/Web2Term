@@ -18,6 +18,8 @@ export interface ContextUsageSummary {
   toolDefinitions: ContextUsageTotals
   toolResults: ContextUsageTotals
   toolRequests: ContextUsageTotals
+  /** Files returned to the model (read_files), estimated by size when they were sent. */
+  attachments: ContextUsageTotals
   uncertain: ContextUsageTotals
   uncertainCount: number
   images: number
@@ -27,6 +29,6 @@ export interface ContextUsageSummary {
 }
 export function emptyContextUsage(): ContextUsageSummary {
   return { injections: { estimatedTokens: 0, characters: 0 }, toolDefinitions: { estimatedTokens: 0, characters: 0 }, toolResults: { estimatedTokens: 0, characters: 0 },
-    toolRequests: { estimatedTokens: 0, characters: 0 }, uncertain: { estimatedTokens: 0, characters: 0 },
+    toolRequests: { estimatedTokens: 0, characters: 0 }, attachments: { estimatedTokens: 0, characters: 0 }, uncertain: { estimatedTokens: 0, characters: 0 },
     uncertainCount: 0, images: 0, files: 0, requestSourceIds: [], observedSince: null }
 }

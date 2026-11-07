@@ -12,11 +12,15 @@ export default function FocusTokenUsage({ usage, injection, loading }: {
   const phase = injection?.phase ?? 'loading'
   const reason = injection?.reason
   const details = 'details' in usage ? usage.details : null
-  const rows = details ? [
+  const attachmentLabel = details && (details.images || details.files)
+    ? '附件（' + [details.images ? details.images + ' 张图片' : '', details.files ? details.files + ' 个文件' : ''].filter(Boolean).join('、') + '）'
+    : '附件'
+  const rows: (readonly [string, number])[] = details ? [
     ['对话消息', details.conversation.estimatedTokens], ['提示词注入', details.recorded.injections.estimatedTokens],
     ['工具完整说明', details.recorded.toolDefinitions.estimatedTokens], ['工具请求', details.recorded.toolRequests.estimatedTokens],
-    ['已回传的工具与自动消息', details.recorded.toolResults.estimatedTokens]
-  ] as const : []
+    ['已回传的工具与自动消息', details.recorded.toolResults.estimatedTokens],
+    [attachmentLabel, details.attachments.estimatedTokens]
+  ] : []
   const nextReason = reason === 'budget' ? '已达到字符阈值。' : reason === 'violations' ? '连续回复格式错误，需要刷新完整约定。'
     : reason === 'mostly-changed' ? '提示词更新较多，需要完整注入。' : '尚无完整注入记录。'
   const injectionHint = phase === 'disabled' ? '终端模式或提示词注入已关闭。' : phase === 'loading' ? '正在读取当前会话的提示词注入状态。'

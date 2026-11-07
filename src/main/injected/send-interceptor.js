@@ -5713,6 +5713,8 @@
   const confirmedFileSends = new Set()
   /** Non-whitespace characters of a long caption that must appear in a folded user message. */
   const FILE_CAPTION_PREFIX = 300
+  /** How long a submitted caption must stay in its new turn before missing attachment previews stop blocking confirmation. */
+  const FILE_RENDER_GRACE_MS = 4000
   const fileSendStatus = (token) => {
     if (confirmedFileSends.has(token)) return { status: 'sent' }
     if (!fileSend || fileSend.token !== token) return { status: 'stale' }
@@ -5752,7 +5754,18 @@
       const newTurnSeen = isNew(newest)
       const turnFilesSeen = turnShowsFiles(newest, fileSend.files)
       const { text: turnText, prefix: captionPrefixSeen, seen: captionSeen } = captionIn(newest)
-      const sent = !fileSend.edited && draftCleared && newTurnSeen && turnFilesSeen && captionSeen
+      // ChatGPT may render a just-sent image only as a placeholder card while it re-uploads it for a newly
+      // created conversation (2026-11-07: the turn, caption and cleared draft were all present, but the image
+      // never rendered inside the 10 s window, so a sent message was reported as unconfirmed). Once the caption
+      // is in a new turn and the draft is empty, the message was submitted; resending would duplicate it. After
+      // that state holds for FILE_RENDER_GRACE_MS, confirm it and flag the attachments as not yet visible.
+      // The fallback needs a caption to identify the turn: an attachment-only send keeps the strict check alone.
+      const turnSent = !fileSend.edited && draftCleared && newTurnSeen && captionSeen
+      const captionedTurnSent = turnSent && !!captionToMatch
+      if (captionedTurnSent && !turnFilesSeen) fileSend.textSentSince ||= Date.now()
+      else fileSend.textSentSince = 0
+      const filesPending = captionedTurnSent && !turnFilesSeen && !!fileSend.textSentSince && Date.now() - fileSend.textSentSince >= FILE_RENDER_GRACE_MS
+      const sent = turnSent && (turnFilesSeen || filesPending)
       if (sent) {
         const focus = fileSend.focus
         const computer = fileSend.computer
@@ -5783,7 +5796,7 @@
         }
         if (state.enabled && state.awaitingReplySince !== 0) scheduleCheck()
         scheduleScrollToBottom()
-        return { status: 'sent' }
+        return filesPending ? { status: 'sent', filesPending: true } : { status: 'sent' }
       }
       return {
         status: 'confirming', draftCleared, newTurnSeen, turnFilesSeen, captionSeen, captionPrefixSeen,
