@@ -40,7 +40,7 @@ export interface StoredCompaction {
   budget?: CompactionBudget
 }
 interface SettingsStore { getSetting(key: string): string | null; setSetting(key: string, value: string): void }
-type Page = Pick<CompactionPage, 'url' | 'available' | 'setViewport' | 'setOwnerVisible' | 'setTheme' | 'read' | 'send' | 'close'>
+type Page = Pick<CompactionPage, 'url' | 'available' | 'setViewport' | 'setOwnerVisible' | 'setTheme' | 'read' | 'clearDraft' | 'send' | 'close'>
 interface Options {
   sessionId: string
   directory: string
@@ -278,7 +278,7 @@ export class ConversationCompaction {
     const name = handoff ? 'summary.md' : 'source.md'
     const page = this.ensurePage(handoff)
     this.update(handoff ? 'importing' : 'opening', '正在压缩对话…')
-    let activeMs = 0, readErrors = 0, last = '', stableSince = 0
+    let activeMs = 0, readErrors = 0, last = '', stableSince = 0, draftClears = 0
     for (;;) {
       await this.waitRunnable(signal)
       const started = this.now()
@@ -291,8 +291,12 @@ export class ConversationCompaction {
         const actual = selectionQuestionConversation(platform, page.url)
         if (pinned && actual?.id !== selectionQuestionConversation(platform, pinned)?.id) throw new Error('压缩网页已切换到其他页面。请返回本次任务的会话后继续检查。')
         if (job[deliveryKey] === 'none') {
-          if (snapshot.hasHistory || snapshot.nativeDraft) throw new Error('压缩网页中已有消息或草稿，已停止自动发送。请取消任务后重新压缩。')
-          if (snapshot.ready && snapshot.uploadReady && snapshot.generating === 'idle' && isQuestionChatHome(platform, page.url)) {
+          if (snapshot.hasHistory) throw new Error('压缩网页中已有消息，已停止自动发送。请取消任务后重新压缩。')
+          if (snapshot.nativeDraft) {
+            // The shared partition can restore any unsent new-chat draft; it must never ride along with the request.
+            if (++draftClears > 5 || !await page.clearDraft()) throw new Error('压缩网页输入框中的内容无法清除，已停止自动发送。请取消任务后重新压缩。')
+            this.current(signal)
+          } else if (snapshot.ready && snapshot.uploadReady && snapshot.generating === 'idle' && isQuestionChatHome(platform, page.url)) {
             await this.checkedFile(name, handoff ? job.summaryHash : job.sourceHash)
             this.current(signal)
             this.update(handoff ? 'importing' : 'uploading', handoff ? '正在上传交接摘要并发送到新会话…' : '正在上传原始快照并发送压缩请求…')

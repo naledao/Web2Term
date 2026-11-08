@@ -155,15 +155,18 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
       created.push({ id: job.targetId, summary, seed: job.seed })
       return job.targetId
     }, makePage: (platform, url, onUrl) => {
-      const page = { url, visible: false, available: true, close() { this.available = false; this.visible = false }, setTheme() {}, setOwnerVisible(value) { this.visible = value },
+      const page = { url, visible: false, available: true, draft: !!settingsOptions.draft, clears: 0,
+        close() { this.available = false; this.visible = false }, setTheme() {}, setOwnerVisible(value) { this.visible = value },
+        async clearDraft() { this.clears++; if (settingsOptions.draft === 'stuck') return false; this.draft = false; return true },
         setViewport(_bounds, visible) { this.visible = visible },
         async read(marker) {
           const record = records.get(this.url)
           await settingsOptions.beforeRead?.({ record, page: this })
-          return { ready: true, nativeDraft: false, uploadReady: true, generating: 'idle', hasHistory: !!record,
+          return { ready: true, nativeDraft: this.draft, uploadReady: true, generating: 'idle', hasHistory: !!record,
             requestFound: record?.marker === marker, answer: record?.answer ?? '', replyId: record ? this.url : '',
             cutOff: !!record?.cutOff, sendFailure: false, oversized: false }
         }, async send(path, prompt, signal, current, beforeSubmit) {
+          assert.equal(this.draft, false, 'a leftover composer draft is never sent with the request')
           const handoff = path.endsWith('summary.md')
           const content = await readFile(path, 'utf8')
           await settingsOptions.beforeSend?.({ handoff, signal, current, page: this })
@@ -423,6 +426,23 @@ test('full workflow sends two distinct files, saves the summary and inherits fro
   assert.equal(f.created[0].seed.preferences.computerUseEnabled, false)
   assert.equal(await readFile(join(f.directory, state.id, 'summary.md'), 'utf8'), f.calls[1].content)
   assert.equal(f.service.state({ ...owner, conversationId: 'another' }), null)
+})
+
+test('any leftover composer draft on the compression page is cleared before sending', async t => {
+  const f = fixture(t, new Map(), { draft: true })
+  await f.start()
+  assert.equal((await settled(f)).phase, 'completed')
+  assert.equal(f.calls.length, 2)
+  assert.ok(f.pages.every(page => page.clears === 1), 'each fresh page clears its restored draft once')
+})
+
+test('a composer draft that cannot be cleared stops before any submit', async t => {
+  const f = fixture(t, new Map(), { draft: 'stuck' })
+  await f.start()
+  const state = await settled(f)
+  assert.equal(state.phase, 'failed')
+  assert.match(state.message, /无法清除/)
+  assert.equal(f.calls.length, 0)
 })
 
 test('ambiguous submit survives restart and is checked without submitting source.md twice', async t => {

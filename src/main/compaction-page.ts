@@ -110,6 +110,12 @@ export class CompactionPage {
       `${readinessSource}\n;window.__questionChatReady(${JSON.stringify(this.platform.page)})`)
     return { ...snapshot, uploadReady: ready.uploadReady === true }
   }
+  /** Called only after read() configured the interceptor for the current URL. */
+  async clearDraft(): Promise<boolean> {
+    const contents = this.view.webContents
+    if (this.disposed || contents.isDestroyed() || this.configuredUrl !== this.url) return false
+    return await questionPageCall<boolean>(contents, 'window.__cmdTerminalInterceptor?.compactionClearDraft() === true') === true
+  }
   send(path: string, prompt: string, signal: AbortSignal, isCurrent: () => boolean, beforeSubmit: () => void,
     queuedSend?: (contents: Electron.WebContents, platform: ChatPlatform, path: string, prompt: string, signal: AbortSignal,
       isCurrent: () => boolean, beforeSubmit: () => void) => ReturnType<typeof sendQuestionChatAttachment>): ReturnType<typeof sendQuestionChatAttachment> {

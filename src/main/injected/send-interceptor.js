@@ -7074,6 +7074,21 @@
         cutOff: !!latest && !!findContinueButton(latest), sendFailure: !!focusSendFailureOf(),
         oversized: answer.length > 250000 }
     },
+    /** Empty the composer before the compaction request; true once it reads back empty. */
+    compactionClearDraft() {
+      if (state.programmatic) return false
+      const element = getComposer()
+      if (!element) return false
+      if (!collapse(readComposer(element))) return true
+      insertText(element, '')
+      if (collapse(readComposer(element)) && element.tagName !== 'TEXTAREA' && element.tagName !== 'INPUT') {
+        // An empty insertText can be a no-op in contenteditable editors; delete the selection instead.
+        element.focus()
+        selectAllIn(element)
+        document.execCommand('delete', false)
+      }
+      return !collapse(readComposer(element))
+    },
     focusSnapshot() {
       // Every page-specific read below comes from the platform's measured focus rules.
       const rules = PAGE.focus || { reasoningSelectors: [] }
