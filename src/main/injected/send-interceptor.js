@@ -1373,13 +1373,16 @@
       let language = codeLanguage(code) || codeLanguage(pre)
       let card = pre
       let parent = pre === root ? null : pre.parentElement
-      for (let depth = 0; parent && depth < 4; depth++, parent = parent.parentElement) {
+      // User screenshot 2026-11-08: ChatGPT's newer code card (`</> powershell` with wrap/copy
+      // icons) was not matched, leaking the label as prose. Its exact nesting is unmeasured, so
+      // climb further and accept a lone language label even when the controls sit elsewhere.
+      for (let depth = 0; parent && depth < 6; depth++, parent = parent.parentElement) {
         if (blockCount(parent) !== 1) break
         const headers = [...parent.children].filter(child => child !== pre && !child.contains(pre))
         const labels = headers.map(child => headerText(child).trim()).filter(Boolean)
         const headerLanguage = labels.map(label => languageOf(label)).find(Boolean)
         const controls = headers.some(child => child.querySelector('button, [role="button"]'))
-        if (headerLanguage && controls && labels.every(label => languageOf(label))) {
+        if (headerLanguage && (controls || labels.length === 1) && labels.every(label => languageOf(label))) {
           language = language || headerLanguage
           card = parent
           break

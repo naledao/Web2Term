@@ -96,7 +96,6 @@ const INITIAL_EMBED_STATE: EmbedState = {
 // A stable empty transcript keeps the memoized focus view from re-rendering while loading.
 const EMPTY_MESSAGES: ConversationMessage[] = []
 const PANEL_MIN_WIDTH = 380
-const PANEL_DEFAULT_WIDTH = 400
 const PANEL_MAX_RESERVE = 520
 
 /** `extra:<id>` is a terminal the user added from the + menu. */
@@ -443,7 +442,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [editing, setEditing] = useState(false)
   const [panelWidth, setPanelWidth] = useState(() => Math.max(
     PANEL_MIN_WIDTH,
-    readStoredNumber(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), readStoredNumber(STORAGE_PANEL_WIDTH, PANEL_DEFAULT_WIDTH))
+    // A session without its own saved width starts at the minimum, not a legacy shared width.
+    readStoredNumber(sessionLayoutKey(STORAGE_PANEL_WIDTH, sessionId), PANEL_MIN_WIDTH)
   ))
   // All chat views share the same sidebar layout within this session.
   const [panelCollapsed, setPanelCollapsed] = useState(() => readStoredBool(sessionLayoutKey(STORAGE_PANEL_COLLAPSED, sessionId), false))
