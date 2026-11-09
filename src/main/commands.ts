@@ -147,7 +147,6 @@ export interface CommandRunnerDeps {
   taskTools?: {
     current(context: TaskToolContext): boolean
     event(context: TaskToolContext, event: TaskToolEvent): boolean
-    format(context: TaskToolContext, text: string): string
     files?(context: TaskToolContext, sources: NonNullable<PreparedFileResult['sources']>): void
   }
   onIdle?: () => void
@@ -465,9 +464,6 @@ export class CommandRunner {
   private taskEvent(record: Pick<ExecutionRecord, 'taskContext'>, event: TaskToolEvent): boolean {
     return record.taskContext === undefined || !!record.taskContext && !!this.deps.taskTools?.event(record.taskContext, event)
   }
-  private taskResult(record: ExecutionRecord, text: string): string {
-    return record.taskContext && this.deps.taskTools ? this.deps.taskTools.format(record.taskContext, text) : text
-  }
   /** Preserve a definitely unsent result when a later execution or pause takes over. Never rerun its command. */
   private retainTaskResult(record: ExecutionRecord, text: string): void {
     if (!record.taskContext || !this.taskCurrent(record)) return
@@ -682,8 +678,8 @@ export class CommandRunner {
       if (taskContext) {
         const record = this.deps.store.getExecution(key)
         if (record) {
-          const text = this.taskResult(record, JSON.stringify({ type: 'task_completion_required', goal_verified: false,
-            message: '空命令没有执行。要结束任务，请以“【任务完成】”开头回复，客户端收到该标记即标记完成并提示用户；如需详细核对和产物报告，可选用 computer.complete_task。' }))
+          const text = JSON.stringify({ type: 'task_completion_required', goal_verified: false,
+            message: '空命令没有执行。要结束任务，请以“【任务完成】”开头回复，客户端收到该标记即标记完成并提示用户；如需详细核对和产物报告，可选用 computer.complete_task。' })
           this.taskEvent({ taskContext }, { stage: 'result-ready', execution: 'not_executed', resultText: text, message: '完成声明需要证据，等待回传核对要求。' })
           void this.deliverTaskText(record, text).catch(() => this.taskEvent({ taskContext }, { stage: 'uncertain', message: '完成核对反馈交付未确认，不自动重发。' }))
         }
@@ -1023,14 +1019,14 @@ export class CommandRunner {
       }
       if (!reused || !record.taskContext) this.deps.store.finishExecution(record.messageId, { status: result.failed ? 'failed' : 'done', exitCode: null, output: result.text, finishedAt: Date.now() })
       if (!reused && record.taskContext && result.sources && current()) this.deps.taskTools?.files?.(record.taskContext, result.sources)
-      this.taskEvent(record, { stage: 'result-ready', execution: 'executed', message: result.failed ? '文件读取存在失败，详见实际结果。' : '文件读取完成，等待回传。', resultText: this.taskResult(record, result.text) })
+      this.taskEvent(record, { stage: 'result-ready', execution: 'executed', message: result.failed ? '文件读取存在失败，详见实际结果。' : '文件读取完成，等待回传。', resultText: result.text })
       this.appendLine({ kind: 'output', text: result.text })
       if (!result.attachments.length) {
         this.deps.store.setFileDeliveryStatus(record.messageId, 'cancelled')
         this.appendLine({ kind: 'error', text: '没有可发送的附件。读取错误已保留在本地执行记录。' })
-        if (record.taskContext && current()) { await this.deliverTaskText(record, this.taskResult(record, result.text)); return }
+        if (record.taskContext && current()) { await this.deliverTaskText(record, result.text); return }
         if (record.taskContext && this.taskCurrent(record) && !controller.signal.aborted && requestId === this.executionRequest) {
-          this.taskTextResult = { record: structuredClone(record), text: this.taskResult(record, result.text) }
+          this.taskTextResult = { record: structuredClone(record), text: result.text }
           this.deps.store.setFileDeliveryStatus(record.messageId, 'pending')
           this.taskEvent(record, { stage: 'pending', message: '读取错误文字已保存，恢复后仅回传结果。' }); this.scheduleTaskResults()
           return
@@ -1053,7 +1049,7 @@ export class CommandRunner {
       this.broadcastExecutions(record.conversationId)
       this.appendLine({ kind: 'notice', text: `正在向 ${platform.label} 上传 ${result.attachments.length} 个附件…` })
       if (!this.taskEvent(record, { stage: 'sending' })) return
-      const outcome = await this.deps.sendFilesToPage(record.taskContext ? { ...result, text: this.taskResult(record, result.text) } : result, token, current, controller.signal)
+      const outcome = await this.deps.sendFilesToPage(result, token, current, controller.signal)
       const pausedDelivery = outcome === 'cancelled' && this.automation.paused && !controller.signal.aborted && requestId === this.executionRequest
       const delivery = outcome === 'ok' ? 'sent' : outcome === 'unknown' || outcome === 'stuck' ? 'unknown' : pausedDelivery || outcome === 'busy' ? 'pending' : outcome === 'cancelled' ? 'cancelled' : 'failed'
       this.deps.store.setFileDeliveryStatus(record.messageId, delivery)
@@ -1192,18 +1188,18 @@ export class CommandRunner {
     // Dedicated creation/final notifications replace the ordinary startup result.
     // They explicitly tell the model that software owns monitoring.
     if (backgroundTaskCount > 0) {
-      this.taskEvent(record, { stage: 'background', execution: 'executed', resultText: this.taskResult(record, result.output) })
+      this.taskEvent(record, { stage: 'background', execution: 'executed', resultText: result.output })
       this.diagnostic({ event: 'delivery', messageId, ownerConversationId: conversationId, deliveryOutcome: 'background' })
       return
     }
     this.taskEvent(record, { stage: 'result-ready', timedOut: Boolean(result.timedOut),
       ...(!record.background ? { commandResult: { exitCode: result.exitCode, output: result.output, timedOut: !!result.timedOut, interrupted: !!result.interrupted, rejected: !!result.rejected, sessionLost: !!result.sessionLost } } : {}), execution: result.rejected || startup?.reused ? 'not_executed' : result.interrupted || result.sessionLost ? 'unknown' : 'executed',
-      message: '命令实际结果已记录，等待原对话回传。', resultText: this.taskResult(record, buildResultMessage(result)) })
+      message: '命令实际结果已记录，等待原对话回传。', resultText: buildResultMessage(result) })
     if (!this.taskCurrent(record)) return
 
     if (request !== this.executionRequest) {
       this.diagnostic({ event: 'delivery', reason: 'superseded', messageId, ownerConversationId: conversationId })
-      this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
+      this.retainTaskResult(record, buildResultMessage(result))
       return
     }
 
@@ -1223,7 +1219,7 @@ export class CommandRunner {
     // for a click instead of running on its own.
     if (this.automation.paused) {
       this.diagnostic({ event: 'delivery', reason: 'paused', messageId, ownerConversationId: conversationId })
-      this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
+      this.retainTaskResult(record, buildResultMessage(result))
       return
     }
 
@@ -1243,7 +1239,7 @@ export class CommandRunner {
     const owner = this.deps.currentConversationId()
     if (owner !== conversationId) {
       this.diagnostic({ event: 'delivery', reason: 'conversation-changed', messageId, ownerConversationId: conversationId })
-      this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
+      this.retainTaskResult(record, buildResultMessage(result))
       this.appendLine({
         kind: 'error',
         text:
@@ -1274,12 +1270,12 @@ export class CommandRunner {
       if (this.disposed) return
       if (request !== this.executionRequest) {
         this.diagnostic({ event: 'delivery', reason: 'superseded', messageId, ownerConversationId: conversationId })
-        this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
+        this.retainTaskResult(record, buildResultMessage(result))
         return
       }
       if (this.deps.currentConversationId() !== conversationId) {
         this.diagnostic({ event: 'delivery', reason: 'conversation-changed', messageId, ownerConversationId: conversationId })
-        this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
+        this.retainTaskResult(record, buildResultMessage(result))
         this.appendLine({
           kind: 'error',
           text: '等待期间对话已切走，结果未回传。'
@@ -1292,7 +1288,7 @@ export class CommandRunner {
     // Pause/end can happen while waiting to return a result.
     if (this.automation.paused || request !== this.executionRequest) {
       this.diagnostic({ event: 'delivery', reason: this.automation.paused ? 'paused' : 'superseded', messageId, ownerConversationId: conversationId })
-      this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
+      this.retainTaskResult(record, buildResultMessage(result))
       return
     }
 
@@ -1300,12 +1296,12 @@ export class CommandRunner {
     if (!this.terminalModeOn()) {
       this.appendLine({ kind: 'notice', text: '终端模式已关闭，结果未回传给模型' })
       this.diagnostic({ event: 'delivery', reason: 'terminal-mode-off', messageId, ownerConversationId: conversationId })
-      this.retainTaskResult(record, this.taskResult(record, buildResultMessage(result)))
+      this.retainTaskResult(record, buildResultMessage(result))
       this.flushTerminal()
       return
     }
     if (!this.taskCurrent(record) || !this.taskEvent(record, { stage: 'sending' })) return
-    const message = this.taskResult(record, buildResultMessage(result, messageId.startsWith('rerun:') ? record.command : undefined))
+    const message = buildResultMessage(result, messageId.startsWith('rerun:') ? record.command : undefined)
     this.appendLine({ kind: 'notice', text: '正在发送...' })
     const outcome = record.taskContext ? await this.deliverTaskText(record, message) : await this.deps.sendRawToPage(message)
     this.diagnostic({ event: 'delivery', messageId, ownerConversationId: conversationId, deliveryOutcome: outcome })

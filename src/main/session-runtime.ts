@@ -41,7 +41,7 @@ import { TaskBackgroundWait, backgroundBelongsTo, reusableBackgroundTask } from 
 import type { ComputerUseStepRequest, StepAcceptance, TaskResultSendOutcome } from './task-progression'
 import type { AutonomousTask, AutonomousTaskState, TaskLease, TaskToolContext, TaskMachine, TaskResumeRequest, TaskStopReason } from '../shared/autonomous-task'
 import { computerRecoveryMessage, recoverySendBlockedMessage } from './computer-recovery'
-import { taskToolResultContext, parseTaskToolContext, taskPausedByInput } from '../shared/autonomous-task'
+import { parseTaskToolContext, taskPausedByInput } from '../shared/autonomous-task'
 import { pendingTaskQuestion, validTaskQuestionRequest } from '../shared/task-clarification'
 import type { TaskQuestion, TaskQuestionSource, TaskQuestionRequest } from '../shared/task-clarification'
 import { validFocusUiAction } from '../shared/focus-smart-ui'
@@ -759,10 +759,6 @@ export class SessionRuntime {
           try { this.taskContinuity.files(context, sources) }
           catch (error) { this.taskCoordinator.fail(context.platformId, context.conversationId); throw error }
         },
-        format: (context, text) => text + '\n\n任务工具上下文：\n' + JSON.stringify({ task_context:
-          taskToolResultContext(context, context.stepId, context.sourceMessageId, context.tool, context.machine), task_continuity: this.taskContinuity.summary(context),
-          task_progress_control: this.taskCoordinator.progressSummary(context), task_completion_context: this.taskCoordinator.completionSummary(context),
-          task_clarification_context: this.taskCoordinator.clarificationSummary(context), client_execution_settings: this.runner.getAutomation() })
       },
       onIdle: () => { options.desktopCoordinator?.reconcile(); this.flushTaskTools(); void this.taskProgression.wake(); this.refreshRemoteRipgrep() },
       fileContext: () => this.fileReadContext(),

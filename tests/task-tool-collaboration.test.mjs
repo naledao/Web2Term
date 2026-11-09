@@ -106,7 +106,7 @@ function fixture(t, options = {}) {
     startBackgroundTask: options.startBackgroundTask,
     taskTools: { current: context => runtime.taskToolCurrent(context), event: (context, event) => coordinator.noteToolStep(context, event),
       files: (context, sources) => fileSources.push({ context, sources }),
-      format: (context, text) => text + '\n\n任务工具上下文：\n' + JSON.stringify({ task_context: shared.taskToolResultContext(context, context.stepId, context.sourceMessageId, context.tool, context.machine) }) },
+      },
     onIdle: () => { runtime.flushTaskTools(); void runtime.taskProgression.wake() },
     sendRawToPage: async (text, context) => { sends.push({ text, context }); return options.send ? options.send(text, context) : 'ok' },
     filePlatform: () => ({ id: 'deepseek', label: 'DeepSeek' }), fileContext: () => ({ scope: remote ? 'ssh' : 'local', hostId: remote ? 'remote-a' : '', cwd: runner.getLocalWorkingDirectory() }),
@@ -342,9 +342,9 @@ test('command, file upload and desktop observation share one task, distinct step
   f.route(f.command()); await f.settled()
   const record = f.records.get('cmd-a'); assert.ok(shared.parseTaskToolContext(record.taskContext))
   assert.equal(record.taskContext.taskId, task.id); assert.equal(f.progress().phase, 'waiting-model'); assert.equal(f.runs.length, 1)
-  assert.equal(f.sends[0].context.stepId, record.taskContext.stepId); assert.match(f.sends[0].text, /"tool":"command"/)
+  assert.equal(f.sends[0].context.stepId, record.taskContext.stepId); assert.doesNotMatch(f.sends[0].text, /任务工具上下文|task_context/)
   f.route(f.command('files-a', { type: 'read_files', files: [{ path: 'report.xlsx' }], command: undefined })); await f.settled()
-  assert.equal(f.prepared.length, 1); assert.equal(f.uploads.length, 1); assert.match(f.uploads[0].result.text, /"tool":"read_files"/)
+  assert.equal(f.prepared.length, 1); assert.equal(f.uploads.length, 1); assert.doesNotMatch(f.uploads[0].result.text, /任务工具上下文|task_context/)
   assert.equal(f.uploads[0].current(), true); assert.equal(f.progress().phase, 'waiting-model')
   assert.equal(f.runtime.advanceComputerUse(f.computer()), 'accepted'); await f.runtime.taskProgression.wake()
   const result = JSON.parse(f.computerSends[0])

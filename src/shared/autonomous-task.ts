@@ -68,12 +68,6 @@ export function parseTaskToolContext(value: unknown): TaskToolContext | null {
   return structuredClone(value) as unknown as TaskToolContext
 }
 
-export function taskToolResultContext(lease: TaskLease, stepId: string, sourceMessageId: string, tool: string, machine: TaskMachine): Record<string, unknown> {
-  return { session_id: lease.sessionId, platform_id: lease.platformId, conversation_id: lease.conversationId,
-    task_id: lease.taskId, task_generation: lease.generation, step_id: stepId, source_message_id: sourceMessageId, tool,
-    machine: { id: machine.id, label: machine.label, platform: machine.platform, arch: machine.arch, connection: machine.connection, working_directory: machine.workingDirectory } }
-}
-
 export interface TaskToolStep {
   id: string
   sourceMessageId: string
