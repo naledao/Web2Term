@@ -153,6 +153,8 @@ export interface PageAdapter {
    * on this site", which is a real limitation to surface rather than paper over.
    */
   messageIdAttr: string
+  /** Additional stable message id attributes used by a newer renderer during a migration. */
+  messageIdAttrs?: string[]
   /** Additional disabled states used by custom controls instead of native buttons. */
   disabledControlSelectors?: string[]
   /**
@@ -675,13 +677,11 @@ export const CHATGPT_PAGE: PageAdapter = {
     'button[aria-label="停止生成"]'
   ],
   /*
-   * The id-bearing message wrapper. Only ONE entry: the previous
-   * `[data-message-author-role="assistant"]` is measured dead, and keeping it here would
-   * re-introduce the two-nodes-per-turn hazard described above the moment ChatGPT restores
-   * the attribute on an ancestor element. Add it back only with a probe run that shows both
-   * attributes on the SAME element.
+   * The id-bearing message wrappers. The current DIL renderer uses a separate
+   * `data-dil-message-id`; both selectors identify the response root itself, so the
+   * overlap is between renderer versions rather than two nodes for one turn.
    */
-  assistantSelectors: ['[data-chatgpt-selection-message-id]'],
+  assistantSelectors: ['[data-chatgpt-selection-message-id]', '[data-dil-response][data-dil-message-id]'],
   // Cached ChatGPT turns can follow the active conversation in document order.
   ignoreHiddenReplyNodes: true,
   /*
@@ -690,14 +690,15 @@ export const CHATGPT_PAGE: PageAdapter = {
    * `isAssistantTurn` gets a structural role test that does not depend on which element the
    * id happens to sit on.
    */
-  assistantReplySelectors: ['[data-markdown-text-style="assistant-message"]'],
+  assistantReplySelectors: ['[data-markdown-text-style="assistant-message"]', '[data-dil-response]'],
   /*
    * BOTH roles, for locating the scroll container only (`findScroller` takes the last match
    * and walks up). Overlap between these two is harmless here in a way it is not for
    * `assistantSelectors`: nothing keys identity off this list.
    */
-  messageSelectors: ['[data-content-search-unit-key]', '[data-chatgpt-selection-message-id]'],
+  messageSelectors: ['[data-content-search-unit-key]', '[data-chatgpt-selection-message-id]', '[data-dil-response][data-dil-message-id]'],
   messageIdAttr: 'data-chatgpt-selection-message-id',
+  messageIdAttrs: ['data-chatgpt-selection-message-id', 'data-dil-message-id'],
   // 2026-10-05 attachment probe: cards are siblings of the empty text unit.
   // The text unit disappears during send; this outer user wrapper remains.
   fileUserTurnSelector: '[class~="group/user-message"][data-chatgpt-search-unit-key]',

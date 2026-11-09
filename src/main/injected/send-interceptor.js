@@ -60,13 +60,14 @@
       'button[aria-label="Stop streaming"]',
       'button[aria-label="停止生成"]'
     ],
-    assistantSelectors: ['[data-chatgpt-selection-message-id]'],
+    assistantSelectors: ['[data-chatgpt-selection-message-id]', '[data-dil-response][data-dil-message-id]'],
     ignoreHiddenReplyNodes: true,
     assistantRoleSelectors: [],
     replyStreamingAttribute: '',
-    assistantReplySelectors: ['[data-markdown-text-style="assistant-message"]'],
-    messageSelectors: ['[data-content-search-unit-key]', '[data-chatgpt-selection-message-id]'],
+    assistantReplySelectors: ['[data-markdown-text-style="assistant-message"]', '[data-dil-response]'],
+    messageSelectors: ['[data-content-search-unit-key]', '[data-chatgpt-selection-message-id]', '[data-dil-response][data-dil-message-id]'],
     messageIdAttr: 'data-chatgpt-selection-message-id',
+    messageIdAttrs: ['data-chatgpt-selection-message-id', 'data-dil-message-id'],
     fileDraftIgnoreSelector: 'button[aria-label="选择 ChatGPT 模型"]',
     disabledControlSelectors: [],
     fileTurnPositionAttr: '',
@@ -254,7 +255,7 @@
   const focusReplyAnchor = (node) => {
     if (!node || !PAGE.focus) return null
     if (PAGE.focus.rowPositionAttr) return focusRowPosition(node)
-    return PAGE.messageIdAttr ? node.getAttribute(PAGE.messageIdAttr) || null : null
+    return messageIdOf(node)
   }
   const userSubmissionScope = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
   let userSubmissionSerial = 0
@@ -548,8 +549,9 @@
     const positions = nodes.map(node => PAGE.fileTurnPositionAttr ? node.getAttribute(PAGE.fileTurnPositionAttr) : null).filter(Boolean)
     // Without row positions (ChatGPT) a reply is new by a message id absent before the send. Every id
     // on the page counts, hidden cached turns included, so no earlier message can come back as new.
-    const ids = !PAGE.fileTurnPositionAttr && PAGE.messageIdAttr
-      ? [...document.querySelectorAll('[' + PAGE.messageIdAttr + ']')].map(node => node.getAttribute(PAGE.messageIdAttr)).filter(Boolean) : []
+    const ids = !PAGE.fileTurnPositionAttr && messageIdAttrs().length
+      ? messageIdAttrs().flatMap(attribute => [...document.querySelectorAll('[' + attribute + ']')]
+        .map(node => node.getAttribute(attribute))).filter(Boolean) : []
     return { path: location.pathname, positions: new Set(positions), maxPosition: positions.length && positions.every(value => /^\d+$/.test(value))
       ? Math.max(...positions.map(Number)) : null, ids: new Set(ids) }
   }
@@ -1410,6 +1412,13 @@
       const element = current
       const codeCard = codeCards.get(element)
       if (codeCard) return renderCode(codeCard.code, codeCard.language)
+      // ChatGPT's writing blocks expose an authoritative Markdown copy. It avoids
+      // leaking the block header, editor chrome and contenteditable implementation
+      // into the focus transcript when this newer renderer is used.
+      if (element.getAttribute('data-markdown-copy') === 'rich-block') {
+        const copied = element.getAttribute('data-markdown-copy-text')
+        if (copied !== null) return `\n\n${copied}\n\n`
+      }
       const nativeFile = nativeFiles.find(item => item.element === element)
       if (nativeFile) return '[' + nativeFile.data.label.replace(/[\\\[\]]/g, '\\$&') + '](' + focusNativeFileHref(nativeFile.data) + ')'
       const citation = citations.find(item => item.element === element)
@@ -1420,6 +1429,7 @@
       if (layout) return layoutMarkdown(layout)
       const tag = element.tagName.toLowerCase()
       if (tag === 'script' || tag === 'style') return ''
+      if (tag === 'button' || element.getAttribute('role') === 'button' || element.getAttribute('aria-hidden') === 'true') return ''
       if (tag === 'svg') {
         const diagram = /^(?:chatgpt-)?mermaid[-_]/i.test(element.getAttribute('id') || '') ||
           !!element.getAttribute('aria-roledescription')
@@ -1697,12 +1707,17 @@
    * Used only to look for the attribute; `turnKeyOf` below is what callers should use,
    * because an empty answer here must never become an empty identity.
    */
+  const messageIdAttrs = () => [...new Set([PAGE.messageIdAttr, ...(PAGE.messageIdAttrs || [])].filter(Boolean))]
   const messageIdOf = (node) => {
-    if (!node || !PAGE.messageIdAttr) return null
-    return node.getAttribute(PAGE.messageIdAttr) || null
+    if (!node) return null
+    for (const attribute of messageIdAttrs()) {
+      const value = node.getAttribute(attribute)
+      if (value) return value
+    }
+    return null
   }
 
-  const pageReplyAttrs = () => [...new Set([PAGE.messageIdAttr, PAGE.replyStreamingAttribute].filter(Boolean))]
+  const pageReplyAttrs = () => [...new Set([...messageIdAttrs(), PAGE.replyStreamingAttribute].filter(Boolean))]
 
   /**
    * Identity for one assistant turn — and it must NEVER be empty.
@@ -3923,7 +3938,7 @@
   }
   const computerTurnIsNew = (node, wait) => {
     if (!node?.isConnected || !isVisibleElement(node)) return false
-    if (!PAGE.fileTurnPositionAttr && PAGE.messageIdAttr) {
+    if (!PAGE.fileTurnPositionAttr && messageIdAttrs().length) {
       if (!wait.baseline.ids?.size && wait.baseline.path !== '/') return false
       const id = messageIdOf(node)
       // History rendered later lands above the newest turn; only the newest can be this send's reply.
@@ -3974,7 +3989,7 @@
       replyCandidateCount: candidates.length, latestIsNode: candidates[candidates.length - 1] === node
     })
     if (!info.nodeConnected || !info.nodeVisible) return fail('node-hidden')
-    if (!PAGE.fileTurnPositionAttr && PAGE.messageIdAttr) {
+    if (!PAGE.fileTurnPositionAttr && messageIdAttrs().length) {
       const id = messageIdOf(node)
       Object.assign(info, { idPresent: !!id, idInBaseline: !!id && !!wait.baseline.ids?.has(id) })
       if (!wait.baseline.ids?.size && wait.baseline.path !== '/') return fail('empty-baseline')
@@ -6344,7 +6359,7 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, computerUseRequests: false, conversationPathPattern: '', ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileUserTurnIdAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileSplitNameCards: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, computerUseRequests: false, conversationPathPattern: '', ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', messageIdAttrs: [], disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileUserTurnIdAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileSplitNameCards: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
         observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing
@@ -7167,7 +7182,7 @@
       }
       let reply = null
       if (node || pending) {
-        const answer = node ? PAGE.assistantReplySelectors.map(selector => node.querySelector(selector)).find(Boolean) || null : null
+        const answer = node ? replyRootOf(node) : null
         // Reasoning may live beside the turn rather than in it (ChatGPT's activity block).
         const reasoningRoot = pending || (rules.reasoningScopeSelector ? node.closest(rules.reasoningScopeSelector) || node : node)
         const thoughts = [...new Set(rules.reasoningSelectors.flatMap(selector => [...reasoningRoot.querySelectorAll(selector)]))]

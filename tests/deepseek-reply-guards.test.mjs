@@ -60,6 +60,20 @@ class ElementFixture {
 
   matches(selector) {
     if (selector.includes(',')) return selector.split(',').some((part) => this.matches(part.trim()))
+    const compound = [...selector.matchAll(/\[([\w-]+)(?:([*^$]?=)"([^"]*)")?\]/g)]
+    if (compound.length > 1) {
+      const base = selector.replace(/\[[^\]]+\]/g, '').trim()
+      if (base && !this.matches(base)) return false
+      return compound.every(([, name, operator, expected]) => {
+        const value = this.getAttribute(name)
+        if (value === null) return false
+        if (!operator) return true
+        if (operator === '*=') return value.includes(expected)
+        if (operator === '^=') return value.startsWith(expected)
+        if (operator === '$=') return value.endsWith(expected)
+        return value === expected
+      })
+    }
     // Child combinator and tag.class: enough for the shipped chart selectors.
     const child = selector.lastIndexOf(' > ')
     if (child !== -1) return this.matches(selector.slice(child + 3)) && !!this.parentElement?.matches(selector.slice(0, child))
@@ -599,6 +613,35 @@ test('a chart whose only label is a type word ("图表 图表") gets no title of
   assert.match(text, /## 周一至周五数据折线图/)
   assert.match(text, /> 📊 图表（可在原始视图中交互查看）/)
   assert.equal(text.includes('图表 图表'), false)
+})
+
+test('ChatGPT DIL writing blocks become clean focus Markdown with the new message id', () => {
+  const copied = '请帮我配置并连接一个 MCP Server。\n\n- 地址：`http://127.0.0.1:8080/mcp`\n\n```powershell\nGet-Date\n```'
+  const writing = element('div', {
+    'data-markdown-copy': 'rich-block',
+    'data-markdown-copy-text': copied,
+    'data-testid': 'chatgpt-writing-block'
+  }, [element('div', { class: 'writing-block-editor' }, [element('div', { contenteditable: 'true' }, '编辑器内部文本')])])
+  const reply = element('div', {
+    'data-dil-response': '',
+    'data-dil-message-id': 'dil-message-1'
+  }, [element('p', { 'data-d-component': 'text' }, '【任务完成】'), writing])
+  const user = element('div', { 'data-content-search-unit-key': 'turn-1:user' }, '用户问题')
+  const app = fixture([user])
+  app.controller.configure({ page: CHATGPT_PAGE })
+  app.confirmSend()
+  app.replaceNodes([user, reply])
+  app.controller.checkNow()
+  app.tick(250)
+  const saved = app.events.find(event => event.event === 'assistant-message')
+  assert.ok(saved, 'the DIL response is recognized as the assistant reply')
+  assert.equal(saved.messageId, 'dil-message-1')
+  assert.match(saved.text, /【任务完成】/)
+  assert.match(saved.text, /请帮我配置并连接一个 MCP Server。/)
+  assert.match(saved.text, /```powershell\nGet-Date\n```/)
+  assert.equal(saved.text.includes('编辑器内部文本'), false)
+  assert.equal(saved.text.includes('data-markdown-copy'), false)
+  assert.match(app.controller.focusSnapshot().reply.answer, /请帮我配置并连接一个 MCP Server。/)
 })
 
 test('ChatGPT categorical bars retain their kind, DIL title, caption and exact values', () => {
