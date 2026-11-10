@@ -1403,6 +1403,11 @@
       // Protect literal code from the prose whitespace normalisation below.
       return `\n\n\u0000focus-code:${index}\u0000\n\n`
     }
+    const richBlockMarkdown = copied => {
+      const metadata = JSON.stringify({ title: '写作' }).replace(/</g, '\\u003c').replace(/--/g, '\\u002d\\u002d')
+      const fallback = copied.split(/\r?\n/).map(line => '> ' + line).join('\n')
+      return '\n\n<!--focus-rich ' + metadata + ' -->\n' + fallback + '\n\n'
+    }
 
     const render = (current, depth = 0, strongContext = false) => {
       if (!current) return ''
@@ -1417,7 +1422,7 @@
       // into the focus transcript when this newer renderer is used.
       if (element.getAttribute('data-markdown-copy') === 'rich-block') {
         const copied = element.getAttribute('data-markdown-copy-text')
-        if (copied !== null) return `\n\n${copied}\n\n`
+        if (copied !== null) return richBlockMarkdown(copied)
       }
       const nativeFile = nativeFiles.find(item => item.element === element)
       if (nativeFile) return '[' + nativeFile.data.label.replace(/[\\\[\]]/g, '\\$&') + '](' + focusNativeFileHref(nativeFile.data) + ')'

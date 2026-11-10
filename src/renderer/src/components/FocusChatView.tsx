@@ -327,8 +327,8 @@ function executionNeedsAction(record: ExecutionRecord, delivery?: FocusDelivery)
  * fallback list. The focus view draws the chart in place of both; a marker that does not
  * parse leaves the quote, and the comment itself is never shown (skipHtml).
  */
-const RICH_BLOCK = /<!--focus-(chart|ui|layout) (\{[^\n]*\}) -->\n((?:>[^\n]*(?:\n|$))*)/g
-const CHART_MARKER = /<!--focus-(?:chart|ui|layout) [\s\S]*? -->\n?/g
+const RICH_BLOCK = /<!--focus-(chart|ui|layout|rich) (\{[^\n]*\}) -->\n((?:>[^\n]*(?:\n|$))*)/g
+const CHART_MARKER = /<!--focus-(?:chart|ui|layout|rich) [\s\S]*? -->\n?/g
 const mathRemarkPlugins = [remarkMath]
 const mathRehypePlugins: NonNullable<ComponentProps<typeof MDEditor.Markdown>['rehypePlugins']> = [
   rehypeFocusFileLinks,
@@ -342,14 +342,51 @@ function normalizeMathDelimiters(markdown: string): string {
     return `$${token.slice(2, -2).replace(/\s*\n\s*/g, ' ')}$`
   })
 }
-const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: AppTheme }): JSX.Element {
+function parseFocusRichBlock(json: string): { title: string } | null {
+  try {
+    const value: unknown = JSON.parse(json)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const title = (value as { title?: unknown }).title
+    return typeof title === 'string' && title.trim().length > 0 && title.length <= 80 ? { title: title.trim() } : null
+  } catch { return null }
+}
+function FocusRichBlock({ title, content, theme, onOriginal }: {
+  title: string; content: string; theme: AppTheme; onOriginal(): void
+}): JSX.Element {
+  const [copied, setCopied] = useState(false)
+  const copy = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1800)
+    } catch { setCopied(false) }
+  }
+  return <section className="focus-rich-block" aria-label={title}>
+    <header className="focus-rich-block__header"><strong>{title}</strong><div className="focus-rich-block__actions">
+      <button type="button" title="复制内容" aria-label="复制内容" onClick={() => void copy()}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+          <rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" />
+        </svg>
+      </button>
+      <button type="button" title="在原始会话中打开" aria-label="在原始会话中打开" onClick={onOriginal}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+          <path d="M14 4h6v6M20 4l-8 8" /><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" />
+        </svg>
+      </button>
+    </div></header>
+    {copied ? <span className="focus-rich-block__copied" role="status">已复制</span> : null}
+    <div className="focus-rich-block__body"><Markdown text={content} theme={theme} onOriginal={onOriginal} /></div>
+  </section>
+}
+const Markdown = memo(function Markdown({ text, theme, onOriginal = () => {} }: { text: string; theme: AppTheme; onOriginal?: () => void }): JSX.Element {
   const source = normalizeMathDelimiters(cleanFocusAnswer(text))
-  const blocks: Array<string | { kind: 'chart'; data: FocusChartData } | { kind: 'ui'; data: FocusUiWidget } | { kind: 'layout'; data: FocusLayoutData }> = []
+  const blocks: Array<string | { kind: 'chart'; data: FocusChartData } | { kind: 'ui'; data: FocusUiWidget } | { kind: 'layout'; data: FocusLayoutData } | { kind: 'rich'; data: { title: string }; content: string }> = []
   let last = 0
   for (const match of source.matchAll(RICH_BLOCK)) {
-    const data = match[1] === 'chart' ? parseFocusChart(match[2]) : match[1] === 'layout' ? parseFocusLayout(match[2]) : parseFocusUi(match[2])
+    const data = match[1] === 'chart' ? parseFocusChart(match[2]) : match[1] === 'layout' ? parseFocusLayout(match[2]) : match[1] === 'rich' ? parseFocusRichBlock(match[2]) : parseFocusUi(match[2])
     if (!data) continue
-    const block = match[1] === 'chart' ? { kind: 'chart' as const, data: data as FocusChartData } :
+    const block = match[1] === 'chart' ? { kind: 'chart' as const, data: data as FocusChartData } : match[1] === 'rich' ?
+      { kind: 'rich' as const, data: data as { title: string }, content: match[3].replace(/^> ?/gm, '').trim() } :
       match[1] === 'layout' ? { kind: 'layout' as const, data: data as FocusLayoutData } : { kind: 'ui' as const, data: data as FocusUiWidget }
     blocks.push(source.slice(last, match.index), block)
     last = match.index + match[0].length
@@ -358,7 +395,8 @@ const Markdown = memo(function Markdown({ text, theme }: { text: string; theme: 
   blocks.push(source.slice(last))
   return <FocusCodeThemeContext.Provider value={theme}>{blocks.map((block, index) => typeof block === 'string'
     ? block.trim() ? <MDEditor.Markdown key={index} source={block} skipHtml disableCopy components={{ pre: FocusCodeBlock, a: FocusMessageLink }} remarkPlugins={mathRemarkPlugins} rehypePlugins={mathRehypePlugins} wrapperElement={{ 'data-color-mode': theme }} /> : null
-    : block.kind === 'chart' ? <FocusChart key={index} data={block.data} /> : block.kind === 'layout'
+    : block.kind === 'chart' ? <FocusChart key={index} data={block.data} /> : block.kind === 'rich' ?
+      <FocusRichBlock key={index} title={block.data.title} content={block.content} theme={theme} onOriginal={onOriginal} /> : block.kind === 'layout'
       ? <FocusLayout key={index} data={block.data} /> : <FocusSmartUi key={index} data={block.data} />)}</FocusCodeThemeContext.Provider>
 })
 
@@ -1173,7 +1211,7 @@ function FocusChatView(props: Props): JSX.Element {
             // Empty cycles have margins and padding too; they must not push the placeholder down.
             if (!segment.parts.length && !segmentExecutions.length && !segmentTools.length) return null
             return <div className="focus-process__cycle" key={segment.cycle}>
-              {segment.parts.map((part, index) => part.kind === 'reasoning' ? <FocusDetails className="focus-reasoning" key={index} ownerKey={viewOwnerKey} stateKey={'reasoning:' + turn.id + ':' + segment.cycle + ':' + index} summary="思考过程">{() => <Markdown text={part.text} theme={theme} />}</FocusDetails> :
+              {segment.parts.map((part, index) => part.kind === 'reasoning' ? <FocusDetails className="focus-reasoning" key={index} ownerKey={viewOwnerKey} stateKey={'reasoning:' + turn.id + ':' + segment.cycle + ':' + index} summary="思考过程">{() => <Markdown text={part.text} theme={theme} onOriginal={props.onOriginal} />}</FocusDetails> :
                 <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
               {segmentExecutions.map(record => renderExecution(record, deliveryOf(record), !turn.archived))}
               {segmentTools.map(renderToolCall)}
@@ -1193,7 +1231,7 @@ function FocusChatView(props: Props): JSX.Element {
             ? <button type="button" disabled={!!actionId} onClick={() => void retryFormat(turn.commandRecovery!.token)}>重试修正</button> : null}
           {!turn.archived ? <button type="button" onClick={props.onOpenTerminal}>查看执行控制</button> : null}
         </div> : null}
-        {answers.map(answer => <div className="focus-answer" key={answer.cycle} data-question-answer={turn.archived ? undefined : answer.sourceMessageId ?? ''}><Markdown text={answer.text} theme={theme} /></div>)}
+        {answers.map(answer => <div className="focus-answer" key={answer.cycle} data-question-answer={turn.archived ? undefined : answer.sourceMessageId ?? ''}><Markdown text={answer.text} theme={theme} onOriginal={props.onOriginal} /></div>)}
         {answers.length > 0 && !turnWorking ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(turn.id, answers.map(answer => answer.text).join('\n\n'))}>{copiedId === turn.id ? '已复制' : '复制回答'}</button></div> : null}
       </div>
     </article>
@@ -1211,7 +1249,7 @@ function FocusChatView(props: Props): JSX.Element {
           </div> : entry.turn ? renderTurn(entry.turn) :
           <article className={'focus-history focus-history--' + entry.message!.role + (editingId === entry.message!.id ? ' focus-user--editing' : '')} data-message-id={entry.message!.id} key={entry.message!.id}>
             {entry.message!.role === 'assistant' ? <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}{modelLabel}</div> : null}
-            {entry.message!.role === 'assistant' ? <>{entry.message!.attachments.map(props.renderAttachment)}<div data-question-answer={entry.message!.archived ? undefined : entry.message!.sourceMessageId ?? ''}><Markdown text={(!entry.message!.archived && richAnswers.get(entry.message!.sourceMessageId ?? '')) || entry.message!.content} theme={theme} /></div></>
+            {entry.message!.role === 'assistant' ? <>{entry.message!.attachments.map(props.renderAttachment)}<div data-question-answer={entry.message!.archived ? undefined : entry.message!.sourceMessageId ?? ''}><Markdown text={(!entry.message!.archived && richAnswers.get(entry.message!.sourceMessageId ?? '')) || entry.message!.content} theme={theme} onOriginal={props.onOriginal} /></div></>
               : userContent(entry.message!.id, cleanFocusUserText(entry.message!.content), entry.message!.attachments.length > 0, entry.message!.attachments.map(props.renderAttachment), entry.message!.archived)}
           </article>)}
       </ConversationTranscript>,
