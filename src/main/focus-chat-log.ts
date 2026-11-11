@@ -69,7 +69,7 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
       'option-confirmed', 'option-unconfirmed', 'native-click-dispatched', 'native-click-not-received',
       'native-click-target-changed', 'native-click-unreachable', 'native-click-window-unfocused',
       'native-click-dispatch-failed', 'request-unrelated', 'request-state-mismatch', 'request-state-absent',
-      'control-missing', 'native-input-failed', 'menu-unavailable', 'model-options-missing', 'settings-read', 'already-selected',
+      'control-missing', 'native-input-failed', 'native-click-not-dispatched', 'menu-unavailable', 'model-options-missing', 'settings-read', 'already-selected',
       'option-unavailable', 'selection-confirmed', 'selection-unconfirmed', 'slider-unavailable', 'menu-close-unconfirmed',
       'file-download-received', 'file-download-completed', 'file-download-failed', 'file-preview-timeout',
       'too-large', 'timeout', 'file-unavailable', 'source-navigation-received', 'source-navigation-opened',

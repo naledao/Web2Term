@@ -1605,6 +1605,8 @@ export class ChatGptEmbed {
   async updateFocusModelSettings(request: FocusModelSettingsRequest, token: string, owns: () => boolean): Promise<FocusModelSettingsResult> {
     const contents = this.focusPage()
     if (!contents || this.platform.id !== 'chatgpt' || this.focusEditToken || this.focusModelNativeClick) return { outcome: 'unavailable', settings: null }
+    const focused = (): boolean => !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false)
+    if (!focused()) return { outcome: 'unavailable', settings: null, reason: 'native-click-window-unfocused' }
     const url = contents.getURL()
     const route = new URL(url)
     let timer: ReturnType<typeof setTimeout> | undefined, step = 0
@@ -1619,8 +1621,7 @@ export class ChatGptEmbed {
     this.focusModelNativeClick = { token, dispatch: next => {
       if (!current() || !Number.isSafeInteger(next) || next !== step + 1 || next > 5) return
       step = next
-      void dispatchFocusModelClick(contents, token, next, current,
-        () => !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false))
+      void dispatchFocusModelClick(contents, token, next, current, focused)
     } }
     try {
       const raw = await Promise.race([

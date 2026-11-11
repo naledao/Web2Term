@@ -1869,8 +1869,12 @@ export class SessionRuntime {
       }
       this.focusUiRecoveredTurn = null
     }
+    // Automatic model reads need native input. A ready DOM in a background window
+    // must not consume the focus view's initialization attempts after compaction.
+    const modelSettingsReady = page?.modelSettingsReady === undefined ? undefined :
+      page.modelSettingsReady && this.active && !!this.window && !this.window.isDestroyed() && this.window.isFocused()
     writeFocusDiagnostic(owner, { event: 'view-state', ready: page?.ready === true,
-      modelSettingsReady: page?.modelSettingsReady,
+      modelSettingsReady,
       sendFailed: !!page?.sendFailure, retryable: page?.sendFailure?.retryable === true,
       nativeDraft: page?.nativeDraft === true, waiting: page?.waiting === true, generating: page?.generating ?? 'unknown',
       turnCount: this.focusChat.turns(owner.platformId, owner.conversationId).length,
@@ -1900,7 +1904,7 @@ export class SessionRuntime {
       smartReplies: page?.smartReplies ?? [],
       composerModes: page?.composerModes ?? [],
       modelSettings: page?.modelSettings,
-      modelSettingsReady: page?.modelSettingsReady,
+      modelSettingsReady,
       promptInjection: focusPromptInjectionState(owner.platformId,
         this.conversationTools.injectionLedger(owner.platformId, owner.conversationId), this.embed.getInterceptorStatus()),
       contextUsage,

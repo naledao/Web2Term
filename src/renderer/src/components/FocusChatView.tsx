@@ -812,7 +812,7 @@ function FocusChatView(props: Props): JSX.Element {
   const selectedUnavailable = selectedSkills.length ? skillModeUnavailable || selectedSkills.map(id => focusSkillUnavailable(id, toolState)).find(Boolean) || '' : ''
   const sendBlock = selectedUnavailable || (selectedSkills.includes('computer') ? state?.sendBlock || '' : '')
   const updateModelSettings = useCallback(async (kind: FocusModelSettingKind, value?: string, automatic = false): Promise<void> => {
-    if (sendLock.current || working || editingId || !ready || !visible) return
+    if (sendLock.current || working || editingId || !ready || !visible || compaction.blocked) return
     sendLock.current = true; settingBusy.current = true; readEpoch.current++
     setSettingPending(kind); setSettingError(''); setError('')
     try {
@@ -827,15 +827,16 @@ function FocusChatView(props: Props): JSX.Element {
       // Only failures before native input may be retried automatically. A dispatched
       // click with an unknown result must remain a user-confirmed operation.
       const retryBeforeInput = kind === 'read' && automatic && modelReadAttempts.current < 3 &&
-        (result.outcome === 'busy' || result.outcome === 'unavailable' && ['control-missing', 'page-unavailable'].includes(result.reason ?? ''))
+        (result.outcome === 'busy' || result.outcome === 'unavailable' && ['control-missing', 'page-unavailable',
+          'native-click-not-dispatched', 'native-click-window-unfocused', 'native-click-unreachable', 'native-click-dispatch-failed'].includes(result.reason ?? ''))
       if (retryBeforeInput) modelReadAttempted.current = false
       else if (result.outcome !== 'ok') setSettingError(result.outcome === 'busy' ? '当前正在处理任务，请稍后切换模型或思考强度。' :
         kind === 'read' ? '暂时无法读取模型设置，请点击顶部刷新或到原始视图检查。' : '切换结果尚未确认，请到原始视图核对后再发送。')
     } catch { if (alive.current) setSettingError('暂时无法同步模型设置，请到原始视图检查。') }
     finally { sendLock.current = false; settingBusy.current = false; if (alive.current) setSettingPending(null) }
-  }, [ownerKey, working, editingId, ready, visible])
+  }, [ownerKey, working, editingId, ready, visible, compaction.blocked])
   useEffect(() => {
-    if (owner.platformId !== 'chatgpt' || !visible || !ready || working || editingId || sendLock.current || modelReadAttempted.current) return
+    if (owner.platformId !== 'chatgpt' || !visible || !ready || working || editingId || compaction.blocked || sendLock.current || modelReadAttempted.current) return
     // A new conversation id remounts this view after the first send. Its page
     // snapshot already carries the confirmed settings; do not reopen a hidden
     // native menu as soon as the task finishes.
@@ -843,10 +844,16 @@ function FocusChatView(props: Props): JSX.Element {
     // The home composer can mount well before its model trigger. Passive snapshots
     // wait for that control without consuming the one owned menu read or locking send.
     if (state?.modelSettingsReady !== true || settingPending !== null) return
-    modelReadAttempted.current = true
-    modelReadAttempts.current++
-    void updateModelSettings('read', undefined, true)
-  }, [ownerKey, visible, ready, working, editingId, sending, settingPending, state?.modelSettings?.model, state?.modelSettingsReady, updateModelSettings])
+    // A newly adopted document can expose its trigger before native hit testing has
+    // settled. Let the page/layout stabilize, including between safe pre-input retries.
+    const timer = setTimeout(() => {
+      if (sendLock.current || modelReadAttempted.current) return
+      modelReadAttempted.current = true
+      modelReadAttempts.current++
+      void updateModelSettings('read', undefined, true)
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [ownerKey, visible, ready, working, editingId, sending, settingPending, compaction.blocked, state?.modelSettings?.model, state?.modelSettingsReady, updateModelSettings])
   useEffect(() => {
     if (state?.modelSettings?.model) setSettingError('')
   }, [ownerKey, state?.modelSettings?.model])

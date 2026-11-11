@@ -32,6 +32,9 @@ function actual(name, context, method = false, path = pagePath) {
   return new Script(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText).runInContext(context)
 }
 function automaticRead(context) {
+  context.compaction ??= { blocked: false }
+  context.setTimeout ??= callback => { callback(); return 1 }
+  context.clearTimeout ??= () => {}
   const path = '../src/renderer/src/components/FocusChatView.tsx'
   const file = ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   function find(node) {
@@ -115,7 +118,7 @@ function fixture() {
       else if (hit === root) effort = ['none', 'medium', 'high'][Math.round((event.x / 1.5 - 20) / 100)]
       afterInput?.(hit)
     } }
-  return { context, inputs, reports, composer, get trigger() { return trigger }, models, read: context.focusModelSettingsOf,
+  return { context, contents, inputs, reports, composer, get trigger() { return trigger }, models, read: context.focusModelSettingsOf,
     resetHistory: actual('armBaseline', context),
     change: async (kind, value = null) => { step = 0; return await api.updateModelSettings(kind, value, context.location.pathname, 'test-operation') },
     originalOpen() { open = true }, isOpen: () => open,
@@ -202,7 +205,7 @@ test('settings survive interim conversation ids and task completion without requ
     assert.equal(JSON.stringify(f.read()), expected, sending + ' after task completion')
     assert.equal(f.inputs.length, inputs)
     const refresh = await f.change('read')
-    assert.equal(refresh.reason, 'native-input-failed')
+    assert.equal(refresh.reason, 'native-click-window-unfocused')
     assert.equal(JSON.stringify(refresh.settings), expected, 'a failed explicit refresh retains confirmed settings')
   }
 })
@@ -335,6 +338,40 @@ test('a pre-input trigger race recovers on readiness without showing a persisten
   assert.equal(f.context.settingBusy.current, false)
 })
 
+test('post-compaction initialization waits for the page to settle and does not run while compaction is blocked', async () => {
+  const settings = { model: 'GPT-6', effort: 'high', models: [{ value: 'GPT-6', label: 'GPT-6' }], efforts: [{ value: 'high', label: 'High' }] }
+  const f = rendererInitialization([{ outcome: 'ok', settings }]), timers = []
+  f.context.setTimeout = (callback, delay) => { const timer = { callback, delay, cancelled: false }; timers.push(timer); return timer }
+  f.context.clearTimeout = timer => { timer.cancelled = true }
+  f.context.compaction.blocked = true
+  f.effect()
+  assert.equal(timers.length, 0)
+  f.context.compaction.blocked = false
+  const cancel = f.effect()
+  assert.equal(f.requests(), 0, 'DOM readiness alone must not immediately dispatch native input')
+  assert.equal(f.context.modelReadAttempts.current, 0)
+  cancel()
+  assert.equal(timers[0].cancelled, true, 'navigation or readiness changes cancel the pending initialization')
+  f.effect()
+  timers.at(-1).callback()
+  await f.wait()
+  assert.equal(f.requests(), 1)
+  assert.equal(f.context.state.modelSettings.model, 'GPT-6')
+})
+
+test('an explicitly rejected first click can recover without switching views or reporting an uncertain selection', async () => {
+  const settings = { model: 'GPT-6', effort: 'high', models: [{ value: 'GPT-6', label: 'GPT-6' }], efforts: [{ value: 'high', label: 'High' }] }
+  for (const reason of ['native-click-not-dispatched', 'native-click-window-unfocused', 'native-click-unreachable', 'native-click-dispatch-failed']) {
+    const f = rendererInitialization([{ outcome: 'unavailable', reason, settings: null }, { outcome: 'ok', settings }])
+    f.effect(); await f.wait()
+    assert.equal(f.context.modelReadAttempted.current, false, reason)
+    assert.deepEqual(f.errors.filter(Boolean), [], reason)
+    f.effect(); await f.wait()
+    assert.equal(f.requests(), 2, reason)
+    assert.equal(f.context.state.modelSettings.model, 'GPT-6', reason)
+  }
+})
+
 test('automatic recovery is bounded and never retries an uncertain native input result', async () => {
   const missing = () => ({ outcome: 'unavailable', reason: 'control-missing', settings: null })
   const f = rendererInitialization([missing(), missing(), missing()])
@@ -462,6 +499,48 @@ test('unfocused window, ambiguous models and an unmeasured slider range fail clo
   const range = fixture(); range.differentRange()
   assert.notEqual((await range.change('effort', 'medium')).outcome, 'ok')
   assert.deepEqual(Array.from(range.read().efforts), [])
+})
+test('an unfocused first read reports that no native click was dispatched', async () => {
+  const f = fixture()
+  f.failFocus()
+  const result = await f.change('read')
+  assert.equal(result.outcome, 'unavailable')
+  assert.equal(result.reason, 'native-click-window-unfocused')
+  assert.equal(f.inputs.length, 0)
+  assert.equal(f.isOpen(), false)
+})
+test('an unreachable first trigger is retryable before any native input', async () => {
+  const f = fixture()
+  f.context.document.elementFromPoint = () => null
+  const result = await f.change('read')
+  assert.equal(result.outcome, 'unavailable')
+  assert.equal(result.reason, 'native-click-unreachable')
+  assert.equal(f.inputs.length, 0)
+  assert.equal(f.isOpen(), false)
+})
+test('a partial native input failure remains uncertain and does not dispatch cleanup or another click', async () => {
+  const f = fixture(), send = f.contents.sendInputEvent
+  f.contents.sendInputEvent = event => {
+    send(event)
+    if (event.type === 'mouseDown') throw new Error('synthetic partial native input failure')
+  }
+  const result = await f.change('read')
+  assert.equal(result.outcome, 'unknown')
+  assert.equal(result.reason, 'native-input-failed')
+  assert.equal(f.inputs.filter(event => event.type === 'mouseDown').length, 1)
+  assert.equal(f.inputs.filter(event => event.type === 'mouseUp').length, 0)
+  assert.equal(f.context.focusModeChanging, null)
+})
+test('the embed defers a background-window read without opening the native menu', async () => {
+  let calls = 0
+  const context = createContext({ BrowserWindow: { getFocusedWindow: () => null } })
+  const read = actual('updateFocusModelSettings', context, true, '../src/main/embed.ts')
+  const embed = { platform: { id: 'chatgpt' }, view: {}, focusEditToken: null, focusModelNativeClick: null,
+    focusPage: () => ({ executeJavaScript: async () => { calls++ } }) }
+  const result = await read.call(embed, { kind: 'read' }, 'test-operation', () => true)
+  assert.equal(result.outcome, 'unavailable')
+  assert.equal(result.reason, 'native-click-window-unfocused')
+  assert.equal(calls, 0)
 })
 test('path changes stop later native steps, release the page lock, and preserve the draft', async () => {
   const f = fixture()

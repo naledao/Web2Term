@@ -6680,10 +6680,12 @@
       }
       return { x, y }
     },
-    finishFocusModelClick(token, step, dispatched) {
+    finishFocusModelClick(token, step, dispatched, reason = null) {
       const operation = focusModeChanging, click = operation?.click
-      if (!operation || operation.token !== token || !click || click.step !== step || (dispatched === true && !click.prepared) || !operation.current()) return false
-      click.dispatched = dispatched === true
+      if (!operation || operation.token !== token || !click || click.step !== step || ![true, false, null].includes(dispatched) ||
+        (dispatched === true && !click.prepared) || !operation.current()) return false
+      click.dispatched = dispatched
+      if (dispatched === false && ['native-click-window-unfocused', 'native-click-unreachable', 'native-click-dispatch-failed'].includes(reason)) click.reason = reason
       return true
     },
     /** One owned menu operation, driven by trusted native input and confirmed from DOM state. */
@@ -6724,8 +6726,14 @@
           let parts = focusModelPickerParts()
           if (!parts || controlDisabled(parts.trigger)) return ['unavailable', 'control-missing']
           if (parts.trigger.getAttribute('aria-expanded') !== 'true') {
+            if (!await nativeClick(parts.trigger, null, () => focusModelPickerParts()?.trigger === parts.trigger)) {
+              // Only an explicitly rejected first click is safe to retry. A missing
+              // acknowledgement or a later failure may already have changed the menu.
+              const click = operation.click
+              return operation.step === 1 && click?.dispatched === false
+                ? ['unavailable', click.reason || 'native-click-not-dispatched'] : ['unknown', 'native-input-failed']
+            }
             openedHere = true
-            if (!await nativeClick(parts.trigger, null, () => focusModelPickerParts()?.trigger === parts.trigger)) return ['unknown', 'native-input-failed']
           }
           if (!await waitFor(() => !!focusModelPickerParts()?.menu)) return ['unknown', 'menu-unavailable']
           parts = focusModelPickerParts()
