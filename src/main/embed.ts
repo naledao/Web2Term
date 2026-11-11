@@ -2550,7 +2550,23 @@ export class ChatGptEmbed {
           `[embed:${this.platform.id}] task-finished completed=${payload.completed === true} ` +
             `messageId=${payload.messageId ?? '?'}`
         )
-        if (payload.completed === true && this.interceptor.taskFinishedAt === null) {
+        if (payload.completed === true) {
+          if (payload.live !== true || payload.taskPromptGeneration !== this.taskPromptGeneration ||
+            payload.computerPageEpoch !== this.computerPageEpoch) break
+          try {
+            const contents = this.liveContents()
+            if (!contents) break
+            const url = new URL(contents.getURL())
+            if (!this.platform.allowedOriginPattern.test(url.href) || payload.pagePath !== url.pathname) break
+          } catch { break }
+          // A background notification can receive its own completion reply after the
+          // human task has already finished. The page advances its prompt boundary
+          // for that reply too; acknowledge it without reopening the timer or notifying
+          // again, otherwise every subsequent human send looks stale to main.
+          if (this.interceptor.taskStartedAt === null || this.interceptor.taskFinishedAt !== null) {
+            this.resetTaskPrompt()
+            break
+          }
           const source = this.taskActionSource(payload)
           if (this.computerUseRecognitionEnabled && this.platform.page.computerUseRequests === true &&
             (!source || payload.computerPageEpoch !== this.computerPageEpoch ||
