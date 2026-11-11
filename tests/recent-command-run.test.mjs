@@ -97,6 +97,7 @@ function fixture(t, options = {}) {
     },
     currentConversationId: () => currentConversationId,
     onCommandDiagnostic: details => diagnostics.push(details),
+    executionAllowed: () => options.executionAllowed !== false,
     terminalModeEnabled: () => terminalMode,
     remoteShell: () => remoteShell,
     onTaskStarted: () => events.push('task-started'),
@@ -351,6 +352,14 @@ test('rejects stale selections, mismatched conversations, disabled mode, pause a
   assert.equal(f.records.size, 1)
   assert.equal(f.calls.length, 0)
   assert.equal(f.sent.length, 0)
+  assert.equal(f.events.length, 0)
+})
+
+test('reports a task that is shutting down as busy while terminal mode is still enabled', (t) => {
+  const f = fixture(t, { executionAllowed: false })
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'busy')
+  assert.equal(f.records.size, 1)
+  assert.equal(f.calls.length, 0)
   assert.equal(f.events.length, 0)
 })
 

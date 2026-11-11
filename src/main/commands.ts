@@ -773,7 +773,10 @@ export class CommandRunner {
   /** Replay a saved command as a new execution without asking the model to regenerate it. */
   runRecentCommand(conversationId: string, messageId: string): RecentCommandRunResult {
     if (this.disposed || this.deps.currentConversationId() !== conversationId) return 'unavailable'
-    if (!this.terminalModeOn()) return 'terminal-mode-off'
+    if (this.deps.terminalModeEnabled?.() === false) return 'terminal-mode-off'
+    // A task can still be shutting down while the terminal-mode switch remains on.
+    // Report that as busy instead of telling the user to enable an already enabled switch.
+    if (this.deps.executionAllowed?.() === false) return 'busy'
     if (this.automation.paused) return 'paused'
     // A replay must not interrupt other work, including manually entered terminal commands.
     if (this.inFlight.size > 0 || this.activeShell || this.deps.remoteShell()?.running) return 'busy'

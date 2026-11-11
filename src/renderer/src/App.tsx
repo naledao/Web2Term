@@ -1286,7 +1286,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const toggleInterceptor = useCallback(async (): Promise<void> => {
     if (!interceptor) return
     try {
-      setInterceptor(await window.api.setInterceptorEnabled(!interceptor.enabled))
+      const status = await window.api.setInterceptorEnabled(!interceptor.enabled)
+      setInterceptor(status)
+      if (status.enabled) setRecentCommandError('')
     } catch {
       /* leave the previous state in place */
     }
@@ -2743,7 +2745,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                       <button
                         type="button"
                         className="btn btn--primary recent-command-picker__send"
-                        disabled={recentCommandRunning !== null}
+                        disabled={recentCommandRunning !== null || (!isRecentQuestion(item.payloadJson) && !interceptor?.enabled)}
+                        title={!isRecentQuestion(item.payloadJson) && !interceptor?.enabled ? '请先开启终端模式' : undefined}
                         onClick={() => void runRecentCommand(item.messageId)}
                       >
                         {isRecentQuestion(item.payloadJson)
