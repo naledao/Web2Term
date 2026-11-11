@@ -76,17 +76,27 @@ export function backgroundLaunchPlan(command: string, name: string, kind: Enviro
       // Failure here prevents the actual workload from starting.
       "[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'pid'), [string]$PID, [Text.Encoding]::ASCII)",
       'try {',
-      "  $w2tTask = '& ' + [char]39 + (Join-Path $PSScriptRoot 'workload.ps1').Replace([string][char]39, ([string][char]39 + [char]39)) + [char]39",
+      // EncodedCommand otherwise collapses script exit codes to 0/1. Preserve the real code,
+      // while still treating a terminating script error without a native exit code as failure.
+      "  $w2tTask = '$LASTEXITCODE = 0; & ' + [char]39 + (Join-Path $PSScriptRoot 'workload.ps1').Replace([string][char]39, ([string][char]39 + [char]39)) + [char]39 + '; if (-not $? -and $LASTEXITCODE -eq 0) { exit 1 }; exit $LASTEXITCODE'",
       '  $w2tTask64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($w2tTask))',
       `  $w2tChild = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-OutputFormat','Text','-EncodedCommand',$w2tTask64) -WorkingDirectory ${psQuote(cwd)} -RedirectStandardInput (Join-Path $PSScriptRoot 'stdin') -RedirectStandardOutput $w2tOut -RedirectStandardError $w2tErr -WindowStyle Hidden -PassThru`,
+      // A launched workload has no confirmed result until its process exit code is read.
+      '  $w2tExit = $null',
+      // Cache the handle before waiting: Start-Process with redirected streams can otherwise
+      // return a null ExitCode even after a successful workload (PowerShell issue #20400).
+      '  $null = $w2tChild.Handle',
       '  $w2tChild.WaitForExit()',
       '  $w2tExit = $w2tChild.ExitCode',
       "  if ($null -eq $w2tExit) { throw 'The workload exit code is unavailable' }",
       '} catch {',
-      "  $w2tExit = 1; [IO.File]::AppendAllText($w2tErr, ('Background workload failed: ' + $_.Exception.Message + [Environment]::NewLine), (New-Object Text.UTF8Encoding($false)))",
+      "  [IO.File]::AppendAllText($w2tErr, ('Background task supervisor error: ' + $_.Exception.Message + [Environment]::NewLine), (New-Object Text.UTF8Encoding($false)))",
       '} finally {',
-      "  [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'exit.txt'), [string]$w2tExit, [Text.Encoding]::ASCII)",
+      // A missing file already means 'exited, exit code unknown' to the observer.
+      // Do not turn a supervision error after launch into a fabricated workload exit code 1.
+      "  if ($null -ne $w2tExit) { [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'exit.txt'), [string]$w2tExit, [Text.Encoding]::ASCII) }",
       '}',
+      'if ($null -eq $w2tExit) { exit 1 }',
       'exit $w2tExit'
     ].join('\n')
     startup = [
