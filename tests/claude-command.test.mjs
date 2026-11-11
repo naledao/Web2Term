@@ -28,6 +28,7 @@ class ElementFixture {
   parentElement = null
   position = 0
   rendered = true
+  clicks = 0
 
   constructor(tag, attributes = {}, content = []) {
     this.tagName = tag.toUpperCase()
@@ -74,6 +75,7 @@ class ElementFixture {
     return null
   }
   contains(other) { return this === other || this.descendants().includes(other) }
+  click() { this.clicks += 1 }
 }
 
 const element = (tag, attributes, content) => new ElementFixture(tag, attributes, content)
@@ -703,6 +705,16 @@ test('ending a ChatGPT task baselines the rendered reply rather than the hidden 
   assert.equal(app.controller.status().lastCommandMessageId, 'current-message')
   app.scan()
   assert.equal(app.commands().length, 0, 'the visible reply at the task boundary must remain handled')
+})
+
+test('ending an idle ChatGPT task does not click a non-streaming control labelled stop', () => {
+  const idleControl = element('button', { 'aria-label': '停止' })
+  const app = fixture([idleControl], CHATGPT_PAGE)
+  app.controller.endTask()
+  assert.equal(idleControl.clicks, 0)
+  const ended = app.events.findLast((event) => event.event === 'end-task')
+  assert.equal(ended.stopButtonFound, false)
+  assert.equal(ended.awaitingReply, false)
 })
 
 test('ChatGPT questions use the same rendered turn selection as commands', () => {

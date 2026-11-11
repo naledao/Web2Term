@@ -6421,7 +6421,21 @@
        * id, class and all — and the selector can be written from the log rather than guessed. Read
        * before the click, because clicking is precisely what removes it from the page.
        */
-      const stop = findStopButton()
+      /*
+       * `aria-label="停止"` is not unique to ChatGPT's streaming control. In the idle
+       * composer the language / voice control can expose the same label, so blindly
+       * clicking a selector match makes 结束任务 open that control when the model is
+       * no longer producing output.
+       *
+       * Keep the selector as generation detection still needs the measured live label,
+       * but only act on it while this task is genuinely waiting for a model reply. A
+       * detected command keeps `awaitingReplySince` armed while its terminal result is
+       * prepared, hence the additional `replyActionDetected` guard: at that point the
+       * model reply has already finished and the similarly-labelled idle control must
+       * not be touched.
+       */
+      const modelReplyPending = state.awaitingReplySince !== 0 && !state.replyActionDetected
+      const stop = modelReplyPending ? findStopButton() : null
       /*
        * When no stop SELECTOR matched, try the composer's primary action instead.
        *
@@ -6429,7 +6443,7 @@
        * that site this is the only thing that can stop a reply, and it is not a guess: it is
        * gated on a reply actually being pending and the composer being empty.
        */
-      const primaryFallback = stop === null ? clickPrimaryWhileWaiting() : null
+      const primaryFallback = modelReplyPending && stop === null ? clickPrimaryWhileWaiting() : null
 
       report({
         event: 'end-task',
