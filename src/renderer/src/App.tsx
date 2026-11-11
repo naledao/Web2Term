@@ -7,6 +7,8 @@ import { Dialog } from '@base-ui/react/dialog'
 import AvatarEditor from 'react-avatar-editor'
 import type { AvatarEditorRef } from 'react-avatar-editor'
 import SshDirectoryPicker from './components/SshDirectoryPicker'
+import { canEditSshTextFile } from '@shared/ssh-file-edit'
+import type { SshTextFileTarget } from '@shared/ssh-file-edit'
 import RemoteRipgrepDialog from './components/RemoteRipgrepDialog'
 import type { RemoteRipgrepState } from '@shared/remote-ripgrep'
 import PdfPreviewDialog from './components/PdfPreviewDialog'
@@ -82,6 +84,7 @@ import type {
 } from '@shared/types'
 
 const CommandViewer = lazy(() => import('./components/CommandViewer'))
+const SshFileEditor = lazy(() => import('./components/SshFileEditor'))
 
 const INITIAL_EMBED_STATE: EmbedState = {
   url: '',
@@ -619,6 +622,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [terminalActionError, setTerminalActionError] = useState('')
   const [sshUploading, setSshUploading] = useState(false)
   const [sshFilesOpen, setSshFilesOpen] = useState(false)
+  const [sshTextEditor, setSshTextEditor] = useState<SshTextFileTarget | null>(null)
   const [pdfPreview, setPdfPreview] = useState<PdfPreviewTarget | null>(null)
   const [imagePreview, setImagePreview] = useState<{ source: string; name: string } | null>(null)
   const openImagePreview = useCallback((source: string, name: string): void => setImagePreview({ source, name }), [])
@@ -1680,13 +1684,19 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     })
   }, [])
 
+  const editSshFile = useCallback((path: string): void => {
+    const hostId = sshHostIdRef.current
+    if (hostId && path) setSshTextEditor({ sessionId, hostId, path })
+  }, [sessionId])
+
   const openSshFile = useCallback((path: string, name?: string): void => {
     if (!path) return
     if (isPdfPath(path)) {
       const hostId = sshHostIdRef.current
       if (hostId) setPdfPreview({ hostId, path, name: name || path.slice(path.lastIndexOf('/') + 1) })
-    } else downloadSshFile(path)
-  }, [downloadSshFile])
+    } else if (canEditSshTextFile(path)) editSshFile(path)
+    else downloadSshFile(path)
+  }, [downloadSshFile, editSshFile])
 
   useEffect(() => {
     if (pdfPreview && (!sshFilesOpen || !ssh?.attached || ssh.hostId !== pdfPreview.hostId)) setPdfPreview(null)
@@ -1994,9 +2004,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const terminalModalOpen = terminalVisible && sshActive && sshFilesOpen
   const remoteRipgrepRetry = remoteRipgrep?.availability === 'missing' && remoteRipgrep.prompt === 'pending' && remoteRipgrepDeferred === remoteRipgrep.connectionId
   const remoteRipgrepVisible = remoteRipgrep?.availability === 'missing' && ['pending', 'sending', 'uncertain'].includes(remoteRipgrep.prompt) && remoteRipgrepDeferred !== remoteRipgrep.connectionId &&
-    !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen &&
+    !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !sshTextEditor && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen &&
     !(pendingQuestion && !questionMinimized && questionDialogVisible)
-  const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen && !remoteRipgrepVisible
+  const chatSurfaceVisible = !settingsOpen && !sshDialogOpen && !terminalModalOpen && !pdfPreview && !sshTextEditor && !imagePreview && !globalModalOpen && !promptOpen && !toolsOpen && !toolWindowOpen && !commandPreviewOpen && !remoteRipgrepVisible
   const nativeEmbedVisible = !placeholderToggle && !isFocusView && !leavingView && chatSurfaceVisible
   useEffect(() => {
     window.api.setEmbedVisible(nativeEmbedVisible)
@@ -2921,11 +2931,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           />
         </div>
         {terminalActionError ? <p className="terminal-actions__error" role="alert">{terminalActionError}</p> : null}
-        {terminalModalOpen && appContainer ? (
-          <Dialog.Root open modal onOpenChange={(open, details) => {
+        {(terminalModalOpen || sshTextEditor) && appContainer ? (
+          <Dialog.Root open={terminalModalOpen} modal onOpenChange={(open, details) => {
             if (open) return
-            // The nested PDF preview handles its own dismissal first.
-            if (pdfPreview) { details.cancel(); return }
+            // Nested viewers/editors handle their own dismissal and unsaved changes first.
+            if (pdfPreview || sshTextEditor) { details.cancel(); return }
             setSshFilesOpen(false)
           }}>
           <Dialog.Portal container={appContainer}>
@@ -2935,9 +2945,9 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             initialFocus={sshFilesCloseButtonRef}
             finalFocus={terminalSwitchRef}
             onMouseDown={(event) => {
-              if (event.target === event.currentTarget && event.button === 0 && !pdfPreview) setSshFilesOpen(false)
+              if (event.target === event.currentTarget && event.button === 0 && !pdfPreview && !sshTextEditor) setSshFilesOpen(false)
             }}>
-            <div className="ssh-files-modal" inert={pdfPreview !== null}>
+            <div className="ssh-files-modal" inert={pdfPreview !== null || sshTextEditor !== null}>
               <div className="ssh-files-modal__head">
                 <div className="ssh-files-modal__heading">
                   <Dialog.Title className="ssh-files-modal__title">远程文件</Dialog.Title>
@@ -2956,7 +2966,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                       <div className="ssh-files__sidebar-head">
                         <span className="ssh-files__sidebar-title">目录</span>
                         <span className="ssh-files__sidebar-actions">
-                          <button type="button" className="ssh-files__sidebar-action" aria-label="新建" title="只读模式下不可新建">+</button>
+                          <button type="button" className="ssh-files__sidebar-action" aria-label="新建" title="暂不支持新建文件或目录" disabled>+</button>
                           <button type="button" className="ssh-files__sidebar-action ssh-files__sidebar-action--refresh" aria-label="刷新" title="刷新目录" onClick={refreshSshFiles}>↻</button>
                         </span>
                       </div>
@@ -3095,6 +3105,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                                             ) : (
                                               <>
                                                 {isPdfPath(file.name) ? <Menu.Item className="ssh-file-menu__item" onClick={() => openSshFile(file.id, file.name)}>预览 PDF</Menu.Item> : null}
+                                                {canEditSshTextFile(file.name, file.size) ? <Menu.Item className="ssh-file-menu__item" onClick={() => editSshFile(file.id)}>编辑</Menu.Item> : null}
                                                 <Menu.Item className="ssh-file-menu__item" onClick={() => downloadSshFile(file.id)}>下载</Menu.Item>
                                               </>
                                             )}
@@ -3126,6 +3137,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
             {pdfPreview ? <PdfPreviewDialog key={`${pdfPreview.hostId}:${pdfPreview.path}`} target={pdfPreview} theme={settings?.theme ?? 'light'} onClose={() => setPdfPreview(null)} /> : null}
           </Dialog.Popup>
           </Dialog.Portal>
+          {sshTextEditor ? <Suspense fallback={null}><SshFileEditor key={`${sshTextEditor.sessionId}:${sshTextEditor.hostId}:${sshTextEditor.path}`}
+            target={sshTextEditor} container={appContainer} theme={settings?.theme ?? 'light'}
+            connected={ssh?.status === 'connected' && ssh.hostId === sshTextEditor.hostId && sessionId === sshTextEditor.sessionId}
+            onSaved={refreshSshFiles} onClose={() => setSshTextEditor(null)} /></Suspense> : null}
           </Dialog.Root>
         ) : null}
           <>

@@ -475,6 +475,9 @@ removeConversation: (id: string): Promise<Conversation[]> =>
     return () => ipcRenderer.removeListener(IpcChannels.sshUploadsChanged, handler)
   },
 
+  readSshTextFile: (target) => ipcRenderer.invoke(IpcChannels.sshTextFileRead, target),
+  saveSshTextFile: (request) => ipcRenderer.invoke(IpcChannels.sshTextFileSave, request),
+
   listSshFiles: (path: string): Promise<SshFileEntry[]> =>
     ipcRenderer.invoke(IpcChannels.sshListFiles, path),
 

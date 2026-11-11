@@ -13,6 +13,8 @@ import type { GitBackend } from './git'
 import { writeGitDiagnostic } from './git-diagnostic'
 import { sshWorkingDirectory } from '../shared/ssh-directory'
 import { SshPdfPreviewReader } from './ssh-pdf-preview'
+import { readSshTextFile, saveSshTextFile, withSshFileChannel } from './ssh-file-edit'
+import type { SshTextFile, SshTextFileTarget, SshTextFileSaveRequest, SshTextFileSaveResult } from '../shared/ssh-file-edit'
 import type { SshPdfPreviewRequest, SshPdfPreviewData } from '../shared/types'
 
 /** Strips ANSI/VT and OSC sequences — there is no terminal emulator to render them. */
@@ -186,6 +188,7 @@ export class SshManager {
   private readonly uploadChannels = new Map<string, SFTPWrapper>()
   private readonly uploadEmitAt = new Map<string, number>()
   private readonly pdfPreview = new SshPdfPreviewReader(this)
+  private readonly textFileSaves = new Set<string>()
 
   constructor(
     private readonly onChanged: (state: SshState) => void,
@@ -563,6 +566,27 @@ export class SshManager {
 
   cancelPdfPreview(requestId: string): void {
     this.pdfPreview.cancel(requestId)
+  }
+
+  private withTextFile<T>(target: SshTextFileTarget, action: (channel: SFTPWrapper, check: () => void) => Promise<T>): Promise<T> {
+    const client = this.client
+    const current = (): boolean => !!client && this.client === client && this.state.status === 'connected' && this.state.hostId === target.hostId
+    return withSshFileChannel(() => new Promise<SFTPWrapper>((resolve, reject) => {
+      if (!client || !current()) { reject(new Error('原 SSH 主机已断开或切换。')); return }
+      client.sftp((error, channel) => error ? reject(error) : resolve(channel))
+    }), current, action)
+  }
+
+  readTextFile(target: SshTextFileTarget): Promise<SshTextFile> {
+    return this.withTextFile(target, (channel, check) => readSshTextFile(channel, target, check))
+  }
+
+  async saveTextFile(request: SshTextFileSaveRequest): Promise<SshTextFileSaveResult> {
+    const key = request.hostId + ':' + posix.normalize(request.path)
+    if (this.textFileSaves.has(key)) throw new Error('此文件正在保存，请等待本次保存完成。')
+    this.textFileSaves.add(key)
+    try { return await this.withTextFile(request, (channel, check) => saveSshTextFile(channel, request, check)) }
+    finally { this.textFileSaves.delete(key) }
   }
 
   /** Read one remote file without modifying it or its parent shell. */

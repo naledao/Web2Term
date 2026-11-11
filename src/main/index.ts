@@ -18,6 +18,8 @@ import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, Tray } from 'electron'
 import { APP_NAME, configureAppIdentity } from './app-identity'
 import { registerDesktopNotifications } from './desktop-notifications'
+import { validSshTextFileTarget } from '../shared/ssh-file-edit'
+import type { SshTextFileTarget, SshTextFileSaveRequest } from '../shared/ssh-file-edit'
 import { blockGeminiWebNotifications } from './embed-permissions'
 import { openFocusHtmlPreview } from './focus-html-preview'
 import { configureWindowsAppDetails } from './windows-app-details'
@@ -2010,6 +2012,16 @@ function registerIpcHandlers(): void {
       /* Diagnostics must never interrupt directory listing. */
     }
     return runtime.ssh.listFiles(String(path ?? '/'))
+  })
+  ipcMain.handle(IpcChannels.sshTextFileRead, (event, target: SshTextFileTarget) => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime || !validSshTextFileTarget(target) || runtime.id !== target.sessionId) throw new Error('原 SSH 工作区已变化，请返回原工作区打开文件。')
+    return runtime.ssh.readTextFile(target)
+  })
+  ipcMain.handle(IpcChannels.sshTextFileSave, (event, request: SshTextFileSaveRequest) => {
+    const runtime = runtimeForEvent(event)
+    if (!runtime || !validSshTextFileTarget(request) || runtime.id !== request.sessionId) throw new Error('原 SSH 工作区已变化，修改尚未保存。')
+    return runtime.ssh.saveTextFile(request)
   })
   ipcMain.on(IpcChannels.sshCwdDebugLog, (_event, message: string): void => {
     try {

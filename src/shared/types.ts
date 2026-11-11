@@ -2,6 +2,7 @@ import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult 
 import type { ReleaseNoteDetail, ReleaseNoteRead, ReleaseNoteRequest, ReleaseNotesPage, ReleaseNotesPageRequest, ReleaseNotesResult } from './release-notes'
 import type { QqMailResult, QqMailSettings, QqMailSettingsDraft } from './qq-mail'
 import type { ToolboxInvocation } from './toolbox'
+import type { SshTextFile, SshTextFileTarget, SshTextFileSaveRequest, SshTextFileSaveResult } from './ssh-file-edit'
 import type { ComputerUsePreferences, ComputerUseCapability } from './computer-use'
 import type { ConversationToolsOwner, ConversationToolsState, ConversationToolsUpdate } from './conversation-tools'
 import type { ScheduledTasksState, ScheduledTaskDraft, ScheduledTaskAction } from './scheduled-tasks'
@@ -218,6 +219,8 @@ export const IpcChannels = {
   sshUploadCancel: 'ssh:upload-cancel',
   sshUploadsChanged: 'ssh:uploads-changed',
   sshListFiles: 'ssh:list-files',
+  sshTextFileRead: 'ssh:text-file-read',
+  sshTextFileSave: 'ssh:text-file-save',
   sshCwdDebugLog: 'ssh:cwd-debug-log',
   sshDownloadFile: 'ssh:download-file',
   sshPdfPreview: 'ssh:pdf-preview',
@@ -2712,6 +2715,8 @@ export interface AppApi {
   onSshUploadsChanged(listener: (items: SshUploadTask[]) => void): () => void
   /** List one remote directory over SFTP. */
   listSshFiles(path: string): Promise<SshFileEntry[]>
+  readSshTextFile(target: SshTextFileTarget): Promise<SshTextFile>
+  saveSshTextFile(request: SshTextFileSaveRequest): Promise<SshTextFileSaveResult>
   /** Append one SSH directory-picker diagnostic line to the local debug log. */
   logSshCwdDebug(message: string): void
   /** Pick a local destination and start downloading one remote file over SFTP. */
