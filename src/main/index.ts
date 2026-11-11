@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, Tray } from 'electron'
 import { APP_NAME, configureAppIdentity } from './app-identity'
 import { registerDesktopNotifications } from './desktop-notifications'
+import { blockGeminiWebNotifications } from './embed-permissions'
 import { openFocusHtmlPreview } from './focus-html-preview'
 import { configureWindowsAppDetails } from './windows-app-details'
 import { registerNotificationSound } from './notification-sound'
@@ -2357,6 +2358,7 @@ function registerIpcHandlers(): void {
 }
 
 async function initializeApplication(): Promise<void> {
+    blockGeminiWebNotifications()
     registerPdfAssetHandler()
     await registerDesktopNotifications(await registerNotificationSound())
     if (quitting) return
