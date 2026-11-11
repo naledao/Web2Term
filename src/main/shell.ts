@@ -8,6 +8,8 @@ import { StringDecoder } from 'node:string_decoder'
 import { DETECT_COMMAND, LOCAL_POSIX_DETECT_COMMAND } from './environment'
 import { buildPosixWrapper, localPosixShellPath } from './posix-shell'
 import { WINDOWS_PATH_REFRESH_SCRIPT } from './shell-path'
+import { parsePowerShellExitDiagnostic, powerShellExitInitialize, powerShellExitStatus, powerShellExitException, powerShellExitReport } from './powershell-terminal'
+import type { PowerShellExitDiagnostic } from './powershell-terminal'
 import { bundledRipgrepPath, withRipgrepPath } from './bundled-ripgrep'
 import type { EnvironmentKind } from '../shared/types'
 
@@ -137,6 +139,8 @@ export interface ShellResult {
   cwd: string
   /** Effective ceiling for this run, used by the timeout message. */
   timeoutMs?: number
+  /** Internal metadata only; never included in terminal/model output. */
+  powerShellExit?: PowerShellExitDiagnostic
 }
 
 /**
@@ -216,6 +220,7 @@ interface PendingRun {
   ceilingMs: number
   timedOut: false | 'idle' | 'ceiling'
   interrupted: boolean
+  powerShellExit?: PowerShellExitDiagnostic
 }
 
 export interface ConversationShellOptions {
@@ -610,6 +615,10 @@ export class ConversationShell implements ExecutionShell {
       return
     }
 
+    if (this.kind === 'windows' && this.pending && line.startsWith(`__CT_PS_EXIT_${this.sessionToken}_${this.pending.seq}__ `)) {
+      this.pending.powerShellExit = parsePowerShellExitDiagnostic(line, this.sessionToken, this.pending.seq) ?? undefined
+      return
+    }
     const donePrefix = `__CT_DONE_${this.sessionToken}_`
     if (line.startsWith(donePrefix)) {
       const match = /^(\d+)__\s+(-?\d+)\s*(.*)$/.exec(line.slice(donePrefix.length))
@@ -625,6 +634,7 @@ export class ConversationShell implements ExecutionShell {
         pending.resolve({
           output: pending.output.trimEnd(),
           exitCode: Number(match[2]),
+          ...(pending.powerShellExit?.exitCode === Number(match[2]) ? { powerShellExit: pending.powerShellExit } : {}),
           timedOut: false,
           interrupted: false,
           rejected: false,
@@ -776,6 +786,7 @@ function buildWrapper(token: string): string {
     // Cleared so the check after the command can tell whether THIS one errored.
     '  $Error.Clear()',
     '  $ctCode = 0',
+    powerShellExitInitialize('ct'),
     '  $ctSavedIn = [Console]::In',
     '  try {',
     // Point stdin at an empty reader for the duration, so a command that reads it
@@ -823,14 +834,16 @@ function buildWrapper(token: string): string {
      * branch — its exit code is non-zero and the first test takes it — which is why dropping
      * its stderr costs nothing.
      */
-    "    if ($LASTEXITCODE -ne 0) { $ctCode = $LASTEXITCODE } elseif (@($Error | Where-Object { $_.FullyQualifiedErrorId -notlike '*NativeCommandError*' }).Count -gt 0) { $ctCode = 1 }",
+    powerShellExitStatus('ct'),
     '  } catch {',
+    powerShellExitException('ct'),
     // A syntax error or `throw` must not take the session down with it.
     "    Write-Output ('__CT_ERROR__ ' + $_.Exception.Message)",
     '    $ctCode = 1',
     '  } finally {',
     '    [Console]::SetIn($ctSavedIn)',
     '  }',
+    powerShellExitReport(`'${token}'`, '$ctSeq', 'ct'),
     `  Write-Output (${donePrefix} + $ctSeq + '__ ' + $ctCode + ' ' + (Get-Location).Path)`,
     '}'
   ].join('\n')

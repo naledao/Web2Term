@@ -34,6 +34,7 @@ import { writeRawSendDiagnostic } from './raw-send-log'
 import { writeInjectionPlanDiagnostic, writePromptDiagnostic } from './prompt-log'
 import type { InjectionPlan } from '../shared/prompt-injection'
 import { writeReplyDiagnostic } from './reply-log'
+import type { CompletionDisposition } from './reply-log'
 import { observeFocusEditRequest, observeFocusPageRequest } from './focus-edit-request'
 import { smartUiSubmission } from './focus-ui-request'
 import { dispatchFocusUiClick } from './focus-ui-click'
@@ -567,6 +568,8 @@ export class ChatGptEmbed {
   private replyDiagnosticLogPath: string | null = null
   private readonly focusSendImages = new Map<string, ConversationImageAttachmentInput[]>()
   private readonly userSubmissions = new Set<string>()
+  /** One prompt-boundary acknowledgement per reply/document, including refused task completions. */
+  private completedReplyBoundaries?: Set<string>
 
   /**
    * Replace the injected prompt.
@@ -2303,6 +2306,8 @@ export class ChatGptEmbed {
 
     let questionAccepted: boolean | undefined
     let computerAccepted: boolean | undefined
+    let completionDisposition: CompletionDisposition | undefined
+    let completionBoundarySynced: boolean | undefined
     // A confirmed send replans at once; the log line describes the plan the send carried.
     const injectionMode = (payload.injectionPlanToken ? this.injectionPlans?.get(payload.injectionPlanToken)?.plan?.mode : null) ?? this.injectionPlan?.mode ?? null
     switch (payload.event) {
@@ -2551,30 +2556,55 @@ export class ChatGptEmbed {
             `messageId=${payload.messageId ?? '?'}`
         )
         if (payload.completed === true) {
-          if (payload.live !== true || payload.taskPromptGeneration !== this.taskPromptGeneration ||
-            payload.computerPageEpoch !== this.computerPageEpoch) break
-          try {
-            const contents = this.liveContents()
-            if (!contents) break
-            const url = new URL(contents.getURL())
-            if (!this.platform.allowedOriginPattern.test(url.href) || payload.pagePath !== url.pathname) break
-          } catch { break }
-          // A background notification can receive its own completion reply after the
-          // human task has already finished. The page advances its prompt boundary
-          // for that reply too; acknowledge it without reopening the timer or notifying
-          // again, otherwise every subsequent human send looks stale to main.
-          if (this.interceptor.taskStartedAt === null || this.interceptor.taskFinishedAt !== null) {
-            this.resetTaskPrompt()
+          if (payload.live !== true || typeof payload.messageId !== 'string' || !payload.messageId.trim() || payload.messageId.length > 512) {
+            completionDisposition = 'invalid-event'
             break
           }
-          const source = this.taskActionSource(payload)
-          if (this.computerUseRecognitionEnabled && this.platform.page.computerUseRequests === true &&
-            (!source || payload.computerPageEpoch !== this.computerPageEpoch ||
-              typeof payload.messageId !== 'string' || !payload.messageId.trim() || payload.messageId.length > 512)) break
+          if (payload.taskPromptGeneration !== this.taskPromptGeneration) { completionDisposition = 'stale-generation'; break }
+          if (payload.computerPageEpoch !== this.computerPageEpoch) { completionDisposition = 'stale-document'; break }
+          try {
+            const contents = this.liveContents()
+            if (!contents) { completionDisposition = 'stale-page'; break }
+            const url = new URL(contents.getURL())
+            if (!this.platform.allowedOriginPattern.test(url.href) || payload.pagePath !== url.pathname) {
+              completionDisposition = 'stale-page'
+              break
+            }
+          } catch { completionDisposition = 'stale-page'; break }
+          const boundaryKey = JSON.stringify([this.computerPageEpoch, payload.messageId])
+          const boundaries = this.completedReplyBoundaries ??= new Set<string>()
+          if (boundaries.has(boundaryKey)) { completionDisposition = 'duplicate'; break }
+          boundaries.add(boundaryKey)
+          if (boundaries.size > 256) boundaries.delete(boundaries.values().next().value!)
           const generation = this.taskPromptGeneration
-          if (this.handlers.onTaskCompleted(payload.messageId, source) === false) break
-          // The coordinator's completion callback may already have ended this embed.
-          if (this.taskPromptGeneration === generation) this.completeTask()
+          try {
+            // Auxiliary/background replies may finish after the original human task.
+            // Acknowledge their boundary without reopening its timer or notifying again.
+            if (this.interceptor.taskStartedAt === null || this.interceptor.taskFinishedAt !== null) {
+              completionDisposition = 'already-finished'
+              break
+            }
+            const source = this.taskActionSource(payload)
+            if (this.computerUseRecognitionEnabled && this.platform.page.computerUseRequests === true && !source) {
+              completionDisposition = 'missing-source'
+              break
+            }
+            if (this.handlers.onTaskCompleted(payload.messageId, source) === false) {
+              completionDisposition = 'coordinator-rejected'
+              break
+            }
+            completionDisposition = 'accepted'
+            // The coordinator's completion callback may already have ended this embed.
+            if (this.taskPromptGeneration === generation) this.completeTask()
+          } finally {
+            // The page already advanced before reporting completion. Even when task
+            // authority refuses the completion, acknowledge this *prompt* boundary.
+            // Otherwise its next confirmed human send (generation + 1) is discarded,
+            // leaving focus replies attached to the preceding user turn. This reset
+            // grants no task authority and does not mark a refused task completed.
+            if (this.taskPromptGeneration === generation) this.resetTaskPrompt()
+            completionBoundarySynced = this.taskPromptGeneration === generation + 1
+          }
         }
         break
       }
@@ -2772,6 +2802,8 @@ export class ChatGptEmbed {
       conversationId: contents ? conversationIdOf(this.platform, contents.getURL()) : null,
       mainPendingQuestion: this.interceptor.pendingQuestion !== null,
       mainTaskPromptGeneration: this.taskPromptGeneration,
+      completionDisposition,
+      completionBoundarySynced,
       computerAccepted,
       questionAccepted
     })

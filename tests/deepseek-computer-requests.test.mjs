@@ -744,6 +744,54 @@ test('a settled model completion reaches main with the old generation and finish
   }
 })
 
+test('refused completion keeps page/main generations aligned for the next confirmed human send in either configure order', () => {
+  for (const rejection of ['missing-source', 'coordinator-rejected']) for (const configureFirst of [true, false]) {
+    const page = pageFixture(), main = mainFixture(), submission = page.confirm()
+    main.submit(submission)
+    const original = main.coordinator.current('deepseek')
+    let pendingConfig, completedCalls = 0, started = 0
+    main.embed.userSubmissions = new Set()
+    main.embed.interceptor.taskStartedAt = 100000
+    main.embed.interceptor.taskFinishedAt = null
+    main.embed.installInterceptor = async () => {
+      const config = { taskPromptGeneration: main.embed.taskPromptGeneration, taskPromptInjected: false }
+      if (configureFirst) page.controller.configure(config)
+      else pendingConfig = config
+    }
+    main.embed.handlers.onTaskCompleted = () => { completedCalls++; return false }
+    page.replace([turn('2', '【任务完成】\n可以使用安卓模拟器。')]); page.settle()
+    const completion = page.events.find(e => e.event === 'task-finished')
+    assert.equal(page.controller.status().taskPromptGeneration, 4)
+    const event = { ...completion, ...(rejection === 'missing-source' ? { sourceSubmissionId: undefined } : {}) }
+    main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(event))
+    assert.equal(main.embed.taskPromptGeneration, 4)
+    assert.equal(main.coordinator.current('deepseek').id, original.id, 'synchronizing a prompt cannot complete the task')
+    assert.equal(main.coordinator.current('deepseek').status, 'recorded')
+    assert.equal(main.embed.interceptor.taskFinishedAt, null)
+    assert.equal(completedCalls, rejection === 'missing-source' ? 0 : 1)
+
+    main.embed.handlers.onUserStarted = (_text, _files, _edit, next) => {
+      started++
+      main.submit(next.id)
+      return 'focus-turn-after-completion'
+    }
+    main.embed.deliverUserMessage = async () => {}
+    const nextSubmission = page.confirm()
+    if (pendingConfig) page.controller.configure(pendingConfig)
+    assert.notEqual(page.controller.status().awaitingReplySince, 0, 'a delayed same-generation configure preserves the next reply wait')
+    const next = page.events.filter(e => e.event === 'user-message').at(-1)
+    main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(next))
+    assert.equal(started, 1)
+    assert.equal(main.coordinator.current('deepseek').sourceSubmissionId, nextSubmission)
+
+    // Even a duplicate with a rewritten generation cannot reset the next task's boundary.
+    main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify({ ...event, taskPromptGeneration: 4 }))
+    assert.equal(main.embed.taskPromptGeneration, 4)
+    assert.equal(main.coordinator.current('deepseek').sourceSubmissionId, nextSubmission)
+    main.coordinator.dispose()
+  }
+})
+
 test('discussion, negation and restored history do not declare completion', () => {
   for (const text of ['任务完成后再保存文件。', '任务尚未完成。', '还没有任务完成的证据。']) {
     const page = pageFixture()

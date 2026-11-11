@@ -1149,6 +1149,7 @@ export class CommandRunner {
       : await this.runOnShell(shell, record.command, timeoutSeconds))
     this.diagnostic({
       event: 'finished', messageId, ownerConversationId: conversationId, exitCode: result.exitCode,
+      powerShellExit: result.powerShellExit,
       rejected: result.rejected === true, interrupted: result.interrupted === true,
       timedOut: Boolean(result.timedOut), sessionLost: result.sessionLost === true
     })

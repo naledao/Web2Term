@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import { stripVTControlCharacters } from 'node:util'
-import { powerShellEnvelope } from './powershell-terminal'
+import { powerShellEnvelope, parsePowerShellExitDiagnostic } from './powershell-terminal'
+import type { PowerShellExitDiagnostic } from './powershell-terminal'
 import type { EventEmitter } from 'node:events'
 import { IDLE_TIMEOUT_MS, MAX_RUNTIME_MS } from './shell'
 import type { ExecutionShell, ShellResult } from './shell'
@@ -30,6 +31,7 @@ interface PendingRun {
   interrupted: boolean
   /** Suppress live mirroring for an internal command such as a cwd sync. */
   silent: boolean
+  powerShellExit?: PowerShellExitDiagnostic
 }
 
 /**
@@ -396,6 +398,10 @@ export class RemoteShell implements ExecutionShell {
 
   private handleLine(line: string): void {
     if (this.kind === 'windows') line = stripVTControlCharacters(line)
+    if (this.kind === 'windows' && this.pending && line.startsWith(`__CT_PS_EXIT_${this.token}_${this.pending.seq}__ `)) {
+      this.pending.powerShellExit = parsePowerShellExitDiagnostic(line, this.token, this.pending.seq) ?? undefined
+      return
+    }
     const identityPrefix = `__CT_SHELL_${this.token}__ `
     if (this.options.stopProcess && line.startsWith(identityPrefix)) {
       const match = /^(\d+) ([A-Za-z0-9+/]+={0,2})$/.exec(line.slice(identityPrefix.length))
@@ -419,6 +425,7 @@ export class RemoteShell implements ExecutionShell {
         pending.resolve({
           output: pending.output.trimEnd(),
           exitCode: Number(match[2]),
+          ...(pending.powerShellExit?.exitCode === Number(match[2]) ? { powerShellExit: pending.powerShellExit } : {}),
           timedOut: false,
           interrupted: false,
           rejected: false,

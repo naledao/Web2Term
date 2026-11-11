@@ -7,6 +7,9 @@ import type { InterceptorPageEvent } from '../shared/types'
 type PlatformId = ChatPlatform['id']
 type Metadata = Record<string, string | number | boolean | null>
 
+export type CompletionDisposition = 'accepted' | 'already-finished' | 'missing-source' | 'coordinator-rejected' |
+  'invalid-event' | 'stale-generation' | 'stale-document' | 'stale-page' | 'duplicate'
+
 export interface ReplyDiagnosticContext {
   viewId: number | null
   conversationId: string | null
@@ -14,6 +17,8 @@ export interface ReplyDiagnosticContext {
   mainTaskPromptGeneration?: number
   questionAccepted?: boolean
   computerAccepted?: boolean
+  completionDisposition?: CompletionDisposition
+  completionBoundarySynced?: boolean
 }
 
 const events = new Set([
@@ -57,6 +62,13 @@ export function replyDiagnosticMetadata(
   }
   if (Number.isSafeInteger(context.mainTaskPromptGeneration) && context.mainTaskPromptGeneration! >= 0) {
     details.mainTaskPromptGeneration = context.mainTaskPromptGeneration!
+  }
+  if (payload.event === 'task-finished') {
+    if (['accepted', 'already-finished', 'missing-source', 'coordinator-rejected', 'invalid-event',
+      'stale-generation', 'stale-document', 'stale-page', 'duplicate'].includes(context.completionDisposition ?? '')) {
+      details.completionDisposition = context.completionDisposition!
+    }
+    if (typeof context.completionBoundarySynced === 'boolean') details.completionBoundarySynced = context.completionBoundarySynced
   }
   if (payload.reason !== undefined) details.reason = reasons.has(payload.reason) ? payload.reason : 'unknown'
   for (const key of ['messageId', 'lastHandledMessageId', 'lastMatchedMessageId', 'lastVisibleMessageId', 'visibleAnswerOwnerMessageId'] as const) {

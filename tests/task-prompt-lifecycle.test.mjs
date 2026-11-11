@@ -15,18 +15,20 @@ const methods = ['handlePageReport', 'completeTask', 'resetTaskPrompt'].map(name
   return method.getText(source)
 }).join('\n')
 let now = 1000
+const traces = []
 class FixedDate extends Date { static now() { return now } }
 const Embed = new Script(ts.transpileModule(`class Actual { ${methods} }; Actual`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText).runInNewContext({
   URL, Date: FixedDate, INTERCEPTOR_LOG_TAG: '[cmd-terminal] ',
-  console: { info() {}, warn() {} }, writeReplyDiagnostic() {}, writePromptDiagnostic() {},
+  console: { info() {}, warn() {} }, writeReplyDiagnostic(_platform, payload, context) { traces.push({ payload, context }) }, writePromptDiagnostic() {},
   conversationIdOf: (_platform, url) => new URL(url).pathname
 })
 
 function fixture(platformId = 'chatgpt') {
   now = 1000
   const sends = [], configurations = []
+  const traceStart = traces.length
   let notifications = 0
   const embed = Object.assign(new Embed(), {
     taskPromptGeneration: 3, computerPageEpoch: 'document-a', taskPromptInjected: true,
@@ -46,7 +48,7 @@ function fixture(platformId = 'chatgpt') {
     taskPromptGeneration: embed.taskPromptGeneration, computerPageEpoch: 'document-a', pagePath: '/c/chat-a', ...payload
   }))
   const complete = (messageId, patch = {}) => report({ event: 'task-finished', messageId, completed: true, live: true, ...patch })
-  return { embed, sends, configurations, report, complete, notifications: () => notifications }
+  return { embed, sends, configurations, report, complete, notifications: () => notifications, diagnostics: () => traces.slice(traceStart) }
 }
 
 test('completion after a late background notification keeps the next human send and timer working', () => {
@@ -96,7 +98,7 @@ test('restored, stale, other-document and other-conversation completions cannot 
   for (const finished of [false, true]) for (const patch of [
     { live: false }, { live: undefined }, { taskPromptGeneration: 2 }, { taskPromptGeneration: 4 },
     { taskPromptGeneration: undefined }, { computerPageEpoch: 'old-document' }, { computerPageEpoch: undefined },
-    { pagePath: '/c/another-chat' }, { pagePath: undefined }
+    { pagePath: '/c/another-chat' }, { pagePath: undefined }, { messageId: '' }, { messageId: undefined }, { messageId: 'x'.repeat(513) }
   ]) {
     const f = fixture()
     if (finished) f.embed.interceptor.taskFinishedAt = 500
@@ -132,4 +134,78 @@ test('coordinator completion that already resets the embed advances the boundary
   assert.equal(f.embed.taskPromptGeneration, 4)
   assert.deepEqual(f.configurations, [4])
   assert.equal(f.embed.interceptor.taskFinishedAt, 1000)
+})
+
+test('refused task completions synchronize the prompt once without completing or granting task authority', () => {
+  for (const rejection of ['missing-source', 'coordinator-rejected']) {
+    const f = fixture()
+    let completionCalls = 0
+    f.embed.computerUseRecognitionEnabled = true
+    f.embed.platform.page.computerUseRequests = true
+    f.embed.taskActionSource = () => rejection === 'missing-source' ? undefined : { sourceSubmissionId: 'user:old:1' }
+    f.embed.handlers.onTaskCompleted = () => { completionCalls++; return false }
+    f.complete('refused-completion')
+    assert.equal(f.embed.taskPromptGeneration, 4, 'the renderer has already advanced from 3 to 4')
+    assert.equal(f.embed.interceptor.taskFinishedAt, null, 'a refused completion cannot finish the underlying task')
+    assert.equal(completionCalls, rejection === 'missing-source' ? 0 : 1)
+    assert.deepEqual(f.configurations, [4])
+    const diagnostic = f.diagnostics().at(-1).context
+    assert.equal(diagnostic.completionDisposition, rejection)
+    assert.equal(diagnostic.completionBoundarySynced, true)
+
+    f.report({ event: 'user-message', taskPromptGeneration: 3, submissionId: 'user:late:1', submissionKind: 'goal', text: '迟到的旧消息' })
+    assert.equal(f.sends.length, 0, 'stale human events remain rejected')
+    f.report({ event: 'user-message', taskPromptGeneration: 4, submissionId: 'user:new:1', submissionKind: 'goal', text: '我不想使用Android Studio呢' })
+    assert.equal(f.sends.length, 1, 'the next real human send reaches focus/task intake')
+    assert.equal(f.sends[0].submission.id, 'user:new:1')
+
+    // A repeat with even the current generation must not advance the boundary again.
+    f.complete('refused-completion')
+    assert.equal(f.embed.taskPromptGeneration, 4)
+    assert.equal(f.embed.interceptor.taskFinishedAt, null)
+    assert.equal(f.diagnostics().at(-1).context.completionDisposition, 'duplicate')
+    assert.equal(completionCalls, rejection === 'missing-source' ? 0 : 1)
+  }
+})
+
+function focusModule(relative, dependencies = {}) {
+  const exports = {}
+  new Script(ts.transpileModule(readFileSync(new URL(relative, import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText).runInNewContext({ exports, Date: FixedDate, require(name) {
+    assert.ok(Object.hasOwn(dependencies, name), name)
+    return dependencies[name]
+  } })
+  return exports
+}
+const sharedFocus = focusModule('../src/shared/focus-chat.ts')
+let turnSerial = 0
+const { FocusChat } = focusModule('../src/main/focus-chat.ts', {
+  'node:crypto': { randomUUID: () => 'turn-' + ++turnSerial }, '../shared/focus-chat': sharedFocus
+})
+
+test('a human send after refused completion creates its own focus turn and cannot overwrite the preceding answer', () => {
+  const f = fixture(), saved = new Map()
+  const chat = new FocusChat('session-a', {
+    listFocusTurns: () => [], saveFocusTurn(_session, _platform, _conversation, turn) { saved.set(turn.id, JSON.parse(JSON.stringify(turn))) }
+  })
+  const first = chat.begin('chatgpt', 'chat-a', '可以用安卓模拟器吗')
+  chat.settled('chatgpt', 'first-answer', '推荐使用 Android Studio 模拟器。')
+  f.embed.handlers.onTaskCompleted = () => false
+  f.complete('first-answer')
+  f.embed.handlers.onUserStarted = text => chat.begin('chatgpt', 'chat-a', text)
+  f.embed.handlers.onAssistantMessage = (messageId, text) => chat.settled('chatgpt', messageId, text)
+  now = 2000
+  f.report({ event: 'user-message', taskPromptGeneration: 4, submissionId: 'user:next:1', submissionKind: 'goal', text: '我不想使用Android Studio呢' })
+  f.report({ event: 'sent', taskPromptGeneration: 4, text: '我不想使用Android Studio呢' })
+  f.report({ event: 'assistant-message', messageId: 'second-answer', text: '完全可以不安装 Android Studio。' })
+  const turns = chat.turns('chatgpt', 'chat-a')
+  assert.equal(turns.length, 2)
+  assert.equal(turns[0].id, first)
+  assert.equal(turns[0].segments[0].sourceMessageId, 'first-answer')
+  assert.equal(turns[0].segments[0].answer, '推荐使用 Android Studio 模拟器。')
+  assert.equal(turns[1].userText, '我不想使用Android Studio呢')
+  assert.equal(turns[1].segments[0].sourceMessageId, 'second-answer')
+  assert.equal(turns[1].segments[0].answer, '完全可以不安装 Android Studio。')
+  assert.equal(saved.size, 2)
 })

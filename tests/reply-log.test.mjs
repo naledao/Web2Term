@@ -110,6 +110,27 @@ test('reply diagnostics retain both sides of the task generation boundary withou
   }
 })
 
+test('completion diagnostics distinguish task rejection from a synchronized prompt boundary without page content', () => {
+  for (const completionDisposition of ['accepted', 'already-finished', 'missing-source', 'coordinator-rejected', 'invalid-event',
+    'stale-generation', 'stale-document', 'stale-page', 'duplicate']) {
+    const value = replyDiagnosticMetadata('chatgpt', {
+      event: 'task-finished', taskPromptGeneration: 4, text: 'private-completion-text', pagePath: '/private-path'
+    }, { ...context, mainTaskPromptGeneration: 5, completionDisposition, completionBoundarySynced: true })
+    assert.equal(value.completionDisposition, completionDisposition)
+    assert.equal(value.completionBoundarySynced, true)
+    assert.equal(JSON.stringify(value).includes('private'), false)
+  }
+  const invalid = replyDiagnosticMetadata('chatgpt', { event: 'task-finished' }, {
+    ...context, completionDisposition: 'private-reason', completionBoundarySynced: 'private-value'
+  })
+  assert.equal(invalid.completionDisposition, undefined)
+  assert.equal(invalid.completionBoundarySynced, undefined)
+  const other = replyDiagnosticMetadata('chatgpt', payload, {
+    ...context, completionDisposition: 'accepted', completionBoundarySynced: true
+  })
+  assert.equal(other.completionDisposition, undefined)
+})
+
 test('default traces omit commands, question content, page text and unrecognized values', () => {
   const secret = 'sensitive-sentinel'
   const value = replyDiagnosticMetadata('claude', {

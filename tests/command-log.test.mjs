@@ -1,11 +1,26 @@
 // User-run offline checks: temporary files only, no Electron, shell or network.
-// Run: node --experimental-strip-types --test tests/command-log.test.mjs
+// Run: node --test tests/command-log.test.mjs
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { CommandDiagnosticLog, commandDiagnosticMetadata } from '../src/main/command-log.ts'
+import { createRequire } from 'node:module'
+import { Script } from 'node:vm'
+import ts from 'typescript'
+
+const require = createRequire(import.meta.url)
+function load(relative, dependencies = {}) {
+  const exports = {}
+  new Script(ts.transpileModule(readFileSync(new URL(relative, import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText).runInNewContext({ exports, Buffer, process, require(name) {
+    return Object.hasOwn(dependencies, name) ? dependencies[name] : require(name)
+  } })
+  return exports
+}
+const powershell = load('../src/main/powershell-terminal.ts')
+const { CommandDiagnosticLog, commandDiagnosticMetadata } = load('../src/main/command-log.ts', { './powershell-terminal': powershell })
 
 const context = {
   sessionId: 'session-a', conversationId: null, appVersion: '0.1.150',
@@ -131,4 +146,39 @@ test('task routing diagnostics expose the waiting stage without recording comman
   assert.equal(invalid.taskPhase, undefined)
   assert.equal(invalid.taskDelivery, undefined)
   assert.equal(invalid.reason, 'task-step-unavailable')
+})
+
+test('finished commands retain bounded PowerShell exit evidence with their execution identity', (t) => {
+  const log = new CommandDiagnosticLog(directory(t))
+  const path = log.write('deepseek', {
+    event: 'finished', messageId: 'text:7618bba4:503', exitCode: 1,
+    powerShellExit: { exitCode: 1, source: 'powershell-error', nativeExitCode: 0,
+      errorCount: 1, ignoredNativeErrorCount: 0, errorsTruncated: false,
+      errors: [{ errorId: 'CmdletizationQuery_NotFound_LocalPort,Get-NetTCPConnection',
+        category: 'ObjectNotFound', commandName: 'Get-NetTCPConnection', lineNumber: 1 }] }
+  }, context)
+  const record = records(path)[0]
+  assert.equal(record.messageId, 'text:7618bba4:503')
+  assert.equal(record.sessionId, context.sessionId)
+  assert.equal(record.powerShellExit.source, 'powershell-error')
+  assert.equal(record.powerShellExit.errors[0].commandName, 'Get-NetTCPConnection')
+  assert.equal(record.powerShellExit.errors[0].lineNumber, 1)
+})
+
+test('PowerShell metadata drops raw error fields, rejects malformed values and bounds samples', () => {
+  const secret = 'C:\\private\\credential.ps1'
+  const diagnostic = { exitCode: 1, source: 'exception', nativeExitCode: 0,
+    errorCount: 9, ignoredNativeErrorCount: 0, errorsTruncated: false,
+    message: secret, command: secret, targetObject: secret, scriptStackTrace: secret,
+    errors: Array.from({ length: 9 }, () => ({ errorId: secret, category: secret,
+      commandName: secret, lineNumber: 2, message: secret, invocationInfo: secret })) }
+  const record = commandDiagnosticMetadata('deepseek', { event: 'finished', powerShellExit: diagnostic }, context)
+  assert.equal(record.powerShellExit.errors.length, 5)
+  assert.equal(record.powerShellExit.errorsTruncated, true)
+  assert.equal(record.powerShellExit.errors[0].errorId, 'unknown')
+  assert.equal(record.powerShellExit.errors[0].commandName, 'unknown')
+  assert.equal(JSON.stringify(record).includes('private'), false)
+  assert.equal(commandDiagnosticMetadata('deepseek', {
+    event: 'finished', powerShellExit: { ...diagnostic, errorCount: -1 }
+  }, context).powerShellExit, undefined)
 })

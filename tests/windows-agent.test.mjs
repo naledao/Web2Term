@@ -566,14 +566,22 @@ test('remote PowerShell parses ANSI completion markers and keeps Windows cwd and
     './environment': { DETECT_COMMAND: 'windows probe', REMOTE_DETECT_COMMAND: 'posix probe' }
   })
   class Channel extends EventEmitter { write(value) { this.written = value } close() { this.emit('close') } signal() {} }
-  const channel = new Channel(), shell = new remote.RemoteShell(channel, { kind: 'windows' })
+  const output = []
+  const channel = new Channel(), shell = new remote.RemoteShell(channel, { kind: 'windows', onOutput: chunk => output.push(chunk) })
   const running = shell.run("Write-Output '中文'")
   const script = Buffer.from(channel.written.trimEnd().split('\r').map(line => line.slice(1)).join(''), 'base64').toString()
   const marker = /__CT_DONE_[a-f0-9]+_1__/.exec(script)[0]
-  channel.emit('data', Buffer.from(`中文\r\n\x1b[0m${marker} 3 C:\\中文 路径\r\n`))
+  const token = marker.match(/__CT_DONE_([a-f0-9]+)_1__/)[1]
+  const diagnostic = { exitCode: 3, source: 'native-exit', nativeExitCode: 3,
+    errorCount: 0, ignoredNativeErrorCount: 0, errorsTruncated: false, errors: [] }
+  const line = `\x1b[0m__CT_PS_EXIT_${token}_1__ ${JSON.stringify(diagnostic)}\r\n`
+  channel.emit('data', Buffer.from('中文\r\n' + line.slice(0, 25)))
+  channel.emit('data', Buffer.from(line.slice(25) + `\x1b[0m${marker} 3 C:\\中文 路径\r\n`))
   const result = await running
   assert.equal(shell.kind, 'windows'); assert.equal(shell.probeCommand, 'windows probe')
   assert.equal(result.cwd, 'C:\\中文 路径'); assert.equal(result.exitCode, 3)
   assert.equal(result.output, '中文')
+  assert.deepEqual(JSON.parse(JSON.stringify(result.powerShellExit)), diagnostic)
+  assert.equal(output.join(''), '中文\n')
   shell.dispose()
 })

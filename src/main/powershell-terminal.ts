@@ -2,6 +2,89 @@
 // Leave room for the loader's PowerShell syntax as well as the command-frame prefix.
 const LINE_DATA = 192
 
+export interface PowerShellExitDiagnostic {
+  exitCode: number
+  source: 'success' | 'native-exit' | 'powershell-error' | 'exception'
+  nativeExitCode: number
+  errorCount: number
+  ignoredNativeErrorCount: number
+  errorsTruncated: boolean
+  errors: Array<{ errorId: string; category: string; commandName: string; lineNumber: number }>
+}
+
+/** Whitelist metadata again at the logging boundary; never retain messages, arguments or paths. */
+export function powerShellExitDiagnosticMetadata(value: unknown): PowerShellExitDiagnostic | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const data = value as Record<string, unknown>
+  if (typeof data.source !== 'string' || !['success', 'native-exit', 'powershell-error', 'exception'].includes(data.source) ||
+    !Number.isSafeInteger(data.exitCode) || !Number.isSafeInteger(data.nativeExitCode) ||
+    !Number.isSafeInteger(data.errorCount) || Number(data.errorCount) < 0 ||
+    !Number.isSafeInteger(data.ignoredNativeErrorCount) || Number(data.ignoredNativeErrorCount) < 0 ||
+    !Array.isArray(data.errors) || typeof data.errorsTruncated !== 'boolean') return null
+  const identifier = (input: unknown, pattern: RegExp): string =>
+    typeof input === 'string' && pattern.test(input) ? input : 'unknown'
+  const errors = data.errors.slice(0, 5).map((input: unknown) => {
+    const error = input && typeof input === 'object' ? input as Record<string, unknown> : {}
+    return {
+      errorId: identifier(error.errorId, /^[A-Za-z0-9_.:,-]{1,160}$/),
+      category: identifier(error.category, /^[A-Za-z]{1,64}$/),
+      commandName: identifier(error.commandName, /^[A-Za-z][A-Za-z0-9]{0,39}-[A-Za-z][A-Za-z0-9]{0,79}$/),
+      lineNumber: Number.isSafeInteger(error.lineNumber) && Number(error.lineNumber) >= 0 ? Number(error.lineNumber) : 0
+    }
+  })
+  return {
+    exitCode: Number(data.exitCode), source: data.source as PowerShellExitDiagnostic['source'],
+    nativeExitCode: Number(data.nativeExitCode), errorCount: Number(data.errorCount),
+    ignoredNativeErrorCount: Number(data.ignoredNativeErrorCount),
+    errorsTruncated: data.errorsTruncated || data.errors.length > 5, errors
+  }
+}
+
+/** Only the pending command's private protocol line can supply exit diagnostics. */
+export function parsePowerShellExitDiagnostic(line: string, token: string, seq: number): PowerShellExitDiagnostic | null {
+  const prefix = `__CT_PS_EXIT_${token}_${seq}__ `
+  if (!line.startsWith(prefix) || line.length > 16384) return null
+  try { return powerShellExitDiagnosticMetadata(JSON.parse(line.slice(prefix.length))) }
+  catch { return null }
+}
+
+export function powerShellExitInitialize(prefix: 'ct' | 'w2t'): string {
+  return `$${prefix}ExitSource = 'success'; $${prefix}NativeExitCode = 0; $${prefix}ExitErrors = @()`
+}
+
+/** Preserve the existing exit policy, taking a snapshot before diagnostic work can affect $Error. */
+export function powerShellExitStatus(prefix: 'ct' | 'w2t'): string {
+  const variable = '$' + prefix
+  return [
+    `${variable}NativeExitCode = $LASTEXITCODE; ${variable}ExitErrors = @($Error)`,
+    `if (${variable}NativeExitCode -ne 0) { ${variable}Code = ${variable}NativeExitCode; ${variable}ExitSource = 'native-exit' }`,
+    `elseif (@(${variable}ExitErrors | Where-Object { $_.FullyQualifiedErrorId -notlike '*NativeCommandError*' }).Count -gt 0) { ${variable}Code = 1; ${variable}ExitSource = 'powershell-error' }`
+  ].join('\n')
+}
+
+export function powerShellExitException(prefix: 'ct' | 'w2t'): string {
+  return `$${prefix}NativeExitCode = $LASTEXITCODE; $${prefix}ExitErrors = @($Error); $${prefix}ExitSource = 'exception'; $${prefix}Code = 1`
+}
+
+/** A separate framed record is removed by the receiver, not shown or returned as command output. */
+export function powerShellExitReport(tokenExpression: string, seqExpression: string, prefix: 'ct' | 'w2t'): string {
+  const variable = '$' + prefix
+  return [
+    'try {',
+    `${variable}ExitFiltered = @(${variable}ExitErrors | Where-Object { $_.FullyQualifiedErrorId -notlike '*NativeCommandError*' })`,
+    `${variable}ExitDetails = @(${variable}ExitFiltered | Select-Object -First 5 | ForEach-Object {`,
+    `${variable}ExitId = [string]$_.FullyQualifiedErrorId`,
+    `if (${variable}ExitId -cnotmatch '^[A-Za-z0-9_.:,-]{1,160}$') { ${variable}ExitId = 'unknown' }`,
+    `${variable}ExitCommand = ''; if ($null -ne $_.InvocationInfo -and $null -ne $_.InvocationInfo.MyCommand) { ${variable}ExitCommand = [string]$_.InvocationInfo.MyCommand.Name }`,
+    `if (${variable}ExitCommand -cnotmatch '^[A-Za-z][A-Za-z0-9]{0,39}-[A-Za-z][A-Za-z0-9]{0,79}$') { ${variable}ExitCommand = 'unknown' }`,
+    `@{ errorId = ${variable}ExitId; category = [string]$_.CategoryInfo.Category; commandName = ${variable}ExitCommand; lineNumber = [int]$_.InvocationInfo.ScriptLineNumber }`,
+    '})',
+    `${variable}ExitDiagnostic = @{ exitCode = ${variable}Code; source = ${variable}ExitSource; nativeExitCode = ${variable}NativeExitCode; errorCount = ${variable}ExitFiltered.Count; ignoredNativeErrorCount = (${variable}ExitErrors.Count - ${variable}ExitFiltered.Count); errorsTruncated = (${variable}ExitFiltered.Count -gt 5); errors = @(${variable}ExitDetails) }`,
+    `[Console]::WriteLine([Environment]::NewLine + '__CT_PS_EXIT_' + ${tokenExpression} + '_' + ${seqExpression} + '__ ' + (ConvertTo-Json -InputObject ${variable}ExitDiagnostic -Compress -Depth 4))`,
+    '} catch { }'
+  ].join('\n')
+}
+
 export interface PowerShellBootstrapFailure {
   bootstrapStage: 'decode' | 'console_type' | 'console_mode' | 'encoding' | 'command_loop' | 'unknown'
   errorId: string
@@ -24,12 +107,14 @@ export function powerShellEnvelope(token: string, seq: number, command: string):
   const script = [
     `$w2tCommand = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))`,
     '$LASTEXITCODE = 0; $Error.Clear(); $w2tCode = 0; $w2tSavedIn = [Console]::In',
+    powerShellExitInitialize('w2t'),
     'try {',
     "[Console]::SetIn((New-Object IO.StringReader ''))",
     'Invoke-Expression $w2tCommand | Out-String -Stream | ForEach-Object { [Console]::WriteLine($_) }',
-    "if ($LASTEXITCODE -ne 0) { $w2tCode = $LASTEXITCODE } elseif (@($Error | Where-Object { $_.FullyQualifiedErrorId -notlike '*NativeCommandError*' }).Count -gt 0) { $w2tCode = 1 }",
-    '} catch { [Console]::WriteLine($_.Exception.Message); $w2tCode = 1 }',
+    powerShellExitStatus('w2t'),
+    `} catch { ${powerShellExitException('w2t')}; [Console]::WriteLine($_.Exception.Message) }`,
     'finally { [Console]::SetIn($w2tSavedIn) }',
+    powerShellExitReport(`'${token}'`, String(seq), 'w2t'),
     `[Console]::WriteLine([Environment]::NewLine + '__CT_DONE_${token}_${seq}__ ' + $w2tCode + ' ' + (Get-Location).Path)`
   ].join('\n')
   const data = Buffer.from(script, 'utf8').toString('base64')

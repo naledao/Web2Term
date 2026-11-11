@@ -2,9 +2,11 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChatPlatform } from '../shared/platforms'
+import { powerShellExitDiagnosticMetadata } from './powershell-terminal'
+import type { PowerShellExitDiagnostic } from './powershell-terminal'
 
 type PlatformId = ChatPlatform['id']
-type Metadata = Record<string, string | number | boolean | null>
+type Metadata = Record<string, string | number | boolean | null | PowerShellExitDiagnostic>
 const events = ['received', 'deferred', 'deferred-flush', 'stored', 'skipped', 'preparing', 'started', 'finished', 'delivery', 'error'] as const
 const reasons = [
   'inactive-platform', 'missing-conversation', 'terminal-mode-off', 'duplicate', 'empty-command',
@@ -34,6 +36,7 @@ export interface CommandDiagnostic {
   shellAlive?: boolean
   shellRunning?: boolean
   exitCode?: number | null
+  powerShellExit?: PowerShellExitDiagnostic
   rejected?: boolean
   interrupted?: boolean
   timedOut?: boolean
@@ -85,6 +88,8 @@ export function commandDiagnosticMetadata(platformId: PlatformId, payload: Comma
     if (typeof payload[key] === 'boolean') details[key] = payload[key]!
   }
   if (payload.exitCode === null || Number.isSafeInteger(payload.exitCode)) details.exitCode = payload.exitCode!
+  const powerShellExit = powerShellExitDiagnosticMetadata(payload.powerShellExit)
+  if (powerShellExit) details.powerShellExit = powerShellExit
   if (['auto', 'manual'].includes(payload.mode ?? '')) details.mode = payload.mode!
   if (['waiting-model', 'responded', 'waiting-user', 'waiting-tool', 'executing-tool', 'waiting-delivery', 'blocked', 'completed'].includes(payload.taskPhase ?? '')) details.taskPhase = payload.taskPhase!
   if (['pending', 'sending', 'sent', 'uncertain', 'cancelled'].includes(payload.taskDelivery ?? '')) details.taskDelivery = payload.taskDelivery!

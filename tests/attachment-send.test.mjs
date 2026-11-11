@@ -8,6 +8,10 @@ import ts from 'typescript'
 
 const interceptorSource = readFileSync(new URL('../src/main/injected/send-interceptor.js', import.meta.url), 'utf8')
 const platformExports = {}
+const skillExports = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-skills.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: skillExports })
 new Script(ts.transpileModule(readFileSync(new URL('../src/shared/platforms.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText).runInNewContext({
@@ -283,6 +287,89 @@ test('DeepSeek textarea uploads Markdown before inserting its caption and acknow
   app.confirmOnSend()
   assert.equal(app.submit(), true)
   assert.equal(app.status().status, 'sent')
+  assert.equal(app.send.clicks, 1)
+})
+
+function focusImageSend(text, selectedSkills = ['computer']) {
+  const file = { fileName: 'image.png', mimeType: 'image/png', sizeBytes: 882009 }
+  const app = fixture([file])
+  app.controller.releaseFileSend(token)
+  app.controller.configure({ prefix: 'SYSTEM\n\n' })
+  const payload = skillExports.focusSkillMessage(text, selectedSkills)
+  assert.equal(app.controller.beginFocusFileSend(token, [file], payload, '/c/offline-fixture', selectedSkills), 'ok')
+  app.controller.fileSelectionApplied(token)
+  app.render([file.fileName])
+  assert.equal(app.controller.prepareFocusFileSendCaption(token), true)
+  assert.ok(app.composer.textContent.includes(payload), 'send the complete skill instructions and original task')
+  assert.equal(app.status().status, 'ready')
+  const sentImage = () => {
+    const image = element('img', { alt: file.fileName })
+    Object.assign(image, { src: 'https://example.test/sent-image.png', naturalWidth: 2047, naturalHeight: 1103 })
+    return image
+  }
+  return { ...app, payload, file, sentImage }
+}
+
+test('ChatGPT confirms skills, image and human text after native Markdown rendering removes fences', () => {
+  const text = '还是不行'
+  for (const selectedSkills of [['computer'], ['computer', 'send_email', 'scheduled_task']]) {
+    const app = focusImageSend(text, selectedSkills)
+    app.send.onClick = () => {
+      const rendered = app.composer.textContent.replace(/```json\n/g, '').replace(/```/g, '')
+      assert.equal(rendered.includes(app.payload), false, 'the raw skill prefix no longer occurs in the rendered turn')
+      app.composer.replaceChildren(); app.cards.replaceChildren()
+      app.body.replaceChildren(element('div', { class: 'group/user-message', 'data-chatgpt-search-unit-key': 'new-user' },
+        [app.sentImage(), element('p', {}, rendered)]), app.root)
+    }
+    assert.equal(app.submit(), true)
+    assert.equal(app.status().status, 'sent')
+    assert.equal(app.status().status, 'sent', 'acknowledgement remains idempotent')
+    assert.equal(app.send.clicks, 1)
+    const confirmed = app.reports.filter(report => report.event === 'user-message')
+    assert.equal(confirmed.length, 1)
+    assert.equal(confirmed[0].text, text, 'the recorded goal excludes skill instructions')
+    assert.deepEqual(confirmed[0].userSkills, selectedSkills)
+    assert.equal(confirmed[0].focusFiles[0].fileName, 'image.png')
+    assert.equal(app.reports.findLast(report => report.event === 'sent').text, text)
+  }
+})
+
+test('a new image turn containing only skill instructions cannot confirm missing or different human text', () => {
+  for (const renderedTask of ['', '另外一个问题']) {
+    const app = focusImageSend('还是不行')
+    const prefix = skillExports.focusSkillPrefix(['computer']).replace(/```json\n/g, '').replace(/```/g, '')
+    // Even an exact old user message cannot stand in for the newly submitted task.
+    const oldTurn = element('div', { class: 'group/user-message', 'data-chatgpt-search-unit-key': 'old-user' },
+      [app.sentImage(), element('p', {}, '还是不行')])
+    app.body.replaceChildren(oldTurn, app.root)
+    app.send.onClick = () => {
+      app.composer.replaceChildren(); app.cards.replaceChildren()
+      app.body.replaceChildren(oldTurn, element('div', { class: 'group/user-message', 'data-chatgpt-search-unit-key': 'new-user' },
+        [app.sentImage(), element('p', {}, prefix + renderedTask)]), app.root)
+    }
+    assert.equal(app.submit(), true)
+    const status = app.status()
+    assert.equal(status.status, 'confirming')
+    assert.equal(status.newTurnSeen, true)
+    assert.equal(status.turnFilesSeen, true)
+    assert.equal(status.captionSeen, false)
+    assert.equal(app.reports.some(report => report.event === 'user-message'), false)
+    assert.equal(app.send.clicks, 1)
+  }
+})
+
+test('skills with an image and no text keep attachment-only confirmation and skill references', () => {
+  const app = focusImageSend('')
+  app.send.onClick = () => {
+    app.composer.replaceChildren(); app.cards.replaceChildren()
+    app.body.replaceChildren(element('div', { class: 'group/user-message', 'data-chatgpt-search-unit-key': 'new-user' },
+      [app.sentImage()]), app.root)
+  }
+  assert.equal(app.submit(), true)
+  assert.equal(app.status().status, 'sent')
+  const confirmed = app.reports.find(report => report.event === 'user-message')
+  assert.equal(confirmed.text, '')
+  assert.deepEqual(confirmed.userSkills, ['computer'])
   assert.equal(app.send.clicks, 1)
 })
 

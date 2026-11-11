@@ -5813,7 +5813,12 @@
     const snapshot = attachmentSnapshot()
     if (fileSend.submitted) {
       const turns = fileUserTurns()
-      const captionToMatch = fileSend.focus ? fileSend.focus.text : fileSend.caption
+      // Focus skills prepend software instructions and fenced JSON before the same
+      // user-text boundary as the system prompt. ChatGPT renders those fences as
+      // markup, so their original bytes no longer occur in the submitted turn.
+      // Correlate the human text, new user turn, attachments and cleared draft;
+      // comparing the skill prefix strands an already-sent message as "confirming".
+      const captionToMatch = fileSend.focus ? userTextOf(fileSend.focus.text) : fileSend.caption
       const expectedCaption = captionToMatch ? captionToMatch.replace(/\s+/g, '') : ''
       // ChatGPT folds a long user message (… 显示更多) and keeps only its start in the DOM
       // (2026-10-27: an 11043-character result was sent but never confirmed). Its opening
@@ -5860,12 +5865,13 @@
         lastDraftImagePromise = Promise.resolve([])
         fileSend = null
         if (focus) {
+          const userText = userTextOf(focus.text)
           confirmPromptInjection(focus.injection.metadata)
           draftRejected = false
           state.replyActionDetected = false
-          report({ event: 'user-message', text: focus.text, focusFiles, focusSendToken: token, attachmentToken: focus.attachmentToken,
+          report({ event: 'user-message', text: userText, focusFiles, focusSendToken: token, attachmentToken: focus.attachmentToken,
             submissionKind: focus.submissionKind, userSkills: focus.userSkills })
-          report({ event: 'sent', text: focus.text.slice(0, 400), promptInjected: focus.promptInjected,
+          report({ event: 'sent', text: userText.slice(0, 400), promptInjected: focus.promptInjected,
             ...focus.injection.metadata, taskPromptGeneration: focus.generation })
         } else {
           if (resultInjection) confirmPromptInjection(resultInjection.metadata)
