@@ -514,10 +514,10 @@ test('unsupported Markdown, a changed chat and a failed snapshot never trigger a
 })
 
 function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synthetic', allow = true, captionAccepted = true, changeBeforeSubmit = false, platformId = 'deepseek',
-  confirmationUrls = [], confirmationStatuses = [], chooserStates = [true] } = {}) {
+  confirmationUrls = [], confirmationStatuses = [], chooserStates = [true], nativeChooser = false } = {}) {
   let now = 10000, submitted = false, confirmationReads = 0, chooserReads = 0
   let url = fixtureHomes[platformId]
-  const calls = [], logs = [], commands = []
+  const calls = [], logs = [], commands = [], inputEvents = []
   class Clock extends Date { static now() { return now } }
   const debuggerApi = new EventEmitter()
   debuggerApi.attached = false
@@ -528,14 +528,16 @@ function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synth
     commands.push({ method, params })
     return method === 'DOM.getDocument' ? { root: { nodeId: 1 } } : method === 'DOM.querySelector' ? { nodeId: 2 } : {}
   }
-  const wc = { debugger: debuggerApi, getURL: () => url, isDestroyed: () => false, executeJavaScript: async source => {
+  const wc = { debugger: debuggerApi, getURL: () => url, isDestroyed: () => false, isFocused: () => true, focus() {}, getZoomFactor: () => 1,
+    sendInputEvent: event => inputEvents.push(event), executeJavaScript: async source => {
     const method = /Interceptor\?\.([\w]+)\(/.exec(source)?.[1]
     calls.push(method)
     if (method === 'beginFileSend') return 'ok'
     if (method === 'openFileChooser') {
       const state = chooserStates[Math.min(chooserReads++, chooserStates.length - 1)]
       if (state === true) debuggerApi.emit('message', {}, 'Page.fileChooserOpened', { backendNodeId: 7, mode: 'selectMultiple' })
-      return state
+      return nativeChooser && (state === true || state === 'waiting')
+        ? { status: state === true ? 'activated' : 'waiting', kind: state === true ? 'native' : 'menu', x: 10, y: 20 } : state
     }
     if (method === 'fileChooserDiagnostics') return { rootFound: true, menuCount: 0, localEntryCount: 0 }
     if (method === 'refreshFileInput' || method === 'fileSelectionApplied' || method === 'releaseFileSend') return true
@@ -553,6 +555,7 @@ function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synth
     throw new Error('Unexpected method ' + method)
   } }
   const api = load('../src/main/page-files.ts', {
+    electron: { BrowserWindow: { fromWebContents: () => null } },
     'node:fs': { mkdirSync() {}, appendFileSync: (_path, line) => logs.push(line) },
     'node:os': { tmpdir: () => '/synthetic-temp' }, 'node:path': path, '../shared/deepseek-question': shared
   }, { Date: Clock, console: { warn() {} }, setTimeout: (callback, delay) => {
@@ -561,7 +564,7 @@ function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synth
     if (delay <= 250) queueMicrotask(() => { if (handle.active) { now += delay; callback() } })
     return handle
   }, clearTimeout: handle => { handle.active = false } })
-  return { calls, logs, commands, send: () => api.sendPageFiles(wc, platformId, [{ path: '/staging/context.md', fileName: 'context.md', mimeType: 'text/markdown', sizeBytes: 100 }],
+  return { calls, logs, commands, inputEvents, send: () => api.sendPageFiles(wc, platformId, [{ path: '/staging/context.md', fileName: 'context.md', mimeType: 'text/markdown', sizeBytes: 100 }],
     'synthetic-upload', () => true, new AbortController().signal, { caption: 'synthetic question', allowNewConversation: allow }) }
 }
 
@@ -777,6 +780,14 @@ test('Gemini uses its transient native chooser, then sends the caption once and 
   const blocked = uploadFixture({ platformId: 'gemini', chooserStates: [false] })
   assert.equal(await blocked.send(), 'upload-failed')
   assert.equal(blocked.calls.includes('submitFileSend'), false)
+})
+
+test('Gemini chooser controls are dispatched as trusted native clicks', async () => {
+  const fixture = uploadFixture({ platformId: 'gemini', nativeChooser: true, chooserStates: ['waiting', true],
+    nextUrl: fixtureConversations.gemini + '?synthetic=native-click' })
+  assert.equal(await fixture.send(), 'ok')
+  assert.equal(fixture.inputEvents.filter(event => event.type === 'mouseDown').length, 2)
+  assert.ok(fixture.logs.some(log => log.includes('chooser-native-click')))
 })
 
 test('Gemini cannot confirm a changed account origin or another conversation after submission', async () => {

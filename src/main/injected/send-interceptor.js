@@ -5937,7 +5937,7 @@
         state.programmatic = true
         const snapshot = attachmentSnapshot()
         if (fileSend.files.length && !snapshot.images && !snapshot.inputFiles && !snapshot.uploading && attachmentNameEvidence(snapshot.nameSources, fileSend.files, snapshot.cardTexts).every((name) => name.method === 'missing')) fileSend.selected = false
-        if (!fileSend.selected) { fileSend.chooserControls = new WeakSet(); fileSend.chooserSteps = {} }
+        if (!fileSend.selected) { fileSend.chooserControls = new WeakSet(); fileSend.chooserSteps = {}; fileSend.lastChooserClick = null }
         return fileSend.selected ? 'resume' : 'ok'
       }
       if (state.programmatic || findStopButton() || collapse(readComposer(composer)) !== '' || draftAttachmentEvidence()) return 'busy'
@@ -5950,7 +5950,8 @@
       }
       input?.setAttribute('data-codex-file-input', token)
       state.programmatic = true
-      fileSend = { token, files, input, selected: false, edited: false, submitted: false, baselineUser: null, baselineAssistant: null, chooserControls: new WeakSet(), chooserSteps: {} }
+      fileSend = { token, files, input, selected: false, edited: false, submitted: false, baselineUser: null, baselineAssistant: null,
+        chooserControls: new WeakSet(), chooserSteps: {}, lastChooserClick: null }
       return 'ok'
     },
     fileSendStatus,
@@ -5998,14 +5999,28 @@
       const visibleControl = (node) => node && node.getClientRects().length > 0 &&
         !node.closest?.('[aria-hidden="true"]') && !controlDisabled(node)
       const unused = (node) => visibleControl(node) && !fileSend.chooserControls.has(node)
+      /*
+       * A file input is a privileged browser action.  Dispatching `.click()` from
+       * executeJavaScript is untrusted and can leave Gemini's menu open without
+       * producing Page.fileChooserOpened (the exact state that used to strand a
+       * retry).  Return a measured point instead; the main process turns it into a
+       * trusted WebContents input event and still waits for the chooser event.
+       */
       const clickOnce = (kind, node, result) => {
+        try { node.scrollIntoView({ block: 'nearest', inline: 'nearest' }) } catch (_) { /* use the measured rect */ }
+        const rect = node.getBoundingClientRect?.()
+        if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.top) || !Number.isFinite(rect.width) ||
+          !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) return false
+        const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2
+        const hit = document.elementFromPoint?.(x, y)
+        if (!hit || (hit !== node && !node.contains?.(hit))) return false
         fileSend.chooserSteps[kind] = true
         fileSend.chooserControls.add(node)
-        pressButton(node)
-        return result
+        fileSend.lastChooserClick = { kind, node }
+        return { status: result, kind, x, y }
       }
       const local = [...document.querySelectorAll(PAGE.fileLocalUploadSelector)].filter(visibleControl)
-      if (local.length === 1 && !fileSend.chooserSteps.native && unused(local[0])) return clickOnce('native', local[0], true)
+      if (local.length === 1 && !fileSend.chooserSteps.native && unused(local[0])) return clickOnce('native', local[0], 'activated')
       const labels = PAGE.fileLocalUploadLabels || []
       const menus = [...document.querySelectorAll('[role="menu"]')].filter((node) => node.getClientRects().length > 0 && !node.closest?.('[aria-hidden="true"]'))
       const candidates = [...new Set(menus.flatMap((menu) => [...menu.querySelectorAll(CONTROL_SELECTOR + ',[role="menuitem"]')]))].filter((node) => {
@@ -6027,6 +6042,16 @@
         return clickOnce('menu', menu, 'waiting')
       }
       return 'waiting'
+    },
+    /** Allow one measured chooser control to be tried again after a lost native event. */
+    resetFileChooserAttempt(token) {
+      if (!fileSend || fileSend.token !== token || fileSend.selected || fileSend.submitted) return false
+      const click = fileSend.lastChooserClick
+      if (!click) return false
+      fileSend.chooserControls.delete(click.node)
+      delete fileSend.chooserSteps[click.kind]
+      fileSend.lastChooserClick = null
+      return true
     },
     fileChooserDiagnostics() {
       const root = attachmentRoot()

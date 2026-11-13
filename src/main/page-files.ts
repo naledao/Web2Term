@@ -2,6 +2,7 @@ import type { WebContents } from 'electron'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { BrowserWindow } from 'electron'
 import type { PreparedAttachment } from './file-access'
 import type { FocusToolSkill } from '../shared/focus-skills'
 import type { FileSendOutcome } from '../shared/file-requests'
@@ -10,6 +11,7 @@ import { isQuestionChatHome, selectionQuestionConversation } from '../shared/dee
 
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 const diagnosticLogPaths = new Map<FileReadingPlatform['id'], string>()
+type NativeChooserClick = { status: 'activated' | 'waiting'; kind: string; x: number; y: number }
 
 /** Append only upload diagnostics, never the message payload or file bytes. */
 function writeDiagnostic(platformId: FileReadingPlatform['id'], token: string, event: string, details: Record<string, unknown>): void {
@@ -143,7 +145,7 @@ export async function sendPageFiles(
   let detached = false
   let uploadError = false
   let chooserIntercepted = false
-  let chooser: { backendNodeId: number; mode: string } | null = null
+  let chooser: { backendNodeId: number | null; mode: string } | null = null
   const ownerUrl = contents.getURL()
   let acceptedConversationId: string | null = null
   const pageContext = (): { matches: boolean; transitioning: boolean; route: string; sameOrigin: boolean; conversationAccepted: boolean } => {
@@ -207,10 +209,9 @@ export async function sendPageFiles(
   const onMessage = (_event: Electron.Event, method: string, params: Record<string, unknown>): void => {
     const id = String(params.requestId ?? '')
     if (method === 'Page.fileChooserOpened' && chooserIntercepted && !chooser) {
-      if (typeof params.backendNodeId === 'number' && params.backendNodeId > 0) {
-        chooser = { backendNodeId: params.backendNodeId, mode: String(params.mode ?? '') }
-        log('file-chooser-opened', { multiple: chooser.mode === 'selectMultiple', inputFound: true })
-      }
+      const backendNodeId = typeof params.backendNodeId === 'number' && params.backendNodeId > 0 ? params.backendNodeId : null
+      chooser = { backendNodeId, mode: String(params.mode ?? '') }
+      log('file-chooser-opened', { multiple: chooser.mode === 'selectMultiple', inputFound: backendNodeId !== null })
     } else if (method === 'Network.requestWillBeSent') {
       const request = params.request as { method?: string; headers?: Record<string, string> } | undefined
       const type = Object.entries(request?.headers ?? {}).find(([name]) => name.toLowerCase() === 'content-type')?.[1] ?? ''
@@ -231,6 +232,67 @@ export async function sendPageFiles(
       }
       pending.delete(id)
     }
+  }
+  const dispatchNativeChooserClick = (value: NativeChooserClick): boolean => {
+    if (contents.isDestroyed() || ![value.x, value.y].every((coordinate) => typeof coordinate === 'number' && Number.isFinite(coordinate))) return false
+    const zoom = contents.getZoomFactor()
+    if (!Number.isFinite(zoom) || zoom <= 0 || value.x < 0 || value.y < 0 || value.x * zoom > 100000 || value.y * zoom > 100000) return false
+    const position = { x: Math.round(value.x * zoom), y: Math.round(value.y * zoom) }
+    try {
+      // Electron drops sendInputEvent when its BrowserWindow/webContents is not
+      // focused. Gemini's file chooser is especially strict about this because
+      // it requires a live user activation, so make the embedded page the input
+      // target before dispatching the trusted mouse sequence.
+      const ownerWindow = BrowserWindow.fromWebContents(contents)
+      if (ownerWindow && !ownerWindow.isFocused()) ownerWindow.focus()
+      if (!contents.isFocused()) contents.focus()
+      if (!contents.isFocused()) return false
+      contents.sendInputEvent({ type: 'mouseMove', ...position })
+      contents.sendInputEvent({ type: 'mouseDown', ...position, button: 'left', clickCount: 1 })
+      contents.sendInputEvent({ type: 'mouseUp', ...position, button: 'left', clickCount: 1 })
+      return true
+    } catch { return false }
+  }
+  const flattenedChooserInput = async (): Promise<{ backendNodeId: number | null; nodeId: number | null } | null> => {
+    try {
+      const flattened = await command('DOM.getFlattenedDocument', { depth: -1, pierce: true })
+      const nodes = Array.isArray(flattened.nodes) ? flattened.nodes as Array<Record<string, unknown>> : []
+      const fileInputs = nodes.filter((node) => {
+        if (String(node.nodeName ?? '').toUpperCase() !== 'INPUT') return false
+        const attrs = Array.isArray(node.attributes) ? node.attributes as unknown[] : []
+        const values = new Map<string, string>()
+        for (let index = 0; index + 1 < attrs.length; index += 2) values.set(String(attrs[index]).toLowerCase(), String(attrs[index + 1]))
+        return values.get('type')?.toLowerCase() === 'file' && !values.has('disabled') &&
+          (attachments.length === 1 || values.has('multiple'))
+      })
+      const candidate = fileInputs.at(-1)
+      if (!candidate) return null
+      return {
+        backendNodeId: typeof candidate.backendNodeId === 'number' && candidate.backendNodeId > 0 ? candidate.backendNodeId : null,
+        nodeId: typeof candidate.nodeId === 'number' && candidate.nodeId > 0 ? candidate.nodeId : null
+      }
+    } catch { /* Fall through to the explicit timeout reason below. */ }
+    return null
+  }
+  const setChooserFiles = async (selected: { backendNodeId: number | null; mode: string }): Promise<boolean> => {
+    const files = attachments.map((file) => file.path)
+    if (selected.backendNodeId !== null) {
+      await command('DOM.setFileInputFiles', { backendNodeId: selected.backendNodeId, files })
+      return true
+    }
+    // Chromium normally supplies backendNodeId with Page.fileChooserOpened. Some
+    // transient Gemini inputs have emitted the event without it, so recover the
+    // live input from the flattened DOM before giving up.
+    const candidate = await flattenedChooserInput()
+    if (candidate?.backendNodeId !== null && candidate?.backendNodeId !== undefined) {
+      await command('DOM.setFileInputFiles', { backendNodeId: candidate.backendNodeId, files })
+      return true
+    }
+    if (candidate?.nodeId !== null && candidate?.nodeId !== undefined) {
+      await command('DOM.setFileInputFiles', { nodeId: candidate.nodeId, files })
+      return true
+    }
+    return false
   }
   try {
     if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
@@ -267,34 +329,75 @@ export async function sendPageFiles(
         await command('Page.setInterceptFileChooserDialog', { enabled: true })
         const chooserDeadline = Date.now() + 8000
         let entryActivated = false
+        let lastNativeClickAt = 0
+        let lastInputProbeAt = 0
+        let chooserClickAttempts = 0
         let lastEntryState = ''
         while (!chooser && Date.now() < chooserDeadline) {
           if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
           if (detached) return finish('upload-failed', 'debugger-detached')
-          if (!entryActivated) {
+          if (!entryActivated && chooserClickAttempts < 4) {
             const result = await call('openFileChooser', token)
-            const entryState = result === true ? 'activated' : result === 'waiting' ? 'waiting' : 'blocked'
+            const nativeClick = result && typeof result === 'object' &&
+              ['activated', 'waiting'].includes(String((result as Record<string, unknown>).status)) &&
+              typeof (result as Record<string, unknown>).kind === 'string' &&
+              typeof (result as Record<string, unknown>).x === 'number' && typeof (result as Record<string, unknown>).y === 'number'
+              ? result as NativeChooserClick : null
+            const entryState = nativeClick ? nativeClick.status : result === true ? 'activated' : result === 'waiting' ? 'waiting' : 'blocked'
             if (entryState !== lastEntryState) { log('chooser-entry-state', { state: entryState }); lastEntryState = entryState }
             if (result !== true && result !== 'waiting') {
-              try { log('chooser-diagnostics', diagnosticSnapshot(await call('fileChooserDiagnostics'))) } catch { log('chooser-diagnostics-unavailable') }
-              return finish('upload-failed', 'local-upload-entry-blocked')
+              if (nativeClick) {
+                if (!dispatchNativeChooserClick(nativeClick)) {
+                  try { log('chooser-diagnostics', diagnosticSnapshot(await call('fileChooserDiagnostics'))) } catch { log('chooser-diagnostics-unavailable') }
+                  return finish('upload-failed', 'native-click-dispatch-failed')
+                }
+                chooserClickAttempts += 1
+                lastNativeClickAt = Date.now()
+                log('chooser-native-click', { kind: nativeClick.kind, attempt: chooserClickAttempts })
+                if (nativeClick.status === 'activated') {
+                  entryActivated = true
+                }
+              } else {
+                try { log('chooser-diagnostics', diagnosticSnapshot(await call('fileChooserDiagnostics'))) } catch { log('chooser-diagnostics-unavailable') }
+                return finish('upload-failed', 'local-upload-entry-blocked')
+              }
             }
-            entryActivated = result === true
+            if (result === true) {
+              entryActivated = true
+            }
           }
           if (chooser) break
+          if (lastNativeClickAt && Date.now() - lastNativeClickAt >= 250 && Date.now() - lastInputProbeAt >= 250) {
+            lastInputProbeAt = Date.now()
+            const input = await flattenedChooserInput()
+            if (input) {
+              chooser = { backendNodeId: input.backendNodeId, mode: 'selectMultiple' }
+              log('file-chooser-dom-fallback', { inputFound: true, backendNodeId: input.backendNodeId !== null, nodeId: input.nodeId !== null })
+              break
+            }
+          }
+          if (chooser) break
+          if (lastNativeClickAt && Date.now() - lastNativeClickAt >= 900) {
+            try {
+              const reset = await call('resetFileChooserAttempt', token)
+              log('chooser-retry', { reset: reset === true, attempt: chooserClickAttempts })
+            } catch { log('chooser-retry-unavailable', { attempt: chooserClickAttempts }) }
+            entryActivated = false
+            lastNativeClickAt = 0
+          }
           await pause(50)
         }
         // The browser reports the transient input directly, even if it has no
         // selector/id and the website closes the menu immediately afterwards.
-        const selectedChooser = chooser as { backendNodeId: number; mode: string } | null
+        const selectedChooser = chooser as { backendNodeId: number | null; mode: string } | null
         if (!selectedChooser) {
           try { log('chooser-diagnostics', diagnosticSnapshot(await call('fileChooserDiagnostics'))) } catch { log('chooser-diagnostics-unavailable') }
-          return finish('upload-failed', entryActivated ? 'file-chooser-timeout' : 'local-upload-entry-missing')
+          return finish('upload-failed', entryActivated || chooserClickAttempts > 0 ? 'file-chooser-timeout' : 'local-upload-entry-missing')
         }
-        if (attachments.length > 1 && selectedChooser.mode !== 'selectMultiple') return finish('upload-failed', 'file-chooser-not-multiple')
+        if (attachments.length > 1 && selectedChooser.mode && selectedChooser.mode !== 'selectMultiple') return finish('upload-failed', 'file-chooser-not-multiple')
         if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
         stage = 'file-selection'
-        await command('DOM.setFileInputFiles', { backendNodeId: selectedChooser.backendNodeId, files: attachments.map((file) => file.path) })
+        if (!await setChooserFiles(selectedChooser)) return finish('upload-failed', 'file-chooser-input-missing')
         await command('Page.setInterceptFileChooserDialog', { enabled: false })
         chooserIntercepted = false
       } else {
