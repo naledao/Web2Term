@@ -47,13 +47,13 @@ const EmbedPrefix = methods('../src/main/embed.ts', 'ChatGptEmbed', ['planPrefix
   randomUUID, withReplyProtocol: types.withReplyProtocol, conversationIdOf: () => 'chat-a'
 })
 const EmbedReports = methods('../src/main/embed.ts', 'ChatGptEmbed', ['handlePageReport', 'confirmInjection'], {
-  REPLY_PROTOCOL_VERSION: types.REPLY_PROTOCOL_VERSION, REPLY_PROTOCOL_REMINDER: types.REPLY_PROTOCOL_REMINDER,
+  REPLY_PROTOCOL_VERSION: types.REPLY_PROTOCOL_VERSION, replyProtocolReminderFor: types.replyProtocolReminderFor,
   INTERCEPTOR_LOG_TAG: '[cmd-terminal] ', conversationIdOf: () => 'chat-a',
   console: { info() {}, warn() {} }, writeReplyDiagnostic() {}, writePromptDiagnostic() {}
 })
 const EmbedResultInjection = methods('../src/main/embed.ts', 'ChatGptEmbed', ['planPrefix', 'confirmInjection', 'handlePageReport'], {
   randomUUID, URL, withReplyProtocol: types.withReplyProtocol,
-  REPLY_PROTOCOL_VERSION: types.REPLY_PROTOCOL_VERSION, REPLY_PROTOCOL_REMINDER: types.REPLY_PROTOCOL_REMINDER,
+  REPLY_PROTOCOL_VERSION: types.REPLY_PROTOCOL_VERSION, replyProtocolReminderFor: types.replyProtocolReminderFor,
   INTERCEPTOR_LOG_TAG: '[cmd-terminal] ', conversationIdOf: (_platform, url) => new URL(url).pathname.split('/').at(-1) || null,
   console: { info() {}, warn() {} }, writeReplyDiagnostic() {}, writePromptDiagnostic() {}
 })
@@ -184,6 +184,28 @@ test('the actual embed plan carries one reply contract and commits its exact tra
   }
 })
 
+test('Gemini gets its execution guidance in full prompts, saved-conversation updates and short reminders', () => {
+  const guidance = 'Gemini 网页的搜索或原生工具额度只适用于网页工具'
+  for (const environment of [linux, types.FALLBACK_ENVIRONMENT]) {
+    const parts = types.buildTerminalPromptParts(environment, tools, 'gemini')
+    assert.ok(parts.basePrompt.includes(guidance))
+    assert.ok(parts.prefix.includes(guidance))
+    assert.ok(!types.buildTerminalPromptParts(environment, tools, 'chatgpt').prefix.includes(guidance))
+  }
+  const full = types.buildTerminalPromptParts(linux, tools, 'gemini').prefix
+  const oldLedger = sent(null, planInjection(null, prefix(), 'gemini'))
+  const updated = planInjection(oldLedger, full, 'gemini')
+  assert.equal(updated.mode, 'delta')
+  assert.ok(updated.prefix.includes(guidance))
+  const ledger = sent(null, planInjection(null, full, 'gemini'))
+  const embed = Object.assign(new EmbedPrefix(), { platform: { id: 'gemini' }, interceptor: { prefix: full },
+    handlers: { planInjection: () => planInjection(ledger, full, 'gemini') } })
+  const reminder = types.replyProtocolReminderFor('gemini')
+  assert.ok(embed.planPrefix('unused').endsWith(reminder))
+  assert.ok(reminder.includes(guidance))
+  assert.ok(!types.replyProtocolReminderFor('deepseek').includes(guidance))
+})
+
 test('confirmed short reminders count context once while planned prefixes commit their own full size', () => {
   const traffic = [], committed = []
   const ledger = sent(null, planInjection(null, prefix(), 'deepseek'))
@@ -212,6 +234,20 @@ test('confirmed short reminders count context once while planned prefixes commit
   assert.equal(committed[0].prefix, actual.prefix)
   assert.equal(sent(ledger, committed[0]).charsSinceFull - ledger.charsSinceFull, actual.prefix.length)
   assert.deepEqual(traffic, [types.REPLY_PROTOCOL_REMINDER.length], 'the planned prefix already includes its short contract')
+})
+
+test('Gemini counts the platform reminder on confirmed result sends without consuming the full refresh', () => {
+  const traffic = [], rawSent = []
+  const embed = Object.assign(new EmbedReports(), { platform: { id: 'gemini' }, taskPromptGeneration: 1,
+    interceptor: { enabled: true, promptInjectionEnabled: true, taskStartedAt: 100, taskFinishedAt: null },
+    handlers: { onContextTraffic: count => traffic.push(count), onRawSent: count => rawSent.push(count), onInterceptor() {} },
+    getInterceptorStatus: () => ({}) })
+  const reminder = types.replyProtocolReminderFor('gemini')
+  embed.handlePageReport('[cmd-terminal] ' + JSON.stringify({ event: 'sent-raw', taskPromptGeneration: 1,
+    promptInjected: false, replyProtocolKind: 'short', replyProtocolVersion: types.REPLY_PROTOCOL_VERSION,
+    replyProtocolLength: reminder.length, textLength: 30 }))
+  assert.deepEqual(traffic, [reminder.length])
+  assert.deepEqual(rawSent, [30])
 })
 
 test('a new conversation gets the full prompt, an unchanged one only the anchor, and the anchor commits no sections', () => {
@@ -264,10 +300,16 @@ test('one violation resends the reply contract, a second one or a used-up budget
   assert.equal(sent(noteInjectionViolation(ledger), reminder).violations, 0, 'the reminder clears the violation')
 
   assert.equal(planInjection(noteInjectionViolation(noteInjectionViolation(ledger)), prefix(), 'chatgpt').reason, 'violations')
-  const busy = addInjectionTraffic(ledger, injection.injectionBudget('chatgpt'))
-  assert.equal(planInjection(busy, prefix(), 'chatgpt').reason, 'budget')
-  assert.equal(sent(busy, planInjection(busy, prefix(), 'chatgpt')).charsSinceFull, 0)
-  assert.ok(injection.injectionBudget('gemini') > injection.injectionBudget('chatgpt'))
+  for (const platformId of ['chatgpt', 'gemini']) {
+    assert.equal(injection.injectionBudget(platformId), 60_000)
+    const belowBudget = addInjectionTraffic(ledger, 59_999)
+    assert.equal(planInjection(belowBudget, prefix(), platformId).mode, 'none')
+    const atBudget = addInjectionTraffic(belowBudget, 1)
+    const refresh = planInjection(atBudget, prefix(), platformId)
+    assert.equal(refresh.mode, 'full')
+    assert.equal(refresh.reason, 'budget')
+    assert.equal(sent(atBudget, refresh).charsSinceFull, 0)
+  }
   assert.equal(addInjectionTraffic(ledger, -5), ledger)
 })
 

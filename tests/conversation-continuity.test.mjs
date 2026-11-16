@@ -97,8 +97,10 @@ test('adoption preserves the original transcript, hides only trusted transport a
   f.continuity.install(task, '# 交接摘要\n完成的事和待办')
   const rows = f.messages.get(physicalC)
   assert.equal(rows.length, 2, 'hidden context is retained for later compression')
-  rows.push(message('native-prompt', physicalC, 'user', shared.compactionHandoffPrompt(jobOne)),
-    message('old-native-prompt', physicalC, 'user', shared.compactionHandoffPrompt(jobOne).replace('本轮只回复“已读取交接摘要，等待下一条消息。”，随后给出结束标记。不要复述目标、待办或摘要，', '本轮只用简短文字确认已接收的目标和待办，等待我下一条消息。')),
+  const [intro, marker, ...instructions] = shared.compactionHandoffPrompt(jobOne).split('\n')
+  rows.push(message('native-prompt', physicalC, 'user', [intro, marker, ...instructions].join('\n')),
+    message('folded-native-prompt', physicalC, 'user', [intro, marker, instructions[0]].join('\n')),
+    message('old-native-prompt', physicalC, 'user', [intro, ...instructions, marker].join('\n')),
     message('native-ack', physicalC, 'assistant', task.handoffAnswer + '\n' + shared.compactionHandoffMarker(jobOne), task.handoffReplyId),
     message('actual-user', physicalC, 'user', '从上一会话导入的交接摘要（summary.md）：这是我自己输入的内容'),
     message('actual-answer', physicalC, 'assistant', '新的回答'))

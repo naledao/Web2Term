@@ -24,7 +24,7 @@ export interface ReplyDiagnosticContext {
 const events = new Set([
   'installed', 'configured', 'sent', 'sent-raw', 'scan', 'reply-state', 'question',
   'question-cleared', 'command', 'read-files', 'computer-request', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
-  'continue-generation', 'command-recovery', 'native-edit'
+  'continue-generation', 'command-recovery', 'native-edit', 'gemini-refusal'
 ])
 const reasons = new Set([
   'no-turns', 'no-visible-turns', 'not-assistant-turn', 'no-key', 'already-handled', 'question-still-generating',
@@ -39,7 +39,7 @@ const reasons = new Set([
   'analysis-leak-detected', 'analysis-leak-edit-click', 'analysis-leak-send-click', 'analysis-leak-limit', 'analysis-leak-failed',
   'dsml-leak-detected', 'dsml-leak-edit-click', 'dsml-leak-send-click', 'dsml-leak-limit', 'dsml-leak-failed',
   'native-edit-draft', 'stopped-retry-detected', 'stopped-retry-edit-click', 'stopped-retry-send-click',
-  'stopped-retry-limit', 'stopped-retry-failed', 'stopped-retry-abandoned'
+  'stopped-retry-limit', 'stopped-retry-failed', 'stopped-retry-abandoned', 'gemini-refusal-matched', 'gemini-refusal-send'
 ])
 
 function identifier(value: unknown): string | null {
@@ -108,6 +108,9 @@ export function replyDiagnosticMetadata(
   if (['command', 'description', 'background', 'timeout_seconds'].includes(payload.parseErrorField ?? '')) details.parseErrorField = payload.parseErrorField!
   if (payload.parseRepair === 'windows-path') details.parseRepair = payload.parseRepair
   if (['pending', 'sent', 'blocked', 'failed', 'uncertain'].includes(payload.recoveryStatus ?? '')) details.recoveryStatus = payload.recoveryStatus!
+  if (payload.event === 'gemini-refusal' && ['ok', 'stale', 'busy', 'no-composer', 'insert-failed', 'stuck'].includes(payload.geminiRefusalOutcome ?? '')) {
+    details.outcome = payload.geminiRefusalOutcome!
+  }
   if (payload.reason === 'computer-not-live' && payload.computerLive && typeof payload.computerLive === 'object') {
     const live = payload.computerLive
     if (typeof live.failed === 'string' && /^[a-z-]{1,40}$/.test(live.failed)) details.liveFailed = live.failed

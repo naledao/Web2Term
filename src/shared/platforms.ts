@@ -311,8 +311,8 @@ export interface FocusPageRules {
   }
   /**
    * Generating vs idle read off the composer's primary action, for a site whose stop control
-   * shares the send button's classes (DeepSeek). Absent: the measured `stopButtonSelectors`
-   * decide — present means 'active', absent means 'idle'.
+   * shares the send button's classes (DeepSeek). Other sites use the stop control and any
+   * explicit reply streaming attribute.
    */
   generatingIcon?: {
     primaryControlSelector: string
@@ -329,7 +329,11 @@ export interface FocusPageRules {
    * it; never stored. Absent: that reply is anchored by its `messageIdAttr` instead.
    */
   rowPositionAttr?: string
-  /** Reasoning blocks inside an assistant turn, shown as 思考过程. Empty until measured. */
+  /** Nearest row carrying `rowPositionAttr` if the attribute lives outside the reply. */
+  rowPositionSelector?: string
+  /** User rows that delimit the current reply when the page has no focus edit rules. */
+  userTurnSelector?: string
+  /** Reasoning blocks shown as 思考过程. Empty until measured. */
   reasoningSelectors: string[]
   /**
    * Where `reasoningSelectors` are queried when reasoning sits OUTSIDE the turn element: the
@@ -1084,6 +1088,12 @@ export const CLAUDE_PAGE: PageAdapter = {
   fileTurnPositionAttr: 'data-rs-index',
   fileAttachmentCardSelector: '[data-testid="file-thumbnail"]',
   fileImagesMayUseNames: true,
+  focus: {
+    rowPositionAttr: 'data-rs-index',
+    rowPositionSelector: '[data-testid="transcript-row"]',
+    userTurnSelector: '[class~="group/message-row"][class~="ms-auto"]',
+    reasoningSelectors: []
+  },
   // Not measured yet; DeepSeek is the platform the theme probe runs against first.
   theme: THEME_UNMEASURED
 }
@@ -1173,6 +1183,7 @@ export const CLAUDE_PLATFORM: ChatPlatform = {
  */
 export const GEMINI_PAGE: PageAdapter = {
   composerKind: 'contenteditable',
+  conversationPathPattern: '^/app/[0-9a-fA-F]{16}/?$',
   composerSelectors: [
     'div.ql-editor[contenteditable="true"]',
     'rich-textarea div[contenteditable="true"]',
@@ -1232,6 +1243,11 @@ export const GEMINI_PAGE: PageAdapter = {
   fileUploadMenuSelectors: ['button[aria-label="上传和工具"]', 'button[aria-label="Upload files"]'],
   fileLocalUploadSelector: 'button[data-test-id="local-images-files-uploader-button"]',
   fileLocalUploadLabels: ['文件', 'Files'],
+  focus: {
+    userTurnSelector: 'user-query',
+    reasoningScopeSelector: 'model-response',
+    reasoningSelectors: ['thinking-overlay']
+  },
   // Not measured yet; DeepSeek is the platform the theme probe runs against first.
   theme: THEME_UNMEASURED
 }

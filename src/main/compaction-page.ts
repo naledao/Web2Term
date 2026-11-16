@@ -21,6 +21,7 @@ export interface CompactionPageSnapshot {
   cutOff: boolean
   sendFailure: boolean
   oversized: boolean
+  geminiRefusal: boolean
   uploadReady: boolean
 }
 
@@ -108,6 +109,7 @@ export class CompactionPage {
     if (this.url !== url || !snapshot || snapshot.path !== new URL(url).pathname) return null
     const ready = await questionPageCall<{ uploadReady: boolean }>(contents,
       `${readinessSource}\n;window.__questionChatReady(${JSON.stringify(this.platform.page)})`)
+    if (this.url !== url) return null
     return { ...snapshot, uploadReady: ready.uploadReady === true }
   }
   /** Called only after read() configured the interceptor for the current URL. */
@@ -122,7 +124,7 @@ export class CompactionPage {
     if (queuedSend) return queuedSend(this.view.webContents, this.platform, path, prompt, signal,
       () => this.available && isCurrent(), beforeSubmit)
     return sendQuestionChatAttachment(this.view.webContents, this.platform, path, prompt, signal,
-      () => this.available && isCurrent(), beforeSubmit, 'unlimited')
+      () => this.available && isCurrent(), beforeSubmit, 'unlimited', true)
   }
   close(): void {
     if (this.disposed) return

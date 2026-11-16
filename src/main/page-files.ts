@@ -136,7 +136,7 @@ export async function sendPageFiles(
   token: string,
   isCurrent: () => boolean,
   signal: AbortSignal,
-  options: { caption?: string; allowNewConversation?: boolean; userText?: string; userSkills?: FocusToolSkill[]; computerResult?: { path: string; generation: number }; beforeSubmit?: () => void } = {}
+  options: { caption?: string; allowNewConversation?: boolean; userText?: string; userSkills?: FocusToolSkill[]; computerResult?: { path: string; generation: number }; beforeSubmit?: () => void; background?: boolean; allowPendingConversation?: boolean } = {}
 ): Promise<FileSendOutcome> {
   const debuggerApi = contents.debugger
   let attached = false
@@ -147,12 +147,13 @@ export async function sendPageFiles(
   let chooserIntercepted = false
   let chooser: { backendNodeId: number | null; mode: string } | null = null
   const ownerUrl = contents.getURL()
+  const createsConversation = options.allowNewConversation === true && isQuestionChatHome(platformId, ownerUrl)
   let acceptedConversationId: string | null = null
   const pageContext = (): { matches: boolean; transitioning: boolean; route: string; sameOrigin: boolean; conversationAccepted: boolean } => {
     const rejected = { matches: false, transitioning: false, route: 'other', sameOrigin: false, conversationAccepted: !!acceptedConversationId }
     if (contents.isDestroyed()) return { ...rejected, route: 'destroyed' }
     const url = contents.getURL()
-    const initialSend = sendClicked && options.allowNewConversation === true && isQuestionChatHome(platformId, ownerUrl)
+    const initialSend = sendClicked && createsConversation
     try {
       const before = new URL(ownerUrl), after = new URL(url)
       if (!initialSend) return { ...rejected, matches: url === ownerUrl, route: url === ownerUrl ? 'owner' : 'changed', sameOrigin: after.origin === before.origin }
@@ -184,7 +185,7 @@ export async function sendPageFiles(
     // blocked delivery, never a reason to start another upload or recapture the desktop.
     if (options.computerResult && (outcome === 'busy' || outcome === 'no-composer') && stage !== 'begin') outcome = 'unknown'
     log('finish', { outcome, reason, submitted })
-    if (outcome !== 'ok') console.warn(`[files:${platformId}] ${outcome} at ${stage}: ${reason}; log: ${diagnosticLogPaths.get(platformId) ?? 'unavailable'}`)
+    if (outcome !== 'ok' && outcome !== 'awaiting-conversation') console.warn(`[files:${platformId}] ${outcome} at ${stage}: ${reason}; log: ${diagnosticLogPaths.get(platformId) ?? 'unavailable'}`)
     return outcome
   }
   log('start', { attachmentCount: attachments.length, attachments: attachments.map(({ mimeType, sizeBytes, textNameAlias }) => ({ mimeType, sizeBytes, textNameAlias: !!textNameAlias })) })
@@ -233,10 +234,24 @@ export async function sendPageFiles(
       pending.delete(id)
     }
   }
-  const dispatchNativeChooserClick = (value: NativeChooserClick): boolean => {
-    if (contents.isDestroyed() || ![value.x, value.y].every((coordinate) => typeof coordinate === 'number' && Number.isFinite(coordinate))) return false
+  const dispatchNativeChooserClick = async (value: NativeChooserClick): Promise<boolean> => {
+    if (contents.isDestroyed() || ![value.x, value.y].every((coordinate) => Number.isFinite(coordinate) && coordinate >= 0 && coordinate <= 100000)) return false
+    if (options.background) {
+      // Target the background page through its existing debugger session. CDP
+      // takes viewport CSS pixels and needs no top-level window activation.
+      const { x, y } = value
+      for (const event of [
+        { type: 'mouseMoved' },
+        { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1 },
+        { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1 }
+      ]) {
+        if (!current() || signal.aborted || detached) return false
+        await command('Input.dispatchMouseEvent', { ...event, x, y })
+      }
+      return true
+    }
     const zoom = contents.getZoomFactor()
-    if (!Number.isFinite(zoom) || zoom <= 0 || value.x < 0 || value.y < 0 || value.x * zoom > 100000 || value.y * zoom > 100000) return false
+    if (!Number.isFinite(zoom) || zoom <= 0 || value.x * zoom > 100000 || value.y * zoom > 100000) return false
     const position = { x: Math.round(value.x * zoom), y: Math.round(value.y * zoom) }
     try {
       // Electron drops sendInputEvent when its BrowserWindow/webContents is not
@@ -347,7 +362,7 @@ export async function sendPageFiles(
             if (entryState !== lastEntryState) { log('chooser-entry-state', { state: entryState }); lastEntryState = entryState }
             if (result !== true && result !== 'waiting') {
               if (nativeClick) {
-                if (!dispatchNativeChooserClick(nativeClick)) {
+                if (!await dispatchNativeChooserClick(nativeClick)) {
                   try { log('chooser-diagnostics', diagnosticSnapshot(await call('fileChooserDiagnostics'))) } catch { log('chooser-diagnostics-unavailable') }
                   return finish('upload-failed', 'native-click-dispatch-failed')
                 }
@@ -503,8 +518,14 @@ export async function sendPageFiles(
       // Recheck after the page call, which can itself race with SPA navigation.
       const afterRead = pageContext()
       if ((!afterRead.matches && !afterRead.transitioning) || detached) return finish('unknown', 'page-changed-after-submit')
+      // The first user row can appear on the home page before its chat URL exists.
       if (afterRead.matches && snapshot?.status === 'sent') {
-        return finish('ok', snapshot.filesPending === true ? 'message-confirmed-attachment-preview-pending' : 'message-confirmed')
+        if (!createsConversation || afterRead.conversationAccepted) {
+          return finish('ok', snapshot.filesPending === true ? 'message-confirmed-attachment-preview-pending' : 'message-confirmed')
+        }
+        if (options.allowPendingConversation && afterRead.route === 'home') {
+          return finish('awaiting-conversation', 'message-confirmed-awaiting-conversation')
+        }
       }
       if (!isCurrent() || signal.aborted) return finish('unknown', 'context-changed-after-submit')
       if (afterRead.matches && diagnostics.newTurnSeen === true && diagnostics.turnFilesSeen === false && (!lastConfirmDiagnosticsAt || Date.now() - lastConfirmDiagnosticsAt >= 3000)) {

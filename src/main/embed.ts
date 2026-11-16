@@ -50,7 +50,7 @@ import { parseReadFilesRequest } from '../shared/file-requests'
 import type { FileSendOutcome } from '../shared/file-requests'
 import type { PreparedFileResult, PreparedAttachment } from './file-access'
 import { FALLBACK_ENVIRONMENT, buildTerminalPromptParts, fileReadingPlatform, isConversationId,
-  REPLY_PROTOCOL_VERSION, REPLY_PROTOCOL_SECTION, REPLY_PROTOCOL_REMINDER, withReplyProtocol } from '../shared/types'
+  REPLY_PROTOCOL_VERSION, REPLY_PROTOCOL_SECTION, replyProtocolReminderFor, withReplyProtocol } from '../shared/types'
 import type { ChatPlatform } from '../shared/platforms'
 import type {
   AppTheme,
@@ -499,6 +499,7 @@ export interface EmbedHandlers {
    */
   onParseFailed(payload: InterceptorPageEvent): void
   onCommandRecovery?(recovery: CommandRecoveryState): void
+  onGeminiRefusal?(conversationId: string, messageId: string, generation: number): void
 }
 
 export class ChatGptEmbed {
@@ -1352,6 +1353,7 @@ export class ChatGptEmbed {
     if (!contents) return
 
     const prefix = this.planPrefix(contents.getURL())
+    const reminder = replyProtocolReminderFor(this.platform.id)
     if (prefix !== this.pushedPrefix) writeInjectionPlanDiagnostic(this.platform.id, this.injectionPlan, prefix.length)
     this.pushedPrefix = prefix
     this.pushedInjectionPlanToken = this.injectionPlanToken
@@ -1367,8 +1369,9 @@ export class ChatGptEmbed {
       injectionReason: this.injectionPlan?.reason ?? null,
       injectionPlanToken: this.injectionPlanToken,
       contextPrefixUsage: estimateContextText(prefix + '\u2063\u2063'),
-      contextReminderUsage: estimateContextText(REPLY_PROTOCOL_REMINDER + '\u2063\u2063'),
-      replyProtocolPrefix: REPLY_PROTOCOL_REMINDER,
+      contextReminderUsage: estimateContextText(reminder + '\u2063\u2063'),
+      replyProtocolPrefix: reminder,
+      replyProtocolOnToolResults: this.platform.id === 'gemini',
       replyProtocolVersion: REPLY_PROTOCOL_VERSION,
       prefixIncludesReplyProtocol: prefix.includes(REPLY_PROTOCOL_SECTION),
       replyProtocolFullLength: REPLY_PROTOCOL_SECTION.length,
@@ -1399,7 +1402,7 @@ export class ChatGptEmbed {
   private planPrefix(url: string): string {
     const conversationId = conversationIdOf(this.platform, url)
     this.injectionPlan = this.handlers.planInjection?.(this.interceptor.prefix, conversationId) ?? null
-    const prefix = withReplyProtocol(this.injectionPlan ? this.injectionPlan.prefix : this.interceptor.prefix)
+    const prefix = withReplyProtocol(this.injectionPlan ? this.injectionPlan.prefix : this.interceptor.prefix, this.platform.id)
     // Commit the actual prefix (including a short contract on deltas/anchors), not an estimate.
     if (this.injectionPlan) this.injectionPlan = { ...this.injectionPlan, prefix }
     // Keep the exact transmitted plan until acknowledgement. Traffic or settings may
@@ -1937,6 +1940,7 @@ export class ChatGptEmbed {
       this.focusSendImages.set(token, images)
       const outcome = await sendPageFiles(contents, this.platform.id, files, token, current, signal, { userText: text, userSkills, allowNewConversation: true })
       if (outcome === 'ok') this.noteAttachmentTraffic(files)
+      if (outcome === 'awaiting-conversation') return 'unknown'
       return outcome === 'not-submitted' ? 'upload-failed' : outcome
     } catch { return 'upload-failed' }
     finally { this.focusSendImages.delete(token) }
@@ -1944,7 +1948,7 @@ export class ChatGptEmbed {
 
   async sendRaw(
     text: string,
-    options?: { conversationId: string; requireIdle: boolean }
+    options?: { conversationId: string; requireIdle: boolean; commandResult?: boolean }
   ): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed'> {
     const contents = this.liveContents()
     if (!contents) return 'no-composer'
@@ -1954,10 +1958,12 @@ export class ChatGptEmbed {
     try {
       const path = new URL(contents.getURL()).pathname
       if (options && this.platform.conversationIdFromPath(path) !== options.conversationId) return 'busy'
+      const pageOptions = options ? { requireIdle: options.requireIdle, path,
+        ...(options.commandResult === true && this.platform.id === 'gemini' ? { commandResult: true, generation: this.taskPromptGeneration } : {}) } : null
       usageOutcome = 'unknown'
       const outcome = (await contents.executeJavaScript(
         `window.__cmdTerminalInterceptor
-           ? window.__cmdTerminalInterceptor.sendRaw(${JSON.stringify(text)}, null, ${JSON.stringify(options ? { requireIdle: options.requireIdle, path } : null)})
+           ? window.__cmdTerminalInterceptor.sendRaw(${JSON.stringify(text)}, null, ${JSON.stringify(pageOptions)})
            : 'no-composer'`
       )) as unknown
       usageOutcome = ['ok', 'busy', 'stuck', 'no-composer', 'insert-failed'].includes(String(outcome)) ? outcome : 'unknown'
@@ -1975,6 +1981,25 @@ export class ChatGptEmbed {
       console.warn('[embed] sendRaw failed:', (error as Error).message)
       return 'no-composer'
     } finally { this.contextUsage?.finish(usage, usageOutcome) }
+  }
+
+  async recoverGeminiRefusal(messageId: string, generation: number, signal: AbortSignal): Promise<string> {
+    const contents = this.liveContents()
+    if (this.platform.id !== 'gemini' || !contents || signal.aborted || generation !== this.taskPromptGeneration) return 'stale'
+    const token = 'gemini-refusal:' + randomUUID()
+    const cancel = (): void => {
+      if (!contents.isDestroyed()) void contents.executeJavaScript(
+        `window.__cmdTerminalInterceptor?.cancelComputerResult(${JSON.stringify(token)})`).catch(() => {})
+    }
+    signal.addEventListener('abort', cancel, { once: true })
+    try {
+      const url = new URL(contents.getURL())
+      if (url.origin !== new URL(this.platform.homeUrl).origin || !this.platform.conversationIdFromPath(url.pathname)) return 'stale'
+      const outcome: unknown = await contents.executeJavaScript(
+        `window.__cmdTerminalInterceptor?.recoverGeminiRefusal(${JSON.stringify(url.pathname)},${generation},${JSON.stringify(messageId)},${JSON.stringify(token)}) ?? 'stale'`)
+      return typeof outcome === 'string' && ['ok', 'stale', 'busy', 'no-composer', 'insert-failed', 'stuck'].includes(outcome) ? outcome : 'stuck'
+    } catch { return 'stuck' }
+    finally { signal.removeEventListener('abort', cancel) }
   }
 
   /** Strict outcome semantics for automatic desktop results; legacy sendRaw stays unchanged. */
@@ -2443,8 +2468,8 @@ export class ChatGptEmbed {
         if (payload.contextUsage) this.contextUsage?.confirmedUsage(payload.contextUsage, 'injection', 'prefix:' + payload.contextUsage.id)
         if (payload.promptInjected === true) this.confirmInjection(payload)
         if (payload.promptInjected === false && payload.replyProtocolKind === 'short' &&
-          payload.replyProtocolVersion === REPLY_PROTOCOL_VERSION && payload.replyProtocolLength === REPLY_PROTOCOL_REMINDER.length) {
-          this.handlers.onContextTraffic?.(REPLY_PROTOCOL_REMINDER.length)
+          payload.replyProtocolVersion === REPLY_PROTOCOL_VERSION && payload.replyProtocolLength === replyProtocolReminderFor(this.platform.id).length) {
+          this.handlers.onContextTraffic?.(payload.replyProtocolLength)
         }
         // A computer observation's screenshot counts as a fixed amount of context, like noteAttachmentTraffic's images.
         this.handlers.onRawSent?.((Number.isSafeInteger(payload.textLength) ? payload.textLength! : 0) + (payload.attachmentKind === 'computer' ? 1500 : 0))
@@ -2453,8 +2478,8 @@ export class ChatGptEmbed {
         if (payload.taskPromptGeneration !== this.taskPromptGeneration) break
         if (payload.contextUsage) this.contextUsage?.confirmedUsage(payload.contextUsage, 'injection', 'prefix:' + payload.contextUsage.id)
         if (payload.promptInjected === false && payload.replyProtocolKind === 'short' &&
-          payload.replyProtocolVersion === REPLY_PROTOCOL_VERSION && payload.replyProtocolLength === REPLY_PROTOCOL_REMINDER.length) {
-          this.handlers.onContextTraffic?.(REPLY_PROTOCOL_REMINDER.length)
+          payload.replyProtocolVersion === REPLY_PROTOCOL_VERSION && payload.replyProtocolLength === replyProtocolReminderFor(this.platform.id).length) {
+          this.handlers.onContextTraffic?.(payload.replyProtocolLength)
         }
         if (payload.promptInjected === true) this.confirmInjection(payload)
         if (payload.conversationPromptInjected === true && payload.promptInjected !== true) {
@@ -2734,6 +2759,19 @@ export class ChatGptEmbed {
         if (current && current.token === payload.parseFailureToken && current.generation === payload.taskPromptGeneration &&
           current.messageId === payload.messageId && ['pending', 'sent', 'blocked', 'failed', 'uncertain'].includes(payload.recoveryStatus ?? '')) {
           this.setCommandRecovery({ ...current, status: payload.recoveryStatus! })
+        }
+        break
+      }
+      case 'gemini-refusal': {
+        if (this.platform.id !== 'gemini' || payload.reason !== 'gemini-refusal-matched' ||
+          payload.taskPromptGeneration !== this.taskPromptGeneration || payload.computerPageEpoch !== this.computerPageEpoch ||
+          typeof payload.messageId !== 'string' || !payload.messageId || payload.messageId.length > 512) break
+        const contents = this.liveContents()
+        if (!contents) break
+        const url = new URL(contents.getURL())
+        const conversationId = this.platform.conversationIdFromPath(url.pathname)
+        if (url.origin === new URL(this.platform.homeUrl).origin && conversationId && url.pathname === payload.pagePath) {
+          this.handlers.onGeminiRefusal?.(conversationId, payload.messageId, this.taskPromptGeneration)
         }
         break
       }

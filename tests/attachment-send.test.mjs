@@ -227,6 +227,19 @@ test('a due full prompt never accompanies an attachment result caption', () => {
   assert.equal(app.composer.textContent, '文件结果', 'the refresh waits for the next human send')
 })
 
+test('Gemini file results carry the short reply contract only with prompt injection enabled', () => {
+  const file = { fileName: 'result.md', mimeType: 'text/markdown', sizeBytes: 100 }
+  const reminder = '【回复约定】Web2Term 执行协议\n\n'
+  for (const enabled of [true, false]) {
+    const app = fixture([file], { ...platformExports.GEMINI_PAGE, fileComposerRootSelector: 'form' })
+    app.controller.configure({ enabled, promptInjectionEnabled: enabled, replyProtocolPrefix: reminder,
+      replyProtocolOnToolResults: true, replyProtocolVersion: 1 })
+    app.cards.replaceChildren(element('uploader-file-preview', {}, file.fileName))
+    assert.equal(app.controller.prepareFileSendCaption(token, '文件结果'), true)
+    assert.equal(app.composer.textContent, enabled ? reminder + '\u2063\u2063文件结果' : '文件结果')
+  }
+})
+
 test('attachment result captions cannot confirm an injection after the task changes', () => {
   const app = fixture()
   app.render(requestedFiles.map(file => file.fileName))
@@ -474,6 +487,31 @@ test('Gemini preserves the native answer identity and confirms its document and 
       assert.equal(app.status().turnFilesSeen, true)
       assert.equal(app.status().captionSeen, false)
     }
+    assert.equal(app.submit(), false)
+    assert.equal(app.send.clicks, 1)
+  }
+})
+
+test('Gemini confirms the first unkeyed attachment message on home and after the new chat route', () => {
+  const file = { fileName: 'source.md', mimeType: 'text/markdown', sizeBytes: 100 }
+  const caption = '请压缩 source.md 中的对话'
+  for (const [path, expected] of [
+    ['/app', 'sent'],
+    ['/app/0123456789abcdef', 'sent'],
+    ['/app/invalid', 'busy']
+  ]) {
+    const app = fixture([file], { ...platformExports.GEMINI_PAGE, fileComposerRootSelector: 'form' }, 'div', '', '/app')
+    app.cards.replaceChildren(element('uploader-file-preview', {}, file.fileName))
+    assert.equal(app.controller.prepareFileSendCaption(token, caption), true)
+    app.send.onClick = () => {
+      app.composer.replaceChildren()
+      app.cards.replaceChildren()
+      const query = element('user-query', {}, [element('user-query-file-preview', {}, file.fileName), element('p', {}, caption)])
+      app.body.replaceChildren(element('div', { class: 'conversation-container' }, [query]), app.root)
+    }
+    assert.equal(app.submit(), true)
+    app.navigate(path)
+    assert.equal(app.status().status, expected, path)
     assert.equal(app.submit(), false)
     assert.equal(app.send.clicks, 1)
   }

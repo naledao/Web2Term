@@ -18,6 +18,7 @@ import { COMPACTION_ACTIVE, compactionSourceMarkdown, compactionPrompt, compacti
 import { compactionBudget } from '../shared/conversation-compaction'
 import { estimateContextText } from '../shared/focus-token-usage'
 import { isQuestionChatHome, selectionQuestionConversation } from '../shared/deepseek-question'
+import { platformById } from '../shared/platforms'
 
 export interface CompactionSeed {
   session: Omit<ManagedSessionRecord, 'updatedAt'>
@@ -255,10 +256,11 @@ export class ConversationCompaction {
     if (delivery !== 'none' && (!url || !selectionQuestionConversation(job.state.owner.platformId, url))) {
       throw new Error('上次消息是否已发送尚未确认，且没有保存到会话地址。请先在平台历史中核对；为避免重复发送，本任务不会重新提交。可取消任务后手动处理。')
     }
-    const home = job.state.owner.platformId === 'deepseek' ? 'https://chat.deepseek.com/' : 'https://chatgpt.com/'
+    const platform = platformById(job.state.owner.platformId)
+    if (!platform) throw new Error('压缩平台不可用。')
     this.pageHandoff = handoff
     const epoch = ++this.pageEpoch
-    this.page = this.options.makePage(job.state.owner.platformId, url ?? home, target => {
+    this.page = this.options.makePage(platform.id, url ?? platform.homeUrl, target => {
       if (this.job !== job || this.pageHandoff !== handoff || this.pageEpoch !== epoch) return
       const currentDelivery = handoff ? job.handoffDelivery : job.sourceDelivery
       const key = handoff ? 'handoffUrl' : 'sourceUrl'
@@ -314,13 +316,15 @@ export class ConversationCompaction {
               const conversation = selectionQuestionConversation(platform, page.url)
               if (!conversation || job[urlKey] && selectionQuestionConversation(platform, job[urlKey]!)?.id !== conversation.id) throw new Error('消息已提交，但会话身份未确认，请先检查网页。')
               job[urlKey] = page.url; job[deliveryKey] = 'sent'; this.save()
-            } else if ((job[deliveryKey] as StoredCompaction['sourceDelivery']) === 'uncertain') {
-              if (!job[urlKey] && selectionQuestionConversation(platform, page.url)) { job[urlKey] = page.url; this.save() }
-              throw new Error('发送结果尚未确认。请检查下方网页，点“继续检查”只核对已发送消息，不会重复提交。')
-            } else {
+            } else if ((job[deliveryKey] as StoredCompaction['sourceDelivery']) !== 'uncertain') {
               this.closePage()
               throw new Error(result === 'unsupported-file-type' ? '网页当前不接受 Markdown 附件。原始文件已保留。' : '附件未发送成功。文件已保留，点“继续检查”可重新打开空白页后尝试。')
+            } else if (result !== 'awaiting-conversation') {
+              if (!job[urlKey] && selectionQuestionConversation(platform, page.url)) { job[urlKey] = page.url; this.save() }
+              throw new Error('发送结果尚未确认。请检查下方网页，点“继续检查”只核对已发送消息，不会重复提交。')
             }
+            // An acknowledged message can generate on the home page. Keep the
+            // durable submit boundary until its request is found at a chat URL.
             this.update(handoff ? 'importing' : 'summarizing', handoff ? '等待新会话读取摘要并确认…' : '正在生成交接摘要…')
             activeMs = 0
           }
@@ -334,6 +338,9 @@ export class ConversationCompaction {
           const stable = this.now() - stableSince
           // No content protocol: the reply is done once the page is idle and unchanged for a while.
           if (snapshot.answer.trim() && snapshot.generating === 'idle' && !snapshot.cutOff && !snapshot.nativeDraft && stable >= 6500) {
+            if (platform === 'gemini' && snapshot.geminiRefusal) throw new Error(handoff
+              ? 'Gemini 未确认读取交接摘要。请点“处理问题”，在原处理页请 Gemini 确认读取后继续。'
+              : 'Gemini 未生成交接摘要。请点“处理问题”，复制补全提示词，在原处理页完成摘要后继续。')
             if (handoff && snapshot.replyId) job.handoffReplyId = snapshot.replyId
             return snapshot.answer
           }
@@ -342,7 +349,7 @@ export class ConversationCompaction {
       }
       await this.pause()
       activeMs += this.now() - started
-      if (activeMs > 30_000 && (!snapshot?.ready || job[deliveryKey] === 'none' && !snapshot.uploadReady)) {
+      if (activeMs > 30_000 && job[deliveryKey] === 'none' && (!snapshot?.ready || !snapshot.uploadReady)) {
         throw new Error('压缩页面尚未就绪，可能需要登录或完成验证。请点“处理问题”查看页面，处理后重试。')
       }
       if (activeMs > (job[deliveryKey] === 'none' ? 120_000 : 15 * 60_000)) throw new Error('等待网页超时。请完成登录、检查网络或补全回答，再点“继续检查”。')

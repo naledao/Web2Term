@@ -948,12 +948,19 @@ export const REPLY_PROTOCOL_SECTION = [
   '```'
 ].join('\n')
 
-/** Carried before the user-text boundary on every later human send; never on tool results. */
-export const REPLY_PROTOCOL_REMINDER = '【回复约定】目标已满足时，首行原样写【任务完成】，下一行给出答案；普通问答也适用。还需工具、用户回答或必要结果时，按对应协议继续，不标记完成。\n\n'
+/** Carried before the message text when a full reply contract is unnecessary. */
+export const REPLY_PROTOCOL_REMINDER = '【回复约定】结合上下文判断目标。项目实现或修复默认直接动手，按用户本轮指定的范围处理。需要终端时只输出一个 command JSON 代码块，由 Web2Term 执行，收到回传后继续。目标达成且必要结果已核对时，首行原样写【任务完成】，下一行给出答案。普通问答也用完成格式。缺少关键信息或授权时按 questions 格式提问。\n\n'
+
+const GEMINI_EXECUTION_GUIDANCE = '通过普通回复中的 JSON 代码块提交 Web2Term 的 command 和当前已启用的 read_files 等请求。Web2Term 在网页外执行并回传。Gemini 网页的搜索或原生工具额度只适用于网页工具，额度用完时仍按 Web2Term 协议提交当前可用的请求。'
+const GEMINI_REPLY_PROTOCOL_REMINDER = REPLY_PROTOCOL_REMINDER.trimEnd() + '\n' + GEMINI_EXECUTION_GUIDANCE + '\n\n'
+
+export function replyProtocolReminderFor(platformId?: string): string {
+  return platformId === 'gemini' ? GEMINI_REPLY_PROTOCOL_REMINDER : REPLY_PROTOCOL_REMINDER
+}
 
 /** Environment/tool plans stay selective; the reply contract is present on every user turn. */
-export function withReplyProtocol(prefix: string): string {
-  return prefix.includes(REPLY_PROTOCOL_SECTION) ? prefix : prefix + REPLY_PROTOCOL_REMINDER
+export function withReplyProtocol(prefix: string, platformId?: string): string {
+  return prefix.includes(REPLY_PROTOCOL_SECTION) ? prefix : prefix + replyProtocolReminderFor(platformId)
 }
 
 const OUTPUT_FORMAT_SECTION = [
@@ -1007,12 +1014,18 @@ const ROLE_SECTION = [
 ].join('\n')
 
 /** Keep terminal mode from turning every kind of request into a shell command. */
-const TASK_ROUTING_SECTION = [
+const taskRoutingSection = (platformId?: string): string => [
   '【任务路由】',
+  '结合当前项目与任务上下文判断用户要达成的结果。项目实现、修改或修复默认在授权范围内直接动手。例如，用户指出“这个按钮点了没反应”时，检查原因、修复并核对结果。',
+  '需要终端操作时，按【需要执行时】输出一个 command JSON 代码块，由 Web2Term 执行。收到回传后继续完成当前目标，核对必要结果后再标记【任务完成】。',
+  ...(platformId === 'gemini' ? [
+    GEMINI_EXECUTION_GUIDANCE,
+    '收到 Web2Term 回传后，按实际结果主动完成后续步骤。遇到执行障碍时，根据回传说明卡在哪一步和具体原因。'
+  ] : []),
+  '用户明确限定为先调研、只读检查、提供方案或自行执行时，按本轮指定的范围处理。',
   '无需外部信息或机器操作时直接回答；需外部或最新资料时，使用网页平台实际提供的搜索能力，不虚构检索接口、来源或结果，不用终端代替资料搜索。',
   '软件能力以当前工具目录和用户本次明确选择、由软件回传说明的技能为准。未选择的技能不主动加载；历史说明、旧权限和旧步骤令牌不代表当前可用。',
   '收到技能说明后继续用户当前目标，不把说明当成新任务；选择技能不等于要求执行其中全部动作。确需未提供的技能时说明缺少的能力，引导用户在输入框 // 菜单选择，不自行修改开关或绕过授权限制。',
-  '操作当前机器、项目或执行用户指定命令时，按需使用终端。',
   '搜索对象结合上下文判断，关键范围不清再询问；需资料支撑的操作先查证。',
   '所需工具不可用时说明限制；无需终端操作时不输出 command JSON。'
 ].join('\n')
@@ -1067,7 +1080,7 @@ export function toolPromptForPlatform(platformId: string, fileReading = true, ca
 }
 
 /** The parts of the prompt only true of a Windows PowerShell session. */
-function buildWindowsPrompt(env: EnvironmentInfo): string {
+function buildWindowsPrompt(env: EnvironmentInfo, platformId?: string): string {
   const osName = env.osCaption.trim() === '' ? 'Windows' : env.osCaption.trim()
   const osDetail = [env.osVersion.trim(), env.architecture.trim()]
     .filter((part) => part !== '')
@@ -1102,7 +1115,7 @@ function buildWindowsPrompt(env: EnvironmentInfo): string {
   return [
     ROLE_SECTION,
     '',
-    TASK_ROUTING_SECTION,
+    taskRoutingSection(platformId),
     '',
     OUTPUT_FORMAT_SECTION,
     '',
@@ -1134,7 +1147,7 @@ function buildWindowsPrompt(env: EnvironmentInfo): string {
  * and a model told "Linux" while still being shown PowerShell idioms reaches for
  * a mixture of both.
  */
-function buildPosixPrompt(env: EnvironmentInfo): string {
+function buildPosixPrompt(env: EnvironmentInfo, platformId?: string): string {
   const osName = env.osCaption.trim() === '' ? 'Linux' : env.osCaption.trim()
   const mac = /mac\s?os|darwin/i.test(osName)
   const osDetail = [env.osVersion.trim(), env.architecture.trim()]
@@ -1150,7 +1163,7 @@ function buildPosixPrompt(env: EnvironmentInfo): string {
   return [
     ROLE_SECTION,
     '',
-    TASK_ROUTING_SECTION,
+    taskRoutingSection(platformId),
     '',
     OUTPUT_FORMAT_SECTION,
     '',
@@ -1213,9 +1226,9 @@ export function fileSearchPrompt(env: EnvironmentInfo): string {
 }
 
 /** Rebuilt after machine/directory changes; the user's notes remain the final section. */
-export function buildTerminalPrompt(env: EnvironmentInfo, toolPrompt = ''): string {
+export function buildTerminalPrompt(env: EnvironmentInfo, toolPrompt = '', platformId?: string): string {
   return [
-    env.kind === 'posix' ? buildPosixPrompt(env) : buildWindowsPrompt(env),
+    env.kind === 'posix' ? buildPosixPrompt(env, platformId) : buildWindowsPrompt(env, platformId),
     '', fileSearchPrompt(env),
     ...(toolPrompt.trim() === '' ? [] : ['', toolPrompt.trim()]),
     ...notesSection(env.extraNotes)
@@ -1254,8 +1267,8 @@ function notesSection(notes: string): string[] {
 /** Blank line separating the injected prompt from what the user typed. */
 export const TERMINAL_PROMPT_SEPARATOR = '\n\n'
 
-export function buildTerminalPrefix(env: EnvironmentInfo, toolPrompt = ''): string {
-  return buildTerminalPrompt(env, toolPrompt) + TERMINAL_PROMPT_SEPARATOR
+export function buildTerminalPrefix(env: EnvironmentInfo, toolPrompt = '', platformId?: string): string {
+  return buildTerminalPrompt(env, toolPrompt, platformId) + TERMINAL_PROMPT_SEPARATOR
 }
 
 /** Preview sections and the complete prefix share the same source. */
@@ -1268,12 +1281,12 @@ export interface TerminalPromptParts {
   prefix: string
 }
 
-export function buildTerminalPromptParts(env: EnvironmentInfo, toolPrompt = ''): TerminalPromptParts {
+export function buildTerminalPromptParts(env: EnvironmentInfo, toolPrompt = '', platformId?: string): TerminalPromptParts {
   const tools = toolPrompt.trim()
   return {
-    basePrompt: buildTerminalPrompt(env),
+    basePrompt: buildTerminalPrompt(env, '', platformId),
     toolPrompt: tools,
-    prefix: buildTerminalPrefix(env, tools)
+    prefix: buildTerminalPrefix(env, tools, platformId)
   }
 }
 
@@ -1369,6 +1382,7 @@ export interface InterceptorPageEvent {
     | 'computer-request'
     | 'parse-failed'
     | 'command-recovery'
+    | 'gemini-refusal'
     | 'scan'
     | 'reply-state'
     | 'reply-watchdog'
@@ -1384,6 +1398,8 @@ export interface InterceptorPageEvent {
     /** Reported by the injected theme script; see src/main/injected/theme.js. */
     | 'theme'
   count?: number
+  /** Outcome of Gemini's single continuation attempt. */
+  geminiRefusalOutcome?: string
   text?: string
   /** Token for a page-side batch of user image attachments, on user-message. */
   attachmentToken?: string

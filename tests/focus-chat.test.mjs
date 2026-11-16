@@ -373,15 +373,17 @@ test('end-task and restored history cannot be resurrected by late events', () =>
   assert.equal(anotherWorkspace.turns('deepseek', 'chat-1').length, 0)
 })
 
-test('one platform switch decides where the focus view exists: DeepSeek and ChatGPT', () => {
-  for (const id of ['deepseek', 'chatgpt']) assert.equal(shared.supportsFocusView(id), true, id)
-  for (const id of ['claude', 'gemini', 'toString', '']) assert.equal(shared.supportsFocusView(id), false, id)
+test('one platform switch enables the focus view for all four platforms', () => {
+  for (const id of ['deepseek', 'chatgpt', 'gemini', 'claude']) assert.equal(shared.supportsFocusView(id), true, id)
+  for (const id of ['toString', '']) assert.equal(shared.supportsFocusView(id), false, id)
   assert.equal(shared.focusPlatformLabel('chatgpt'), 'ChatGPT')
-  assert.equal(shared.focusPlatformLabels(), 'DeepSeek、ChatGPT')
+  assert.equal(shared.focusPlatformLabel('gemini'), 'Gemini')
+  assert.equal(shared.focusPlatformLabel('claude'), 'Claude')
+  assert.equal(shared.focusPlatformLabels(), 'DeepSeek、ChatGPT、Gemini、Claude')
   const { chat } = fixture()
-  assert.equal(chat.begin('claude', 'chat-1', '不应建立专注轮次'), undefined)
-  assert.equal(chat.turns('claude', 'chat-1').length, 0)
-  assert.equal(typeof chat.begin('chatgpt', 'chat-1', 'ChatGPT 专注轮次'), 'string')
+  assert.equal(chat.begin('toString', 'chat-1', '不应建立专注轮次'), undefined)
+  assert.equal(chat.turns('toString', 'chat-1').length, 0)
+  assert.equal(typeof chat.begin('claude', 'chat-1', 'Claude 专注轮次'), 'string')
 })
 
 test('after a restart the interrupted turn resumes once the task shows it is still running', () => {

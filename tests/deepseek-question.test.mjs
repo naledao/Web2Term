@@ -472,8 +472,8 @@ function attachmentFixture({ outcome = 'ok', navigate = false, invalid = false, 
   const wc = { getURL: () => url, isDestroyed: () => false }
   const prompt = shared.selectionQuestionPrompt(selection, platformId)
   return { sends, scripts, requests, cleanups: () => cleanups,
-    send: sizePolicy => helper.sendQuestionChatAttachment(wc, { id: platformId, page: {} }, '/synthetic-export/' + filename, prompt,
-      new AbortController().signal, () => true, undefined, sizePolicy), prompt }
+    send: (sizePolicy, background) => helper.sendQuestionChatAttachment(wc, { id: platformId, page: {} }, '/synthetic-export/' + filename, prompt,
+      new AbortController().signal, () => true, undefined, sizePolicy, background), prompt }
 }
 
 test('sidebar attachment reuses the uploader, adds the question as caption and cleans staging only', async () => {
@@ -492,12 +492,14 @@ test('sidebar attachment reuses the uploader, adds the question as caption and c
   assert.equal(fixture.cleanups(), 1)
 })
 
-test('generated compression attachments defer size limits to the platform on both supported platforms', async () => {
-  for (const platformId of ['deepseek', 'chatgpt']) {
+test('generated compression attachments defer size limits to the platform and use background uploads', async () => {
+  for (const platformId of ['deepseek', 'chatgpt', 'gemini']) {
     const fixture = attachmentFixture({ platformId })
-    assert.equal(await fixture.send('unlimited'), 'ok')
+    assert.equal(await fixture.send('unlimited', true), 'ok')
     assert.equal(fixture.requests[0][4], 'unlimited')
     assert.equal(fixture.sends.length, 1)
+    assert.equal(fixture.sends[0][6].background, true)
+    assert.equal(fixture.sends[0][6].allowPendingConversation, platformId === 'gemini')
     assert.equal(fixture.cleanups(), 1)
   }
 })
@@ -514,8 +516,9 @@ test('unsupported Markdown, a changed chat and a failed snapshot never trigger a
 })
 
 function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synthetic', allow = true, captionAccepted = true, changeBeforeSubmit = false, platformId = 'deepseek',
-  confirmationUrls = [], confirmationStatuses = [], chooserStates = [true], nativeChooser = false } = {}) {
+  confirmationUrls = [], confirmationStatuses = [], chooserStates = [true], nativeChooser = false, background = false, allowPendingConversation = false } = {}) {
   let now = 10000, submitted = false, confirmationReads = 0, chooserReads = 0
+  let chooserState
   let url = fixtureHomes[platformId]
   const calls = [], logs = [], commands = [], inputEvents = []
   class Clock extends Date { static now() { return now } }
@@ -524,18 +527,21 @@ function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synth
   debuggerApi.isAttached = () => debuggerApi.attached
   debuggerApi.attach = () => { debuggerApi.attached = true }
   debuggerApi.detach = () => { debuggerApi.attached = false }
+  const openChooser = () => debuggerApi.emit('message', {}, 'Page.fileChooserOpened', { backendNodeId: 7, mode: 'selectMultiple' })
   debuggerApi.sendCommand = async (method, params) => {
     commands.push({ method, params })
+    if (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased' && chooserState === true) openChooser()
     return method === 'DOM.getDocument' ? { root: { nodeId: 1 } } : method === 'DOM.querySelector' ? { nodeId: 2 } : {}
   }
-  const wc = { debugger: debuggerApi, getURL: () => url, isDestroyed: () => false, isFocused: () => true, focus() {}, getZoomFactor: () => 1,
+  const wc = { debugger: debuggerApi, getURL: () => url, isDestroyed: () => false, isFocused: () => !background,
+    focus() { assert.equal(background, false, 'background uploads do not focus the native view') }, getZoomFactor: () => background ? 2 : 1,
     sendInputEvent: event => inputEvents.push(event), executeJavaScript: async source => {
     const method = /Interceptor\?\.([\w]+)\(/.exec(source)?.[1]
     calls.push(method)
     if (method === 'beginFileSend') return 'ok'
     if (method === 'openFileChooser') {
-      const state = chooserStates[Math.min(chooserReads++, chooserStates.length - 1)]
-      if (state === true) debuggerApi.emit('message', {}, 'Page.fileChooserOpened', { backendNodeId: 7, mode: 'selectMultiple' })
+      const state = chooserState = chooserStates[Math.min(chooserReads++, chooserStates.length - 1)]
+      if (state === true && !background) openChooser()
       return nativeChooser && (state === true || state === 'waiting')
         ? { status: state === true ? 'activated' : 'waiting', kind: state === true ? 'native' : 'menu', x: 10, y: 20 } : state
     }
@@ -565,7 +571,8 @@ function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synth
     return handle
   }, clearTimeout: handle => { handle.active = false } })
   return { calls, logs, commands, inputEvents, send: () => api.sendPageFiles(wc, platformId, [{ path: '/staging/context.md', fileName: 'context.md', mimeType: 'text/markdown', sizeBytes: 100 }],
-    'synthetic-upload', () => true, new AbortController().signal, { caption: 'synthetic question', allowNewConversation: allow }) }
+    'synthetic-upload', () => true, new AbortController().signal,
+    { caption: 'synthetic question', allowNewConversation: allow, background, allowPendingConversation }) }
 }
 
 test('attachment caption is prepared before exactly one submit and the initial new-chat route is acknowledged', async () => {
@@ -788,6 +795,38 @@ test('Gemini chooser controls are dispatched as trusted native clicks', async ()
   assert.equal(await fixture.send(), 'ok')
   assert.equal(fixture.inputEvents.filter(event => event.type === 'mouseDown').length, 2)
   assert.ok(fixture.logs.some(log => log.includes('chooser-native-click')))
+})
+
+test('Gemini background uploads dispatch chooser clicks without focusing the view', async () => {
+  const fixture = uploadFixture({ platformId: 'gemini', nativeChooser: true, chooserStates: ['waiting', true],
+    background: true, nextUrl: fixtureConversations.gemini })
+  assert.equal(await fixture.send(), 'ok')
+  assert.equal(fixture.inputEvents.length, 0)
+  const clicks = fixture.commands.filter(command => command.method === 'Input.dispatchMouseEvent')
+  assert.deepEqual(clicks.map(({ params }) => params.type),
+    ['mouseMoved', 'mousePressed', 'mouseReleased', 'mouseMoved', 'mousePressed', 'mouseReleased'])
+  assert.ok(clicks.every(({ params }) => params.x === 10 && params.y === 20), 'CDP uses viewport CSS coordinates')
+  const intercept = fixture.commands.find(command => command.method === 'Page.setInterceptFileChooserDialog')
+  assert.ok(intercept && fixture.commands.indexOf(intercept) < fixture.commands.indexOf(clicks[0]))
+  assert.equal(fixture.commands.find(command => command.method === 'DOM.setFileInputFiles')?.params.backendNodeId, 7)
+  assert.equal(fixture.calls.filter(call => call === 'submitFileSend').length, 1)
+})
+
+test('Gemini waits for the new chat URL even when the first message is already confirmed on home', async () => {
+  const home = fixtureHomes.gemini
+  const fixture = uploadFixture({ platformId: 'gemini', nextUrl: home,
+    confirmationUrls: [home, home, fixtureConversations.gemini] })
+  assert.equal(await fixture.send(), 'ok')
+  const confirmCalls = fixture.calls.slice(fixture.calls.indexOf('submitFileSend') + 1)
+  assert.equal(confirmCalls.filter(call => call === 'fileSendStatus').length, 3)
+  assert.equal(fixture.calls.filter(call => call === 'submitFileSend').length, 1)
+})
+
+test('Gemini compaction hands off an acknowledged message while the chat URL is pending', async () => {
+  const fixture = uploadFixture({ platformId: 'gemini', nextUrl: fixtureHomes.gemini, allowPendingConversation: true })
+  assert.equal(await fixture.send(), 'awaiting-conversation')
+  assert.equal(fixture.calls.filter(call => call === 'submitFileSend').length, 1)
+  assert.ok(fixture.logs.some(line => line.includes('message-confirmed-awaiting-conversation')))
 })
 
 test('Gemini cannot confirm a changed account origin or another conversation after submission', async () => {

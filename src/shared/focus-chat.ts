@@ -17,7 +17,9 @@ export const DEFAULT_CHAT_VIEW: ChatView = 'focus'
  */
 const FOCUS_PLATFORMS: Readonly<Record<string, { label: string }>> = {
   deepseek: { label: 'DeepSeek' },
-  chatgpt: { label: 'ChatGPT' }
+  chatgpt: { label: 'ChatGPT' },
+  gemini: { label: 'Gemini' },
+  claude: { label: 'Claude' }
 }
 export function supportsFocusView(platformId: string): boolean {
   return Object.prototype.hasOwnProperty.call(FOCUS_PLATFORMS, platformId)

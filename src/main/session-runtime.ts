@@ -738,9 +738,15 @@ export class SessionRuntime {
               details.deliveryOutcome === 'busy' ? 'blocked' : details.reason === 'superseded' ? 'superseded' : 'failed')
         }
       },
-      sendRawToPage: async (text, context) => {
-        // As before queueing: a plain raw send, with no conversation pin or idle requirement.
-        if (!context) return this.enqueueRawResult(text, { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.embed.getState().conversationId }, undefined)
+      sendRawToPage: async (text, context, commandResultConversationId) => {
+        // Bind Gemini command deliveries to their source chat so only their replies can trigger recovery.
+        if (!context) {
+          const platformId = this.activePlatformId
+          const rawOptions = platformId === 'gemini' && commandResultConversationId
+            ? { conversationId: commandResultConversationId, requireIdle: false, commandResult: true } : undefined
+          const owner = { sessionId: this.id, platformId, conversationId: rawOptions?.conversationId ?? this.embed.getState().conversationId }
+          return this.enqueueRawResult(text, owner, rawOptions)
+        }
         if (!this.taskToolCurrent(context)) return 'stale'
         const operation = { context, abort: new AbortController() }; this.legacyToolSend = operation
         try { return await this.enqueueTaskResult(text, context, operation.abort.signal, () => this.taskToolCurrent(context), context.stepId + ':' + context.sourceMessageId) }
@@ -1292,6 +1298,21 @@ export class SessionRuntime {
       },
       onCommandRecovery: recovery => {
         if (isActive()) this.focusChat.commandRecovery(platform.id, recovery)
+      },
+      onGeminiRefusal: (conversationId, messageId, generation) => {
+        const embed = record()?.embed
+        if (!embed) return
+        const current = () => !this.disposed && this.active && isActive() && !this.taskEnded && !this.stoppingTask &&
+          record()?.embed === embed && embed.getState().conversationId === conversationId
+        if (!current()) return
+        const owner = { sessionId: this.id, platformId: platform.id, conversationId }
+        this.queueSend({ kind: 'recovery', owner, sourceId: messageId,
+          text: 'Gemini 续接消息', retryable: () => false,
+          execute: signal => signal.aborted || !current() || !this.runner.canSendAutomaticResult()
+            ? Promise.resolve('stale') : embed.recoverGeminiRefusal(messageId, generation, signal),
+          describeFailure: () => 'Gemini 续接消息的发送结果未确认，请在原始对话核对。',
+          cancelled: () => 'stale', dedupeKey: `gemini-refusal:${conversationId}:${messageId}`
+        })
       }
     }
   }
@@ -1345,7 +1366,7 @@ export class SessionRuntime {
      * inject the wrong prompt, or (when the fallback is identical to what the page already has)
      * look like nothing was injected at all.
      */
-    entry.embed.setPromptParts(buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id)))
+    entry.embed.setPromptParts(buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id), entry.platform.id))
     this.refreshComputerUseStepContext(platformId)
     /*
      * Same reasoning as the prompt above, one line down: the theme lives per VIEW, so a view
@@ -1439,7 +1460,7 @@ export class SessionRuntime {
      * the last environment probe or SSH handover, in which case its copy of the prompt is stale
      * and the page would inject a description of the wrong machine.
      */
-    const prompts = buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id))
+    const prompts = buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id), entry.platform.id)
     embed.setPromptParts(prompts)
     this.applyVisibility()
     void embed.armCommandBaseline()
@@ -2143,7 +2164,7 @@ export class SessionRuntime {
   }
 
   /** `rawOptions` is passed to `sendRaw` unchanged, so each caller keeps its own conversation/idle requirement. */
-  private enqueueRawResult(text: string, owner: AiOutboundOwner, rawOptions: { conversationId: string; requireIdle: boolean } | undefined,
+  private enqueueRawResult(text: string, owner: AiOutboundOwner, rawOptions: { conversationId: string; requireIdle: boolean; commandResult?: boolean } | undefined,
     signal?: AbortSignal, sourceId?: string): Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'> {
     return this.queueSend<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'>({
       kind: 'auxiliary', owner, sourceId, text,
@@ -2151,6 +2172,8 @@ export class SessionRuntime {
         if (queueSignal.aborted) return Promise.resolve('busy')
         const embed = this.embeds.get(item.owner.platformId)?.embed
         if (!embed) return Promise.resolve('no-composer')
+        if (rawOptions?.commandResult && (this.taskEnded || this.stoppingTask || this.activePlatformId !== item.owner.platformId ||
+          embed.getState().conversationId !== rawOptions.conversationId)) return Promise.resolve('stale')
         return embed.sendRaw(text, rawOptions && { ...rawOptions })
       },
       blockOnFailure: outcome => outcome === 'stuck',
@@ -2191,7 +2214,7 @@ export class SessionRuntime {
   }
 
   private enqueuePageFileMessage(owner: AiOutboundOwner, contents: Electron.WebContents, platform: ChatPlatform, path: string, prompt: string,
-    signal: AbortSignal, current: () => boolean, beforeSubmit: () => void, unlimited = false): Promise<FileSendOutcome> {
+    signal: AbortSignal, current: () => boolean, beforeSubmit: () => void, compaction = false): Promise<FileSendOutcome> {
     // The side page is its own conversation: it neither waits for nor pauses the main conversation's lane.
     const queue = this.pageQueue(contents)
     if (!queue) return Promise.resolve('cancelled')
@@ -2201,7 +2224,8 @@ export class SessionRuntime {
       attachments: [{ name: path.split(/[\\/]/).at(-1) ?? 'context.md', size }], signal,
       execute: async queueSignal => {
         if (queueSignal.aborted || !current()) return 'cancelled'
-        return sendQuestionChatAttachment(contents, platform, path, prompt, queueSignal, current, beforeSubmit, unlimited ? 'unlimited' : undefined)
+        return sendQuestionChatAttachment(contents, platform, path, prompt, queueSignal, current, beforeSubmit,
+          compaction ? 'unlimited' : undefined, compaction)
       },
       // Each side page sends once and its caller already reports an uncertain outcome; nobody would see a paused side lane.
       blockOnFailure: () => false,
@@ -3217,7 +3241,7 @@ export class SessionRuntime {
       const currentStep = this.taskCoordinator?.current(entry.platform.id)?.progress?.currentStep
       if (!this.options.computerUseBlocked?.() && (!capability.computerUseEnabled || !capability.scopeSupported ||
         !capability.desktopControlEnabled && currentStep && (currentStep.tool ?? 'computer') === 'computer' && currentStep.status !== 'delivered')) this.stopAutonomousTask(entry.platform.id, 'interrupted')
-      const parts = buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id))
+      const parts = buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id), entry.platform.id)
       const catalogChanged = entry.embed?.getInterceptorStatus?.()?.toolPrompt !== parts.toolPrompt
       entry.embed?.setPromptParts(parts,
         catalogChanged && !!changed && changed.platformId === entry.platform.id && changed.conversationId === entry.conversationId)
@@ -3505,7 +3529,7 @@ export class SessionRuntime {
     const embed = this.embeds.get(platformId)?.embed
     if (!embed || this.disposed) return
     const capability = this.getComputerUseCapability(platformId)
-    embed.setPromptParts(buildTerminalPromptParts(this.environment, this.toolPrompt(platformId)))
+    embed.setPromptParts(buildTerminalPromptParts(this.environment, this.toolPrompt(platformId), platformId))
     embed.setComputerUseProtocolContext({ definitions: capability.actionDefinitions,
       stepToken: capability.available ? this.taskCoordinator.computerStepToken(platformId) : null })
   }
@@ -3768,7 +3792,7 @@ export class SessionRuntime {
     this.lastDirectoryNotes = notes
     this.environment = { ...this.environment, workingDirectory: notes.directory, extraNotes: notes.text }
     for (const entry of this.embeds.values()) {
-      entry.embed?.setPromptParts(buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id)))
+      entry.embed?.setPromptParts(buildTerminalPromptParts(this.environment, this.toolPrompt(entry.platform.id), entry.platform.id))
     }
     this.send(IpcChannels.terminalNotesChanged, notes)
     this.send(IpcChannels.environmentChanged, { ...this.environment })

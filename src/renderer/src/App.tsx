@@ -2784,7 +2784,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           </div>
 
           {taskStopError ? <p className="autonomous-task-summary__error" role="alert">{taskStopError}</p> : null}
-          {!visibleAutonomousTask?.task && currentGoal ? (
+          {currentGoal ? (
             <p className="terminal__last" title={currentGoal}>
               当前的目标：{currentGoal}
             </p>

@@ -155,6 +155,7 @@
     injectionReason: null,
     injectionPlanToken: null,
     replyProtocolPrefix: '',
+    replyProtocolOnToolResults: false,
     replyProtocolVersion: 0,
     prefixIncludesReplyProtocol: false,
     replyProtocolFullLength: 0,
@@ -227,7 +228,7 @@
   const replyDiagnosticEvents = new Set([
     'installed', 'configured', 'sent', 'sent-raw', 'scan', 'reply-state', 'question',
     'question-cleared', 'command', 'read-files', 'computer-request', 'parse-failed', 'task-finished', 'end-task', 'reply-watchdog',
-    'continue-generation', 'command-recovery', 'native-edit'
+    'continue-generation', 'command-recovery', 'native-edit', 'gemini-refusal'
   ])
   const replyScanEvents = new Set(['scan', 'question', 'command', 'read-files', 'computer-request', 'parse-failed', 'task-finished'])
   let replyScanSnapshot = {}
@@ -244,8 +245,10 @@
   const focusEditExcludedIds = new Set()
   // The focus view's list position (`PAGE.focus.rowPositionAttr`); null on a platform without focus rules.
   const focusRowPosition = (node) => {
-    const attribute = PAGE.focus?.rowPositionAttr
-    return node && attribute ? node.getAttribute(attribute) || null : null
+    const rules = PAGE.focus
+    if (!node || !rules?.rowPositionAttr) return null
+    const row = rules.rowPositionSelector ? node.closest(rules.rowPositionSelector) : node
+    return row?.getAttribute(rules.rowPositionAttr) || null
   }
   /*
    * What pins the reply to the current send: the list position where the rules name one,
@@ -401,9 +404,11 @@
   }
 
   let pendingAssistantCompletion = null
-  const setReplyWaiting = (since, reason, messageId = null, computerBaseline = null) => {
+  let geminiRefusal = null
+  const setReplyWaiting = (since, reason, messageId = null, computerBaseline = null, commandResult = false) => {
     pendingAssistantCompletion = null
     pendingComputerRecognition = null
+    geminiRefusal = commandResult ? { path: location.pathname, generation: state.taskPromptGeneration, pageEpoch: computerPageEpoch, since } : null
     // Manual checkNow is allowed for legacy commands, but cannot re-arm desktop history.
     const confirmedSend = ['user-sent', 'result-sent', 'file-send-submitted', 'smart-ui-sent', 'user-edited'].includes(reason)
     // Only a new message starts a fresh retry budget; a resend of the same one keeps counting.
@@ -1435,6 +1440,7 @@
       const tag = element.tagName.toLowerCase()
       if (tag === 'script' || tag === 'style') return ''
       if (tag === 'button' || element.getAttribute('role') === 'button' || element.getAttribute('aria-hidden') === 'true') return ''
+      if (element.getAttribute('role') === 'status' && element.matches('.sr-only')) return ''
       if (tag === 'svg') {
         const diagram = /^(?:chatgpt-)?mermaid[-_]/i.test(element.getAttribute('id') || '') ||
           !!element.getAttribute('aria-roledescription')
@@ -1631,7 +1637,7 @@
   }
 
   const findStopButton = () => findComposerControl(PAGE.stopButtonSelectors)
-  /** The focus composer follows the native control, independently of the task's reply wait. */
+  /** The focus composer follows native generation, independently of the task's reply wait. */
   const focusGenerationState = () => {
     const rules = PAGE.focus
     if (!rules) return 'unknown'
@@ -1642,7 +1648,8 @@
       return generatingPrefixes.some(prefix => icon.startsWith(prefix)) ? 'active' :
         idlePrefixes.some(prefix => icon.startsWith(prefix)) ? 'idle' : 'unknown'
     }
-    return findStopButton() ? 'active' : 'idle'
+    const latest = PAGE.replyStreamingAttribute ? latestReplyNode(queryAllAssistant()) : null
+    return replyIsGenerating(latest) ? 'active' : 'idle'
   }
   const replyIsGenerating = (node) => {
     if (findStopButton()) return true
@@ -2346,14 +2353,15 @@
    * whose content changed (a terminal environment switch, the tool catalog) is news the model needs
    * now, so it also travels with the next automatic result, mid-task included.
    */
-  const userPromptInjection = (conversationPromptInjected = false, result = false) => {
+  const userPromptInjection = (conversationPromptInjected = false, result = false, toolResult = false) => {
     const active = state.enabled && state.promptInjectionEnabled
     const planDue = !!state.injectionPlanToken && !confirmedInjectionPlans.has(state.injectionPlanToken)
     const fullDue = planDue && state.injectionMode === 'full'
     const changedDue = planDue && ['full', 'delta'].includes(state.injectionMode) && ['changed', 'mostly-changed'].includes(state.injectionReason)
     const promptInjected = active && !!state.prefix &&
       (result ? changedDue : fullDue || changedDue || (!state.taskPromptInjected && !conversationPromptInjected))
-    const prefix = active ? (promptInjected ? state.prefix : result ? '' : state.replyProtocolPrefix) : ''
+    const remind = !result || (toolResult && state.replyProtocolOnToolResults)
+    const prefix = active ? (promptInjected ? state.prefix : remind ? state.replyProtocolPrefix : '') : ''
     const full = promptInjected && state.prefixIncludesReplyProtocol
     // Snapshot the counts configured WITH this exact prefix. A send can outlive a
     // reconfiguration; its acknowledgement must not estimate the next task's prompt.
@@ -2759,7 +2767,7 @@
           state.commandRecoveryUsed = false
         }
         // Once a message actually goes out, the next assistant turn is ours.
-        setReplyWaiting(Date.now(), isRaw ? 'result-sent' : 'user-sent', null, sendContext.computerBaseline)
+        setReplyWaiting(Date.now(), isRaw ? 'result-sent' : 'user-sent', null, sendContext.computerBaseline, sendContext.commandResult === true)
         state.taskActive = true
         // Ignore only the assistant turn that existed BEFORE this send. Never
         // baseline the new placeholder/reply that may already have appeared.
@@ -2821,6 +2829,11 @@
     const button = findSendButton()
     const element = getComposer()
     const generating = findStopButton() !== null
+    if (sendContext.submitOnceIf && (!element || !composerMatches(element, text) || !sendContext.submitOnceIf())) {
+      state.programmatic = false
+      if (done) done('stale')
+      return
+    }
     // A textarea site has no send-button selector worth trusting, so Enter is its real
     // submit path rather than a fallback — which is why this one is not gated on anything.
     const textControl =
@@ -2854,10 +2867,10 @@
     if (button && !generating && !controlDisabled(button)) {
       if (sendContext.scope) sendContext.scope.attempted = true
       pressButton(button)
-    } else if (button === null && !generating && textControl) {
+    } else if (!sendContext.submitOnceIf && button === null && !generating && textControl) {
       if (sendContext.scope) sendContext.scope.attempted = true
       pressEnter(element)
-    } else if (button === null && !generating && fallbackDue) {
+    } else if (!sendContext.submitOnceIf && button === null && !generating && fallbackDue) {
       /*
        * The selector never matched and the grace period is over — go structural NOW.
        *
@@ -2920,6 +2933,8 @@
         setTimeout(confirm, SEND_CONFIRM_POLL_MS)
         return
       }
+      // A Gemini continuation may click the measured Send control only once.
+      if (sendContext.submitOnceIf) { finish(false); return }
       /*
        * The window closed with the text still in the box, so whatever this pass did, it did not
        * take.
@@ -4849,6 +4864,23 @@
     return true
   }
 
+  const geminiRefusalIdentity = '(?:我(?:只是|是)|身为)(?:一个)?(?:语言模型|文本AI)'
+  const geminiCannotHelp = '(?:(?:在这方面)?(?:没法|无法)(?:帮到你|帮上忙)|我?(?:没办法|没法|无法)提供这方面的帮助)'
+  const geminiRefusalPattern = new RegExp(`^(?:${geminiRefusalIdentity},(?:${geminiCannotHelp}|这超出了我的能力范围)` +
+    `|${geminiRefusalIdentity},(?:理解不了这个问题|不具备这方面的信息或能力),因此${geminiCannotHelp}` +
+    `|我无法提供这方面的帮助,因为${geminiRefusalIdentity})[。.]?$`, 'i')
+  const isGeminiRefusal = (markdown, node) => geminiRefusalPattern.test(markdown.normalize('NFKC').trim().replace(/[ \t]+/g, '')) &&
+    !node.querySelector('blockquote, q, pre, code')
+  const geminiRefusalAfterCommand = (messageId, markdown, node) => {
+    const wait = geminiRefusal
+    if (!wait || wait.since !== state.awaitingReplySince || wait.path !== location.pathname ||
+      wait.generation !== state.taskPromptGeneration || wait.pageEpoch !== computerPageEpoch ||
+      !state.enabled || !state.taskActive || userStoppedAt >= wait.since ||
+      !isGeminiRefusal(markdown, node)) return null
+    const user = queryAll([PAGE.fileUserTurnSelector]).filter(isVisibleElement).at(-1)
+    return user && (user.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) ? { ...wait, messageId } : null
+  }
+
   /** Final prose and leaked analysis both settle without inspecting nested command examples. */
   const settleAssistantReply = (messageId, text) => {
     if (!text.trim() || state.awaitingReplySince === 0 || pendingAssistantCompletion?.messageId === messageId) return
@@ -4877,6 +4909,7 @@
       if (handleSafetyLeak(messageId, text, latest)) return
       const markdown = readReplyMarkdown(latest) || text
       const completed = /^(?:#{1,6}\s*)?(?:\*\*)?(?:【任务完成】|任务完成(?=$|[\s。！!：:]))/.test(text.trimStart())
+      const refusal = geminiRefusalAfterCommand(messageId, markdown, latest)
       const completionSource = completed ? legacyTaskSource(latest) : {}
       replyScanSnapshot = snapshotReplyScan(latest, nodes)
       state.lastCommandMessageId = messageId
@@ -4890,6 +4923,11 @@
       report({ event: 'task-finished', messageId, completed, live: true,
         taskPromptGeneration: completion.generation, pagePath: completion.path,
         ...completionSource, computerPageEpoch })
+      if (refusal) {
+        geminiRefusal = refusal
+        report({ event: 'gemini-refusal', reason: 'gemini-refusal-matched', messageId,
+          taskPromptGeneration: refusal.generation, pagePath: refusal.path, computerPageEpoch })
+      }
     }
     setTimeout(settle, 250)
   }
@@ -5764,7 +5802,9 @@
       // Final message keys need not be numeric, even when placeholder keys are.
       // Snapshot the opaque keys too; never assume every row is a list index.
       const key = fileUserTurnKey(newest)
-      return !!key && !baseline.keys.has(key)
+      if (key) return !baseline.keys.has(key)
+      // Gemini can render the first user row before assigning its position or key.
+      return baseline.count === 0 && turns.length === 1
     }
     const key = fileUserTurnKey(newest)
     // A positional unit key can repeat; the turn's own message id cannot.
@@ -6235,7 +6275,7 @@
       const composer = getComposer()
       if (!composer || !composerMatches(composer, '') || fileSend.caption) return false
       const text = normalizeLineEndings(caption)
-      const injection = userPromptInjection(false, true)
+      const injection = userPromptInjection(false, true, true)
       fileSend.resultInjection = injection
       fileSend.resultScope = { generation: state.taskPromptGeneration, path: location.pathname }
       fileSend.resultTextLength = text.length
@@ -6351,6 +6391,7 @@
       if (typeof config.injectionReason === 'string' || config.injectionReason === null) state.injectionReason = config.injectionReason
       if (typeof config.injectionPlanToken === 'string' || config.injectionPlanToken === null) state.injectionPlanToken = config.injectionPlanToken
       if (typeof config.replyProtocolPrefix === 'string') state.replyProtocolPrefix = config.replyProtocolPrefix
+      if (typeof config.replyProtocolOnToolResults === 'boolean') state.replyProtocolOnToolResults = config.replyProtocolOnToolResults
       state.contextPrefixUsage = config.contextPrefixUsage
       state.contextReminderUsage = config.contextReminderUsage
       if (Number.isSafeInteger(config.replyProtocolVersion) && config.replyProtocolVersion > 0) state.replyProtocolVersion = config.replyProtocolVersion
@@ -7141,14 +7182,15 @@
       const user = users.at(-1)
       const latest = latestReplyNode(queryAllAssistant())
       const follows = !!latest && (!user || !!(user.compareDocumentPosition(latest) & Node.DOCUMENT_POSITION_FOLLOWING))
-      const requestFound = users.some(row => String(row.innerText || '').includes(marker) &&
+      // A folded prompt can hide the marker visually while keeping it in its user row.
+      const requestFound = users.some(row => String(row.textContent || '').includes(marker) &&
         turnShowsFiles(row, [{ fileName, mimeType: 'text/markdown' }]))
       const answer = follows && isAssistantTurn(latest) ? readReplyMarkdown(latest) || readReplyText(latest) : ''
       return { path: location.pathname, ready: !!getComposer(), nativeDraft: !!getComposer() && !!collapse(readComposer(getComposer())),
         generating: focusGenerationState(), requestFound, hasHistory: queryAllMessages().length > 0,
         replyId: follows && latest ? turnKeyOf(latest) : '', answer: answer.slice(0, 250000),
         cutOff: !!latest && !!findContinueButton(latest), sendFailure: !!focusSendFailureOf(),
-        oversized: answer.length > 250000 }
+        oversized: answer.length > 250000, geminiRefusal: !!answer && isGeminiRefusal(answer, latest) }
     },
     /** Empty the composer before the compaction request; true once it reads back empty. */
     compactionClearDraft() {
@@ -7211,12 +7253,14 @@
        * focus turn) became the newest node while the new reply was still thinking without an id.
        * It was adopted and pinned as this send's reply. An answer above the newest user row is history.
        */
-      if (node && focusReplyPosition === null && PAGE.focus?.edit) {
-        const userRows = queryAll([PAGE.focus.edit.userTextSelector, ...(PAGE.fileUserTurnFallbackSelector ? [PAGE.fileUserTurnFallbackSelector] : [])])
-          .filter(isVisibleElement)
-        const newestUser = userRows.reduce((last, row) => !last || (last.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING) ? row : last, null)
-        if (newestUser && !node.contains(newestUser) && (node.compareDocumentPosition(newestUser) & Node.DOCUMENT_POSITION_FOLLOWING)) node = null
+      const userSelector = rules.edit?.userTextSelector || rules.userTurnSelector
+      const followsNewestUser = candidate => {
+        if (!userSelector) return true
+        const selectors = [userSelector, ...(PAGE.fileUserTurnFallbackSelector ? [PAGE.fileUserTurnFallbackSelector] : [])]
+        const newestUser = queryAll(selectors).filter(isVisibleElement).at(-1)
+        return !newestUser || candidate.contains(newestUser) || !(candidate.compareDocumentPosition(newestUser) & Node.DOCUMENT_POSITION_FOLLOWING)
       }
+      if (node && focusReplyPosition === null && !followsNewestUser(node)) node = null
       if (node && focusReplyPosition === null) {
         const anchor = focusReplyAnchor(node)
         // A virtual position is valid only during this send, never persisted as an identity;
@@ -7234,9 +7278,9 @@
        */
       let pending = null
       if (!node && focusReplyPosition === null && rules.reasoningScopeSelector && PAGE.messageIdAttr) {
-        const groups = queryAll([rules.reasoningScopeSelector]).filter(isVisibleElement)
-        const last = groups.at(-1)
-        if (last && !last.querySelector('[' + PAGE.messageIdAttr + ']')) pending = last
+        const last = queryAll([rules.reasoningScopeSelector]).filter(isVisibleElement).at(-1)
+        // Gemini also puts ordinary HTML ids on controls inside the group.
+        if (last && followsNewestUser(last) && !rows.some(row => last.contains(row) && messageIdOf(row))) pending = last
       }
       let reply = null
       if (node || pending) {
@@ -7260,10 +7304,11 @@
             return /^https?:$/.test(url.protocol) ? [{ kind: part.kind, text: text.slice(0, 500), url: url.href.slice(0, 2000) }] : []
           } catch { return [] }
         })
-        const raw = answer ? readReplyText(node) : ''
-        const protocol = protocolReply(raw, node)
+        // Claude's streaming turn can hold only thinking/search status before its answer mounts.
+        // Once settled, the whole-turn fallback also covers replies consisting only of code.
+        const answerReady = answer && (answer !== node || !PAGE.replyStreamingAttribute || generating !== 'active')
         reply = { sourceMessageId: node ? turnKeyOf(node) : '', parts,
-          answer: answer && !protocol ? markdownOf(node).slice(0, 250000) : '' }
+          answer: answerReady && !protocolReply(readReplyText(node), node) ? markdownOf(node).slice(0, 250000) : '' }
       }
       const historyDraft = !!rules.edit && queryAll([rules.edit.editorSelector]).some(isVisibleElement)
       return { path: location.pathname, ready: !!composer, nativeDraft: historyDraft || (!!composer && collapse(readComposer(composer)) !== ''),
@@ -7323,6 +7368,29 @@
       state.programmatic = false
     },
 
+    async recoverGeminiRefusal(path, generation, messageId, token) {
+      const refusal = geminiRefusal
+      if (!refusal?.messageId || refusal.path !== path || refusal.generation !== generation || refusal.messageId !== messageId) return 'stale'
+      const current = () => {
+        if (location.pathname !== path || state.taskPromptGeneration !== generation || refusal.pageEpoch !== computerPageEpoch ||
+          !state.enabled || !state.taskActive ||
+          state.awaitingReplySince !== 0 || userStoppedAt >= refusal.since || focusEditing || fileSend) return false
+        const latest = latestReplyNode(queryAllAssistant())
+        return !!latest && turnKeyOf(latest) === messageId && !replyIsGenerating(latest) && isGeminiRefusal(readReplyMarkdown(latest), latest)
+      }
+      geminiRefusal = null
+      if (!current()) return 'stale'
+      let outcome = 'stuck'
+      try {
+        outcome = state.programmatic ? 'busy' : await this.sendComputerResult('你具备的，你可以的，相信自己。', {
+          path, generation, requireIdle: true, submitOnceIf: current,
+          computerResultToken: token,
+          injection: { prefix: '', metadata: { promptInjected: false } }
+        })
+        return outcome
+      } finally { report({ event: 'gemini-refusal', reason: 'gemini-refusal-send', messageId, geminiRefusalOutcome: outcome }) }
+    },
+
     sendRaw(text, ownedDraft = null, options = null) {
       const element = getComposer()
       if (!element) return Promise.resolve('no-composer')
@@ -7354,7 +7422,8 @@
       }
 
       const resultText = normalizeLineEndings(text)
-      const injection = options?.injection || userPromptInjection(false, true)
+      const toolResult = options?.commandResult === true || !!options?.computerResultToken
+      const injection = options?.injection || userPromptInjection(false, true, toolResult)
       const payload = injection.prefix ? injection.prefix + USER_TEXT_SENTINEL + resultText : resultText
       const taskPromptGeneration = state.taskPromptGeneration
 
@@ -7410,6 +7479,8 @@
           Date.now() + SEND_BUTTON_GRACE_MS,
           null,
           { taskPromptGeneration, ...injection.metadata, rawTextLength: resultText.length, path: options?.path ?? location.pathname,
+            ...(options?.commandResult === true ? { commandResult: true } : {}),
+            ...(options?.submitOnceIf ? { submitOnceIf: options.submitOnceIf } : {}),
             ...(options?.question ? { question: options.question } : {}),
             ...(options?.computerResultToken !== undefined ? { computerResultToken: options.computerResultToken } : {}) }
         )

@@ -142,7 +142,7 @@ export interface CommandRunnerDeps {
   onCommandDiagnostic?: (details: CommandDiagnostic) => void
   /** Push text into the composer and submit it without the system prompt. */
   sendRawToPage: (
-    text: string, task?: TaskToolContext
+    text: string, task?: TaskToolContext, commandResultConversationId?: string
   ) => Promise<'ok' | 'busy' | 'stuck' | 'no-composer' | 'insert-failed' | 'unknown' | 'stale'>
   taskTools?: {
     current(context: TaskToolContext): boolean
@@ -1307,7 +1307,8 @@ export class CommandRunner {
     if (!this.taskCurrent(record) || !this.taskEvent(record, { stage: 'sending' })) return
     const message = buildResultMessage(result, messageId.startsWith('rerun:') ? record.command : undefined)
     this.appendLine({ kind: 'notice', text: '正在发送...' })
-    const outcome = record.taskContext ? await this.deliverTaskText(record, message) : await this.deps.sendRawToPage(message)
+    const outcome = record.taskContext ? await this.deliverTaskText(record, message) :
+      await this.deps.sendRawToPage(message, undefined, messageId.startsWith('rerun:') ? undefined : conversationId)
     this.diagnostic({ event: 'delivery', messageId, ownerConversationId: conversationId, deliveryOutcome: outcome })
     if (this.disposed) return
     if (outcome === 'ok') {

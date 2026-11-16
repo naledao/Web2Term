@@ -13,7 +13,7 @@ const platformExports = {}
 new Script(ts.transpileModule(readFileSync(new URL('../src/shared/platforms.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText).runInNewContext({ exports: platformExports, require: () => ({ isConversationId: () => true }) })
-const { CHATGPT_PAGE, DEEPSEEK_PAGE } = platformExports
+const { CHATGPT_PAGE, DEEPSEEK_PAGE, GEMINI_PAGE } = platformExports
 const file = ts.createSourceFile('send-interceptor.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
 function find(predicate, node = file) {
   if (predicate(node)) return node
@@ -51,6 +51,8 @@ function fixture() {
     composerToolbarControls: () => [{ matches: () => true, querySelector: () => ({ getAttribute: () => 'M8.3125 0.980206' }) }],
     queryAllAssistant: () => [], isAssistantTurn: () => true,
     latestReplyNode: nodes => nodes.at(-1), turnKeyOf: node => node.id,
+    replyRootOf: node => node.querySelector?.(context.PAGE.assistantReplySelectors[0]) || node,
+    dsmlInProse: () => false, looksLikeScheduledReply: () => false, looksLikeMailReply: () => false, looksLikeToolPromptReadReply: () => false,
     readReplyText: node => node.body || '', readReplyMarkdown: node => node.markdown || '', smartUiCardsOf: () => [], smartUiLayoutsOf: () => [], focusComposerModesOf: () => [],
     focusModelSettingsOf: () => ({ model: null, effort: null, models: [], efforts: [] }),
     focusModelPickerParts: () => null,
@@ -58,7 +60,7 @@ function fixture() {
     queryAll: () => [], isVisibleElement: () => true, focusSendFailureOf: () => null
   })
   context.confirmedInjectionPlans = new Set()
-  for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'focusRowPosition', 'focusReplyAnchor', 'focusGenerationState', 'conversationPromptInHistory', 'userPromptInjection', 'reportUserInjection', 'confirmPromptInjection']) context[name] = arrow(name, context)
+  for (const name of ['looksLikeReadFilesReply', 'looksLikeQuestionReply', 'looksLikeCommandReply', 'messageIdAttrs', 'messageIdOf', 'focusRowPosition', 'focusReplyAnchor', 'replyIsGenerating', 'focusGenerationState', 'conversationPromptInHistory', 'userPromptInjection', 'reportUserInjection', 'confirmPromptInjection']) context[name] = arrow(name, context)
   return { context, composer, calls, reports, send: method('sendUser', context), snapshot: method('focusSnapshot', context) }
 }
 
@@ -81,10 +83,132 @@ function resultInjectionFixture() {
   })
   f.context.submitWithRetry = arrow('submitWithRetry', f.context)
   const send = method('sendRaw', f.context)
-  return { ...f, submitted, send: text => send(text, null, { path: f.context.location.pathname }),
+  return { ...f, submitted, send: (text, options) => send(text, null, { path: f.context.location.pathname, ...options }),
     failInsert(value) { insert = !value },
     confirm() { for (const [id, timer] of [...timers]) if (timer.delay === 120) { timers.delete(id); timer.callback() } } }
 }
+
+const geminiRefusals = [
+  '我无法提供这方面的帮助，因为我只是一个语言模型。',
+  '我是一个文本 AI，这超出了我的能力范围。',
+  '我只是一个语言模型，理解不了这个问题，因此没法帮上忙。',
+  '我只是一个文本 AI，在这方面没法帮到你。',
+  '我只是一个语言模型，不具备这方面的信息或能力，因此没法帮到你。',
+  '身为一个语言模型，我没办法提供这方面的帮助。'
+]
+
+function geminiRefusalFixture() {
+  const f = resultInjectionFixture(), settleTimers = []
+  const path = '/app/0123456789abcdef', generation = f.context.state.taskPromptGeneration
+  let latest = null, serial = 0
+  const setTimeout = f.context.setTimeout
+  Object.assign(f.context, {
+    PAGE: GEMINI_PAGE, location: { pathname: path, href: 'https://gemini.google.com' + path },
+    pendingAssistantCompletion: null, pendingComputerRecognition: null, geminiRefusal: null, userStoppedAt: 0,
+    computerPageEpoch: 'page-one', queryAllAssistant: () => latest ? [latest] : [], lastAssistantId: () => latest?.id ?? null,
+    continueCutOffReply: () => false, replyIsGenerating: () => !!f.context.findStopButton(),
+    handleSafetyLeak: () => false, legacyTaskSource: () => ({}), snapshotReplyScan: () => ({}), replyScanSnapshot: {},
+    queryAll: selectors => selectors.includes('user-query') ? [node(1)] : [],
+    scheduleCheck() {}, diagnoseSendFailure: () => ({}),
+    setTimeout(callback, delay) { return delay === 250 ? settleTimers.push(callback) : setTimeout(callback, delay) }
+  })
+  for (const name of ['setReplyWaiting', 'geminiRefusalIdentity', 'geminiCannotHelp', 'geminiRefusalPattern',
+    'isGeminiRefusal', 'geminiRefusalAfterCommand']) f.context[name] = arrow(name, f.context)
+  const settle = arrow('settleAssistantReply', f.context)
+  const recover = method('recoverGeminiRefusal', f.context).bind({ sendRaw: method('sendRaw', f.context), sendComputerResult: method('sendComputerResult', f.context) })
+  return { ...f,
+    async result(commandResult = true) {
+      const sent = f.send('已执行命令，退出码 0', { commandResult })
+      f.confirm()
+      assert.equal(await sent, 'ok')
+    },
+    reply(body, { quoted = false, order = 2 } = {}) {
+      latest = { ...node(order, body), id: 'gemini-reply-' + (++serial), body, isConnected: true,
+        querySelector: selector => quoted && selector.includes('blockquote') ? {} : null }
+      settle(latest.id, body)
+      for (const callback of settleTimers.splice(0)) callback()
+      return latest.id
+    },
+    recover: messageId => recover(path, generation, messageId, 'gemini-refusal:fixture'),
+    matches: () => f.reports.filter(event => event.reason === 'gemini-refusal-matched')
+  }
+}
+
+test('Gemini recognizes all observed sentence shapes and sends the exact continuation once', async () => {
+  const continuation = '你具备的，你可以的，相信自己。'
+  for (const body of [...geminiRefusals, '我是一个文本ＡＩ, 这超出了我的能力范围.']) {
+    const f = geminiRefusalFixture()
+    await f.result()
+    const first = f.reply(body)
+    assert.equal(f.matches().length, 1, body)
+    const pending = f.recover(first)
+    assert.equal(await f.recover(first), 'stale')
+    f.confirm()
+    assert.equal(await pending, 'ok')
+    assert.equal(f.submitted[1], continuation)
+    assert.equal(f.reports.some(event => event.event === 'user-message'), false)
+    assert.equal(await f.recover(f.reply(body)), 'stale')
+    assert.equal(f.matches().length, 1, 'the follow-up reply cannot arm a second continuation')
+    assert.equal(f.submitted.length, 2)
+  }
+})
+
+test('Gemini requires a fresh reply to a confirmed command result and keeps other text as ordinary prose', async () => {
+  for (const scenario of [
+    { commandResult: false }, { quoted: true }, { order: 0 }, { streaming: true },
+    { body: `「${geminiRefusals[1]}」` }, { body: `${geminiRefusals[1]}\n但从命令输出可以看出端口正常。` },
+    { body: '身为一个语言模型，我没办法提供这方面的帮助。请贴出错误日志。' },
+    { body: '我没办法提供这方面的帮助。' },
+    { body: '我只是一个语言模型，无法直接访问你的电脑。请贴出错误日志。' }
+  ]) {
+    const f = geminiRefusalFixture()
+    await f.result(scenario.commandResult)
+    if (scenario.streaming) f.context.findStopButton = () => ({})
+    const id = f.reply(scenario.body ?? geminiRefusals[1], scenario)
+    assert.equal(f.matches().length, 0)
+    assert.equal(await f.recover(id), 'stale')
+    assert.equal(f.submitted.length, 1)
+  }
+})
+
+test('Gemini preserves an existing draft and never retries an unconfirmed continuation click', async () => {
+  const draft = geminiRefusalFixture()
+  await draft.result()
+  const first = draft.reply(geminiRefusals[0])
+  draft.composer.draft = '用户自己的草稿'
+  assert.equal(await draft.recover(first), 'busy')
+  assert.equal(draft.composer.draft, '用户自己的草稿')
+  assert.equal(draft.submitted.length, 1)
+
+  const uncertain = geminiRefusalFixture()
+  await uncertain.result()
+  const other = uncertain.reply(geminiRefusals[1])
+  let now = Date.now()
+  uncertain.context.Date = { now: () => now }
+  uncertain.context.pressButton = () => uncertain.submitted.push(uncertain.composer.draft)
+  const pending = uncertain.recover(other)
+  now += 3100
+  uncertain.confirm()
+  assert.equal(await pending, 'stuck')
+  assert.equal(await uncertain.recover(other), 'stale')
+  assert.equal(uncertain.submitted.length, 2)
+})
+
+test('Gemini discards a queued continuation after navigation or a task or page change', async () => {
+  for (const alter of [
+    context => { context.location.pathname = '/app/fedcba9876543210' },
+    context => { context.state.taskPromptGeneration++ },
+    context => { context.computerPageEpoch = 'page-two' }
+  ]) {
+    const f = geminiRefusalFixture()
+    await f.result()
+    const id = f.reply(geminiRefusals[0])
+    assert.equal(f.matches().length, 1)
+    alter(f.context)
+    assert.equal(await f.recover(id), 'stale')
+    assert.equal(f.submitted.length, 1)
+  }
+})
 
 test('a due full prompt never accompanies an automatic result and stays due for the next human send', async () => {
   const f = resultInjectionFixture(), generation = f.context.state.taskPromptGeneration
@@ -101,6 +225,25 @@ test('a due full prompt never accompanies an automatic result and stays due for 
   assert.equal(human.metadata.promptInjected, true)
   assert.equal(human.metadata.injectionPlanToken, 'refresh-1')
   assert.equal(human.prefix, f.context.state.prefix)
+})
+
+test('Gemini command results use the short reply contract without using up a full refresh', async () => {
+  const f = resultInjectionFixture()
+  Object.assign(f.context, { PAGE: GEMINI_PAGE })
+  Object.assign(f.context.state, { replyProtocolOnToolResults: true, injectionReason: 'budget' })
+  const reminder = f.context.state.replyProtocolPrefix
+  const command = f.send('退出码 0', { commandResult: true }); f.confirm()
+  assert.equal(await command, 'ok')
+  assert.equal(f.submitted[0], reminder + USER_TEXT_SENTINEL + '退出码 0')
+  const report = f.reports.find(event => event.event === 'sent-raw')
+  assert.equal(report.replyProtocolKind, 'short')
+  assert.equal(report.replyProtocolLength, reminder.length)
+  assert.equal(report.promptInjected, false)
+  assert.equal(f.context.confirmedInjectionPlans.size, 0)
+
+  const recovery = f.send('继续'); f.confirm()
+  assert.equal(await recovery, 'ok')
+  assert.equal(f.submitted[1], '继续', 'a raw recovery message is separate from a tool result')
 })
 
 test('a changed prompt (terminal environment switch) travels with the next result once, mid-task', async () => {
@@ -635,19 +778,66 @@ test('ChatGPT activity is shown while the reply is still working, before its id 
     getAttribute: name => name === 'data-chatgpt-selection-message-id' ? 'msg-old' : null,
     querySelector: () => ({}), querySelectorAll: () => [], closest: () => null }
   const steps = [node(1, '完善并明确监控方案设置'), node(2, '准备启动任务')]
-  const working = { querySelector: () => null, querySelectorAll: selector => selector === stepSelector ? steps : [] }
-  const finished = { querySelector: selector => selector === '[data-chatgpt-selection-message-id]' ? previous : null, querySelectorAll: () => [] }
+  const working = { contains: () => false, querySelectorAll: selector => selector === stepSelector ? steps : [] }
+  const finished = { contains: row => row === previous, querySelectorAll: () => [] }
   f.context.focusReplyBaseline = 'msg-old'
   f.context.queryAllAssistant = () => [previous]
-  f.context.queryAll = () => [finished, working]
+  const scope = CHATGPT_PAGE.focus.reasoningScopeSelector
+  let groups = [finished, working]
+  f.context.queryAll = selectors => selectors.includes(scope) ? groups : []
   const result = f.snapshot()
   assert.deepEqual(Array.from(result.reply.parts, part => part.text), ['完善并明确监控方案设置', '准备启动任务'])
   assert.equal(result.reply.answer, '')
   assert.equal(result.reply.sourceMessageId, '', 'no identity is pinned before the id exists')
   assert.equal(f.context.focusReplyPosition, null)
   // Until the user's own turn appears, the newest group is the finished one: nothing is shown.
-  f.context.queryAll = () => [finished]
+  groups = [finished]
   assert.equal(f.snapshot().reply, null)
+})
+
+test('Gemini reads thinking outside the answer and pins the reply by its native id', () => {
+  const f = fixture()
+  f.context.PAGE = GEMINI_PAGE
+  f.context.replyRootOf = arrow('replyRootOf', f.context)
+  f.context.location = { pathname: '/app/0123456789abcdef', href: 'https://gemini.google.com/app/0123456789abcdef' }
+  const oldId = 'message-content-id-r_1111111111111111'
+  const newId = 'message-content-id-r_2222222222222222'
+  const answer = (id, order, text, group) => ({ ...node(order, text), id, body: text,
+    getAttribute: name => name === 'id' ? id : null,
+    closest: selector => selector === 'model-response' ? group : null, querySelectorAll: () => [] })
+  const group = (order, text) => {
+    const response = { ...node(order), contains: row => row.closest?.('model-response') === response,
+      querySelector: selector => selector === '[id]' ? { id: 'expand-thinking-toggle' } : null,
+      querySelectorAll: selector => selector === 'thinking-overlay' ? [node(order + 1, text)] : [] }
+    return response
+  }
+  const oldGroup = group(1, '旧思考'), newGroup = group(6, '正在整理资料')
+  const previous = answer(oldId, 3, '旧回答', oldGroup)
+  const current = answer(newId, 8, '**新回答**', newGroup)
+  const newestUser = node(5, '继续')
+  const rows = [previous], groups = [oldGroup]
+  f.context.queryAllAssistant = () => rows
+  f.context.queryAll = selectors => selectors.includes('model-response') ? groups : selectors.includes('user-query') ? [newestUser] : []
+  f.context.focusReplyBaseline = 'message-content-id-r_0000000000000000'
+  f.context.findStopButton = () => ({})
+  assert.equal(f.snapshot().reply, null, 'a remounted answer above the newest user is history even if it differs from the baseline')
+
+  groups.push(newGroup)
+  const thinking = f.snapshot()
+  assert.equal(thinking.generating, 'active')
+  assert.equal(thinking.reply.sourceMessageId, '', 'the thinking toggle id is not a reply id')
+  assert.equal(thinking.reply.answer, '')
+  assert.deepEqual(Array.from(thinking.reply.parts, part => [part.kind, part.text]), [['reasoning', '正在整理资料']])
+
+  rows.push(current)
+  assert.equal(f.snapshot().reply.sourceMessageId, newId)
+  rows.push(answer('message-content-id-r_3333333333333333', 9, '另一条回答', null))
+  f.context.findStopButton = () => null
+  const finished = f.snapshot()
+  assert.equal(finished.generating, 'idle')
+  assert.equal(finished.reply.sourceMessageId, newId)
+  assert.equal(finished.reply.answer, '**新回答**')
+  assert.deepEqual(Array.from(finished.reply.parts, part => part.text), ['正在整理资料'])
 })
 
 test('measured send and stop icons identify generation; an unknown spinner stays unknown', () => {
@@ -736,11 +926,11 @@ function completionFixture() {
   const f = fixture(), timers = []
   const reply = { id: 'previous-answer', body: '【任务完成】上一轮已经完成。', isConnected: true }
   Object.assign(f.context, {
-    pendingAssistantCompletion: null, pendingComputerRecognition: null,
+    pendingAssistantCompletion: null, pendingComputerRecognition: null, geminiRefusal: null,
     computerReplyWait: null, computerReplySerial: 0, computerSourceSubmissionId: null, mailSourceSubmissionId: null,
     computerPageEpoch: 'page-one', computerBaselineOf: () => ({}),
     queryAllAssistant: () => [reply], continueCutOffReply: () => false, replyIsGenerating: () => false,
-    handleSafetyLeak: () => false, legacyTaskSource: () => ({}), snapshotReplyScan: () => ({}), replyScanSnapshot: {},
+    handleSafetyLeak: () => false, geminiRefusalAfterCommand: () => null, legacyTaskSource: () => ({}), snapshotReplyScan: () => ({}), replyScanSnapshot: {},
     attachmentRoot: () => ({}), findAttachmentInput: () => ({ setAttribute() {} }),
     fileSendStatus: () => ({ status: 'ready' }), discardUserImageCapture() {}, scheduleCheck() {},
     setTimeout(callback, delay) { assert.equal(delay, 250); timers.push(callback) }

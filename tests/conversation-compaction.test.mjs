@@ -114,8 +114,8 @@ test('prompts no longer ask for end or failure markers', () => {
     }
   }
   assert.ok(shared.compactionPrompt(id).includes('输入范围仅为 source.md 本身'))
-  assert.ok(shared.compactionPrompt(id).split('\n').at(-1) === '任务标识：' + shared.compactionRequestMarker(id))
-  assert.ok(shared.compactionHandoffPrompt(id).split('\n').at(-1) === '任务标识：' + shared.compactionRequestMarker(id, true))
+  assert.equal(shared.compactionPrompt(id).split('\n')[1], '任务标识：' + shared.compactionRequestMarker(id))
+  assert.equal(shared.compactionHandoffPrompt(id).split('\n')[1], '任务标识：' + shared.compactionRequestMarker(id, true))
 })
 
 test('relative budgets guide the prompt length and reserve transport overhead', () => {
@@ -142,10 +142,11 @@ test('checkpoint prompt preserves continuation state without requesting a fixed-
 })
 
 function fixture(t, settings = new Map(), settingsOptions = {}) {
-  const subjectOwner = { ...owner, platformId: settingsOptions.platformId ?? owner.platformId }
+  const subjectOwner = { ...owner, platformId: settingsOptions.platformId ?? owner.platformId,
+    conversationId: settingsOptions.conversationId ?? owner.conversationId }
   const directory = mkdtempSync(join(tmpdir(), 'web2term-compaction-test-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
-  const calls = [], records = new Map(), created = [], pages = []
+  const calls = [], records = new Map(), created = [], pages = [], openings = []
   let clock = 1_000, failTarget = settingsOptions.failTarget === true
   const options = { sessionId: owner.sessionId, directory, store: { getSetting: key => settings.get(key) ?? null,
     setSetting: (key, value) => settings.set(key, value) }, canWork: () => true,
@@ -155,16 +156,24 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
       created.push({ id: job.targetId, summary, seed: job.seed })
       return job.targetId
     }, makePage: (platform, url, onUrl) => {
+      openings.push({ platform, url })
+      let pendingUrl = null, routeReads = 0
       const page = { url, visible: false, available: true, draft: !!settingsOptions.draft, clears: 0,
         close() { this.available = false; this.visible = false }, setTheme() {}, setOwnerVisible(value) { this.visible = value },
         async clearDraft() { this.clears++; if (settingsOptions.draft === 'stuck') return false; this.draft = false; return true },
         setViewport(_bounds, visible) { this.visible = visible },
         async read(marker) {
-          const record = records.get(this.url)
+          if (pendingUrl && ++routeReads === settingsOptions.routeDelayReads) {
+            this.url = pendingUrl
+            pendingUrl = null
+            onUrl(this.url)
+            return null // The new route has not rendered its composer yet.
+          }
+          const record = records.get(pendingUrl ?? this.url)
           await settingsOptions.beforeRead?.({ record, page: this })
-          return { ready: true, nativeDraft: this.draft, uploadReady: true, generating: 'idle', hasHistory: !!record,
-            requestFound: record?.marker === marker, answer: record?.answer ?? '', replyId: record ? this.url : '',
-            cutOff: !!record?.cutOff, sendFailure: false, oversized: false }
+          return { ready: true, nativeDraft: this.draft, uploadReady: true, generating: pendingUrl ? 'active' : 'idle', hasHistory: !!record,
+            requestFound: record?.marker === marker, answer: pendingUrl ? '' : record?.answer ?? '', replyId: record ? this.url : '',
+            cutOff: !!record?.cutOff, sendFailure: false, oversized: false, geminiRefusal: !!record?.geminiRefusal }
         }, async send(path, prompt, signal, current, beforeSubmit) {
           assert.equal(this.draft, false, 'a leftover composer draft is never sent with the request')
           const handoff = path.endsWith('summary.md')
@@ -176,14 +185,23 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
           const delivery = handoff ? stored.handoffDelivery : stored.sourceDelivery
           assert.equal(delivery, 'uncertain', 'dispatch intent is durable before a page submit')
           calls.push({ handoff, content, prompt })
-          this.url = (platform === 'deepseek' ? 'https://chat.deepseek.com/a/chat/s/' : 'https://chatgpt.com/c/') +
-            (handoff ? '22222222-2222-4222-8222-222222222222' : '11111111-1111-4111-8111-111111111111')
-          records.set(this.url, { marker: shared.compactionRequestMarker(stored.state.id, handoff), cutOff: !handoff && !!settingsOptions.cutOff,
-            answer: handoff ? (settingsOptions.verboseHandoff ? '你'.repeat(6000) : '已接收上下文')
+          const base = { deepseek: 'https://chat.deepseek.com/a/chat/s/', chatgpt: 'https://chatgpt.com/c/', gemini: 'https://gemini.google.com/app/' }[platform]
+          const id = platform === 'gemini' ? (handoff ? '2222222222222222' : '1111111111111111')
+            : (handoff ? '22222222-2222-4222-8222-222222222222' : '11111111-1111-4111-8111-111111111111')
+          const targetUrl = base + id
+          const geminiRefusal = platform === 'gemini' && settingsOptions.refusal === (handoff ? 'handoff' : 'summary')
+          records.set(targetUrl, { marker: shared.compactionRequestMarker(stored.state.id, handoff), geminiRefusal,
+            cutOff: !handoff && !!settingsOptions.cutOff,
+            answer: geminiRefusal ? '我是一个文本 AI，这超出了我的能力范围。' : handoff ? (settingsOptions.verboseHandoff ? '你'.repeat(6000) : '已接收上下文')
               : settingsOptions.verboseSummary ? complete().replace('## 当前目标\n无记录', '## 当前目标\n' + '你'.repeat(6000))
               : settingsOptions.cutOff ? '输出被截断' : settingsOptions.freeform ? '没有按章节写的摘要' : settingsOptions.historyGap ?
               complete().replace('## 缺失信息与未验证事项\n无记录', '## 缺失信息与未验证事项\n文件已读完，历史附件原件未提供。') : complete() })
-          onUrl(this.url)
+          if (settingsOptions.routeDelayReads) {
+            pendingUrl = targetUrl
+            return 'awaiting-conversation'
+          }
+          this.url = targetUrl
+          onUrl(targetUrl)
           return settingsOptions.unknown && calls.length === 1 ? 'unknown' : 'ok'
         } }
       pages.push(page)
@@ -191,9 +209,13 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
     } }
   let service = new ConversationCompaction(options)
   t.after(() => service.dispose())
-  return { directory, options, records, calls, settings, created, pages, owner: subjectOwner, get service() { return service },
-    async start() { return service.start(subjectOwner, async () => ({ contextTokens: 6000, source: { ...source(), owner: subjectOwner },
-      seed: { ...seed(), session: { ...seed().session, platformId: subjectOwner.platformId } } })) },
+  return { directory, options, records, calls, settings, created, pages, openings, owner: subjectOwner, get service() { return service },
+    async start() {
+      const snapshot = source(), initial = seed()
+      return service.start(subjectOwner, async () => ({ contextTokens: 6000,
+        source: { ...snapshot, owner: subjectOwner, messages: snapshot.messages.map(message => ({ ...message, conversationId: subjectOwner.conversationId })) },
+        seed: { ...initial, session: { ...initial.session, platformId: subjectOwner.platformId, conversationId: subjectOwner.conversationId } } }))
+    },
     restart() { service.dispose(); service = new ConversationCompaction(options); return service } }
 }
 async function settled(f) {
@@ -465,6 +487,61 @@ test('DeepSeek uses its own home and conversation identity throughout both submi
   assert.equal(f.calls.length, 2)
   assert.ok([...f.records.keys()].every(url => url.startsWith('https://chat.deepseek.com/a/chat/s/')))
   assert.equal(f.created[0].seed.session.platformId, 'deepseek')
+})
+
+test('Gemini resumes a pinned summary conversation and opens a distinct handoff conversation', async t => {
+  const f = fixture(t, new Map(), { platformId: 'gemini', conversationId: 'fedcba9876543210', unknown: true })
+  const home = 'https://gemini.google.com/app'
+  const sourceUrl = home + '/1111111111111111'
+  const handoffUrl = home + '/2222222222222222'
+  await f.start()
+  assert.equal((await settled(f)).phase, 'uncertain')
+  f.restart()
+  await f.service.resume(f.owner)
+  assert.equal((await settled(f)).phase, 'completed')
+  assert.deepEqual(f.openings, [home, sourceUrl, home].map(url => ({ platform: 'gemini', url })))
+  assert.deepEqual(f.calls.map(call => call.handoff), [false, true])
+  const stored = JSON.parse(f.settings.get('conversationCompaction:' + f.owner.sessionId))
+  assert.equal(stored.sourceUrl, sourceUrl)
+  assert.equal(stored.handoffUrl, handoffUrl)
+  assert.equal(f.created.length, 1)
+  assert.equal(f.created[0].seed.session.id, f.owner.sessionId)
+  assert.equal(f.created[0].seed.session.platformId, 'gemini')
+  assert.equal(f.created[0].seed.session.conversationId, f.owner.conversationId)
+})
+
+test('Gemini compaction waits through late chat routes and their temporary unreadable snapshots', async t => {
+  const f = fixture(t, new Map(), { platformId: 'gemini', conversationId: 'fedcba9876543210', routeDelayReads: 50 })
+  const started = f.options.now()
+  await f.start()
+  assert.equal((await settled(f)).phase, 'completed')
+  assert.deepEqual(f.calls.map(call => call.handoff), [false, true])
+  assert.ok(f.options.now() - started > 90_000, 'each new chat URL arrived more than 30 seconds after submit')
+  const stored = JSON.parse(f.settings.get('conversationCompaction:' + f.owner.sessionId))
+  assert.equal(stored.sourceUrl, 'https://gemini.google.com/app/1111111111111111')
+  assert.equal(stored.handoffUrl, 'https://gemini.google.com/app/2222222222222222')
+})
+
+test('Gemini refusals wait for a corrected reply in the same phase without submitting again', async t => {
+  for (const refusal of ['summary', 'handoff']) {
+    const f = fixture(t, new Map(), { platformId: 'gemini', conversationId: 'fedcba9876543210', refusal })
+    await f.start()
+    const state = await settled(f)
+    assert.equal(state.phase, 'failed')
+    assert.match(state.message, /Gemini.*处理问题/)
+    assert.equal(state.hasSummary, refusal === 'handoff')
+    assert.equal(f.calls.length, refusal === 'summary' ? 1 : 2)
+    assert.equal(f.created.length, 0)
+    const pageCount = f.openings.length
+    f.service.showPage()
+    assert.equal(f.openings.length, pageCount)
+    const record = f.records.get(f.pages.at(-1).url)
+    record.geminiRefusal = false
+    record.answer = refusal === 'summary' ? complete() : '已读取交接摘要，等待下一条消息。'
+    await f.service.resume(f.owner)
+    assert.equal((await settled(f)).phase, 'completed')
+    assert.deepEqual(f.calls.map(call => call.handoff), [false, true])
+  }
 })
 
 test('a platform cut-off stops before handoff; manual completion resumes the existing B conversation', async t => {

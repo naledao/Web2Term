@@ -12,7 +12,7 @@ import type { FileSendOutcome } from '../shared/file-requests'
 /** Upload the generated snapshot and question as ONE message. No URL-only fallback. */
 export async function sendQuestionChatAttachment(
   contents: Electron.WebContents, platform: ChatPlatform, contextPath: string, prompt: string,
-  signal: AbortSignal, isCurrent: () => boolean, beforeSubmit?: () => void, sizePolicy?: FileReadSizePolicy
+  signal: AbortSignal, isCurrent: () => boolean, beforeSubmit?: () => void, sizePolicy?: FileReadSizePolicy, compaction = false
 ): Promise<FileSendOutcome> {
   if (!contextPath || !supportsSelectionQuestion(platform.id) || !isCurrent() || signal.aborted) return 'cancelled'
   const platformId = platform.id
@@ -28,6 +28,7 @@ export async function sendQuestionChatAttachment(
     if (!isCurrent() || signal.aborted || contents.isDestroyed() || contents.getURL() !== ownerUrl) return 'cancelled'
     if (prepared.failed || prepared.attachments.length !== 1 || prepared.attachments[0].mimeType !== 'text/markdown') return 'upload-failed'
     return await sendPageFiles(contents, platformId, prepared.attachments, randomUUID(), isCurrent, signal,
-      { caption: prompt, allowNewConversation: true, beforeSubmit })
+      { caption: prompt, allowNewConversation: true, beforeSubmit, background: compaction,
+        allowPendingConversation: compaction && platformId === 'gemini' })
   } finally { await prepared.cleanup() }
 }

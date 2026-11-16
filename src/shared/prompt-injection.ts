@@ -62,9 +62,8 @@ const ANCHOR = '【终端助手】本对话此前注入的约定继续有效。'
 
 /**
  * Re-send the full prompt once the conversation since the last copy reaches this many characters.
- * About half of what each site keeps in context, so the copy is refreshed before it is truncated.
  */
-const BUDGETS: Record<string, number> = { chatgpt: 60_000, deepseek: 60_000, claude: 120_000, gemini: 200_000 }
+const BUDGETS: Record<string, number> = { chatgpt: 60_000, deepseek: 60_000, claude: 120_000, gemini: 60_000 }
 const DEFAULT_BUDGET = 40_000
 
 /** Two violations without a refresh mean the model lost the contract, not a slip. */

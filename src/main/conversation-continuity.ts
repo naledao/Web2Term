@@ -1,6 +1,6 @@
 import type { ConversationMessage, EmbedState, ExecutionRecord } from '../shared/types'
 import type { FocusOwner, FocusTurn } from '../shared/focus-chat'
-import { compactionHandoffMarker, compactionHandoffPrompt, compactionHandoffContext, compactionRequestMarker } from '../shared/conversation-compaction'
+import { compactionHandoffMarker, compactionHandoffContext, compactionRequestMarker } from '../shared/conversation-compaction'
 import type { CompactionBoundary } from '../shared/conversation-compaction'
 import { selectionQuestionConversation } from '../shared/deepseek-question'
 import type { StoredCompaction } from './conversation-compaction'
@@ -99,10 +99,11 @@ export class ConversationContinuity {
     return !!conversationId && this.read(platformId, conversationId)?.jobId === jobId
   }
   private seedText(text: string, metadata: Continuation): boolean {
-    const normalized = text.trim()
-    return normalized === compactionHandoffPrompt(metadata.jobId) ||
-      normalized.startsWith('请读取附件 summary.md，这是上一会话的交接摘要。\n') &&
-      normalized.split(/\r?\n/).at(-1) === '任务标识：' + compactionRequestMarker(metadata.jobId, true)
+    const lines = text.trim().split(/\r?\n/)
+    const marker = '任务标识：' + compactionRequestMarker(metadata.jobId, true)
+    // Recent requests keep the marker in the folded preview. Older requests put it last.
+    return lines[0] === '请读取附件 summary.md，这是上一会话的交接摘要。' &&
+      (lines[1] === marker || lines.at(-1) === marker)
   }
   private internal(message: ConversationMessage, metadata: Continuation | null): boolean {
     if (!metadata) return false

@@ -15,6 +15,7 @@ import { rehypeFocusFileLinks, cleanFocusFileLinkCopy } from '@shared/focus-file
 import FocusFilePreviewProvider from './FocusFilePreview'
 import FocusComposerModes from './FocusComposerModes'
 import FocusCompaction, { useConversationCompaction } from './FocusCompaction'
+import { supportsCompaction } from '@shared/conversation-compaction'
 import FocusSkillIcon from './FocusSkillIcon'
 import FocusMessageSkills from './FocusMessageSkills'
 import { FOCUS_SKILLS, focusSkillQuery, validFocusToolSkills, focusSkillUnavailable } from '@shared/focus-skills'
@@ -34,8 +35,10 @@ import type { FocusUiAction, FocusUiWidget } from '@shared/focus-smart-ui'
 import type { FocusSendOutcome, FocusComposerModeId, FocusModelSettingKind, FocusOutboundFailure, FocusOutboundQueueItem, FocusOutboundQueueState } from '@shared/focus-chat'
 import deepseekIcon from '../assets/DeepSeek.svg'
 import chatgptIcon from '../assets/ChatGPT.svg'
+import geminiIcon from '../assets/Gemini.svg'
+import claudeIcon from '../assets/Claude.svg'
 // The view's brand icon per focus platform (`FOCUS_PLATFORMS`); a platform without one shows its name.
-const FOCUS_ICONS: Readonly<Record<string, string>> = { deepseek: deepseekIcon, chatgpt: chatgptIcon }
+const FOCUS_ICONS: Readonly<Record<string, string>> = { deepseek: deepseekIcon, chatgpt: chatgptIcon, gemini: geminiIcon, claude: claudeIcon }
 import type { AppTheme, ConversationAttachment, ConversationMessage, ExecutionRecord } from '@shared/types'
 import type { FocusChatState, FocusChatUpdate, FocusOwner, FocusTurn, FocusDelivery, FocusToolCall } from '@shared/focus-chat'
 import { cleanFocusAnswer, cleanFocusUserText, focusOwnerKey, focusDelivery, focusPlatformLabel, supportsFocusEdit } from '@shared/focus-chat'
@@ -652,7 +655,8 @@ function FocusChatView(props: Props): JSX.Element {
   const modelIcon = FOCUS_ICONS[owner.platformId]
   const [state, setState] = useState<FocusChatState | null>(null)
   const [draft, setDraft] = useState(() => readDraft(viewOwner))
-  const compaction = useConversationCompaction(owner, visible)
+  const compactionSupported = supportsCompaction(owner.platformId)
+  const compaction = useConversationCompaction(owner, visible && compactionSupported)
   const [skillCaret, setSkillCaret] = useState(draft.length)
   const [skillsDismissed, setSkillsDismissed] = useState(false)
   const skillQuery = focusSkillQuery(draft, skillCaret)
@@ -660,7 +664,7 @@ function FocusChatView(props: Props): JSX.Element {
   const [selectedSkills, setSelectedSkills] = useState<FocusToolSkill[]>(() => readSkillDraft(viewOwnerKey))
   const [toolState, setToolState] = useState<ConversationToolsState | null>(null)
   const composerInput = useRef<HTMLTextAreaElement>(null)
-  const matchingSkills = FOCUS_SKILLS.filter(skill => skillQuery?.ids.includes(skill.id))
+  const matchingSkills = FOCUS_SKILLS.filter(skill => skillQuery?.ids.includes(skill.id) && (skill.id !== 'compact' || compactionSupported))
   const activeSkill = matchingSkills[Math.min(skillIndex, Math.max(0, matchingSkills.length - 1))]
   const [sending, setSending] = useState(false)
   const [changingMode, setChangingMode] = useState<FocusComposerModeId | null>(null)
@@ -996,7 +1000,7 @@ function FocusChatView(props: Props): JSX.Element {
       ? '请等待当前回答、发送或编辑结束后再压缩。' : compaction.blocked ? '正在处理压缩任务。' :
         compaction.state && !['completed', 'cancelled'].includes(compaction.state.phase) ? '请先继续检查或取消已有压缩任务。' : ''
   const startCompaction = async (): Promise<void> => {
-    if (compactionDisabled || sendLock.current || !skillQuery?.ids.includes('compact')) return
+    if (!compactionSupported || compactionDisabled || sendLock.current || !skillQuery?.ids.includes('compact')) return
     const original = draftRef.current, query = { ...skillQuery }
     sendLock.current = true
     try {

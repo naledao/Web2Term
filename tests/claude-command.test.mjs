@@ -40,6 +40,7 @@ class ElementFixture {
   }
 
   get className() { return this.attributes.class || '' }
+  get children() { return this.childNodes.filter(child => child.nodeType === 1) }
   get textContent() { return this.childNodes.map((child) => child.nodeType === 3 ? child.nodeValue : child.textContent).join('') }
   get innerText() { return this.textContent }
   getAttribute(name) { return this.attributes[name] ?? null }
@@ -465,6 +466,37 @@ test('Claude saves only the completed full answer after thinking and web search 
   app.scan(); app.tick(250)
   assert.equal(app.events.filter(event => event.event === 'assistant-message').length, 1)
   assert.equal(app.events.filter(event => event.event === 'task-finished').length, 1)
+})
+
+test('Claude focus follows a virtual reply row through thinking, streaming and completion', async () => {
+  const row = (index, message) => element('div', { 'data-testid': 'transcript-row', 'data-rs-index': String(index) }, [message])
+  const assistant = (streaming, content) => element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': String(streaming) }, content)
+  const composer = element('div', { 'data-testid': 'chat-input', contenteditable: 'true' })
+  const history = row(0, assistant(false, '以前的回答'))
+  const user = row(1, element('div', { 'data-testid': 'user-message' }, '给一个代码示例'))
+  const app = fixture([history, user, composer])
+  const snapshot = () => app.controller.focusSnapshot()
+  assert.equal(snapshot().reply, null)
+
+  app.replaceNodes([history, user, row(2, assistant(true, '搜索网页中')), composer])
+  assert.equal(snapshot().generating, 'active')
+  assert.equal(snapshot().reply.answer, '')
+  assert.equal(await app.controller.sendUser('下一条', '/chat/offline-fixture', { fromFocus: true }), 'busy')
+
+  const prose = element('div', { class: 'font-claude-response' }, '代码示例正在生成')
+  app.replaceNodes([user, row(2, assistant(true, [prose])), composer])
+  assert.equal(snapshot().reply.answer, '代码示例正在生成')
+
+  const completed = assistant(false, [
+    element('span', { class: 'sr-only', role: 'status', 'aria-live': 'polite' }, 'Claude responded: '),
+    element('pre', {}, [element('code', { class: 'language-javascript' }, 'console.log("hello")')])
+  ])
+  app.replaceNodes([user, row(2, completed), row(4, assistant(false, '之后挂载的回答')), composer])
+  const finished = snapshot()
+  assert.equal(finished.generating, 'idle')
+  assert.equal(finished.reply.answer, '```javascript\nconsole.log("hello")\n```')
+  assert.equal(finished.reply.sourceMessageId, app.controller.questionSourceMessageId(completed))
+  assert.match(finished.reply.sourceMessageId, /^text:/)
 })
 
 test('Claude streaming-state changes are observed after configuring the adapter, even with no text change', () => {
