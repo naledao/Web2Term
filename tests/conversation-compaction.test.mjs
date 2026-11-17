@@ -106,6 +106,15 @@ test('the whole finished reply is kept without any marker, section or length che
   assert.equal(shared.compactionReplyText(quoted), quoted, 'former protocol lines are ordinary text')
 })
 
+test('compaction and export exclude Claude reply footers from the Markdown body', () => {
+  const body = '## 当前目标\n\n生成一份交接文档。'
+  for (const footer of ['just now', 'Claude works directly with your codebasejust now']) {
+    const captured = body + '\n\n' + footer
+    assert.equal(shared.compactionReplyText(captured, 'claude'), body)
+    assert.equal(shared.compactionReplyText(captured, 'gemini'), captured)
+  }
+})
+
 test('prompts no longer ask for end or failure markers', () => {
   const id = '11111111-1111-4111-8111-111111111111'
   for (const prompt of [shared.compactionPrompt(id), shared.compactionRecoveryPrompt(id), shared.compactionHandoffPrompt(id)]) {
@@ -143,20 +152,24 @@ test('checkpoint prompt preserves continuation state without requesting a fixed-
 
 function fixture(t, settings = new Map(), settingsOptions = {}) {
   const subjectOwner = { ...owner, platformId: settingsOptions.platformId ?? owner.platformId,
-    conversationId: settingsOptions.conversationId ?? owner.conversationId }
+    conversationId: settingsOptions.conversationId ?? owner.conversationId,
+    ...(settingsOptions.claudeAccountId && { claudeAccountId: settingsOptions.claudeAccountId }) }
+  const settingsKey = 'conversationCompaction:' + owner.sessionId +
+    (subjectOwner.claudeAccountId ? ':' + subjectOwner.claudeAccountId : '')
   const directory = mkdtempSync(join(tmpdir(), 'web2term-compaction-test-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const calls = [], records = new Map(), created = [], pages = [], openings = []
-  let clock = 1_000, failTarget = settingsOptions.failTarget === true
-  const options = { sessionId: owner.sessionId, directory, store: { getSetting: key => settings.get(key) ?? null,
+  let clock = settingsOptions.initialTime ?? 1_000, failTarget = settingsOptions.failTarget === true
+  const options = { sessionId: owner.sessionId, directory, claudeAccountId: subjectOwner.claudeAccountId,
+    store: { getSetting: key => settings.get(key) ?? null,
     setSetting: (key, value) => settings.set(key, value) }, canWork: () => true,
     now: () => clock, pause: async () => { clock += 900; await settingsOptions.beforePause?.(); await immediate() },
     createTarget: (job, summary) => {
       if (failTarget) { failTarget = false; throw new Error('创建工作区失败') }
       created.push({ id: job.targetId, summary, seed: job.seed })
       return job.targetId
-    }, makePage: (platform, url, onUrl) => {
-      openings.push({ platform, url })
+    }, makePage: (platform, url, onUrl, accountId) => {
+      openings.push({ platform, url, ...(accountId && { accountId }) })
       let pendingUrl = null, routeReads = 0
       const page = { url, visible: false, available: true, draft: !!settingsOptions.draft, clears: 0,
         close() { this.available = false; this.visible = false }, setTheme() {}, setOwnerVisible(value) { this.visible = value },
@@ -181,11 +194,12 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
           await settingsOptions.beforeSend?.({ handoff, signal, current, page: this })
           if (signal.aborted || !current()) return 'cancelled'
           beforeSubmit()
-          const stored = JSON.parse(settings.get('conversationCompaction:' + owner.sessionId))
+          const stored = JSON.parse(settings.get(settingsKey))
           const delivery = handoff ? stored.handoffDelivery : stored.sourceDelivery
           assert.equal(delivery, 'uncertain', 'dispatch intent is durable before a page submit')
           calls.push({ handoff, content, prompt })
-          const base = { deepseek: 'https://chat.deepseek.com/a/chat/s/', chatgpt: 'https://chatgpt.com/c/', gemini: 'https://gemini.google.com/app/' }[platform]
+          const base = { deepseek: 'https://chat.deepseek.com/a/chat/s/', chatgpt: 'https://chatgpt.com/c/',
+            gemini: 'https://gemini.google.com/app/', claude: 'https://claude.ai/chat/' }[platform]
           const id = platform === 'gemini' ? (handoff ? '2222222222222222' : '1111111111111111')
             : (handoff ? '22222222-2222-4222-8222-222222222222' : '11111111-1111-4111-8111-111111111111')
           const targetUrl = base + id
@@ -210,11 +224,14 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
   let service = new ConversationCompaction(options)
   t.after(() => service.dispose())
   return { directory, options, records, calls, settings, created, pages, openings, owner: subjectOwner, get service() { return service },
-    async start() {
+    async start(generationPlatformId, generationAccountId) {
       const snapshot = source(), initial = seed()
-      return service.start(subjectOwner, async () => ({ contextTokens: 6000,
+      return service.start(subjectOwner, async () => ({
+        contextTokens: settingsOptions.contextTokens ?? 6000,
         source: { ...snapshot, owner: subjectOwner, messages: snapshot.messages.map(message => ({ ...message, conversationId: subjectOwner.conversationId })) },
-        seed: { ...initial, session: { ...initial.session, platformId: subjectOwner.platformId, conversationId: subjectOwner.conversationId } } }))
+        seed: { ...initial, session: { ...initial.session, title: settingsOptions.title ?? initial.session.title,
+          platformId: subjectOwner.platformId, conversationId: subjectOwner.conversationId } }
+      }), generationPlatformId, generationAccountId)
     },
     restart() { service.dispose(); service = new ConversationCompaction(options); return service } }
 }
@@ -487,6 +504,85 @@ test('DeepSeek uses its own home and conversation identity throughout both submi
   assert.equal(f.calls.length, 2)
   assert.ok([...f.records.keys()].every(url => url.startsWith('https://chat.deepseek.com/a/chat/s/')))
   assert.equal(f.created[0].seed.session.platformId, 'deepseek')
+})
+
+test('Claude summarizes and imports through separate Claude conversations', async t => {
+  const f = fixture(t, new Map(), { platformId: 'claude', conversationId: 'fa4e73a6-92b9-4b7b-832c-2de7b09e48bd' })
+  await f.start()
+  assert.equal((await settled(f)).phase, 'completed')
+  assert.deepEqual(f.openings, [
+    { platform: 'claude', url: 'https://claude.ai/new' },
+    { platform: 'claude', url: 'https://claude.ai/new' }
+  ])
+  assert.deepEqual(f.calls.map(call => call.handoff), [false, true])
+  assert.equal(f.records.size, 2)
+  assert.ok([...f.records.keys()].every(url => url.startsWith('https://claude.ai/chat/')))
+  assert.equal(f.created[0].seed.session.platformId, 'claude')
+})
+
+test('an export resumes on the selected platform and saves the same summary locally', async t => {
+  const options = { contextTokens: 300, unknown: true, title: '排查/登录:问题?', initialTime: new Date(2026, 10, 17, 15, 30, 42).getTime() }
+  const f = fixture(t, new Map(), options)
+  options.beforeSend = () => { f.options.canWork = () => false }
+  await f.start('claude')
+  const state = await settled(f)
+  assert.equal(state.phase, 'uncertain')
+  assert.equal(state.owner.platformId, 'chatgpt')
+  assert.equal(state.generationPlatformId, 'claude')
+  assert.deepEqual(f.openings, [{ platform: 'claude', url: 'https://claude.ai/new' }])
+  assert.match(f.calls[0].content, /来源平台：chatgpt/)
+  assert.match(f.calls[0].prompt, /供另一个平台或账号继续任务/)
+
+  f.restart()
+  await f.service.resume(f.owner)
+  assert.equal((await settled(f)).phase, 'ready-to-export')
+  assert.equal(f.openings[1].platform, 'claude')
+  assert.ok(f.openings[1].url.startsWith('https://claude.ai/chat/'))
+  assert.ok(f.pages.every(page => !page.available))
+  f.restart()
+  assert.equal(f.service.state(f.owner).phase, 'ready-to-export')
+
+  const defaultName = '任务交接-排查 登录 问题-2026-11-17_15-30-42.md'
+  await f.service.exportSummary(f.owner, async fileName => {
+    assert.equal(fileName, defaultName)
+    return undefined
+  })
+  assert.equal(f.service.state(f.owner).phase, 'ready-to-export')
+  await assert.rejects(f.service.exportSummary(f.owner, async () => join(f.directory, 'missing', 'summary.md')), /ENOENT/)
+  assert.equal(f.service.state(f.owner).phase, 'ready-to-export')
+
+  const destination = join(f.directory, '我的交接.md')
+  await f.service.exportSummary(f.owner, async fileName => {
+    assert.equal(fileName, defaultName)
+    return destination
+  })
+  assert.equal(await readFile(destination, 'utf8'), await readFile(join(f.directory, state.id, 'summary.md'), 'utf8'))
+  assert.equal(f.service.state(f.owner).phase, 'completed')
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.created.length, 0)
+})
+
+test('Claude handoff resumes on the selected generation account while keeping the source account owner', async t => {
+  const accountA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const accountB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const f = fixture(t, new Map(), { platformId: 'claude', claudeAccountId: accountA, unknown: true })
+  await f.start('claude', accountB)
+  assert.equal((await settled(f)).phase, 'uncertain')
+  assert.equal(f.service.state({ ...f.owner, claudeAccountId: accountB }), null)
+  f.restart()
+  assert.equal(f.service.state(f.owner).generationAccountId, accountB)
+  await f.service.resume(f.owner)
+  assert.equal((await settled(f)).phase, 'ready-to-export')
+  assert.deepEqual(f.openings.map(page => page.accountId), [accountB, accountB])
+  assert.equal(f.calls.length, 1)
+})
+
+test('both Claude compaction pages use the source account', async t => {
+  const account = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const f = fixture(t, new Map(), { platformId: 'claude', claudeAccountId: account })
+  await f.start()
+  assert.equal((await settled(f)).phase, 'completed')
+  assert.deepEqual(f.openings.map(page => page.accountId), [account, account])
 })
 
 test('Gemini resumes a pinned summary conversation and opens a distinct handoff conversation', async t => {

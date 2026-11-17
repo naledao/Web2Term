@@ -4,20 +4,32 @@ import type { FocusOwner } from '@shared/focus-chat'
 import { focusOwnerKey } from '@shared/focus-chat'
 import type { CompactionAction, CompactionState } from '@shared/conversation-compaction'
 import { COMPACTION_ACTIVE } from '@shared/conversation-compaction'
+import type { SelectionQuestionPlatform } from '@shared/deepseek-question'
+import { platformById } from '@shared/platforms'
 import './FocusCompaction.css'
 
 export function useConversationCompaction(owner: FocusOwner, visible: boolean): {
   state: CompactionState | null; pending: boolean; error: string; blocked: boolean
-  start(): Promise<boolean>; act(action: CompactionAction): Promise<boolean>
+  startingPlatform?: SelectionQuestionPlatform
+  startingAccountId?: string
+  start(platform?: SelectionQuestionPlatform, accountId?: string): Promise<boolean>; act(action: CompactionAction): Promise<boolean>
 } {
   const ownerKey = focusOwnerKey(owner)
   const [state, setState] = useState<CompactionState | null>(null)
   const [pending, setPending] = useState(false)
+  const [startingPlatform, setStartingPlatform] = useState<SelectionQuestionPlatform>()
+  const [startingAccountId, setStartingAccountId] = useState<string>()
+  const [exportNoticeJobId, setExportNoticeJobId] = useState<string>()
   const [error, setError] = useState('')
   const lock = useRef(false)
   const readRevision = useRef(0)
   const mounted = useRef(true)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  useEffect(() => {
+    if (!exportNoticeJobId) return
+    const timer = setTimeout(() => setExportNoticeJobId(undefined), 5000)
+    return () => clearTimeout(timer)
+  }, [exportNoticeJobId])
   useEffect(() => {
     if (!visible) return
     let disposed = false, timer: ReturnType<typeof setTimeout> | undefined
@@ -33,18 +45,21 @@ export function useConversationCompaction(owner: FocusOwner, visible: boolean): 
     void poll()
     return () => { disposed = true; if (timer) clearTimeout(timer) }
   }, [ownerKey, visible])
-  const start = useCallback(async (): Promise<boolean> => {
+  const start = useCallback(async (platform?: SelectionQuestionPlatform, accountId?: string): Promise<boolean> => {
     if (lock.current) return false
     readRevision.current++
-    lock.current = true; setPending(true); setError('')
+    lock.current = true; setPending(true); setStartingPlatform(platform); setStartingAccountId(accountId); setError(''); setExportNoticeJobId(undefined)
     try {
-      const next = await window.api.startCompaction(owner)
+      const next = await window.api.startCompaction(owner, platform, accountId)
       if (mounted.current) setState(next)
       return true
     } catch (failure) {
-      if (mounted.current) setError(failure instanceof Error ? failure.message : '无法开始压缩。')
+      if (mounted.current) setError(failure instanceof Error ? failure.message : '无法开始当前任务。')
       return false
-    } finally { lock.current = false; if (mounted.current) setPending(false) }
+    } finally {
+      lock.current = false
+      if (mounted.current) { setPending(false); setStartingPlatform(undefined); setStartingAccountId(undefined) }
+    }
   }, [ownerKey])
   const act = useCallback(async (action: CompactionAction): Promise<boolean> => {
     if (!state || lock.current) return false
@@ -53,22 +68,30 @@ export function useConversationCompaction(owner: FocusOwner, visible: boolean): 
     try {
       await window.api.compactionAction({ ...owner, jobId: state.id }, action)
       const next = await window.api.getCompaction(owner)
-      if (mounted.current) setState(next)
+      if (mounted.current) {
+        setState(next)
+        if (action === 'export' && next?.id === state.id && next.phase === 'completed') setExportNoticeJobId(next.id)
+      }
       return true
     } catch (failure) {
-      if (mounted.current) setError(failure instanceof Error ? failure.message : '压缩操作失败，请重试。')
+      if (mounted.current) setError(failure instanceof Error ? failure.message : '操作失败，请重试。')
       return false
     }
     finally { lock.current = false; if (mounted.current) setPending(false) }
   }, [ownerKey, state?.id])
-  // Keep the cancellation record on disk, while removing its panel and input lock.
-  const displayState = state?.phase === 'cancelled' ? null : state
-  return { state: displayState, pending, error, start, act,
+  // Only a save initiated in this view shows a confirmation. Polling also
+  // returns previously completed exports and must not bring the notice back.
+  const showState = state && state.phase !== 'cancelled' && focusOwnerKey(state.owner) === ownerKey &&
+    (!state.generationPlatformId || state.phase !== 'completed' || state.id === exportNoticeJobId)
+  const displayState = showState ? state : null
+  return { state: displayState, pending, error, startingPlatform, startingAccountId, start, act,
     blocked: pending || !!displayState && (COMPACTION_ACTIVE.includes(displayState.phase) || displayState.workerVisible) }
 }
 
-export default function FocusCompaction({ owner, visible, state, pending, error, act }: {
+export default function FocusCompaction({ owner, visible, state, pending, error, startingPlatform, generationAccountLabel, act }: {
   owner: FocusOwner; visible: boolean; state: CompactionState | null; pending: boolean; error: string
+  startingPlatform?: SelectionQuestionPlatform
+  generationAccountLabel?: string
   act(action: CompactionAction): Promise<boolean>
 }): JSX.Element | null {
   const slot = useRef<HTMLDivElement>(null)
@@ -94,16 +117,24 @@ export default function FocusCompaction({ owner, visible, state, pending, error,
     }
   }, [ownerKey, visible, state?.id, state?.workerVisible])
   if (!state && !pending && !error) return null
+  const generationPlatform = platformById(startingPlatform ?? state?.generationPlatformId ?? '')
+  const generationLabel = [generationPlatform?.label, generationAccountLabel].filter(Boolean).join(' · ')
+  const exporting = !!generationPlatform
+  const title = exporting ? '任务交接文档' : '会话压缩'
   const active = !!state && COMPACTION_ACTIVE.includes(state.phase)
-  const interrupted = !!state && !active && !['completed', 'cancelled'].includes(state.phase)
-  const status = active || pending ? '正在压缩对话…' : state?.phase === 'completed' ? '对话已压缩' :
-    state?.phase === 'paused' ? '会话压缩已暂停' : '会话压缩暂未完成'
-  return <section className="focus-compaction" aria-label="会话压缩">
+  const readyToExport = state?.phase === 'ready-to-export'
+  const interrupted = !!state && !active && !readyToExport && !['completed', 'cancelled'].includes(state.phase)
+  const status = readyToExport && pending ? '正在保存任务交接文档…' : active || pending
+    ? (exporting ? `正在使用 ${generationLabel} 生成交接文档…` : '正在压缩对话…')
+    : readyToExport || state?.phase === 'completed' ? (exporting ? state.message : '对话已压缩')
+      : state?.phase === 'paused' ? title + '已暂停' : state ? title + '暂未完成' : ''
+  return <section className="focus-compaction" aria-label={title}>
     <div className="focus-compaction__status">
       <span className="focus-compaction__label" role="status" aria-live="polite">
         {active || pending ? <span className="focus-compaction__spinner" aria-hidden="true" /> : null}{status}
       </span>
       <div className="focus-compaction__actions">
+        {readyToExport ? <button type="button" disabled={pending} onClick={() => void act('export')}>导出 Markdown</button> : null}
         {interrupted ? <>
           <button type="button" disabled={pending} onClick={() => void act('resume')}>重试</button>
           <button type="button" disabled={pending} onClick={() => void act('show-page')}>处理问题</button>
@@ -113,22 +144,22 @@ export default function FocusCompaction({ owner, visible, state, pending, error,
       </div>
     </div>
     {error ? <p className="focus-compaction__error" role="alert">{error}</p> : null}
-    {state?.workerVisible ? <div className="focus-compaction__dialog" role="dialog" aria-label="处理会话压缩" aria-modal="false">
+    {state?.workerVisible ? <div className="focus-compaction__dialog" role="dialog" aria-label={exporting ? '处理交接文档生成' : '处理会话压缩'} aria-modal="false">
       <div className="focus-compaction__head">
-        <div className="focus-compaction__dialog-title"><strong>处理会话压缩</strong>
+        <div className="focus-compaction__dialog-title"><strong>{exporting ? `在 ${generationLabel} 中处理交接文档` : '处理会话压缩'}</strong>
           <button type="button" onClick={() => void act('hide-page')}>收起页面</button></div>
         <p>{state.message}</p>
         <div className="focus-compaction__actions">
-          <button type="button" disabled={pending} onClick={() => void act('resume')}>处理完成，继续压缩</button>
+          <button type="button" disabled={pending} onClick={() => void act('resume')}>{exporting ? '处理完成，继续生成' : '处理完成，继续压缩'}</button>
           {state.phase === 'failed' && !state.hasSummary ? <button type="button" disabled={pending}
             onClick={() => { void act('copy-recovery').then(copied => { if (copied) setRecoveryCopiedFor(state.id) }) }}>
             {recoveryCopiedFor === state.id ? '补全提示词已复制' : '复制补全提示词'}</button> : null}
           {state.hasSource ? <button type="button" disabled={pending} onClick={() => void act('source')}>定位原始快照</button> : null}
           {state.hasSummary ? <button type="button" disabled={pending} onClick={() => void act('summary')}>定位交接摘要</button> : null}
         </div>
-        {state.phase === 'failed' && recoveryCopiedFor === state.id ? <p role="status">在下方网页粘贴并发送，回答结束后继续压缩，无需重新上传快照。</p> : null}
+        {state.phase === 'failed' && recoveryCopiedFor === state.id ? <p role="status">在下方网页粘贴并发送，等回答结束后再继续检查。</p> : null}
       </div>
-      <div className="focus-compaction__page" ref={slot} aria-label="压缩处理网页"><p>正在加载网页…</p></div>
+      <div className="focus-compaction__page" ref={slot} aria-label={exporting ? '交接文档生成网页' : '压缩处理网页'}><p>正在加载网页…</p></div>
     </div> : null}
   </section>
 }

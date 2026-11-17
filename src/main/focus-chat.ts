@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { FocusTurn, FocusSegment, FocusPageSnapshot, FocusDelivery, FocusAttachmentInfo, FocusToolCall, FocusToolKind, FocusToolObserver, FocusToolUpdate } from '../shared/focus-chat'
 import type { CommandRecoveryState, InterceptorPageEvent } from '../shared/types'
 import type { FocusToolSkill } from '../shared/focus-skills'
-import { cleanFocusAnswer, cleanFocusUserText, supportsFocusView, validFocusToolCall } from '../shared/focus-chat'
+import { cleanFocusAnswer, cleanFocusUserText, focusReplyParts, supportsFocusView, validFocusToolCall } from '../shared/focus-chat'
 
 interface FocusStore {
   listFocusTurns(sessionId: string, platformId: string, conversationId: string): FocusTurn[]
@@ -183,16 +183,19 @@ export class FocusChat {
     if (page.reply.sourceMessageId && entry.turns.some(other => other !== turn &&
       other.segments.some(item => item.sourceMessageId === page.reply!.sourceMessageId))) return
     const segment = this.segment(entry, turn)
+    const parts = focusReplyParts(page.reply.answer, platformId, page.reply.parts)
     // A settled Markdown read is authoritative; a late streaming sample cannot replace it.
     if (segment.settled) {
-      if (segment.sourceMessageId === page.reply.sourceMessageId && JSON.stringify(segment.parts) !== JSON.stringify(page.reply.parts)) {
-        segment.parts = page.reply.parts
+      const settledParts = platformId === 'claude' && !parts.some(part => part.kind === 'reasoning')
+        ? [...segment.parts.filter(part => part.kind === 'reasoning'), ...parts] : parts
+      if (segment.sourceMessageId === page.reply.sourceMessageId && JSON.stringify(segment.parts) !== JSON.stringify(settledParts)) {
+        segment.parts = settledParts
         this.changed(entry, turn)
         this.persist(platformId, entry)
       }
       return
     }
-    const next = { sourceMessageId: page.reply.sourceMessageId, parts: page.reply.parts, answer: cleanFocusAnswer(page.reply.answer) }
+    const next = { sourceMessageId: page.reply.sourceMessageId, parts, answer: cleanFocusAnswer(page.reply.answer, platformId) }
     if (JSON.stringify([segment.sourceMessageId, segment.parts, segment.answer]) === JSON.stringify([next.sourceMessageId, next.parts, next.answer])) return
     Object.assign(segment, next)
     turn.updatedAt = Date.now()
@@ -205,7 +208,8 @@ export class FocusChat {
     const { entry, turn } = current
     const segment = this.segment(entry, turn)
     segment.sourceMessageId = messageId
-    segment.answer = cleanFocusAnswer(text)
+    segment.parts = focusReplyParts(text, platformId, segment.parts)
+    segment.answer = cleanFocusAnswer(text, platformId)
     segment.settled = true
     delete turn.notice
     delete turn.commandRecovery
@@ -222,7 +226,7 @@ export class FocusChat {
    */
   refreshAnswer(platformId: string, conversationId: string, messageId: string, text: string): void {
     const entry = this.context(platformId, conversationId)
-    const answer = cleanFocusAnswer(text)
+    const answer = cleanFocusAnswer(text, platformId)
     if (!answer.trim()) return
     let changed = false
     for (const turn of entry.turns) {
@@ -357,6 +361,10 @@ export class FocusChat {
   }
   flush(platformId?: string): void {
     for (const [id, entry] of this.entries) if (!platformId || platformId === id) this.persist(id, entry, true)
+  }
+  resetContext(platformId: string): void {
+    this.flush(platformId)
+    this.entries.delete(platformId)
   }
   version(platformId: string, conversationId: string | null): number {
     return this.context(platformId, conversationId).revision

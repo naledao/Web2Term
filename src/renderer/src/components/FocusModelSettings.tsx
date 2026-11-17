@@ -1,17 +1,19 @@
 import type { JSX } from 'react'
 import type { FocusModelSettings as ModelSettings, FocusModelSettingKind } from '@shared/focus-chat'
 
-export default function FocusModelSettings({ settings, disabled, pending, waiting = false, onChange, onRefresh }: {
+export default function FocusModelSettings({ settings, disabled, pending, waiting = false, platformLabel = 'ChatGPT', onChange, onRefresh }: {
   settings: ModelSettings | null
   disabled: boolean
   pending: FocusModelSettingKind | null
   waiting?: boolean
+  platformLabel?: string
   onChange(kind: 'model' | 'effort', value: string): void
   onRefresh(): void
 }): JSX.Element {
-  return <div className="focus-chat__model-controls" role="group" aria-label="ChatGPT 模型设置" aria-busy={pending !== null}>
-    {([{ kind: 'model', label: '当前模型', options: settings?.models ?? [], value: settings?.model },
-      { kind: 'effort', label: '思考强度', options: settings?.efforts ?? [], value: settings?.effort }] as const).map(item =>
+  const model = { kind: 'model', label: '当前模型', options: settings?.models ?? [], value: settings?.model } as const
+  const effort = { kind: 'effort', label: '思考强度', options: settings?.efforts ?? [], value: settings?.effort } as const
+  return <div className="focus-chat__model-controls" role="group" aria-label={`${platformLabel} 模型设置`} aria-busy={pending !== null}>
+    {[model, effort].map(item =>
       <label className="focus-chat__model-field" key={item.kind}>
         <span>{item.label}</span>
         <span className="focus-chat__model-select">

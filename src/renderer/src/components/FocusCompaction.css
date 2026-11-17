@@ -12,6 +12,44 @@
 .focus-compaction__head p{margin:6px 0;white-space:pre-wrap;overflow-wrap:anywhere}
 .focus-compaction__page{position:relative;flex:1;min-height:0;overflow:hidden;background:var(--fc-bg)}
 .focus-compaction__page>p{margin:24px;color:var(--fc-muted);font-size:13px}
+.modal__box.focus-compaction__picker {
+  min-height: 0;
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+.focus-compaction__picker .modal__head { margin: 0; font-size: 15px; font-weight: 650; }
+.focus-compaction__picker p {
+  margin: 0 0 14px;
+  color: color-mix(in srgb, var(--text) 72%, var(--text-muted));
+  font-size: 13px;
+  line-height: 1.6;
+}
+.focus-compaction__picker .modal__foot { justify-content: flex-end; }
+.focus-compaction__picker button {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-chrome);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.focus-compaction__picker button:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+.focus-compaction__picker button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.focus-compaction__picker button:disabled { opacity: .55; cursor: default; }
+.focus-compaction__platforms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.focus-compaction__platforms button { display: flex; align-items: center; gap: 9px; min-height: 40px; text-align: left; }
+.focus-compaction__platforms img { flex: none; width: 19px; height: 19px; object-fit: contain; }
+.focus-chat__accounts ul { display: grid; gap: 6px; margin: 0 0 14px; padding: 0; max-height: 230px; overflow: auto; list-style: none; }
+.focus-chat__accounts li button { display: flex; justify-content: space-between; gap: 16px; width: 100%; text-align: left; overflow-wrap: anywhere; }
+.focus-chat__accounts li button[aria-current="true"], .focus-compaction__platforms button[aria-pressed="true"] { border-color: var(--accent); }
+.focus-chat__accounts li button[aria-current="true"] span:last-child { flex-shrink: 0; color: var(--text-muted); }
+.focus-chat__accounts form, .focus-compaction__account { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.focus-compaction__account { margin-top: 14px; }
+.focus-chat__accounts label, .focus-compaction__account label { display: grid; flex: 1; gap: 4px; min-width: 125px; }
+.focus-chat__accounts input, .focus-compaction__account select { box-sizing: border-box; width: 100%; min-height: 34px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-chrome); color: var(--text); font: inherit; }
+.focus-chat__accounts .focus-chat__error { margin: 8px 0 0; }
 @keyframes focus-compaction-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.focus-compaction__spinner{animation:none}}
 .focus-composer{position:relative}

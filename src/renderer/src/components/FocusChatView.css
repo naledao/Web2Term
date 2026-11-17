@@ -26,6 +26,10 @@
 .focus-chat__new-chat{display:inline-flex;flex:none;align-items:center;justify-content:center;width:36px;height:36px;padding:6px;border:0;border-radius:8px;background:transparent}
 .focus-chat__new-chat svg{display:block;width:24px;height:24px}
 .focus-chat__new-chat:hover:not(:disabled){background:var(--fc-soft)}
+.focus-chat__account{display:inline-flex;align-items:center;gap:8px;max-width:min(200px,50vw);min-height:34px;padding:0 10px;border:1px solid var(--fc-border);border-radius:8px;background:var(--fc-bg);color:var(--fc-text);font:inherit}
+.focus-chat__account>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.focus-chat__account:hover:not(:disabled){background:var(--fc-soft)}
+.focus-chat__account:disabled{opacity:.6}
 .focus-chat__model-info{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:baseline;column-gap:8px;row-gap:1px;min-width:0;margin:0 0 0 6px;font-size:12px;line-height:1.45}
 .focus-chat__model-info dt{color:color-mix(in srgb,var(--fc-text) 76%,var(--fc-bg));white-space:nowrap}
 .focus-chat__model-info dd{min-width:0;margin:0;overflow-wrap:anywhere;font-weight:500}

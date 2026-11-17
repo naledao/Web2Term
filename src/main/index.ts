@@ -15,7 +15,7 @@ import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/b
 import { join, posix } from 'node:path'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, shell, Tray } from 'electron'
 import { APP_NAME, configureAppIdentity } from './app-identity'
 import { registerDesktopNotifications } from './desktop-notifications'
 import { validSshTextFileTarget } from '../shared/ssh-file-edit'
@@ -108,6 +108,8 @@ import type {
   DiagnosticLogsExportResult
 } from '../shared/types'
 import { embedAuthState, importCookieSet, importSessionToken, previewSessionImport } from './session-import'
+import { applyChatPartitionProxy, claudePlatformForAccount, listClaudeAccounts, newClaudeAccount } from './claude-accounts'
+import { DEFAULT_CLAUDE_ACCOUNT_ID, isClaudeAccountId } from '../shared/claude-accounts'
 import { ConversationStore } from './db'
 import { readStartupTheme } from './startup-theme'
 import { workspaceProjectDraft, workspaceSessionOptions } from './workspace-projects'
@@ -795,23 +797,13 @@ function readEmbedProxies(store: {
 }
 
 async function applyEmbedProxy(proxies: Record<string, string>): Promise<void> {
-  /*
-   * One session per platform, so each is set from ITS OWN value.
-   *
-   * This used to apply one shared value to every platform — which is why it carried a comment
-   * about "the proxy works for ChatGPT but not DeepSeek" being half-applied configuration. Now
-   * that the values are separate, a partial application is a real thing the user asked for
-   * rather than a bug, and the log below says which platform got what.
-   */
   for (const platform of CHAT_PLATFORMS) {
     const proxy = proxies[platform.id] ?? ''
-    const embedSession = session.fromPartition(platform.partition)
-    try {
-      if (proxy === '') await embedSession.setProxy({ mode: 'direct' })
-      else await embedSession.setProxy({ proxyRules: proxy })
-      await embedSession.closeAllConnections()
-    } catch (error) {
-      console.warn(`[settings] failed to apply embed proxy to ${platform.id}:`, (error as Error).message)
+    const partitions = platform.id === 'claude' && store
+      ? listClaudeAccounts(store).map(account => claudePlatformForAccount(account.id).partition) : [platform.partition]
+    for (const partition of partitions) {
+      try { await applyChatPartitionProxy(partition, proxy) }
+      catch (error) { console.warn(`[settings] failed to apply embed proxy to ${platform.id}:`, (error as Error).message) }
     }
   }
 }
@@ -1078,6 +1070,7 @@ function createSession(
     projectId: restored?.projectId ?? creation?.projectId ?? null,
     initialUrl: restored?.url || undefined,
     initialConversationId: restored?.conversationId ?? null,
+    initialClaudeWorkspace: restored?.claudeWorkspace,
     initialPaused: restored?.paused ?? false,
     initialPromptInjectionEnabled: restored?.promptInjectionEnabled ?? true,
     initialLocalCwd: restored?.localCwd ?? creation?.localCwd ?? '',
@@ -1558,10 +1551,12 @@ function registerIpcHandlers(): void {
   }
   const focusRuntime = (event: IpcMainInvokeEvent, owner: unknown): SessionRuntime | null => {
     if (!owner || typeof owner !== 'object') return null
-    const value = owner as { sessionId?: unknown; platformId?: unknown; conversationId?: unknown }
+    const value = owner as { sessionId?: unknown; platformId?: unknown; conversationId?: unknown; claudeAccountId?: unknown }
     if (typeof value.sessionId !== 'string' || value.sessionId.length > 128 ||
       typeof value.platformId !== 'string' || !supportsFocusView(value.platformId) ||
-      (value.conversationId !== null && (typeof value.conversationId !== 'string' || value.conversationId.length > 512))) return null
+      (value.conversationId !== null && (typeof value.conversationId !== 'string' || value.conversationId.length > 512)) ||
+      (value.claudeAccountId !== undefined && (value.platformId !== 'claude' ||
+        value.claudeAccountId === DEFAULT_CLAUDE_ACCOUNT_ID || !isClaudeAccountId(value.claudeAccountId)))) return null
     return questionRuntime(event, value.sessionId)
   }
   ipcMain.handle(IpcChannels.focusChatGet, (event, owner, cursor) => {
@@ -1571,14 +1566,30 @@ function registerIpcHandlers(): void {
       ? runtime.getFocusChat(owner, cursor) : runtime.getFocusChat(owner)
   })
   ipcMain.handle(IpcChannels.compactionGet, (event, owner) => focusRuntime(event, owner)?.getCompaction(owner) ?? null)
-  ipcMain.handle(IpcChannels.compactionStart, (event, owner) => {
+  ipcMain.handle(IpcChannels.claudeAccountsList, event =>
+    store && fromManager(event) && event.senderFrame === event.sender.mainFrame ? listClaudeAccounts(store) : [])
+  ipcMain.handle(IpcChannels.claudeAccountAdd, async (event, owner, label) => {
+    const runtime = focusRuntime(event, owner)
+    if (!runtime || owner.platformId !== 'claude') throw new Error('请先打开 Claude 专注视图。')
+    const account = newClaudeAccount(label)
+    await runtime.switchClaudeAccount(owner, account, true)
+    return account
+  })
+  ipcMain.handle(IpcChannels.claudeAccountSwitch, (event, owner, accountId) => {
+    const runtime = focusRuntime(event, owner)
+    if (!runtime || owner.platformId !== 'claude' || !store) throw new Error('请先打开 Claude 专注视图。')
+    const account = listClaudeAccounts(store).find(item => item.id === accountId)
+    if (!account) throw new Error('Claude 账号不可用。')
+    return runtime.switchClaudeAccount(owner, account)
+  })
+  ipcMain.handle(IpcChannels.compactionStart, (event, owner, generationPlatformId, generationAccountId) => {
     const runtime = focusRuntime(event, owner)
     if (!runtime) throw new Error('当前会话已切换。')
-    return runtime.startCompaction(owner)
+    return runtime.startCompaction(owner, generationPlatformId, generationAccountId)
   })
   ipcMain.handle(IpcChannels.compactionAction, (event, request, action: CompactionAction) => {
     if (typeof request?.jobId !== 'string' || request.jobId.length > 128 ||
-        !['resume', 'cancel', 'source', 'summary', 'target', 'compression', 'copy-recovery', 'show-page', 'hide-page'].includes(action)) throw new Error('压缩任务操作无效。')
+        !['resume', 'cancel', 'source', 'summary', 'target', 'compression', 'copy-recovery', 'show-page', 'hide-page', 'export'].includes(action)) throw new Error('会话任务操作无效。')
     const runtime = focusRuntime(event, request)
     if (!runtime) throw new Error('当前会话已切换。')
     return runtime.compactionAction(request, action)
@@ -1649,28 +1660,31 @@ function registerIpcHandlers(): void {
   ipcMain.on(IpcChannels.embedLoginWithEmail, (event) => runtimeForEvent(event)?.embed.navigate(EMBED_LOGIN_URL))
   ipcMain.handle(IpcChannels.embedImportSession, async (event, platformId: string, draft: SessionImportDraft): Promise<SessionImportResult> => {
     const runtime = runtimeForEvent(event)
-    const platform = platformById(String(platformId ?? '')) ?? runtime?.chatPlatform
+    const requested = platformById(String(platformId ?? ''))
+    const active = runtime?.chatPlatform
+    const platform = active && (!requested || requested.id === active.id) ? active : requested
     if (!platform) return { ok: false, message: '请求不是来自应用窗口。', signedIn: false }
     /*
      * The TARGET PLATFORM comes from the argument, not from whichever session is in front.
      *
-     * A partition belongs to a platform and every session of that platform shares it, so a login
-     * state is global — routing by active session made the destination depend on which tab
-     * happened to be visible, which is not a property of the login at all.
+     * For the visible platform, keep the same partition as its live page. Other
+     * platforms keep their default import target.
      *
      * The VIEW, separately, is only needed to confirm the result, so it is used when the session
      * in front happens to be showing the same platform and skipped otherwise. Writing is what
      * matters; verification is a bonus that must not decide the routing.
      */
-    const contents = runtime && runtime.chatPlatform.id === platform.id ? runtime.embed.contents() : null
-    return importSessionToken(platform, draft, contents, () => runtime?.embed.reloadAndWait() ?? Promise.resolve())
+    const embed = runtime && platform === active ? runtime.embed : null
+    return importSessionToken(platform, draft, embed?.contents() ?? null, () => embed?.reloadAndWait() ?? Promise.resolve())
   })
   ipcMain.handle(IpcChannels.embedImportCookieSet, async (event, platformId: string, raw: string): Promise<SessionImportResult> => {
     const runtime = runtimeForEvent(event)
-    const platform = platformById(String(platformId ?? '')) ?? runtime?.chatPlatform
+    const requested = platformById(String(platformId ?? ''))
+    const active = runtime?.chatPlatform
+    const platform = active && (!requested || requested.id === active.id) ? active : requested
     if (!platform) return { ok: false, message: '请求不是来自应用窗口。', signedIn: false }
-    const contents = runtime && runtime.chatPlatform.id === platform.id ? runtime.embed.contents() : null
-    return importCookieSet(platform, String(raw ?? ''), contents, () => runtime?.embed.reloadAndWait() ?? Promise.resolve())
+    const embed = runtime && platform === active ? runtime.embed : null
+    return importCookieSet(platform, String(raw ?? ''), embed?.contents() ?? null, () => embed?.reloadAndWait() ?? Promise.resolve())
   })
   ipcMain.handle(IpcChannels.embedPreviewSession, (event, draft: SessionImportDraft): SessionImportResult => {
     if (!runtimeForEvent(event)) return { ok: false, message: '请求不是来自应用窗口。', signedIn: false }

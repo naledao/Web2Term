@@ -7,6 +7,10 @@ const FOCUS_SKILL_ICON_PATHS: Readonly<Record<FocusSkillId, readonly string[]>> 
     'M7 4h10a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H9l-5 3V7a3 3 0 0 1 3-3Z',
     'm8 8 3 3-3 3m8-6-3 3 3 3'
   ],
+  task_handoff: [
+    'M12 20H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8l5 5v4m-5-9v5h5M8 12h7m-7 4h3',
+    'M18 14v7m-3-3 3 3 3-3'
+  ],
   scheduled_task: [
     'M10 21H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2',
     'M7 3v4m8-4v4M3 10h9',

@@ -53,6 +53,18 @@ test('sends jobs in FIFO order', async () => {
   assert.deepEqual(order, ['first', 'second'])
 })
 
+test('Claude draft queue state is visible only to its account', async () => {
+  const Queue = loadQueue()
+  const queue = new Queue()
+  const original = { ...owner, platformId: 'claude', conversationId: null }
+  const alternate = { ...original, claudeAccountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }
+  const ticket = queue.enqueue(request({ owner: alternate, execute: async () => 'unknown', blockOnFailure: () => true }))
+  assert.equal(await ticket.completion, 'unknown')
+  assert.equal(queue.stateFor(alternate).blocked?.id, ticket.item.id)
+  assert.equal(queue.stateFor(original).pending, 0)
+  queue.dispose()
+})
+
 test('retries a busy result on the same job before advancing', async () => {
   const Queue = loadQueue()
   const queue = new Queue()

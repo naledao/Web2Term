@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { appendFileSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { ManagedSessionRecord } from './db'
 import type { CompactionPage } from './compaction-page'
@@ -11,6 +11,7 @@ import { compactionViewKey } from './conversation-continuity'
 import type { ConversationViewSnapshot } from './conversation-continuity'
 import type { FocusOwner } from '../shared/focus-chat'
 import type { ConversationToolPreferences } from '../shared/conversation-tools'
+import { isClaudeAccountId } from '../shared/claude-accounts'
 import type { Web2termSessionBinding } from './web2term-shell'
 import type { CompactionPhase, CompactionSource, CompactionState, CompactionBudget } from '../shared/conversation-compaction'
 import { COMPACTION_ACTIVE, compactionSourceMarkdown, compactionPrompt, compactionHandoffPrompt, compactionRequestMarker,
@@ -18,6 +19,7 @@ import { COMPACTION_ACTIVE, compactionSourceMarkdown, compactionPrompt, compacti
 import { compactionBudget } from '../shared/conversation-compaction'
 import { estimateContextText } from '../shared/focus-token-usage'
 import { isQuestionChatHome, selectionQuestionConversation } from '../shared/deepseek-question'
+import type { SelectionQuestionPlatform } from '../shared/deepseek-question'
 import { platformById } from '../shared/platforms'
 
 export interface CompactionSeed {
@@ -44,9 +46,10 @@ interface SettingsStore { getSetting(key: string): string | null; setSetting(key
 type Page = Pick<CompactionPage, 'url' | 'available' | 'setViewport' | 'setOwnerVisible' | 'setTheme' | 'read' | 'clearDraft' | 'send' | 'close'>
 interface Options {
   sessionId: string
+  claudeAccountId?: string
   directory: string
   store: SettingsStore
-  makePage(platformId: string, url: string, onUrl: (url: string) => void): Page
+  makePage(platformId: string, url: string, onUrl: (url: string) => void, accountId?: string): Page
   canWork(owner: FocusOwner): boolean
   canAdopt?(owner: FocusOwner): boolean
   createTarget(job: StoredCompaction, summary: string): string
@@ -57,9 +60,22 @@ interface Options {
   sendPageMessage?(owner: FocusOwner, contents: WebContents, platform: import('../shared/platforms').ChatPlatform,
     path: string, prompt: string, signal: AbortSignal, current: () => boolean, beforeSubmit: () => void): Promise<import('../shared/file-requests').FileSendOutcome>
 }
-const sameOwner = (a: FocusOwner, b: FocusOwner): boolean => a.sessionId === b.sessionId && a.platformId === b.platformId && a.conversationId === b.conversationId
+const sameOwner = (a: FocusOwner, b: FocusOwner): boolean => a.sessionId === b.sessionId && a.platformId === b.platformId &&
+  a.conversationId === b.conversationId && a.claudeAccountId === b.claudeAccountId
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
 const uuid = (value: unknown): value is string => typeof value === 'string' && /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)
+
+function handoffExportFileName(title: string, createdAt: number): string {
+  // Leave room for the prefix and timestamp even when the title is all CJK or emoji.
+  const cleaned = title.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').replace(/^[. ]+/, '')
+  const shortTitle = [...cleaned].slice(0, 48).join('').replace(/[. ]+$/, '')
+  const date = new Date(createdAt)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  const day = [date.getFullYear(), pad(date.getMonth() + 1), pad(date.getDate())].join('-')
+  const time = [date.getHours(), date.getMinutes(), date.getSeconds()].map(pad).join('-')
+  return ['任务交接', shortTitle, `${day}_${time}`].filter(Boolean).join('-') + '.md'
+}
+
 let logPath = ''
 function log(job: StoredCompaction): void {
   try {
@@ -69,14 +85,15 @@ function log(job: StoredCompaction): void {
       logPath = join(directory, `conversation-compaction-${Date.now()}-${process.pid}.log`)
     }
     appendFileSync(logPath, `${new Date().toISOString()} ${JSON.stringify({ jobId: job.state.id, platformId: job.state.owner.platformId,
-      phase: job.state.phase, sourceDelivery: job.sourceDelivery, handoffDelivery: job.handoffDelivery,
+      generationPlatformId: job.state.generationPlatformId, phase: job.state.phase,
+      sourceDelivery: job.sourceDelivery, handoffDelivery: job.handoffDelivery,
       sourceMessages: job.state.sourceMessages, beforeTokens: job.budget?.beforeTokens,
       summaryTokens: job.state.summaryTokens, maxSummaryTokens: job.budget?.maxSummaryTokens,
       hasSummary: job.state.hasSummary, hasTarget: !!job.state.targetSessionId })}\n`, 'utf8')
   } catch { /* Diagnostics never include transcript or summary bodies. */ }
 }
 
-/** Durable two-submit workflow. A possibly dispatched submission is never replayed. */
+/** Durable summary generation, followed by context adoption or local export. */
 export class ConversationCompaction {
   private job: StoredCompaction | null = null
   private page: Page | null = null
@@ -95,24 +112,32 @@ export class ConversationCompaction {
       const job: StoredCompaction = raw ? JSON.parse(raw) : null
       if (job?.version === 1 && uuid(job.state?.id) && uuid(job.targetId) && job.state.owner?.sessionId === options.sessionId &&
           typeof job.state.owner.conversationId === 'string' && !!job.state.owner.conversationId && supportsCompaction(job.state.owner.platformId) &&
-          [...COMPACTION_ACTIVE, 'completed', 'paused', 'failed', 'cancelled', 'uncertain'].includes(job.state.phase) &&
+          job.state.owner.claudeAccountId === options.claudeAccountId &&
+          (job.state.generationPlatformId === undefined || supportsCompaction(job.state.generationPlatformId)) &&
+          (job.state.generationAccountId === undefined ||
+            job.state.generationPlatformId === 'claude' && isClaudeAccountId(job.state.generationAccountId)) &&
+          [...COMPACTION_ACTIVE, 'completed', 'paused', 'failed', 'cancelled', 'uncertain', 'ready-to-export'].includes(job.state.phase) &&
+          (job.state.phase !== 'ready-to-export' || !!job.state.generationPlatformId && job.state.hasSummary) &&
           typeof job.state.hasSource === 'boolean' && typeof job.state.hasSummary === 'boolean' &&
           ['none', 'uncertain', 'sent'].includes(job.sourceDelivery) && ['none', 'uncertain', 'sent'].includes(job.handoffDelivery) &&
           typeof job.sourceHash === 'string' && typeof job.summaryHash === 'string' && job.seed?.session?.id === options.sessionId &&
           job.seed.session.platformId === job.state.owner.platformId && job.seed.session.conversationId === job.state.owner.conversationId &&
-          (job.sourceUrl === null || !!selectionQuestionConversation(job.state.owner.platformId, job.sourceUrl)) &&
+          (job.sourceUrl === null || !!selectionQuestionConversation(job.state.generationPlatformId ?? job.state.owner.platformId, job.sourceUrl)) &&
           (job.handoffUrl === null || !!selectionQuestionConversation(job.state.owner.platformId, job.handoffUrl)) &&
           (job.handoffAnswer === null || typeof job.handoffAnswer === 'string' && job.handoffAnswer.length <= 250000)) {
         this.job = job
         job.state.workerVisible = false
-        if (options.isAdopted?.(job)) {
+        if (!this.isExport && options.isAdopted?.(job)) {
           job.state.targetSessionId = options.sessionId
           this.update('completed', '对话已压缩，可以继续聊天。')
-        } else if (COMPACTION_ACTIVE.includes(job.state.phase)) this.update('paused', '上次压缩已中断。点“继续检查”从已保存的阶段恢复；不会重复提交已发送的消息。')
+        } else if (COMPACTION_ACTIVE.includes(job.state.phase)) this.update('paused', '上次任务已中断。点“重试”可从已保存的阶段恢复。')
       }
     } catch { /* Invalid saved state is never used to navigate or send. */ }
   }
-  private get key(): string { return 'conversationCompaction:' + this.options.sessionId }
+  private get key(): string {
+    const account = this.options.claudeAccountId
+    return 'conversationCompaction:' + this.options.sessionId + (account ? ':' + account : '')
+  }
   private path(name: 'source.md' | 'summary.md'): string { return join(this.options.directory, this.job!.state.id, name) }
   file(name: 'source.md' | 'summary.md'): string | null {
     return this.job && (name === 'source.md' ? this.job.state.hasSource : this.job.state.hasSummary) ? this.path(name) : null
@@ -120,14 +145,16 @@ export class ConversationCompaction {
   compressionUrl(): string | null { return this.job?.sourceUrl ?? null }
   recoveryPrompt(): string {
     if (!this.job || this.job.sourceDelivery !== 'sent' || this.job.state.hasSummary || this.running) {
-      throw new Error('请先等待原始快照发送和压缩回答结束，再补全摘要。')
+      throw new Error('请先等待原始快照发送和回答结束，再补全摘要。')
     }
-    return compactionRecoveryPrompt(this.job.state.id, this.job.budget ?? compactionBudget(this.job.state.sourceTokens))
+    return compactionRecoveryPrompt(this.job.state.id,
+      this.isExport ? undefined : this.job.budget ?? compactionBudget(this.job.state.sourceTokens), this.isExport ? 'export' : 'compact')
   }
   state(owner: FocusOwner): CompactionState | null {
     return this.job && sameOwner(owner, this.job.state.owner) ? { ...this.job.state, owner: { ...this.job.state.owner } } : null
   }
   get busy(): boolean { return this.running }
+  get isExport(): boolean { return this.job?.state.generationPlatformId !== undefined }
   get inProgress(): boolean { return !!this.job && COMPACTION_ACTIVE.includes(this.job.state.phase) }
   private save(): void {
     if (!this.job) return
@@ -141,9 +168,15 @@ export class ConversationCompaction {
       workerVisible: this.job.state.workerVisible && !!this.page }
     this.save()
   }
-  async start(owner: FocusOwner, capture: () => Promise<{ source: CompactionSource; seed: CompactionSeed; view?: ConversationViewSnapshot; contextTokens?: number }>): Promise<CompactionState> {
-    if (this.running || this.job && !['completed', 'cancelled'].includes(this.job.state.phase)) throw new Error('已有压缩任务，请先继续检查或取消该任务。')
-    if (!supportsCompaction(owner.platformId) || !owner.conversationId || this.disposed) throw new Error('当前会话不能压缩。')
+  async start(owner: FocusOwner, capture: () => Promise<{ source: CompactionSource; seed: CompactionSeed; view?: ConversationViewSnapshot; contextTokens?: number }>,
+    generationPlatformId?: SelectionQuestionPlatform, generationAccountId?: string): Promise<CompactionState> {
+    if (this.running || this.job && !['completed', 'cancelled'].includes(this.job.state.phase)) throw new Error('已有任务，请先完成或取消该任务。')
+    if (!supportsCompaction(owner.platformId) || !owner.conversationId || this.disposed ||
+        owner.claudeAccountId !== this.options.claudeAccountId) throw new Error('当前会话暂不支持此操作。')
+    if (generationPlatformId !== undefined && !supportsCompaction(generationPlatformId)) throw new Error('生成平台不可用。')
+    if (generationAccountId !== undefined && (generationPlatformId !== 'claude' || !isClaudeAccountId(generationAccountId))) {
+      throw new Error('生成账号不可用。')
+    }
     this.running = true
     const controller = new AbortController()
     this.controller = controller
@@ -153,11 +186,13 @@ export class ConversationCompaction {
       controller.signal.throwIfAborted()
       if (!sameOwner(owner, source.owner) || !this.options.canWork(owner)) throw new Error('原会话已切换，请返回原会话后重试。')
       const snapshot = compactionSourceMarkdown(source)
-      const budget = compactionBudget(contextTokens ?? snapshot.tokens)
+      const budget = generationPlatformId ? undefined : compactionBudget(contextTokens ?? snapshot.tokens)
       this.closePage()
       this.job = { version: 1, seed, budget, targetId: randomUUID(), sourceHash: hash(snapshot.markdown), summaryHash: '',
         sourceUrl: null, handoffUrl: null, sourceDelivery: 'none', handoffDelivery: 'none', handoffAnswer: null,
-        state: { id: randomUUID(), owner: { ...owner }, phase: 'preparing', message: '正在保存会话快照…', createdAt: this.now(),
+        state: { id: randomUUID(), owner: { ...owner }, ...(generationPlatformId && { generationPlatformId }),
+          ...(generationAccountId && { generationAccountId }),
+          phase: 'preparing', message: '正在保存会话快照…', createdAt: this.now(),
           updatedAt: this.now(), sourceMessages: snapshot.messageCount, sourceTokens: snapshot.tokens, summaryTokens: null,
           hasSource: false, hasSummary: false, workerVisible: false, targetSessionId: null } }
       this.save()
@@ -166,7 +201,7 @@ export class ConversationCompaction {
       await writeFile(this.path('source.md'), snapshot.markdown, { encoding: 'utf8', flag: 'wx', mode: 0o600, signal: controller.signal })
       controller.signal.throwIfAborted()
       this.job.state.hasSource = true
-      this.update('opening', '正在压缩对话…')
+      this.update('opening', this.isExport ? '正在打开生成平台…' : '正在压缩对话…')
     } catch (error) {
       if (this.job && this.job !== previous && this.controller === controller && !controller.signal.aborted) this.update('failed', error instanceof Error ? error.message : '保存会话快照失败。')
       throw error
@@ -176,19 +211,19 @@ export class ConversationCompaction {
   }
   async resume(owner: FocusOwner): Promise<void> {
     if (this.running || this.disposed || !this.job || !sameOwner(owner, this.job.state.owner) ||
-        ['completed', 'cancelled'].includes(this.job.state.phase)) return
+        ['completed', 'cancelled', 'ready-to-export'].includes(this.job.state.phase)) return
     const controller = new AbortController()
     this.controller = controller
     this.running = true
     try {
-      if (!this.job.state.hasSource) throw new Error('原始快照未保存成功，请取消任务后重新压缩。')
-      this.job.budget ??= compactionBudget(this.job.state.sourceTokens)
+      if (!this.job.state.hasSource) throw new Error('原始快照未保存成功，请取消任务后重新开始。')
+      if (!this.isExport) this.job.budget ??= compactionBudget(this.job.state.sourceTokens)
       if (!this.job.state.hasSummary) {
         await this.checkedFile('source.md', this.job.sourceHash)
         this.current(controller.signal)
         const answer = await this.exchange(false, controller.signal)
         this.current(controller.signal)
-        const summary = compactionReplyText(answer) + '\n'
+        const summary = compactionReplyText(answer, this.job.state.generationPlatformId ?? owner.platformId) + '\n'
         this.job.state.summaryTokens = estimateContextText(summary).estimatedTokens
         this.update('saving', '正在保存交接摘要…')
         const temporary = join(this.options.directory, this.job.state.id, `summary-${randomUUID()}.tmp`)
@@ -204,10 +239,15 @@ export class ConversationCompaction {
       this.current(controller.signal)
       const summary = await this.checkedFile('summary.md', this.job.summaryHash)
       this.current(controller.signal)
+      if (this.isExport) {
+        this.closePage()
+        this.update('ready-to-export', '任务交接文档已生成')
+        return
+      }
       if (!this.job.handoffAnswer) {
         const answer = await this.exchange(true, controller.signal)
         this.current(controller.signal)
-        this.job.handoffAnswer = compactionReplyText(answer)
+        this.job.handoffAnswer = compactionReplyText(answer, owner.platformId)
         this.save()
       }
       // The isolated pages can finish in the background. Adoption also waits for
@@ -225,61 +265,84 @@ export class ConversationCompaction {
     } catch (error) {
       if (this.controller === controller && !controller.signal.aborted) {
         const uncertain = this.job.sourceDelivery === 'uncertain' || this.job.handoffDelivery === 'uncertain'
-        this.update(uncertain ? 'uncertain' : 'failed', error instanceof Error ? error.message : '压缩流程中断，请检查网页后继续。')
+        this.update(uncertain ? 'uncertain' : 'failed', error instanceof Error ? error.message : '后台任务中断，请检查网页后继续。')
       }
     } finally {
       if (this.controller === controller) this.controller = null
       this.running = false
     }
   }
+  async exportSummary(owner: FocusOwner, choosePath: (fileName: string) => Promise<string | undefined>): Promise<void> {
+    const job = this.job
+    if (this.running || this.disposed || !job?.state.generationPlatformId ||
+        job.state.phase !== 'ready-to-export' || !sameOwner(owner, job.state.owner)) throw new Error('当前没有可导出的交接文档。')
+    this.running = true
+    try {
+      const summary = await this.checkedFile('summary.md', job.summaryHash)
+      const destination = await choosePath(handoffExportFileName(job.seed.session.title, job.state.createdAt))
+      if (!destination || this.disposed) return
+      const temporary = join(dirname(destination), `.summary-${randomUUID()}.tmp`)
+      try {
+        await writeFile(temporary, summary, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+        await rename(temporary, destination)
+      } finally { await rm(temporary, { force: true }).catch(() => {}) }
+      this.update('completed', '任务交接文档已保存到本机')
+    } finally { this.running = false }
+  }
   private current(signal: AbortSignal): void { signal.throwIfAborted(); if (this.disposed || !this.job) throw new Error('压缩任务已结束。') }
+  private canContinue(job: StoredCompaction): boolean {
+    // The captured snapshot is the full input for an export; it can finish even
+    // if the user opens a different conversation on the source platform.
+    return !this.disposed && this.job === job && (!!job.state.generationPlatformId || this.options.canWork(job.state.owner))
+  }
   private async waitRunnable(signal: AbortSignal): Promise<void> {
     while (true) {
       this.current(signal)
-      if (this.options.canWork(this.job!.state.owner) && this.page?.available) return
+      if (this.canContinue(this.job!) && this.page?.available) return
       await this.pause()
     }
   }
   private async checkedFile(name: 'source.md' | 'summary.md', expected: string): Promise<string> {
     const content = await readFile(this.path(name), 'utf8')
-    if (!expected || hash(content) !== expected) throw new Error(`${name} 已被修改或不完整，请保留文件并重新开始压缩。`)
+    if (!expected || hash(content) !== expected) throw new Error(`${name} 已被修改或不完整，请保留文件并重新开始任务。`)
     return content
   }
   private ensurePage(handoff: boolean): Page {
     const job = this.job!
+    const platformId = job.state.generationPlatformId ?? job.state.owner.platformId
     const delivery = handoff ? job.handoffDelivery : job.sourceDelivery
     const url = handoff ? job.handoffUrl : job.sourceUrl
-    if (url && !selectionQuestionConversation(job.state.owner.platformId, url)) throw new Error('保存的压缩会话地址无效。')
+    if (url && !selectionQuestionConversation(platformId, url)) throw new Error('保存的处理会话地址无效。')
     if (this.page && this.pageHandoff === handoff && (!url ||
-        selectionQuestionConversation(job.state.owner.platformId, this.page.url)?.id === selectionQuestionConversation(job.state.owner.platformId, url)?.id)) return this.page
+        selectionQuestionConversation(platformId, this.page.url)?.id === selectionQuestionConversation(platformId, url)?.id)) return this.page
     this.closePage()
-    if (delivery !== 'none' && (!url || !selectionQuestionConversation(job.state.owner.platformId, url))) {
+    if (delivery !== 'none' && !url) {
       throw new Error('上次消息是否已发送尚未确认，且没有保存到会话地址。请先在平台历史中核对；为避免重复发送，本任务不会重新提交。可取消任务后手动处理。')
     }
-    const platform = platformById(job.state.owner.platformId)
-    if (!platform) throw new Error('压缩平台不可用。')
+    const platform = platformById(platformId)
+    if (!platform) throw new Error('生成平台不可用。')
     this.pageHandoff = handoff
     const epoch = ++this.pageEpoch
     this.page = this.options.makePage(platform.id, url ?? platform.homeUrl, target => {
       if (this.job !== job || this.pageHandoff !== handoff || this.pageEpoch !== epoch) return
       const currentDelivery = handoff ? job.handoffDelivery : job.sourceDelivery
       const key = handoff ? 'handoffUrl' : 'sourceUrl'
-      if (currentDelivery !== 'none' && selectionQuestionConversation(job.state.owner.platformId, target) && !job[key]) {
+      if (currentDelivery !== 'none' && selectionQuestionConversation(platformId, target) && !job[key]) {
         job[key] = target; this.save()
       }
-    })
+    }, job.state.generationPlatformId ? job.state.generationAccountId : job.state.owner.claudeAccountId)
     job.state.workerVisible = false
     this.save()
     return this.page
   }
   private async exchange(handoff: boolean, signal: AbortSignal): Promise<string> {
     this.current(signal)
-    const job = this.job!, id = job.state.id, platform = job.state.owner.platformId
+    const job = this.job!, id = job.state.id, platform = job.state.generationPlatformId ?? job.state.owner.platformId
     const deliveryKey = handoff ? 'handoffDelivery' : 'sourceDelivery'
     const urlKey = handoff ? 'handoffUrl' : 'sourceUrl'
     const name = handoff ? 'summary.md' : 'source.md'
     const page = this.ensurePage(handoff)
-    this.update(handoff ? 'importing' : 'opening', '正在压缩对话…')
+    this.update(handoff ? 'importing' : 'opening', this.isExport ? '正在打开生成平台…' : '正在压缩对话…')
     let activeMs = 0, readErrors = 0, last = '', stableSince = 0, draftClears = 0
     for (;;) {
       await this.waitRunnable(signal)
@@ -291,21 +354,22 @@ export class ConversationCompaction {
       if (snapshot) {
         const pinned = job[urlKey]
         const actual = selectionQuestionConversation(platform, page.url)
-        if (pinned && actual?.id !== selectionQuestionConversation(platform, pinned)?.id) throw new Error('压缩网页已切换到其他页面。请返回本次任务的会话后继续检查。')
+        if (pinned && actual?.id !== selectionQuestionConversation(platform, pinned)?.id) throw new Error('处理网页已切换到其他页面。请返回本次任务的会话后继续检查。')
         if (job[deliveryKey] === 'none') {
-          if (snapshot.hasHistory) throw new Error('压缩网页中已有消息，已停止自动发送。请取消任务后重新压缩。')
+          if (snapshot.hasHistory) throw new Error('处理网页中已有消息，已停止自动发送。请取消后重新开始。')
           if (snapshot.nativeDraft) {
             // The shared partition can restore any unsent new-chat draft; it must never ride along with the request.
-            if (++draftClears > 5 || !await page.clearDraft()) throw new Error('压缩网页输入框中的内容无法清除，已停止自动发送。请取消任务后重新压缩。')
+            if (++draftClears > 5 || !await page.clearDraft()) throw new Error('处理网页输入框中的内容无法清除，已停止自动发送。请取消后重新开始。')
             this.current(signal)
           } else if (snapshot.ready && snapshot.uploadReady && snapshot.generating === 'idle' && isQuestionChatHome(platform, page.url)) {
             await this.checkedFile(name, handoff ? job.summaryHash : job.sourceHash)
             this.current(signal)
-            this.update(handoff ? 'importing' : 'uploading', handoff ? '正在上传交接摘要并发送到新会话…' : '正在上传原始快照并发送压缩请求…')
-            const result = await page.send(this.path(name), handoff ? compactionHandoffPrompt(id) : compactionPrompt(id, job.budget), signal,
-              () => this.options.canWork(job.state.owner), () => {
+            this.update(handoff ? 'importing' : 'uploading', handoff ? '正在上传交接摘要并发送到新会话…' : '正在向生成平台发送会话快照…')
+            const prompt = handoff ? compactionHandoffPrompt(id) : compactionPrompt(id, job.budget, this.isExport ? 'export' : 'compact')
+            const result = await page.send(this.path(name), prompt, signal,
+              () => this.canContinue(job), () => {
                 this.current(signal)
-                if (!this.options.canWork(job.state.owner)) throw new Error('原会话当前不可操作。')
+                if (!this.canContinue(job)) throw new Error('原会话当前不可操作。')
                 job[deliveryKey] = 'uncertain'; this.save()
               }, this.options.sendPageMessage
                 ? (contents, chatPlatform, path, prompt, sendSignal, current, beforeSubmit) => this.options.sendPageMessage!(job.state.owner,
@@ -332,7 +396,7 @@ export class ConversationCompaction {
             (!pinned || actual.id === selectionQuestionConversation(platform, pinned)?.id)) {
           if (job[deliveryKey] !== 'sent') { job[deliveryKey] = 'sent'; job[urlKey] = page.url; this.save() }
           if (snapshot.sendFailure) throw new Error('网页报告消息发送失败。请在下方网页处理后继续检查；软件不会重复提交。')
-          if (snapshot.oversized) throw new Error('网页回答超过可完整读取的范围，已停止迁移。')
+          if (snapshot.oversized) throw new Error('网页回答超过可完整读取的范围，请在处理页重新生成较短的摘要。')
           const signature = snapshot.replyId + '\n' + snapshot.answer
           if (signature !== last || snapshot.generating !== 'idle') { last = signature; stableSince = this.now() }
           const stable = this.now() - stableSince
@@ -350,7 +414,7 @@ export class ConversationCompaction {
       await this.pause()
       activeMs += this.now() - started
       if (activeMs > 30_000 && job[deliveryKey] === 'none' && (!snapshot?.ready || !snapshot.uploadReady)) {
-        throw new Error('压缩页面尚未就绪，可能需要登录或完成验证。请点“处理问题”查看页面，处理后重试。')
+        throw new Error('处理页面尚未就绪，可能需要登录或完成验证。请点“处理问题”查看页面，处理后重试。')
       }
       if (activeMs > (job[deliveryKey] === 'none' ? 120_000 : 15 * 60_000)) throw new Error('等待网页超时。请完成登录、检查网络或补全回答，再点“继续检查”。')
     }
@@ -361,8 +425,8 @@ export class ConversationCompaction {
     this.page?.setViewport(raw, visible && this.options.canWork(owner))
   }
   showPage(): void {
-    if (!this.job || ['completed', 'cancelled'].includes(this.job.state.phase)) throw new Error('当前没有需要处理的压缩任务。')
-    this.ensurePage(this.job.state.hasSummary)
+    if (!this.job || ['completed', 'cancelled', 'ready-to-export'].includes(this.job.state.phase)) throw new Error('当前没有需要处理的任务。')
+    this.ensurePage(!this.isExport && this.job.state.hasSummary)
     this.job.state.workerVisible = true
     this.save()
   }
@@ -372,15 +436,16 @@ export class ConversationCompaction {
   }
   setTheme(theme: Parameters<Page['setTheme']>[0]): void { this.page?.setTheme(theme) }
   pauseTask(message: string): void {
-    if (!this.job || ['completed', 'cancelled'].includes(this.job.state.phase)) return
+    if (!this.job || ['completed', 'cancelled', 'ready-to-export'].includes(this.job.state.phase)) return
     this.controller?.abort()
     this.closePage()
     this.update('paused', message)
   }
   cancel(): void {
+    if (this.running && this.job?.state.phase === 'ready-to-export') return
     this.controller?.abort()
     this.closePage()
-    if (this.job) this.update('cancelled', '压缩已取消，已保存的文件和已发送的网页消息仍保留。')
+    if (this.job) this.update('cancelled', '任务已取消，已保存的文件和已发送的网页消息仍保留。')
   }
   private closePage(): void {
     this.pageEpoch++

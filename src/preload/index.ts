@@ -222,7 +222,11 @@ const api: AppApi = {
   getEmbedState: (): Promise<EmbedState> => ipcRenderer.invoke(IpcChannels.embedGetState),
   getFocusChat: (owner: FocusOwner): Promise<FocusChatState | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner),
   getCompaction: owner => ipcRenderer.invoke(IpcChannels.compactionGet, owner),
-  startCompaction: owner => ipcRenderer.invoke(IpcChannels.compactionStart, owner),
+  listClaudeAccounts: () => ipcRenderer.invoke(IpcChannels.claudeAccountsList),
+  addClaudeAccount: (owner, label) => ipcRenderer.invoke(IpcChannels.claudeAccountAdd, owner, label),
+  switchClaudeAccount: (owner, accountId) => ipcRenderer.invoke(IpcChannels.claudeAccountSwitch, owner, accountId),
+  startCompaction: (owner, generationPlatformId, generationAccountId) =>
+    ipcRenderer.invoke(IpcChannels.compactionStart, owner, generationPlatformId, generationAccountId),
   compactionAction: (request, action) => ipcRenderer.invoke(IpcChannels.compactionAction, request, action),
   setCompactionViewport: (request, bounds, visible) => ipcRenderer.send(IpcChannels.compactionViewport, request, bounds, visible),
   pollFocusChat: (owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner, cursor),

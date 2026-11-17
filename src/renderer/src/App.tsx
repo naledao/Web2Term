@@ -41,6 +41,8 @@ import ConversationTranscript from './components/ConversationTranscript'
 import FocusChatView from './components/FocusChatView'
 import type { ChatView } from '@shared/focus-chat'
 import { DEFAULT_CHAT_VIEW, focusPlatformLabels, supportsFocusView } from '@shared/focus-chat'
+import { DEFAULT_CLAUDE_ACCOUNT, DEFAULT_CLAUDE_ACCOUNT_ID } from '@shared/claude-accounts'
+import type { ClaudeAccount } from '@shared/claude-accounts'
 import QuestionChatPanel from './components/QuestionChatPanel'
 import type { QuestionChatState } from '@shared/deepseek-question'
 import { supportsSelectionQuestion } from '@shared/deepseek-question'
@@ -410,6 +412,14 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const showFocusView = isFocusView || (leavingView === 'focus' && supportsFocusView(platformId))
   const showLocalView = placeholderToggle || leavingView === 'local'
   const [embed, setEmbed] = useState<EmbedState>(INITIAL_EMBED_STATE)
+  const [claudeAccounts, setClaudeAccounts] = useState<ClaudeAccount[]>([{ ...DEFAULT_CLAUDE_ACCOUNT }])
+  useEffect(() => {
+    let cancelled = false
+    void window.api.listClaudeAccounts().then(accounts => {
+      if (!cancelled && accounts.length) setClaudeAccounts(accounts)
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
   /*
    * The site this session is actually showing.
    *
@@ -745,6 +755,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     return () => { cancelled = true; off() }
   }, [sessionId, platformId, conversationId])
   const transcriptScrollKey = conversationScrollKey(sessionId, platformId, conversationId)
+  const claudeAccountId = embed.claudeAccountId ?? DEFAULT_CLAUDE_ACCOUNT_ID
+  const claudeAccountScope = platformId === 'claude' && claudeAccountId !== DEFAULT_CLAUDE_ACCOUNT_ID ? claudeAccountId : undefined
   const conversationMessagesReady = conversationTranscript.ownerKey === transcriptScrollKey
   const conversationMessages = conversationMessagesReady ? conversationTranscript.messages : EMPTY_MESSAGES
   const isAuto = automation?.mode === 'auto'
@@ -1988,7 +2000,14 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [sessionId, platformId, chatView])
 
   // Terminal streaming must not invalidate the focus transcript's memoized props.
-  const focusOwner = useMemo(() => ({ sessionId, platformId, conversationId }), [sessionId, platformId, conversationId])
+  const focusOwner = useMemo(() => ({ sessionId, platformId, conversationId, claudeAccountId: claudeAccountScope }),
+    [sessionId, platformId, conversationId, claudeAccountScope])
+  const selectClaudeAccount = useCallback((accountId: string) => window.api.switchClaudeAccount(focusOwner, accountId), [focusOwner])
+  const addClaudeAccount = useCallback(async (label: string) => {
+    const account = await window.api.addClaudeAccount(focusOwner, label)
+    setClaudeAccounts(accounts => [...accounts.filter(item => item.id !== account.id), account])
+    selectChatView('original')
+  }, [focusOwner, selectChatView])
   const focusNewChat = useCallback(() => window.api.sendEmbedCommand('home'), [])
   const focusQuestion = useCallback(() => setQuestionMinimized(false), [])
   const focusOriginal = useCallback(() => selectChatView('original'), [selectChatView])
@@ -2463,9 +2482,16 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           aria-labelledby={'chat-view-tab-' + (isFocusView ? 'focus' : placeholderToggle ? 'local' : 'original')}>
           {showFocusView ? (
             <div className={'stage__view' + (isFocusView ? '' : ' stage__view--leaving')}>
-            <FocusChatView key={transcriptScrollKey} owner={focusOwner} theme={theme} viewConversationId={embed.viewConversationId ?? conversationId}
+            <FocusChatView key={claudeAccountScope ? transcriptScrollKey + ':' + claudeAccountScope : transcriptScrollKey}
+              owner={focusOwner} theme={theme} viewConversationId={embed.viewConversationId ?? conversationId}
               visible={chatSurfaceVisible} messages={conversationMessages} messagesReady={conversationMessagesReady}
+              dialogContainer={appContainer?.closest<HTMLElement>('.workspace') ?? appContainer}
               needsAnswer={!!pendingQuestion}
+              taskRunning={taskRunning}
+              claudeAccountId={claudeAccountId}
+              claudeAccounts={claudeAccounts}
+              onClaudeAccountSelect={selectClaudeAccount}
+              onClaudeAccountAdd={addClaudeAccount}
               newChatDisabled={taskRunning || embed.isLoading || switchingPlatform}
               onNewChat={focusNewChat}
               onQuestion={focusQuestion}
@@ -2842,10 +2868,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         ) : null}
 
         {backgroundTasksOpen ? <BackgroundTasksPane sessionId={sessionId} visible={panelTab === 'background' && !panelCollapsed} /> : null}
-        {scheduledTasksOpen ? <ScheduledTasksPane owner={{ sessionId, platformId, conversationId }} visible={panelTab === 'scheduled' && !panelCollapsed} /> : null}
+        {scheduledTasksOpen ? <ScheduledTasksPane owner={focusOwner} visible={panelTab === 'scheduled' && !panelCollapsed} /> : null}
 
         {githubRepositoriesOpen ? <GithubRepositoriesPane visible={panelTab === 'github' && !panelCollapsed}
-          owner={{ sessionId, platformId, conversationId }} taskRunning={taskRunning} commandRecovery={interceptor?.commandRecovery}
+          owner={focusOwner} taskRunning={taskRunning} commandRecovery={interceptor?.commandRecovery}
           loginDisabledReason={remoteTerminal ? '请先将当前终端切回本机'
             : switchingPlatform || embed.isLoading ? '等待当前 AI 页面加载完成'
               : !interceptor?.installed || !interceptor.enabled || !interceptor.promptInjectionEnabled ? '请先启用当前对话的终端模式和提示词注入'
@@ -3495,8 +3521,8 @@ ${record.command}`
           </Dialog.Root>
         ) : null}
 
-        {toolsOpen && appContainer ? <ToolPromptsDialog key={JSON.stringify([sessionId, platformId, embed.conversationId, toolsSkill])}
-          owner={{ sessionId, platformId, conversationId: embed.conversationId }} container={appContainer} theme={theme}
+        {toolsOpen && appContainer ? <ToolPromptsDialog key={JSON.stringify([sessionId, platformId, embed.conversationId, toolsSkill, claudeAccountScope])}
+          owner={{ ...focusOwner, conversationId: embed.conversationId }} container={appContainer} theme={theme}
           skillId={toolsSkill} trigger={toolsSkill ? skillSettingsTriggerRef : toolsTriggerRef} onClose={() => setToolsOpen(false)} /> : null}
         {/* System prompt keeps its searchable, read-only viewer. */}
         {promptOpen && appContainer ? (

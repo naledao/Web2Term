@@ -169,6 +169,8 @@ export interface FocusOwner {
   sessionId: string
   platformId: string
   conversationId: string | null
+  /** Omitted for the original Claude partition and for other platforms. */
+  claudeAccountId?: string
 }
 export type FocusComposerModeId = 'thinking' | 'search'
 export const FOCUS_COMPOSER_MODES = [{ id: 'thinking', label: '深度思考' }, { id: 'search', label: '智能搜索' }] as const
@@ -365,10 +367,49 @@ export interface FocusSelectionRequest extends FocusOwner {
   sourceMessageId?: string
 }
 export function focusOwnerKey(owner: FocusOwner): string {
-  return JSON.stringify([owner.sessionId, owner.platformId, owner.conversationId])
+  const key = [owner.sessionId, owner.platformId, owner.conversationId]
+  if (owner.claudeAccountId) key.push(owner.claudeAccountId)
+  return JSON.stringify(key)
 }
-export function cleanFocusAnswer(text: string): string {
-  const answer = text.replace(/^\s*(?:#{1,6}[ \t]+)?(?:\*\*【任务完成】\*\*|__【任务完成】__|【任务完成】)\s*/, '')
+
+/** Claude can append the toolbar timestamp alone or concatenate it with a promotion. */
+export function stripClaudeReplyFooter(text: string): string {
+  const footer = /\r?\n[ \t]*\r?\n(?:Claude works directly with your codebase\s*)?(?:just now|(?:about )?(?:\d+|an?) (?:seconds?|minutes?|hours?|days?|weeks?|months?|years?) ago)[ \t]*(?:\r?\n[ \t]*)*$/i.exec(text)
+  if (!footer) return text
+  const body = text.slice(0, footer.index)
+  if (!body.trim()) return text
+  // A streaming code fence may still be open when the last line is captured.
+  let fence = ''
+  for (const [, delimiter, suffix] of body.matchAll(/^ {0,3}(`{3,}|~{3,})([^\r\n]*)/gm)) {
+    if (!fence) fence = delimiter
+    else if (delimiter[0] === fence[0] && delimiter.length >= fence.length && !suffix.trim()) fence = ''
+  }
+  return fence ? text : body.trimEnd()
+}
+
+// Claude can serialize a one-line caption twice with an icon-font glyph in
+// between. Only treat a duplicate as UI text if both captions match exactly.
+export const CLAUDE_THINKING_PREFIX = new RegExp(
+  /^(?! {4}|\t| {0,3}(?:[#>~\x60*_]|[-+][ \t]|\d+[.)][ \t]|【任务完成】)) {0,3}([^\s\uE000-\uF8FF][^\r\n\uE000-\uF8FF]{0,159}?)[ \t]*/.source +
+  String.raw`(?:[ \t\r\n]*[\uE000-\uF8FF][ \t\r\n]*\1[ \t]*)?` +
+  /\r?\n(?:[ \t]*\r?\n)*(?=【任务完成】[ \t]*(?:\r?\n|$))/.source
+)
+
+export function focusReplyParts(text: string, platformId: string, parts: FocusPart[] = []): FocusPart[] {
+  if (platformId !== 'claude' || parts.some(part => part.kind === 'reasoning')) return parts
+  const caption = CLAUDE_THINKING_PREFIX.exec(text)?.[1].trimEnd()
+  return caption ? [{ kind: 'reasoning', text: caption }, ...parts] : parts
+}
+
+export function cleanFocusAnswer(text: string, platformId?: string): string {
+  // Legacy Claude captures serialized the accessibility heading and its duplicate
+  // completion line into the same Markdown answer.
+  const content = platformId === 'claude'
+    ? stripClaudeReplyFooter(text)
+      .replace(/^\s*#{1,6}[ \t]+Claude responded:[ \t]*【任务完成】[ \t]*(?:\r?\n|$)(?=\s*(?:【任务完成】|$))/, '')
+      .replace(CLAUDE_THINKING_PREFIX, '')
+    : text
+  const answer = content.replace(/^\s*(?:#{1,6}[ \t]+)?(?:\*\*【任务完成】\*\*|__【任务完成】__|【任务完成】)\s*/, '')
   // Interpret only an entire transport object. Prose explaining JSON and code
   // examples embedded in a normal answer must retain their original formatting.
   let body = answer.trim().replace(/^JSON[ \t]*(?:\r?\n)+/i, '')

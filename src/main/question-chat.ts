@@ -111,6 +111,15 @@ export class QuestionChat {
   getState(): QuestionChatState | null {
     return this.closed ? null : { id: this.id, platformId: this.platform.id, selectedText: this.selectedText, contextPath: this.contextPath, status: this.statusText, error: this.statusError }
   }
+  async hasActiveReply(): Promise<boolean> {
+    const contents = this.view.webContents
+    const selector = this.platform.page.stopButtonSelectors.join(',')
+    if (this.closed || contents.isDestroyed() || !selector ||
+        !selectionQuestionConversation(this.platform.id, contents.getURL())) return false
+    return questionPageCall<boolean>(contents,
+      `Array.from(document.querySelectorAll(${JSON.stringify(selector)})).some(button => button.getClientRects().length > 0)`, 2500)
+      .catch(() => false)
+  }
   setViewport(raw: unknown, visible: boolean): void {
     if (this.closed || this.parent.isDestroyed()) return
     const [width, height] = this.parent.getContentSize()

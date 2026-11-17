@@ -3,8 +3,12 @@ import { join } from 'node:path'
 import { ConversationCompaction } from './conversation-compaction'
 import type { StoredCompaction } from './conversation-compaction'
 import { CompactionPage } from './compaction-page'
+import { applyChatPartitionProxy, claudeConversationLocation, claudePlatformForAccount, listClaudeAccounts, restoreClaudeWorkspace, saveClaudeAccount } from './claude-accounts'
+import { DEFAULT_CLAUDE_ACCOUNT_ID, isClaudeAccountId } from '../shared/claude-accounts'
+import type { ClaudeAccount } from '../shared/claude-accounts'
 import { ConversationContinuity } from './conversation-continuity'
 import type { CompactionAction, CompactionRequest, CompactionState } from '../shared/conversation-compaction'
+import { supportsCompaction } from '../shared/conversation-compaction'
 import type { ScheduledTasks } from './scheduled-tasks'
 import { sameScheduledTarget } from './scheduled-task-target'
 import type { ScheduledDelivery } from './scheduled-tasks'
@@ -141,7 +145,7 @@ import { normalizeNacosUrl } from './nacos-view'
 import { readMysqlColumnMetadata, mysqlColumnDescriptions, mysqlRowKey, mysqlRowDeleteUnavailable, mysqlColumnsEditable, deleteMysqlRowWithConnection, updateMysqlCellWithConnection } from './mysql-table-rows'
 import { readMysqlDatabaseDdl } from './mysql-ddl-export'
 import { RedisReader, normalizeRedisDraft } from './redis-reader'
-import { ChatGptEmbed } from './embed'
+import { ChatGptEmbed, prepareChatBrowserIdentity } from './embed'
 import { FocusChat } from './focus-chat'
 import { stageFocusAttachments } from './focus-attachments'
 import { cleanFocusUserText, focusOwnerKey, supportsFocusView, validFocusFiles, focusToolInfo, focusToolDelivery, focusComputerToolUpdate, focusComputerResultUpdate } from '../shared/focus-chat'
@@ -274,6 +278,7 @@ export interface SessionRuntimeOptions {
   projectId?: string | null
   initialUrl?: string
   initialConversationId?: string | null
+  initialClaudeWorkspace?: string
   initialPaused?: boolean
   initialPromptInjectionEnabled?: boolean
   initialLocalCwd?: string
@@ -370,7 +375,22 @@ function normalizeProxy(raw: string): string {
 export class SessionRuntime {
   private readonly continuity: ConversationContinuity
   private pendingCompaction: { conversationId: string; url: string } | null = null
-  private compaction: ConversationCompaction | null = null
+  private readonly compactions = new Map<string, ConversationCompaction>()
+  private claudeAccountId: string
+  private readonly claudeLocations: Map<string, string>
+  private switchingClaudeAccount = false
+
+  private get claudeAccountScope(): string | undefined {
+    return this.claudeAccountId === DEFAULT_CLAUDE_ACCOUNT_ID ? undefined : this.claudeAccountId
+  }
+
+  private get compactionScope(): string {
+    return this.activePlatformId === 'claude' ? this.claudeAccountId : DEFAULT_CLAUDE_ACCOUNT_ID
+  }
+
+  private get compaction(): ConversationCompaction | undefined {
+    return this.compactions.get(this.compactionScope)
+  }
   private readonly conversationTools: ConversationTools
   /** Main-process backends register only the desktop actions they can actually execute. */
   readonly computerUseTool: ComputerUseTool
@@ -577,6 +597,14 @@ export class SessionRuntime {
     this.id = options.id ?? randomUUID()
     this.continuity = new ConversationContinuity(this.id, options.store)
     this.conversationTools = new ConversationTools(this.id, options.store)
+    const claude = restoreClaudeWorkspace(options.initialClaudeWorkspace, listClaudeAccounts(options.store))
+    this.claudeAccountId = claude.accountId
+    this.claudeLocations = claude.locations
+    this.conversationTools.claudeAccountId = this.claudeAccountScope
+    if (!options.initialClaudeWorkspace && options.platform.id === 'claude' && options.initialUrl) {
+      const legacyLocation = claudeConversationLocation(options.initialUrl)
+      if (legacyLocation) this.claudeLocations.set(this.claudeAccountId, legacyLocation.url)
+    }
     this.computerUseTool = new ComputerUseTool(() => this.refreshComputerUseCapabilities(), options.desktopCoordinator)
     this.focusChat = new FocusChat(this.id, options.store)
     this.taskCoordinator = new TaskCoordinator(this.id, options.store, (state, completedNow) => {
@@ -697,6 +725,10 @@ export class SessionRuntime {
        * sites nobody is looking at, which also means two sets of background beacons.
        */
       const isStarting = platform.id === options.platform.id
+      if (platform.id === 'claude') {
+        this.embeds.set(platform.id, this.claudeEmbedEntry(this.claudeAccountId))
+        continue
+      }
       this.embeds.set(platform.id, {
         platform,
         embed: null,
@@ -968,33 +1000,36 @@ export class SessionRuntime {
    * handler that guessed its own platform would attribute a background page's events to
    * whichever view happens to be in front.
    */
-  private embedHandlers(platform: ChatPlatform): EmbedHandlers {
-    const record = (): PlatformEmbed => this.embeds.get(platform.id) as PlatformEmbed
+  private embedHandlers(entry: PlatformEmbed): EmbedHandlers {
+    const platform = entry.platform
+    // An account switch replaces the Claude slot. Reports already queued by the old
+    // webContents must be dropped before they can touch the new account's task state.
+    const isCurrent = (): boolean => !this.disposed && this.embeds.get(platform.id) === entry
     /*
      * A FUNCTION, not a captured boolean. The handlers outlive a platform switch and are how
      * the background view reports in, so "am I the visible one" has to be asked at event time
      * â€” capture it and the view in front would keep the old answer forever.
      */
-    const isActive = (): boolean => platform.id === this.activePlatformId
+    const isActive = (): boolean => isCurrent() && platform.id === this.activePlatformId
 
     return {
-      contextTurnId: conversationId => this.focusChat?.contextUsageTurnId(platform.id, conversationId),
-      onContextUsage: entry => this.recordContextUsage(platform.id, entry),
+      contextTurnId: conversationId => isCurrent() ? this.focusChat?.contextUsageTurnId(platform.id, conversationId) : undefined,
+      onContextUsage: usage => { if (isCurrent()) this.recordContextUsage(platform.id, usage) },
       onQuestionChat: state => {
         if (isActive()) this.send(IpcChannels.questionChatState, state)
       },
       sendQuestionChat: (chatPlatform, contents, contextPath, prompt, signal, current, beforeSubmit) =>
         // The side chat is its own page and conversation; enqueuePageFileMessage gives it its own lane.
         this.enqueuePageFileMessage({ sessionId: this.id, platformId: chatPlatform.id, conversationId: null }, contents,
-          chatPlatform, contextPath, prompt, signal, current, beforeSubmit ?? (() => {})),
+          chatPlatform, contextPath, prompt, signal, () => isCurrent() && current(), beforeSubmit ?? (() => {})),
       readQuestionContext: conversationId => {
-        if (record().conversationId !== conversationId) return null
+        if (!isCurrent() || entry.conversationId !== conversationId) return null
         const conversation = this.options.store.list().find(item => item.id === conversationId)
         if (!conversation || selectionQuestionConversation(platform.id, conversation.url)?.id !== conversationId) return null
         return { conversationId, title: conversation.title, messages: this.options.store.listConversationMessages(conversationId) }
       },
       onState: (state) => {
-        if (this.disposed) return
+        if (!isCurrent()) return
         if (isActive() && this.pendingCompaction && state.conversationId !== this.pendingCompaction.conversationId) {
           if (isActive()) this.send(IpcChannels.embedState, this.getEmbedState())
           return
@@ -1003,7 +1038,6 @@ export class SessionRuntime {
           this.pendingCompaction = null
           this.refreshComputerUseCapabilities()
         }
-        const entry = record()
         /*
          * Remember the URL ONLY when it is one a restart should reopen.
          *
@@ -1017,7 +1051,13 @@ export class SessionRuntime {
          *
          * A persisted URL is a promise that reopening it is useful. A redirect dead end is not.
          */
-        if (state.url !== '' && isRestorableUrl(state.url)) entry.url = state.url
+        if (platform.id === 'claude') {
+          const location = claudeConversationLocation(state.url)
+          if (location) {
+            entry.url = location.url
+            this.claudeLocations.set(this.claudeAccountId, location.url)
+          }
+        } else if (state.url !== '' && isRestorableUrl(state.url)) entry.url = state.url
 
         /*
          * Only the visible view drives the UI. A background platform keeps its own state
@@ -1025,7 +1065,7 @@ export class SessionRuntime {
          * `embed:state` would overwrite the address bar and status line of the view the
          * user is actually looking at.
          */
-        if (isActive()) this.send(IpcChannels.embedState, this.continuity.decorate(state, platform.id))
+        if (isActive()) this.send(IpcChannels.embedState, this.decorateEmbedState(state))
 
         if (state.conversationId !== entry.conversationId) {
           const previousConversationId = entry.conversationId
@@ -1063,6 +1103,7 @@ export class SessionRuntime {
         if (isActive()) this.options.onEmbedReady?.()
       },
       onConversation: (conversation) => {
+        if (!isCurrent()) return
         this.options.store.upsert(conversation, this.currentConversationProject())
         this.flushContextUsage(platform.id, conversation.id)
         this.flushDeferredCommands(conversation.id)
@@ -1072,11 +1113,12 @@ export class SessionRuntime {
         this.broadcastConversations()
       },
       onSynced: (scraped) => {
+        if (!isCurrent()) return
         this.options.store.upsertMany(scraped)
         this.broadcastConversations()
       },
       onUserStarted: (text, files, editToken, submission, scheduledRunId, userSkills) => {
-        if (this.disposed) return undefined
+        if (!isCurrent()) return undefined
         const controlsCurrent = !this.disposed && isActive() && (this.active || this.canRunConversationInBackground(platform.id))
         const automatic = scheduledRunId !== undefined || submission?.id.startsWith('user:scheduled:') === true
         const scheduled = this.scheduledSubmission
@@ -1089,12 +1131,12 @@ export class SessionRuntime {
           if (this.lastSubmissions.get(platform.id) !== submission.id) { this.mailNotifications?.cancel(); this.toolPromptReads?.cancel(); this.scheduledTaskTools?.cancel() }
           this.lastSubmissions.set(platform.id, submission.id)
         }
-        if (controlsCurrent && record().conversationId === null) this.conversationTools.submitted(platform.id)
+        if (controlsCurrent && entry.conversationId === null) this.conversationTools.submitted(platform.id)
         if (!automatic && controlsCurrent && !this.stoppingTask && this.options.desktopCoordinator?.canReleaseHumanControl() !== false &&
           (submission?.kind !== 'clarification' || !!submission.answerTo && this.taskCoordinator.waitingForUser(platform.id))) this.taskEnded = false
         const revision = this.focusRevision
         if (editToken && (!revision || revision.acknowledged || revision.token !== editToken || revision.platformId !== platform.id ||
-          revision.conversationId !== record().conversationId)) return undefined
+          revision.conversationId !== entry.conversationId)) return undefined
         if (editToken && revision) {
           this.deferredCommands.clear()
           this.backgroundTaskResults.cancel({ platformId: platform.id, conversationId: revision.conversationId })
@@ -1104,7 +1146,7 @@ export class SessionRuntime {
           ? this.focusChat.turns(platform.id, revision.conversationId).find(turn => turn.userMessageId === revision.messageIds[0])?.userSkills : undefined)
         const turnId = editToken && revision
           ? this.focusChat.revise(platform.id, revision.conversationId, text, revision.turnIds, revision.messageIds, referencedSkills)
-          : this.focusChat.begin(platform.id, record().conversationId, text, files, referencedSkills)
+          : this.focusChat.begin(platform.id, entry.conversationId, text, files, referencedSkills)
         if (editToken && revision) revision.acknowledged = true
         // A late send may remain in its original history, but cannot reopen task authority after handover.
         if (submission && !controlsCurrent) return turnId
@@ -1114,19 +1156,19 @@ export class SessionRuntime {
           try {
             const recovery = this.taskRecoverySend
             const recoveryMessage = recovery?.text === text
-            const previous = recoveryMessage ? this.taskCoordinator.context(platform.id, record().conversationId).task : null
+            const previous = recoveryMessage ? this.taskCoordinator.context(platform.id, entry.conversationId).task : null
             const resumes = recovery && recoveryMessage && this.active && !this.disposed && isActive() &&
               previous?.id === recovery.request.taskId && previous.generation === recovery.request.generation &&
-              recovery.request.platformId === platform.id && recovery.request.conversationId === record().conversationId &&
-              recovery.pageEpoch === record().embed?.getComputerUsePageEpoch() && submission.kind === 'goal'
+              recovery.request.platformId === platform.id && recovery.request.conversationId === entry.conversationId &&
+              recovery.pageEpoch === entry.embed?.getComputerUsePageEpoch() && submission.kind === 'goal'
             if (recovery) this.taskRecoverySend = null
             // A late recovery acknowledgement must not create a new goal after a switch/replacement.
             if (recoveryMessage && !resumes) return turnId
             // After the user's input paused computer use, their next message continues that same task.
-            const paused = !recoveryMessage && submission.kind === 'goal' ? this.taskCoordinator.context(platform.id, record().conversationId).task : null
+            const paused = !recoveryMessage && submission.kind === 'goal' ? this.taskCoordinator.context(platform.id, entry.conversationId).task : null
             const continuesPause = !automatic && !!paused && taskPausedByInput(paused)
             const submit = (resume?: { taskId: string; generation: number; userText?: boolean }): AutonomousTask | null =>
-              this.taskCoordinator.submit({ platformId: platform.id, conversationId: record().conversationId,
+              this.taskCoordinator.submit({ platformId: platform.id, conversationId: entry.conversationId,
                 submission, turnId, text: cleanFocusUserText(text), attachments: files ?? [], capability: this.getComputerUseCapability(platform.id, true),
                 ...(resume ? { resume } : {}),
                 machine: { id: this.options.localMachineId, label: '本机', platform: process.platform, arch: process.arch,
@@ -1135,32 +1177,34 @@ export class SessionRuntime {
               // A pause that can no longer be continued (another machine, another conversation) leaves a fresh goal.
               : continuesPause && paused ? submit({ taskId: paused.id, generation: paused.generation, userText: true }) ?? submit() : submit()
             if (resumes) {
-              if (!task) this.taskCoordinator.fail(platform.id, record().conversationId)
+              if (!task) this.taskCoordinator.fail(platform.id, entry.conversationId)
               else recovery.acknowledged = true
             }
             if (scheduledCurrent && scheduled) scheduled.autonomousTaskId = task?.id ?? null
             if (!automatic && task?.status === 'recorded' && submission.kind === 'goal') this.options.desktopCoordinator?.releaseHumanControl()
           } catch (error) {
             console.warn('[task] failed to record confirmed submission:', error instanceof Error ? error.name : 'Error')
-            this.taskCoordinator.fail(platform.id, record().conversationId)
+            this.taskCoordinator.fail(platform.id, entry.conversationId)
           }
         }
-        if (supportsFocusView(platform.id)) writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: record().conversationId },
+        if (supportsFocusView(platform.id)) writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: entry.conversationId },
           { event: 'user-started', turnId, inputLength: text.length, attachmentCount: files?.length ?? 0 })
         return turnId
       },
       onUserMessage: (text, attachments, turnId, imageSource) => {
+        if (!isCurrent()) return
         const discarded = !!turnId && !this.focusChat.ownsTurn(platform.id, turnId)
-        if (supportsFocusView(platform.id)) writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: record().conversationId },
+        if (supportsFocusView(platform.id)) writeFocusDiagnostic({ sessionId: this.id, platformId: platform.id, conversationId: entry.conversationId },
           { event: discarded ? 'user-discarded' : 'user-captured', turnId, imageSource, inputLength: text.length, attachmentCount: attachments.length })
         if (discarded) return
         this.captureConversationMessage(platform.id, 'user', text, null, attachments, turnId)
       },
       onRawSent: textLength => {
+        if (!isCurrent()) return
         this.focusChat.rawSent(platform.id)
         this.updateInjectionLedger(platform.id, ledger => addInjectionTraffic(ledger, textLength))
       },
-      onContextTraffic: chars => { this.updateInjectionLedger(platform.id, ledger => addInjectionTraffic(ledger, chars)) },
+      onContextTraffic: chars => { if (isCurrent()) this.updateInjectionLedger(platform.id, ledger => addInjectionTraffic(ledger, chars)) },
       onScheduledTask: call => { if (isActive()) this.receiveScheduledTask(call) },
       onMailNotification: call => {
         if (isActive()) this.mailNotifications.receive(call,
@@ -1168,24 +1212,26 @@ export class SessionRuntime {
       },
       onToolPromptRead: call => { if (isActive()) this.toolPromptReads.receive(call) },
       onAssistantMessage: (messageId, text) => {
+        if (!isCurrent()) return
         this.captureConversationMessage(platform.id, 'assistant', text, messageId)
         this.focusChat.settled(platform.id, messageId, text)
         this.noteAutonomousReply(platform.id, messageId, 'response')
       },
       onAssistantHistoryMarkdown: (messageId, text) => {
-        const conversationId = record().conversationId
+        if (!isCurrent()) return
+        const conversationId = entry.conversationId
         if (conversationId) this.options.store.refreshAssistantMessageMarkdown(conversationId, messageId, text)
         // The focus view keeps its own copy of each answer; refresh that one too.
         if (conversationId && supportsFocusView(platform.id)) this.focusChat.refreshAnswer(platform.id, conversationId, messageId, text)
       },
-      hasConversationPrompt: conversationId => this.conversationTools.hasInjectedPrompt(platform.id, conversationId),
+      hasConversationPrompt: conversationId => isCurrent() && this.conversationTools.hasInjectedPrompt(platform.id, conversationId),
       onPromptInjected: conversationId => {
-        if (!this.disposed) this.conversationTools.markPromptInjected(platform.id, conversationId)
+        if (isCurrent()) this.conversationTools.markPromptInjected(platform.id, conversationId)
       },
-      planInjection: (fullPrefix, conversationId) => this.disposed ? null
+      planInjection: (fullPrefix, conversationId) => !isCurrent() ? null
         : planInjection(this.conversationTools.injectionLedger(platform.id, conversationId), fullPrefix, platform.id),
       onInjectionSent: (conversationId, plan) => {
-        if (this.disposed) return
+        if (!isCurrent()) return
         const conversation = conversationId === null ? 'draft' : 'saved'
         if (!plan) {
           writeInjectionLedgerDiagnostic(platform.id, 'injection-unmatched', conversation, this.conversationTools.injectionLedger(platform.id, conversationId))
@@ -1194,14 +1240,15 @@ export class SessionRuntime {
         const ledger = commitInjection(this.conversationTools.injectionLedger(platform.id, conversationId), plan, Date.now())
         this.conversationTools.setInjectionLedger(platform.id, conversationId, ledger)
         writeInjectionLedgerDiagnostic(platform.id, 'injection-committed', conversation, ledger, plan.mode)
-        record().embed?.refreshInjectionPlan()
+        entry.embed?.refreshInjectionPlan()
       },
       onConversationBranched: conversationId => {
-        if (this.disposed) return
+        if (!isCurrent()) return
         this.conversationTools.setInjectionLedger(platform.id, conversationId, null)
         writeInjectionLedgerDiagnostic(platform.id, 'injection-reset', conversationId === null ? 'draft' : 'saved', null)
       },
       onInterceptor: (status) => {
+        if (!isCurrent()) return
         if (isActive() && (!status.enabled || !status.promptInjectionEnabled)) this.remoteRipgrepSend?.controller.abort()
         this.mailNotifications?.reconcile()
         this.toolPromptReads?.reconcile(); this.scheduledTaskTools?.reconcile()
@@ -1220,7 +1267,8 @@ export class SessionRuntime {
         if (isActive()) this.notifyQuestion(question, count)
       },
       onQuestionRecorded: (messageId, rawJson) => {
-        const conversationId = record().conversationId
+        if (!isCurrent()) return
+        const conversationId = entry.conversationId
         if (!conversationId) return
         try {
           this.options.store.saveRecentCommandJson(conversationId, messageId, rawJson)
@@ -1228,7 +1276,7 @@ export class SessionRuntime {
           console.warn('[cmd] question not recorded:', (error as Error).message)
         }
       },
-      onTaskQuestion: (question, source) => this.recordTaskQuestion(platform.id, question, source),
+      onTaskQuestion: (question, source) => { if (isCurrent()) this.recordTaskQuestion(platform.id, question, source) },
       onTaskCompleted: (messageId, source) => {
         if (!isActive()) return
         this.refreshRemoteRipgrep()
@@ -1248,6 +1296,7 @@ export class SessionRuntime {
        * answer to "which conversation is this session driving".
        */
       onCommand: (command) => {
+        if (!isCurrent()) return
         this.traceCommand(platform, {
           event: 'received', messageId: command.messageId, active: isActive(), live: command.live,
           commandLength: 'command' in command ? command.command.length : undefined, taskSourcePresent: Boolean(command.taskSource)
@@ -1280,9 +1329,9 @@ export class SessionRuntime {
         this.handleDetectedCommand(command)
         this.focusChat.command(platform.id, command.messageId, command.live)
       },
-      onComputerRequest: request => this.receiveComputerUseRequest(platform.id, request),
+      onComputerRequest: request => isCurrent() && this.receiveComputerUseRequest(platform.id, request),
       onComputerDocumentChanged: () => {
-        if (this.disposed) return
+        if (!isCurrent()) return
         this.interruptTaskControl(platform.id)
       },
       onParseFailed: (payload) => {
@@ -1291,7 +1340,7 @@ export class SessionRuntime {
         this.runner.noteParseFailure(payload.text ?? '')
         if (payload.live === true) {
           const ledger = this.updateInjectionLedger(platform.id, noteInjectionViolation)
-          if (ledger) writeInjectionLedgerDiagnostic(platform.id, 'injection-violation', record().conversationId === null ? 'draft' : 'saved', ledger)
+          if (ledger) writeInjectionLedgerDiagnostic(platform.id, 'injection-violation', entry.conversationId === null ? 'draft' : 'saved', ledger)
         }
         if (payload.live === true) void this.enqueueCommandRecovery(platform.id,
           (this.active || this.canRunConversationInBackground(platform.id)) && this.runner.canSendAutomaticResult(), false)
@@ -1300,10 +1349,10 @@ export class SessionRuntime {
         if (isActive()) this.focusChat.commandRecovery(platform.id, recovery)
       },
       onGeminiRefusal: (conversationId, messageId, generation) => {
-        const embed = record()?.embed
+        const embed = entry.embed
         if (!embed) return
         const current = () => !this.disposed && this.active && isActive() && !this.taskEnded && !this.stoppingTask &&
-          record()?.embed === embed && embed.getState().conversationId === conversationId
+          entry.embed === embed && embed.getState().conversationId === conversationId
         if (!current()) return
         const owner = { sessionId: this.id, platformId: platform.id, conversationId }
         this.queueSend({ kind: 'recovery', owner, sourceId: messageId,
@@ -1340,7 +1389,7 @@ export class SessionRuntime {
 
     entry.embed = new ChatGptEmbed(
       entry.platform,
-      this.embedHandlers(entry.platform),
+      this.embedHandlers(entry),
       entry.url || entry.platform.homeUrl
     )
     entry.embed.setPromptInjectionEnabled(this.promptInjectionEnabled)
@@ -1427,7 +1476,7 @@ export class SessionRuntime {
    * reads the theme from settings.
    */
   setTheme(theme: AppTheme): void {
-    this.compaction?.setTheme(theme)
+    for (const compaction of this.compactions.values()) compaction.setTheme(theme)
     for (const entry of this.embeds.values()) entry.embed?.setTheme(theme)
   }
 
@@ -1492,6 +1541,75 @@ export class SessionRuntime {
     return true
   }
 
+  private claudeEmbedEntry(accountId: string): PlatformEmbed {
+    const platform = claudePlatformForAccount(accountId)
+    const location = claudeConversationLocation(this.claudeLocations.get(accountId) ?? '')
+    return { platform, embed: null, ...(location ?? { url: platform.homeUrl, conversationId: null }) }
+  }
+
+  private checkClaudeAccountSwitch(owner: FocusOwner): void {
+    if (!this.active || owner.platformId !== 'claude' || !this.ownsFocus(owner)) throw new Error('当前 Claude 对话已切换。')
+    if (this.taskRunning() || this.stoppingTask || this.focusRevision || this.runner.hasInFlightWork() ||
+        this.embed.getInterceptorStatus().pendingQuestion || this.backgroundTaskResults.isSending ||
+        this.mailNotifications.busy || this.toolPromptReads.busy || this.scheduledTaskTools.busy || this.scheduledSendAbort ||
+        this.taskCoordinator.current('claude') || [...this.compactions.values()].some(task => task.busy || task.inProgress) ||
+        !!owner.conversationId && this.backgroundTasks.getState().tasks.some(task => task.conversationId === owner.conversationId &&
+          ['checking', 'running'].includes(task.status)) ||
+        [...this.pageQueues.values()].some(queue => queue.state().pending > 0)) {
+      throw new Error('任务正在运行，请等待完成或结束任务后再切换账号。')
+    }
+    if (this.aiOutboundQueue.state().pending > 0) throw new Error('请先处理发送队列中的消息，再切换账号。')
+  }
+
+  async switchClaudeAccount(owner: FocusOwner, account: ClaudeAccount, adding = false): Promise<void> {
+    if (this.switchingClaudeAccount) throw new Error('正在切换 Claude 账号。')
+    this.checkClaudeAccountSwitch(owner)
+    if (account.id === this.claudeAccountId) return
+    this.switchingClaudeAccount = true
+    try {
+      if (adding) {
+        await applyChatPartitionProxy(claudePlatformForAccount(account.id).partition, this.options.settings().embedProxy.claude ?? '')
+      }
+      const previous = this.activeEmbed()
+      const [page, sideBusy] = await Promise.all([
+        previous.embed?.readFocusSnapshot(), previous.embed?.questionChatGenerating()
+      ])
+      this.checkClaudeAccountSwitch(owner)
+      if (this.activeEmbed() !== previous) throw new Error('当前 Claude 对话已切换。')
+      if (page?.generating === 'active' || page?.waiting || sideBusy) throw new Error('Claude 仍在回答，请等待完成或停止生成。')
+      if (page?.nativeDraft) throw new Error('Claude 原始页面有草稿，请先处理草稿再切换账号。')
+      if (adding) saveClaudeAccount(this.options.store, account)
+
+      this.compaction?.hide()
+      this.pendingCompaction = null
+      this.remoteRipgrepSend?.controller.abort()
+      this.focusChat.resetContext('claude')
+      this.focusUiRecoveredTurn = null
+      this.focusFileRequest = null
+      this.focusFileCache = null
+      this.pendingGoal = ''
+      this.pendingConversationMessages.delete('claude')
+      this.pendingContextUsage.delete('claude')
+      this.lastSubmissions.delete('claude')
+      this.deferredCommands.clear()
+      this.lastSummaryTaskRunning = false
+      this.claudeAccountId = account.id
+      this.conversationTools.claudeAccountId = this.claudeAccountScope
+      const next = this.claudeEmbedEntry(account.id)
+      this.embeds.set('claude', next)
+      if (this.window) previous.embed?.destroy(this.window)
+      this.focusChat.context('claude', next.conversationId)
+      const embed = this.ensureEmbed('claude').embed!
+      this.applyVisibility()
+      this.syncAutonomousTask('claude', next.conversationId)
+      this.refreshComputerUseCapabilities()
+      this.send(IpcChannels.embedState, this.getEmbedState())
+      this.send(IpcChannels.interceptorEvent, embed.getInterceptorStatus())
+      this.send(IpcChannels.questionChatState, null)
+      this.options.onSummaryChanged()
+    } finally { this.switchingClaudeAccount = false }
+  }
+
   /** Which platform this session is currently showing. */
   get activePlatform(): ChatPlatform {
     return this.activeEmbed().platform
@@ -1548,6 +1666,7 @@ export class SessionRuntime {
     url: string
     conversationId: string | null
     platformId: string
+    claudeWorkspace?: string
     paused: boolean
     promptInjectionEnabled: boolean
     localCwd: string
@@ -1576,6 +1695,8 @@ export class SessionRuntime {
       url: active.url,
       conversationId: active.conversationId,
       platformId: active.platform.id,
+      claudeWorkspace: this.claudeLocations.size || this.claudeAccountScope
+        ? JSON.stringify({ accountId: this.claudeAccountId, locations: Object.fromEntries(this.claudeLocations) }) : undefined,
       paused: automation.paused,
       promptInjectionEnabled: this.promptInjectionEnabled,
       localCwd: this.web2term ? '' : terminal.cwd,
@@ -1612,7 +1733,8 @@ export class SessionRuntime {
       conversationId: state.conversationId,
       platformId: this.activeEmbed().platform.id,
       taskRunning: this.taskRunning(),
-      compacting: this.compaction?.inProgress ?? false,
+      compacting: [...this.compactions.values()].some(task => task.inProgress && !task.isExport),
+      generatingHandoff: [...this.compactions.values()].some(task => task.inProgress && task.isExport),
       createdAt: this.createdAt
     }
   }
@@ -1674,13 +1796,18 @@ export class SessionRuntime {
 
   private ownsFocus(owner: FocusOwner): boolean {
     return !this.disposed && owner.sessionId === this.id && supportsFocusView(owner.platformId) &&
-      this.activePlatformId === owner.platformId && this.embed.getState().conversationId === owner.conversationId
+      this.activePlatformId === owner.platformId &&
+      owner.claudeAccountId === (owner.platformId === 'claude' ? this.claudeAccountScope : undefined) &&
+      this.embed.getState().conversationId === owner.conversationId
+  }
+
+  private decorateEmbedState(state: EmbedState): EmbedState {
+    return { ...this.continuity.decorate(state, this.activePlatformId), claudeAccountId: this.claudeAccountId }
   }
 
   getEmbedState(): EmbedState {
     const state = this.embed.getState()
-    return this.continuity.decorate(this.pendingCompaction
-      ? { ...state, ...this.pendingCompaction, isLoading: true } : state, this.activePlatformId)
+    return this.decorateEmbedState(this.pendingCompaction ? { ...state, ...this.pendingCompaction, isLoading: true } : state)
   }
   visibleConversationMessages(conversationId: string): import('../shared/types').ConversationMessage[] {
     return conversationId === this.activeEmbed().conversationId
@@ -1690,6 +1817,7 @@ export class SessionRuntime {
     const owner = job.state.owner, target = job.handoffUrl && selectionQuestionConversation(owner.platformId, job.handoffUrl)
     const entry = this.activeEmbed()
     if (this.disposed || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId || !target ||
+        owner.claudeAccountId !== (owner.platformId === 'claude' ? this.claudeAccountScope : undefined) ||
         entry.conversationId !== owner.conversationId && entry.conversationId !== target.id) throw new Error('来源会话已变化，暂未切换压缩上下文。')
     if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork()) throw new Error('请等待当前操作结束后继续承接压缩上下文。')
     this.options.store.upsert({ id: target.id, url: job.handoffUrl!, title: this.customTitle || job.seed.session.title })
@@ -1702,6 +1830,7 @@ export class SessionRuntime {
     this.customTitle = this.customTitle || job.seed.session.title
     entry.conversationId = target.id
     entry.url = job.handoffUrl!
+    if (owner.platformId === 'claude') this.claudeLocations.set(this.claudeAccountId, entry.url)
     this.focusChat.context(owner.platformId, target.id)
     this.pendingCompaction = { conversationId: target.id, url: job.handoffUrl! }
     // Persist C before navigation so a restart cannot reopen A after adoption.
@@ -1712,18 +1841,26 @@ export class SessionRuntime {
   }
 
   private compactionService(): ConversationCompaction {
-    if (!this.compaction) this.compaction = new ConversationCompaction({
-      sessionId: this.id, directory: join(app.getPath('userData'), 'exports', 'compactions'), store: this.options.store,
+    if (this.compaction) return this.compaction
+    const scope = this.compactionScope
+    const service = new ConversationCompaction({
+      sessionId: this.id, claudeAccountId: scope === DEFAULT_CLAUDE_ACCOUNT_ID ? undefined : scope,
+      directory: join(app.getPath('userData'), 'exports', 'compactions'), store: this.options.store,
       // A compaction owns isolated pages, so selecting another workspace or
       // platform only hides its optional UI; it does not revoke the upload.
       canWork: owner => !this.disposed && owner.sessionId === this.id && !!owner.conversationId &&
+        (owner.platformId !== 'claude' || owner.claudeAccountId === this.claudeAccountScope) &&
         this.embeds.get(owner.platformId)?.embed?.getState().conversationId === owner.conversationId,
       canAdopt: owner => this.ownsFocus(owner) && !this.focusSending && !this.focusRevision && !this.runner.hasInFlightWork(),
-      makePage: (platformId, url, onUrl) => {
+      makePage: (platformId, url, onUrl, accountId) => {
         if (!this.window || this.window.isDestroyed()) throw new Error('应用窗口不可用。')
-        const platform = this.embeds.get(platformId)?.platform
-        if (!platform) throw new Error('压缩平台不可用。')
-        return new CompactionPage(this.window, platform, this.options.settings().theme, url, onUrl, this.lastBounds ?? undefined)
+        const id = accountId ?? DEFAULT_CLAUDE_ACCOUNT_ID
+        const platform = platformId === 'claude'
+          ? listClaudeAccounts(this.options.store).some(account => account.id === id) && claudePlatformForAccount(id)
+          : this.embeds.get(platformId)?.platform
+        if (!platform) throw new Error('生成平台不可用。')
+        return new CompactionPage(this.window, platform, this.options.settings().theme, url, onUrl,
+          prepareChatBrowserIdentity(platform.partition), this.lastBounds ?? undefined)
       },
       sendPageMessage: (owner, contents, platform, path, prompt, signal, current, beforeSubmit) =>
         this.enqueuePageFileMessage(owner, contents, platform, path, prompt, signal, current, beforeSubmit, true),
@@ -1734,21 +1871,38 @@ export class SessionRuntime {
       onStateChanged: () => this.options.onSummaryChanged(),
       isAdopted: job => this.continuity.owns(job.state.owner.platformId, this.activeEmbed().conversationId, job.state.id)
     })
-    return this.compaction
+    this.compactions.set(scope, service)
+    return service
   }
   getCompaction(owner: FocusOwner): CompactionState | null {
     return this.ownsFocus(owner) ? this.compactionService().state(owner) : null
   }
-  async startCompaction(owner: FocusOwner): Promise<CompactionState> {
-    if (!this.active || !this.ownsFocus(owner) || !owner.conversationId) throw new Error('请打开需要压缩的已有会话。')
+  async startCompaction(owner: FocusOwner, generationPlatformId?: unknown, generationAccountId?: unknown): Promise<CompactionState> {
+    if (generationPlatformId !== undefined &&
+        (typeof generationPlatformId !== 'string' || !supportsCompaction(generationPlatformId))) throw new Error('请选择有效的生成平台。')
+    if (!this.active || !this.ownsFocus(owner) || !owner.conversationId) throw new Error('请先打开已有会话。')
+    if (generationAccountId !== undefined && (generationPlatformId !== 'claude' || !isClaudeAccountId(generationAccountId) ||
+        !listClaudeAccounts(this.options.store).some(account => account.id === generationAccountId))) throw new Error('请选择有效的 Claude 账号。')
+    const accountId = generationPlatformId === 'claude'
+      ? typeof generationAccountId === 'string' ? generationAccountId : this.claudeAccountId : undefined
+    const exporting = generationPlatformId !== undefined
     return this.compactionService().start(owner, async () => {
       if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending ||
           this.mailNotifications?.busy || this.toolPromptReads?.busy || this.scheduledTaskTools?.busy || this.embed.getInterceptorStatus().pendingQuestion) {
-        throw new Error('当前正在发送、执行工具或等待回答，请处理完成后再压缩。')
+        throw new Error('当前正在发送、执行工具或等待回答，请处理完成后再试。')
       }
       const page = await this.embed.readFocusSnapshot()
-      if (!this.ownsFocus(owner) || !page?.ready || page.generating !== 'idle' || page.waiting || page.sendFailure || page.nativeDraft ||
-          this.focusChat.turns(owner.platformId, owner.conversationId!).at(-1)?.status === 'working') throw new Error('请等待当前回答结束，并处理原网页草稿或发送失败后再压缩。')
+      if (!this.ownsFocus(owner)) throw new Error('当前会话已切换。')
+      const lastTurnWorking = this.focusChat.turns(owner.platformId, owner.conversationId!).at(-1)?.status === 'working'
+      if (exporting) {
+        // A quota error can replace the source composer. The export reads the
+        // saved transcript and uses the selected platform's independent page.
+        if (page?.generating === 'active' || (!page?.sendFailure && (page?.waiting || lastTurnWorking))) {
+          throw new Error('请等待当前回答结束后再生成交接文档。')
+        }
+      } else if (!page?.ready || page.generating !== 'idle' || page.waiting || page.sendFailure || page.nativeDraft || lastTurnWorking) {
+        throw new Error('请等待当前回答结束，并处理原网页草稿或发送失败后再压缩。')
+      }
       this.focusChat.flush(owner.platformId)
       const conversationId = owner.conversationId!
       const hidden = this.focusChat.hiddenMessageIds(owner.platformId, conversationId)
@@ -1760,18 +1914,29 @@ export class SessionRuntime {
         messages: this.options.store.listConversationMessages(conversationId),
         turns: this.focusChat.turns(owner.platformId, conversationId), hiddenMessageIds: hidden,
         executions: this.options.store.listExecutions(conversationId).filter(record => !superseded.has(record.messageId)) }
-      const contextTokens = estimateFocusConversation({ messages: this.continuity.visibleCurrent(owner.platformId, conversationId),
+      const contextTokens = exporting ? undefined : estimateFocusConversation({ messages: this.continuity.visibleCurrent(owner.platformId, conversationId),
         turns: this.continuity.visibleTurns(owner.platformId, conversationId, source.turns), executions: source.executions,
-        hiddenMessageIds: hidden, smartReplies: page.smartReplies,
+        hiddenMessageIds: hidden, smartReplies: page?.smartReplies,
         contextUsage: this.options.store.contextUsage.summary(owner.platformId, conversationId) }).estimatedTokens
-      return { source, contextTokens, view: this.continuity.capture(owner, source.messages, source.turns, source.executions, hidden),
+      return { source, contextTokens,
+        view: exporting ? undefined : this.continuity.capture(owner, source.messages, source.turns, source.executions, hidden),
         seed: { session: { ...this.persistentState(), title: this.summary().title }, preferences: this.conversationTools.read(owner.platformId, conversationId),
           ...(this.web2term ? { binding: this.web2term.persistentBinding() } : {}) } }
-    })
+    }, generationPlatformId, accountId)
   }
   async compactionAction(request: CompactionRequest, action: CompactionAction): Promise<void> {
     const service = this.compactionService(), state = service.state(request)
-    if (!this.ownsFocus(request) || !state || state.id !== request.jobId) throw new Error('压缩任务已切换。')
+    if (!this.ownsFocus(request) || !state || state.id !== request.jobId) throw new Error('会话任务已切换。')
+    if (action === 'export') {
+      await service.exportSummary(request, async fileName => {
+        const window = this.window
+        if (!this.active || !this.ownsFocus(request) || !window || window.isDestroyed()) return
+        const result = await dialog.showSaveDialog(window, { title: '导出任务交接文档', defaultPath: fileName,
+          filters: [{ name: 'Markdown', extensions: ['md'] }] })
+        return result.canceled ? undefined : result.filePath
+      })
+      return
+    }
     if (action === 'cancel') service.cancel()
     if (action === 'copy-recovery') clipboard.writeText(service.recoveryPrompt())
     if (action === 'show-page') service.showPage()
@@ -1935,11 +2100,11 @@ export class SessionRuntime {
   }
 
   private focusOutboundQueueState(owner: FocusOwner): FocusChatState['outboundQueue'] {
-    const queueOwner: AiOutboundOwner = { sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId }
     const failures = this.focusQueueFailures.filter(failure => failure.owner.sessionId === this.id && failure.owner.platformId === owner.platformId &&
+      failure.owner.claudeAccountId === owner.claudeAccountId &&
       (failure.owner.conversationId === null || owner.conversationId === null || failure.owner.conversationId === owner.conversationId))
       .map(({ owner: _owner, ...failure }) => ({ ...failure, ...(failure.attachments ? { attachments: failure.attachments.map(file => ({ ...file })) } : {}) }))
-    const state = this.aiOutboundQueue.stateFor(queueOwner)
+    const state = this.aiOutboundQueue.stateFor(owner)
     // A composer message is summarized by what the user typed, not by the skill-prefixed text sent to the page.
     const summarize = <T extends FocusOutboundQueueItem | null>(item: T): T => {
       const pending = item && this.pendingFocusSends.get(item.id)
@@ -1966,13 +2131,13 @@ export class SessionRuntime {
       return true
     }
     // Only the items this owner's focus view shows can be acted on from it.
-    const state = this.aiOutboundQueue.stateFor({ sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId })
+    const state = this.aiOutboundQueue.stateFor(owner)
     // Cancelling a waiting composer message hands its draft back (its completion records the failure).
     if (action === 'cancel' && (state.active?.id === itemId || state.queued?.some(item => item.id === itemId))) return this.aiOutboundQueue.cancel(itemId)
     if (state.blocked?.id !== itemId) return false
     // A blocked head: 'acknowledge-skip' (and 'cancel') means it was sent; 'restore-skip' means it was not.
     const pending = this.pendingFocusSends.get(itemId)
-    const blockedOwner = { sessionId: this.id, platformId: state.blocked.platformId, conversationId: state.blocked.conversationId }
+    const blockedOwner = { ...owner, conversationId: state.blocked.conversationId }
     if (!this.aiOutboundQueue.acknowledgeBlocked(itemId)) return false
     this.pendingFocusSends.delete(itemId)
     if (action === 'restore-skip' && pending) this.recordFocusQueueFailure(blockedOwner, pending.requestId, 'cancelled', pending.text, pending.attachments)
@@ -2011,8 +2176,7 @@ export class SessionRuntime {
       return await dispatchGithubLoginTask({
         blockedReason: () => {
           if (controller.signal.aborted) return '登录任务发送已取消。'
-          if (this.disposed || !this.active || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId ||
-            owner.conversationId !== this.embed.getState().conversationId) return '当前会话已切换，请在当前 AI 对话中重新操作。'
+          if (!this.active || !this.ownsFocus(owner)) return '当前会话已切换，请在当前 AI 对话中重新操作。'
           if (this.web2term || this.ssh.getState().attached) return 'GitHub 仓库管理使用本机账号，请先将当前终端切回本机。'
           const status = this.embed.getInterceptorStatus()
           if (!status.installed || !status.enabled || !status.promptInjectionEnabled) return '请先启用当前对话的终端模式和提示词注入，再让 AI 协助登录。'
@@ -2021,7 +2185,7 @@ export class SessionRuntime {
         },
         inspect: getGithubCliState,
         send: text => this.enqueueUserTask(text, { sessionId: this.id, platformId: owner.platformId, conversationId: owner.conversationId },
-          { current: () => !this.disposed && owner.platformId === this.activePlatformId && owner.conversationId === this.embed.getState().conversationId,
+          { current: () => this.ownsFocus(owner),
             kind: 'auxiliary', sourceId: 'github-login:' + randomUUID() })
       })
     } finally {
@@ -2067,7 +2231,9 @@ export class SessionRuntime {
       blockOnFailure: uncertain,
       aborted: outcome => uncertain(outcome) ? outcome : request.cancelled(),
       failed: () => 'unknown' as unknown as T,
-      ...request
+      ...request,
+      owner: { ...request.owner, ...(request.owner.platformId === 'claude' && this.claudeAccountScope
+        ? { claudeAccountId: this.claudeAccountScope } : {}) }
     })
   }
 
@@ -2087,8 +2253,7 @@ export class SessionRuntime {
   }
 
   async retryCommandRecovery(owner: FocusOwner, token: number): Promise<string> {
-    if (this.disposed || !this.active || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId ||
-      owner.conversationId !== this.embed.getState().conversationId || this.embed.getInterceptorStatus().commandRecovery?.token !== token) return 'stale'
+    if (!this.active || !this.ownsFocus(owner) || this.embed.getInterceptorStatus().commandRecovery?.token !== token) return 'stale'
     return this.enqueueCommandRecovery(owner.platformId, this.runner.canSendAutomaticResult(), true)
   }
 
@@ -2258,7 +2423,7 @@ export class SessionRuntime {
     const attachments = files.map(file => ({ name: file.fileName, size: file.sizeBytes }))
     const ticket = this.queueSend<FocusSendOutcome>({ kind: 'user', owner: request, sourceId: requestId, text, attachments,
       execute: async (signal, item) => {
-        const owner = { sessionId: this.id, platformId: item.owner.platformId, conversationId: item.owner.conversationId }
+        const owner = item.owner
         if (!this.ownsFocus(owner) || signal.aborted) return 'cancelled'
         const embed = this.embeds.get(item.owner.platformId)?.embed
         if (!embed) return 'unavailable'
@@ -2336,14 +2501,18 @@ export class SessionRuntime {
   }
 
   async updateFocusModelSettings(request: FocusModelSettingsRequest): Promise<FocusModelSettingsResult> {
-    if (!this.ownsFocus(request) || request.platformId !== 'chatgpt') return { outcome: 'unavailable', settings: null }
+    if (!this.active || !this.ownsFocus(request)) return { outcome: 'unavailable', settings: null }
+    const rules = this.activePlatform.page.focus?.modelSettings
+    if (!rules) return { outcome: 'unavailable', settings: null }
     if (!validFocusModelSettingsRequest(request)) return { outcome: 'invalid', settings: null }
-    if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork() || this.embed.getInterceptorStatus().pendingQuestion) return { outcome: 'busy', settings: null }
+    if (this.taskRunning() || this.stoppingTask || this.focusRevision || this.runner.hasInFlightWork() || this.embed.getInterceptorStatus().pendingQuestion) return { outcome: 'busy', settings: null }
+    const embed = this.embed
+    const current = (): boolean => this.active && this.embed === embed && this.ownsFocus(request)
     this.focusSending = true
     writeFocusDiagnostic(request, { event: 'model-setting-request', setting: request.kind })
     try {
-      const result = await this.embed.updateFocusModelSettings(request, randomUUID(), () => this.ownsFocus(request) && !this.runner.hasInFlightWork())
-      const resolved: FocusModelSettingsResult = this.ownsFocus(request) ? result : { outcome: 'cancelled', settings: null }
+      const result = await embed.updateFocusModelSettings(request, randomUUID(), () => current() && !this.stoppingTask && !this.runner.hasInFlightWork())
+      const resolved: FocusModelSettingsResult = current() ? result : { outcome: 'cancelled', settings: null }
       writeFocusDiagnostic(request, { event: 'model-setting-outcome', setting: request.kind, outcome: resolved.outcome, reason: resolved.reason })
       return resolved
     } finally { this.focusSending = false }
@@ -3260,7 +3429,8 @@ export class SessionRuntime {
   }
 
   private toolsOwner(): ConversationToolsOwner {
-    return { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.activeEmbed().conversationId }
+    return { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.activeEmbed().conversationId,
+      ...(this.activePlatformId === 'claude' && this.claudeAccountScope ? { claudeAccountId: this.claudeAccountScope } : {}) }
   }
 
   private scheduledTarget(): ScheduledTaskTarget {
@@ -3282,6 +3452,7 @@ export class SessionRuntime {
   private scheduledOwnerCurrent(task: ScheduledTask): boolean {
     if (this.disposed || (!this.active && !this.canRunConversationInBackground(task.owner.platformId)) || task.owner.sessionId !== this.id || this.activePlatformId !== task.owner.platformId ||
       this.embed.getState().conversationId !== task.owner.conversationId || this.stoppingTask ||
+      (task.owner.platformId === 'claude' && task.owner.claudeAccountId !== this.claudeAccountScope) ||
       this.runner.getAutomation().paused || this.options.desktopCoordinator?.getState().humanControl ||
       taskPausedByInput(this.taskCoordinator.latest(task.owner.platformId)) || !this.toolPreferences(task.owner.platformId).scheduledTasksEnabled) return false
     const latest = this.options.scheduledTasks?.store.get(task.id)
@@ -4624,7 +4795,8 @@ export class SessionRuntime {
   }
 
   dispose(): void {
-    this.compaction?.dispose()
+    for (const compaction of this.compactions.values()) compaction.dispose()
+    this.compactions.clear()
     this.focusFileRequest = null; this.focusFileCache = null
     this.remoteRipgrepSend?.controller.abort()
     this.mailNotifications?.cancel()

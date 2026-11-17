@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, FormEvent, JSX, ReactNode, RefObject } from 'react'
+import { Dialog } from '@base-ui/react/dialog'
 import MDEditor from '@uiw/react-md-editor'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -15,7 +16,11 @@ import { rehypeFocusFileLinks, cleanFocusFileLinkCopy } from '@shared/focus-file
 import FocusFilePreviewProvider from './FocusFilePreview'
 import FocusComposerModes from './FocusComposerModes'
 import FocusCompaction, { useConversationCompaction } from './FocusCompaction'
+import ClaudeAccountPicker from './ClaudeAccountPicker'
+import type { ClaudeAccount } from '@shared/claude-accounts'
 import { supportsCompaction } from '@shared/conversation-compaction'
+import type { SelectionQuestionPlatform } from '@shared/deepseek-question'
+import { CHAT_PLATFORMS, platformById } from '@shared/platforms'
 import FocusSkillIcon from './FocusSkillIcon'
 import FocusMessageSkills from './FocusMessageSkills'
 import { FOCUS_SKILLS, focusSkillQuery, validFocusToolSkills, focusSkillUnavailable } from '@shared/focus-skills'
@@ -41,7 +46,7 @@ import claudeIcon from '../assets/Claude.svg'
 const FOCUS_ICONS: Readonly<Record<string, string>> = { deepseek: deepseekIcon, chatgpt: chatgptIcon, gemini: geminiIcon, claude: claudeIcon }
 import type { AppTheme, ConversationAttachment, ConversationMessage, ExecutionRecord } from '@shared/types'
 import type { FocusChatState, FocusChatUpdate, FocusOwner, FocusTurn, FocusDelivery, FocusToolCall } from '@shared/focus-chat'
-import { cleanFocusAnswer, cleanFocusUserText, focusOwnerKey, focusDelivery, focusPlatformLabel, supportsFocusEdit } from '@shared/focus-chat'
+import { cleanFocusAnswer, cleanFocusUserText, focusOwnerKey, focusDelivery, focusPlatformLabel, focusReplyParts, supportsFocusEdit } from '@shared/focus-chat'
 import { FOCUS_MAX_FILES, FOCUS_MAX_FILE_BYTES, FOCUS_MAX_BATCH_BYTES } from '@shared/focus-chat'
 import type { FocusAttachmentInput } from '@shared/focus-chat'
 import './FocusChatView.css'
@@ -51,9 +56,15 @@ interface Props {
   viewConversationId?: string | null
   theme: AppTheme
   visible: boolean
+  dialogContainer: HTMLElement | null
   messages: ConversationMessage[]
   messagesReady: boolean
   needsAnswer: boolean
+  taskRunning: boolean
+  claudeAccounts: ClaudeAccount[]
+  claudeAccountId: string
+  onClaudeAccountSelect(id: string): Promise<void>
+  onClaudeAccountAdd(label: string): Promise<void>
   newChatDisabled: boolean
   onNewChat(): void
   onQuestion(): void
@@ -381,8 +392,10 @@ function FocusRichBlock({ title, content, theme, onOriginal }: {
     <div className="focus-rich-block__body"><Markdown text={content} theme={theme} onOriginal={onOriginal} /></div>
   </section>
 }
-const Markdown = memo(function Markdown({ text, theme, onOriginal = () => {} }: { text: string; theme: AppTheme; onOriginal?: () => void }): JSX.Element {
-  const source = normalizeMathDelimiters(cleanFocusAnswer(text))
+const Markdown = memo(function Markdown({ text, theme, platformId, onOriginal = () => {} }: {
+  text: string; theme: AppTheme; platformId?: string; onOriginal?: () => void
+}): JSX.Element {
+  const source = normalizeMathDelimiters(cleanFocusAnswer(text, platformId))
   const blocks: Array<string | { kind: 'chart'; data: FocusChartData } | { kind: 'ui'; data: FocusUiWidget } | { kind: 'layout'; data: FocusLayoutData } | { kind: 'rich'; data: { title: string }; content: string }> = []
   let last = 0
   for (const match of source.matchAll(RICH_BLOCK)) {
@@ -652,11 +665,15 @@ function FocusChatView(props: Props): JSX.Element {
   const viewOwner = { ...owner, conversationId: props.viewConversationId ?? owner.conversationId }
   const viewOwnerKey = focusOwnerKey(viewOwner)
   const modelLabel = focusPlatformLabel(owner.platformId)
+  const modelSettingsKind = platformById(owner.platformId)?.page.focus?.modelSettings?.kind
   const modelIcon = FOCUS_ICONS[owner.platformId]
   const [state, setState] = useState<FocusChatState | null>(null)
   const [draft, setDraft] = useState(() => readDraft(viewOwner))
   const compactionSupported = supportsCompaction(owner.platformId)
   const compaction = useConversationCompaction(owner, visible && compactionSupported)
+  const [handoffPickerOwner, setHandoffPickerOwner] = useState('')
+  const [handoffClaudeAccount, setHandoffClaudeAccount] = useState<string | null>(null)
+  useEffect(() => { setHandoffPickerOwner('') }, [ownerKey, visible])
   const [skillCaret, setSkillCaret] = useState(draft.length)
   const [skillsDismissed, setSkillsDismissed] = useState(false)
   const skillQuery = focusSkillQuery(draft, skillCaret)
@@ -664,7 +681,8 @@ function FocusChatView(props: Props): JSX.Element {
   const [selectedSkills, setSelectedSkills] = useState<FocusToolSkill[]>(() => readSkillDraft(viewOwnerKey))
   const [toolState, setToolState] = useState<ConversationToolsState | null>(null)
   const composerInput = useRef<HTMLTextAreaElement>(null)
-  const matchingSkills = FOCUS_SKILLS.filter(skill => skillQuery?.ids.includes(skill.id) && (skill.id !== 'compact' || compactionSupported))
+  const matchingSkills = FOCUS_SKILLS.filter(skill => skillQuery?.ids.includes(skill.id) &&
+    (compactionSupported || (skill.id !== 'compact' && skill.id !== 'task_handoff')))
   const activeSkill = matchingSkills[Math.min(skillIndex, Math.max(0, matchingSkills.length - 1))]
   const [sending, setSending] = useState(false)
   const [changingMode, setChangingMode] = useState<FocusComposerModeId | null>(null)
@@ -673,6 +691,7 @@ function FocusChatView(props: Props): JSX.Element {
   const settingBusy = useRef(false)
   const modelReadAttempted = useRef(false)
   const modelReadAttempts = useRef(0)
+  const geminiReadModel = useRef<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const skillsOpen = !!skillQuery && !skillsDismissed && !editingId
   const readEpoch = useRef(0)
@@ -798,14 +817,14 @@ function FocusChatView(props: Props): JSX.Element {
     const history = messages.filter(message => !represented.ids.has(message.id) &&
     !hiddenMessageIds.has(message.id) &&
     !(message.sourceMessageId && represented.sources.has(JSON.stringify([!!message.archived, message.sourceMessageId]))) &&
-    (message.role !== 'assistant' || !!cleanFocusAnswer(message.content).trim() || message.attachments.length > 0) &&
+    (message.role !== 'assistant' || !!cleanFocusAnswer(message.content, owner.platformId).trim() || message.attachments.length > 0) &&
     !(message.role === 'assistant' && message.sourceMessageId && recordsById.has(message.sourceMessageId)) &&
     !message.sourceMessageId?.startsWith('read-files:'))
     return [...history.map(message => ({ at: message.createdAt, message, turn: null as FocusTurn | null, compaction: null })),
     ...turns.map(turn => ({ at: turn.createdAt, turn, message: null as ConversationMessage | null, compaction: null })),
     ...(compactionBoundaries ?? []).map(compaction => ({ at: compaction.createdAt, compaction, turn: null, message: null }))]
     .sort((a, b) => a.at - b.at)
-  }, [messages, represented, hiddenMessageIds, recordsById, turns, compactionBoundaries])
+  }, [messages, represented, hiddenMessageIds, recordsById, turns, compactionBoundaries, owner.platformId])
   const lastTurn = turns.filter(turn => !turn.archived).at(-1)
   const sendFailure = state?.sendFailure
   const working = !sendFailure && (props.needsAnswer || state?.waiting === true || state?.generating === 'active' || lastTurn?.status === 'working')
@@ -815,8 +834,9 @@ function FocusChatView(props: Props): JSX.Element {
   const skillModeUnavailable = state?.promptInjection?.phase === 'disabled' ? '请先启用终端模式和提示词注入，再使用按需技能。' : ''
   const selectedUnavailable = selectedSkills.length ? skillModeUnavailable || selectedSkills.map(id => focusSkillUnavailable(id, toolState)).find(Boolean) || '' : ''
   const sendBlock = selectedUnavailable || (selectedSkills.includes('computer') ? state?.sendBlock || '' : '')
+  const modelSettingsBlocked = working || props.taskRunning || stopping || !!editingId || !ready || compaction.blocked
   const updateModelSettings = useCallback(async (kind: FocusModelSettingKind, value?: string, automatic = false): Promise<void> => {
-    if (sendLock.current || working || editingId || !ready || !visible || compaction.blocked) return
+    if (sendLock.current || modelSettingsBlocked || !visible) return
     sendLock.current = true; settingBusy.current = true; readEpoch.current++
     setSettingPending(kind); setSettingError(''); setError('')
     try {
@@ -834,17 +854,27 @@ function FocusChatView(props: Props): JSX.Element {
         (result.outcome === 'busy' || result.outcome === 'unavailable' && ['control-missing', 'page-unavailable',
           'native-click-not-dispatched', 'native-click-window-unfocused', 'native-click-unreachable', 'native-click-dispatch-failed'].includes(result.reason ?? ''))
       if (retryBeforeInput) modelReadAttempted.current = false
-      else if (result.outcome !== 'ok') setSettingError(result.outcome === 'busy' ? '当前正在处理任务，请稍后切换模型或思考强度。' :
+      else if (result.outcome !== 'ok') setSettingError(result.outcome === 'busy' ? '当前正在处理任务，请稍后调整模型设置。' :
         kind === 'read' ? '暂时无法读取模型设置，请点击顶部刷新或到原始视图检查。' : '切换结果尚未确认，请到原始视图核对后再发送。')
     } catch { if (alive.current) setSettingError('暂时无法同步模型设置，请到原始视图检查。') }
     finally { sendLock.current = false; settingBusy.current = false; if (alive.current) setSettingPending(null) }
-  }, [ownerKey, working, editingId, ready, visible, compaction.blocked])
+  }, [ownerKey, modelSettingsBlocked, visible])
   useEffect(() => {
-    if (owner.platformId !== 'chatgpt' || !visible || !ready || working || editingId || compaction.blocked || sendLock.current || modelReadAttempted.current) return
+    if (!modelSettingsKind || !visible || modelSettingsBlocked || sendLock.current) return
+    const settings = state?.modelSettings
+    if (modelSettingsKind === 'gemini' && settings?.model) {
+      // Strength availability follows the confirmed model. Read the new model once.
+      if (geminiReadModel.current && geminiReadModel.current !== settings.model) {
+        modelReadAttempted.current = false
+        modelReadAttempts.current = 0
+      }
+      geminiReadModel.current = settings.model
+    }
+    if (modelReadAttempted.current) return
     // A new conversation id remounts this view after the first send. Its page
     // snapshot already carries the confirmed settings; do not reopen a hidden
     // native menu as soon as the task finishes.
-    if (state?.modelSettings?.model) { modelReadAttempted.current = true; return }
+    if (settings?.model && (modelSettingsKind === 'chatgpt' || settings.efforts.length > 0)) { modelReadAttempted.current = true; return }
     // The home composer can mount well before its model trigger. Passive snapshots
     // wait for that control without consuming the one owned menu read or locking send.
     if (state?.modelSettingsReady !== true || settingPending !== null) return
@@ -857,7 +887,8 @@ function FocusChatView(props: Props): JSX.Element {
       void updateModelSettings('read', undefined, true)
     }, 500)
     return () => clearTimeout(timer)
-  }, [ownerKey, visible, ready, working, editingId, sending, settingPending, compaction.blocked, state?.modelSettings?.model, state?.modelSettingsReady, updateModelSettings])
+  }, [ownerKey, modelSettingsKind, visible, modelSettingsBlocked, sending, settingPending, state?.modelSettings?.model, state?.modelSettings?.efforts.length,
+    state?.modelSettingsReady, updateModelSettings])
   useEffect(() => {
     if (state?.modelSettings?.model) setSettingError('')
   }, [ownerKey, state?.modelSettings?.model])
@@ -865,6 +896,7 @@ function FocusChatView(props: Props): JSX.Element {
     // Loading home again can retain conversationId=null and this React instance.
     modelReadAttempted.current = false
     modelReadAttempts.current = 0
+    geminiReadModel.current = null
     setSettingError('')
     props.onNewChat()
   }
@@ -995,16 +1027,21 @@ function FocusChatView(props: Props): JSX.Element {
       if (!ok && alive.current) setError('这条消息的发送已经结束，无需取消。')
     }).catch(() => {})
   }
-  const compactionDisabled = !owner.conversationId ? '请先开始一个对话，再压缩已有记录。' :
-    working || sending || stopping || !!editingId || settingPending !== null || !ready || !!state?.nativeDraft || !!sendFailure
-      ? '请等待当前回答、发送或编辑结束后再压缩。' : compaction.blocked ? '正在处理压缩任务。' :
-        compaction.state && !['completed', 'cancelled'].includes(compaction.state.phase) ? '请先继续检查或取消已有压缩任务。' : ''
-  const startCompaction = async (): Promise<void> => {
-    if (!compactionSupported || compactionDisabled || sendLock.current || !skillQuery?.ids.includes('compact')) return
+  const compactionDisabled = (skill: 'compact' | 'task_handoff'): string => {
+    if (!owner.conversationId) return '请先打开已有会话。'
+    if (working || state?.generating === 'active' || sending || stopping || !!editingId || settingPending !== null ||
+        (skill === 'compact' && (!ready || state?.nativeDraft || sendFailure))) return '请等待当前回答、发送或编辑结束后再试。'
+    if (compaction.blocked) return '正在处理已有任务。'
+    if (compaction.state?.phase === 'ready-to-export') return '请先导出或取消已生成的文档。'
+    return compaction.state && compaction.state.phase !== 'completed' ? '请先重试或取消已有任务。' : ''
+  }
+  const startCompaction = async (platform?: SelectionQuestionPlatform, accountId?: string): Promise<void> => {
+    const skill = platform ? 'task_handoff' : 'compact'
+    if (!compactionSupported || compactionDisabled(skill) || sendLock.current || !skillQuery?.ids.includes(skill)) return
     const original = draftRef.current, query = { ...skillQuery }
     sendLock.current = true
     try {
-      if (await compaction.start()) {
+      if (await compaction.start(platform, accountId)) {
         setSkillsDismissed(true)
         if (alive.current && draftRef.current === original) {
           setDraftText(original.slice(0, query.start) + original.slice(query.end))
@@ -1014,11 +1051,17 @@ function FocusChatView(props: Props): JSX.Element {
     } finally { sendLock.current = false }
   }
   const changeSkills = (skills: FocusToolSkill[]): void => { setSelectedSkills(skills); saveSkillDraft(viewOwnerKey, skills) }
-  const skillDisabled = (id: FocusSkillId): string => id === 'compact' ? compactionDisabled :
+  const skillDisabled = (id: FocusSkillId): string => id === 'compact' || id === 'task_handoff' ? compactionDisabled(id) :
     sending || stopping || !!editingId || settingPending !== null || compaction.blocked ? '当前操作结束后可选择技能。' : skillModeUnavailable || focusSkillUnavailable(id, toolState)
   const chooseSkill = (id: FocusSkillId): void => {
     if (!skillQuery || skillDisabled(id)) return
     if (id === 'compact') { void startCompaction(); return }
+    if (id === 'task_handoff') {
+      setSkillsDismissed(true)
+      setHandoffClaudeAccount(null)
+      setHandoffPickerOwner(ownerKey)
+      return
+    }
     if (!selectedSkills.includes(id)) changeSkills([...selectedSkills, id])
     const next = draftRef.current.slice(0, skillQuery.start) + draftRef.current.slice(skillQuery.end)
     const caret = skillQuery.start
@@ -1120,7 +1163,7 @@ function FocusChatView(props: Props): JSX.Element {
     finally { if (alive.current) setActionId(null) }
   }
   const copy = async (id: string, text: string): Promise<void> => {
-    try { await navigator.clipboard.writeText(cleanFocusFileLinkCopy(cleanFocusCitationCopy(cleanFocusAnswer(text).replace(CHART_MARKER, '')))); setCopiedId(id); setTimeout(() => { if (alive.current) setCopiedId(current => current === id ? null : current) }, 2000) }
+    try { await navigator.clipboard.writeText(cleanFocusFileLinkCopy(cleanFocusCitationCopy(cleanFocusAnswer(text, owner.platformId).replace(CHART_MARKER, '')))); setCopiedId(id); setTimeout(() => { if (alive.current) setCopiedId(current => current === id ? null : current) }, 2000) }
     catch { setError('复制失败，可以选择正文手动复制。') }
   }
   const retrySend = async (): Promise<void> => {
@@ -1179,6 +1222,11 @@ function FocusChatView(props: Props): JSX.Element {
       </>}</FocusDetails>
     </div>
   }
+  const renderReasoning = (text: string, key: string): JSX.Element => (
+    <FocusDetails className="focus-reasoning" key={key} ownerKey={viewOwnerKey} stateKey={'reasoning:' + key} summary="思考过程">
+      {() => <Markdown text={text} theme={theme} onOriginal={props.onOriginal} />}
+    </FocusDetails>
+  )
   const renderTurn = (turn: FocusTurn): JSX.Element => {
     const turnWorking = !turn.archived && turn.status === 'working'
     const sendBlocked = !!sendFailure && turn === lastTurn
@@ -1193,16 +1241,21 @@ function FocusChatView(props: Props): JSX.Element {
     const deliveryPending = turnWorking && (executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending') ||
       turn.toolCalls?.some(call => call.status === 'done' && call.delivery === 'pending'))
     // A new tool/result cycle must not move earlier prose into the process panel.
-    const answers = turn.segments.flatMap(segment => {
+    const segments = turn.segments.map(segment => {
+      const rawAnswer = (!turn.archived && segment.sourceMessageId ? richAnswers.get(segment.sourceMessageId) : '') || segment.answer
+      const parts = focusReplyParts(segment.answer, owner.platformId, segment.parts)
+      return { ...segment, rawAnswer, parts: rawAnswer === segment.answer ? parts : focusReplyParts(rawAnswer, owner.platformId, parts) }
+    })
+    const answers = segments.flatMap(segment => {
       // Empty command answers are intentional. Rich content may enrich actual
       // prose, but must never recreate a protocol response as an answer bubble.
       if (!segment.answer.trim() ||
         (segment.sourceMessageId && (executionIds.has(segment.sourceMessageId) || toolSources.has(segment.sourceMessageId)))) return []
       // Older versions saved raw question JSON; normalize it at display time too.
-      const text = cleanFocusAnswer((!turn.archived && segment.sourceMessageId ? richAnswers.get(segment.sourceMessageId) : '') || segment.answer)
+      const text = cleanFocusAnswer(segment.rawAnswer, owner.platformId)
       return text.trim() ? [{ cycle: segment.cycle, sourceMessageId: segment.sourceMessageId, text }] : []
     })
-    const hasProcess = turn.segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.toolCalls?.length || !!turn.parseFailures?.length
+    const hasProcess = segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.toolCalls?.length || !!turn.parseFailures?.length
     const label = sendBlocked ? '消息发送失败 · 等待重试' : turn.commandRecovery && !turn.archived ? (turnWorking ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : toolRunning ? '正在调用工具…' : deliveryPending ? '正在回传执行结果…' :
       turn.status === 'stopped' ? '已停止 · 已有内容保留' : turnWorking ? '正在处理…' : '已回复'
     const userMessage = turn.userMessageId ? messagesById.get(turn.userMessageId) : null
@@ -1216,13 +1269,13 @@ function FocusChatView(props: Props): JSX.Element {
         <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}<span>{modelLabel}</span></div>
         <FocusDetails className="focus-process" ownerKey={viewOwnerKey} stateKey={'process:' + turn.id} defaultOpen summary={<><span className={turnWorking && !sendBlocked ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{sendBlocked ? '!' : turnWorking ? '' : turn.status === 'blocked' ? '!' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <ProcessHint /> : null}</>}>{() =>
           <ProcessScroll scrollKey={viewOwnerKey + ':turn:' + turn.id} follow={turnWorking && !sendBlocked}>
-          {turn.segments.map(segment => {
+          {segments.map(segment => {
             const segmentExecutions = byCycle.get(segment.cycle) ?? EMPTY_RECORDS
             const segmentTools = toolsByCycle.get(segment.cycle) ?? EMPTY_TOOL_CALLS
             // Empty cycles have margins and padding too; they must not push the placeholder down.
             if (!segment.parts.length && !segmentExecutions.length && !segmentTools.length) return null
             return <div className="focus-process__cycle" key={segment.cycle}>
-              {segment.parts.map((part, index) => part.kind === 'reasoning' ? <FocusDetails className="focus-reasoning" key={index} ownerKey={viewOwnerKey} stateKey={'reasoning:' + turn.id + ':' + segment.cycle + ':' + index} summary="思考过程">{() => <Markdown text={part.text} theme={theme} onOriginal={props.onOriginal} />}</FocusDetails> :
+              {segment.parts.map((part, index) => part.kind === 'reasoning' ? renderReasoning(part.text, turn.id + ':' + segment.cycle + ':' + index) :
                 <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
               {segmentExecutions.map(record => renderExecution(record, deliveryOf(record), !turn.archived))}
               {segmentTools.map(renderToolCall)}
@@ -1260,7 +1313,12 @@ function FocusChatView(props: Props): JSX.Element {
           </div> : entry.turn ? renderTurn(entry.turn) :
           <article className={'focus-history focus-history--' + entry.message!.role + (editingId === entry.message!.id ? ' focus-user--editing' : '')} data-message-id={entry.message!.id} key={entry.message!.id}>
             {entry.message!.role === 'assistant' ? <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}{modelLabel}</div> : null}
-            {entry.message!.role === 'assistant' ? <>{entry.message!.attachments.map(props.renderAttachment)}<div data-question-answer={entry.message!.archived ? undefined : entry.message!.sourceMessageId ?? ''}><Markdown text={(!entry.message!.archived && richAnswers.get(entry.message!.sourceMessageId ?? '')) || entry.message!.content} theme={theme} onOriginal={props.onOriginal} /></div></>
+            {entry.message!.role === 'assistant' ? <>{entry.message!.attachments.map(props.renderAttachment)}
+              {focusReplyParts(entry.message!.content, owner.platformId).map((part, index) => renderReasoning(part.text, entry.message!.id + ':' + index))}
+              <div data-question-answer={entry.message!.archived ? undefined : entry.message!.sourceMessageId ?? ''}>
+              <Markdown text={(!entry.message!.archived && richAnswers.get(entry.message!.sourceMessageId ?? '')) || entry.message!.content}
+                theme={theme} platformId={owner.platformId} onOriginal={props.onOriginal} />
+            </div></>
               : userContent(entry.message!.id, cleanFocusUserText(entry.message!.content), entry.message!.attachments.length > 0, entry.message!.attachments.map(props.renderAttachment), entry.message!.archived)}
           </article>)}
       </ConversationTranscript>,
@@ -1269,6 +1327,10 @@ function FocusChatView(props: Props): JSX.Element {
     <FocusFilePreviewProvider key={ownerKey} owner={owner} visible={visible}>
     <header className="focus-chat__header">
       <span>{modelIcon ? <img className="focus-chat__brand-icon" src={modelIcon} alt={modelLabel} /> : <strong>{modelLabel}</strong>}</span>
+      {owner.platformId === 'claude' && props.dialogContainer ? <ClaudeAccountPicker
+        accountId={props.claudeAccountId} accounts={props.claudeAccounts} container={props.dialogContainer}
+        disabled={props.taskRunning || working || sending || stopping || !!editingId || compaction.blocked || !!outboundQueue?.pending}
+        onSelect={props.onClaudeAccountSelect} onAdd={props.onClaudeAccountAdd} /> : null}
       <button type="button" className="focus-chat__new-chat" aria-label="新建对话" title="新建对话"
         disabled={props.newChatDisabled || working || sending || stopping || !!editingId || settingPending !== null || compaction.blocked} onClick={startNewChat}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
@@ -1280,9 +1342,10 @@ function FocusChatView(props: Props): JSX.Element {
         <dt>当前模型</dt><dd className="focus-chat__model-name">DeepSeek-V4.1-Flash-1017</dd>
         <dt>思考强度</dt><dd>high</dd>
       </dl> : null}
-      {owner.platformId === 'chatgpt' ? <FocusModelSettings settings={state?.modelSettings ?? null}
-        disabled={working || sending || stopping || !!editingId || !ready || compaction.blocked} pending={settingPending}
-        waiting={ready && !state?.modelSettings?.model && !modelReadAttempted.current && settingPending === null}
+      {modelSettingsKind ? <FocusModelSettings settings={state?.modelSettings ?? null} platformLabel={modelLabel}
+        disabled={modelSettingsBlocked || sending} pending={settingPending}
+        waiting={ready && (modelSettingsKind === 'chatgpt' || state?.modelSettingsReady === true) && !state?.modelSettings?.model &&
+          !modelReadAttempted.current && settingPending === null}
         onChange={(kind, value) => { void updateModelSettings(kind, value) }} onRefresh={() => { void updateModelSettings('read') }} /> : null}
       <FocusTokenUsage usage={tokenUsage} injection={state?.promptInjection} loading={!messagesReady || state === null} />
     </header>
@@ -1331,7 +1394,46 @@ function FocusChatView(props: Props): JSX.Element {
       </div> : null}
       {settingError ? <div className="focus-chat__error" role="alert">{settingError}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       {error ? <div className="focus-chat__error" role="alert">{error}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
-      <FocusCompaction owner={owner} visible={visible} state={compaction.state} pending={compaction.pending} error={compaction.error} act={compaction.act} />
+      <FocusCompaction owner={owner} visible={visible} state={compaction.state} pending={compaction.pending}
+        startingPlatform={compaction.startingPlatform}
+        generationAccountLabel={props.claudeAccounts.find(account => account.id ===
+          (compaction.startingAccountId ?? compaction.state?.generationAccountId))?.label}
+        error={compaction.error} act={compaction.act} />
+      {visible && handoffPickerOwner === ownerKey && props.dialogContainer ? <Dialog.Root open onOpenChange={open => { if (!open) setHandoffPickerOwner('') }}>
+        <Dialog.Portal container={props.dialogContainer}>
+          <Dialog.Popup className="modal" finalFocus={composerInput}
+            onMouseDown={event => { if (event.target === event.currentTarget && event.button === 0) setHandoffPickerOwner('') }}>
+            <div className="modal__box focus-compaction__picker">
+              <Dialog.Title className="modal__head">选择生成平台</Dialog.Title>
+              <div className="modal__body">
+                <Dialog.Description>会话快照将发送给所选平台。选择 Claude 时，可以指定生成账号。</Dialog.Description>
+                <div className="focus-compaction__platforms">
+                  {CHAT_PLATFORMS.filter(platform => supportsCompaction(platform.id)).map(platform =>
+                    <button key={platform.id} type="button" disabled={!!compactionDisabled('task_handoff')}
+                      aria-pressed={platform.id === 'claude' ? handoffClaudeAccount !== null : undefined}
+                      onClick={() => {
+                        if (platform.id === 'claude') { setHandoffClaudeAccount(props.claudeAccountId); return }
+                        setHandoffPickerOwner('')
+                        void startCompaction(platform.id)
+                      }}>
+                      <img alt="" src={FOCUS_ICONS[platform.id]} />{platform.label}
+                    </button>)}
+                </div>
+                {handoffClaudeAccount !== null ? <div className="focus-compaction__account">
+                  <label>Claude 生成账号<select value={handoffClaudeAccount} onChange={event => setHandoffClaudeAccount(event.target.value)}>
+                    {props.claudeAccounts.map(account => <option key={account.id} value={account.id}>{account.label}</option>)}
+                  </select></label>
+                  <button type="button" disabled={!!compactionDisabled('task_handoff') || !props.claudeAccounts.some(account => account.id === handoffClaudeAccount)}
+                    onClick={() => { setHandoffPickerOwner(''); void startCompaction('claude', handoffClaudeAccount) }}>
+                    生成交接文档
+                  </button>
+                </div> : null}
+              </div>
+              <div className="modal__foot"><Dialog.Close type="button">取消</Dialog.Close></div>
+            </div>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog.Root> : null}
       {queueTrayVisible ? <OutboundQueueTray queue={outboundQueue!} collapsed={queueCollapsed} onToggle={toggleQueue}
         onCancelActive={cancelActiveQueued} onEdit={item => void pullQueued(item, 'edit')} onDelete={item => void pullQueued(item, 'discard')} /> : null}
       <form className={'focus-composer' + (queueTrayVisible ? ' has-queue' : '')} onSubmit={event => void submit(event)}>

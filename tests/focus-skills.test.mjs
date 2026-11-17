@@ -31,9 +31,10 @@ const owner = { sessionId: 'workspace', platformId: 'chatgpt', conversationId: '
 const plain = value => JSON.parse(JSON.stringify(value))
 const tools = () => ({ owner, tools: ['scheduled', 'mail', 'computer'].map(id => ({ id, enabled: true, available: true, message: '' })) })
 
-test('picker supports four skills, filtering, line boundaries and caret position without matching URLs', () => {
-  assert.deepEqual(Array.from(skills.focusSkillQuery('//', 2).ids), ['compact', 'scheduled_task', 'send_email', 'computer'])
-  for (const [query, expected] of [['//定时', 'scheduled_task'], ['//email', 'send_email'], ['//电脑', 'computer'], ['//压缩', 'compact'], ['//compress conversation', 'compact']]) {
+test('picker finds chat workflows and tool skills without matching URLs', () => {
+  assert.deepEqual(Array.from(skills.focusSkillQuery('//', 2).ids), ['compact', 'task_handoff', 'scheduled_task', 'send_email', 'computer'])
+  for (const [query, expected] of [['//定时', 'scheduled_task'], ['//email', 'send_email'], ['//电脑', 'computer'],
+    ['//压缩', 'compact'], ['//compress conversation', 'compact'], ['//交接', 'task_handoff'], ['//markdown', 'task_handoff']]) {
     assert.deepEqual(Array.from(skills.focusSkillQuery(query, query.length).ids), [expected])
   }
   const draft = '保留这段任务\n  //邮件'
@@ -48,7 +49,7 @@ test('picker supports four skills, filtering, line boundaries and caret position
 test('only supported, unique selections are accepted; configuration and environment remain authoritative', () => {
   assert.equal(skills.validFocusToolSkills([]), true)
   assert.equal(skills.validFocusToolSkills(['scheduled_task', 'send_email', 'computer']), true)
-  for (const value of [null, 'computer', ['compact'], ['computer', 'computer'], ['read_files'], [1]]) assert.equal(skills.validFocusToolSkills(value), false)
+  for (const value of [null, 'computer', ['compact'], ['task_handoff'], ['computer', 'computer'], ['read_files'], [1]]) assert.equal(skills.validFocusToolSkills(value), false)
   assert.match(skills.focusSkillUnavailable('computer', null), /读取工具状态/)
   const state = tools()
   assert.equal(skills.focusSkillUnavailable('send_email', state), '')

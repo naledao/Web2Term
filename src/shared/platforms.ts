@@ -134,6 +134,8 @@ export interface PageAdapter {
    * behaviour on a site that marks nothing at all. Neither platform ships empty today.
    */
   assistantReplySelectors: string[]
+  /** Page-generated prefix of the accessibility announcement preceding the actual reply. */
+  assistantReplyAnnouncementPrefix?: string
   /** Recognize desktop requests only on the supported control conversation. */
   computerUseRequests?: boolean
   /**
@@ -282,12 +284,27 @@ export interface FocusPageRules {
     conversationPathPattern: string
     triggerSelector: string
     modelSelector: string
+  } & ({
+    kind: 'chatgpt'
     viewToggleSelector: string
     effortAttribute: string
     sliderSelector: string
     sliderRootSelector: string
     efforts: Array<{ value: string; label: string; position: number }>
-  }
+  } | {
+    kind: 'gemini'
+    composerScopeSelector: string
+    modelLabelSelector: string
+    triggerLabelSelector: string
+    effortMenu: {
+      toggleSelector: string
+      toggleLabels: string[]
+      optionSelector: string
+      optionLabelSelector: string
+      triggerLabelSelector: string
+      levels: Array<{ value: string; labels: string[] }>
+    }
+  })
   composerModeControlSelector?: string
   composerModes?: Array<{ id: 'thinking' | 'search'; labels: string[]; activeSelector?: string; inactiveSelector?: string }>
   smartUi?: {
@@ -759,6 +776,7 @@ export const CHATGPT_PAGE: PageAdapter = {
     // one shared Radix menu, hidden model track with aria-checked, visible
     // reasoning slider 0..2, and the trigger's selected effort even when closed.
     modelSettings: {
+      kind: 'chatgpt',
       newChatPath: '/', conversationPathPattern: '^/(?:g/[^/?#]+/)?c/[^/?#]+/?$',
       // User probe 2026-10-29T06-21: the legacy data-codex-intelligence-trigger is gone.
       triggerSelector: 'button[aria-label="选择 ChatGPT 模型"][aria-haspopup="menu"][data-selected-reasoning-effort]',
@@ -1062,9 +1080,10 @@ export const CLAUDE_PAGE: PageAdapter = {
   /*
    * Prefer the answer container to omit the screen-reader prefix. This is a text-extraction
    * hint, not a role marker: code-only replies can lack it. The confirmed assistant turn is
-   * then read as a whole, and the JSON extractor ignores the surrounding UI text.
+   * then read as a whole, with the separate accessibility announcement excluded.
    */
   assistantReplySelectors: ['[class*="font-claude-response"]'],
+  assistantReplyAnnouncementPrefix: 'Claude responded:',
   messageSelectors: ['[data-testid="user-message"]', '[data-testid="assistant-message"]'],
   /*
    * EMPTY, and this is a finding rather than an omission — the same conclusion DeepSeek's entry
@@ -1246,7 +1265,30 @@ export const GEMINI_PAGE: PageAdapter = {
   focus: {
     userTurnSelector: 'user-query',
     reasoningScopeSelector: 'model-response',
-    reasoningSelectors: ['thinking-overlay']
+    reasoningSelectors: ['thinking-overlay'],
+    modelSettings: {
+      kind: 'gemini', newChatPath: '/app', conversationPathPattern: '^/app/[0-9a-fA-F]{16}/?$',
+      composerScopeSelector: 'input-area, fieldset.input-area-fieldset',
+      triggerSelector: ':is(button, [role="button"]):is([data-test-id="bard-mode-menu-button"], [data-testid="bard-mode-menu-button"]), ' +
+        ':is([data-test-id="bard-mode-menu-button"], [data-testid="bard-mode-menu-button"]) button[aria-haspopup]',
+      // User probe 2026-11-17: the linked gem-mode-menu uses custom radio items.
+      // The row shows a purpose and a full model name; the trigger shows the short name.
+      modelSelector: 'gem-menu-item[role="menuitemradio"][data-test-id^="bard-mode-option-"], ' +
+        'gem-menu-item[role="menuitemradio"][data-testid^="bard-mode-option-"], ' +
+        'button[data-test-id^="bard-mode-option-"], button[data-testid^="bard-mode-option-"]',
+      modelLabelSelector: 'gem-menu-item-content .sublabel',
+      triggerLabelSelector: '[data-test-id="logo-pill-label-container"] .picker-primary-text',
+      // The aria-controls menu stays mounted when closed. Only its radio rows
+      // carry availability and checked state; the pill repeats the current level.
+      effortMenu: {
+        toggleSelector: 'gem-menu-item[role="menuitem"][aria-haspopup="true"][aria-controls]',
+        toggleLabels: ['思考等级', 'Thinking level'],
+        optionSelector: 'gem-menu-item[role="menuitemradio"]',
+        optionLabelSelector: 'gem-menu-item-content .label',
+        triggerLabelSelector: '[data-test-id="logo-pill-label-container"] .picker-secondary-text',
+        levels: [{ value: 'low', labels: ['低', 'Low'] }, { value: 'medium', labels: ['中', 'Medium'] }, { value: 'high', labels: ['高', 'High'] }]
+      }
+    }
   },
   // Not measured yet; DeepSeek is the platform the theme probe runs against first.
   theme: THEME_UNMEASURED

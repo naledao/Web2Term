@@ -34,13 +34,12 @@ export class CompactionPage {
   private configuredUrl = ''
   private readonly parentClosed = (): void => this.close()
   constructor(private readonly parent: BrowserWindow, private readonly platform: ChatPlatform,
-    private theme: AppTheme, url: string, onUrl: (url: string) => void, initialBounds?: EmbedBounds) {
+    private theme: AppTheme, url: string, onUrl: (url: string) => void, userAgent: string, initialBounds?: EmbedBounds) {
     this.view = new WebContentsView({ webPreferences: { partition: platform.partition, nodeIntegration: false,
       contextIsolation: true, sandbox: true, webSecurity: true, spellcheck: false, backgroundThrottling: false } })
     this.view.setBackgroundColor(theme === 'dark' ? '#0a0a0a' : '#ffffff')
     // Match the primary embed's Chromium UA rather than exposing Electron to auth pages.
-    this.view.webContents.setUserAgent(this.view.webContents.getUserAgent()
-      .replace(/\sElectron\/[^\s]+/g, '').replace(/\sweb2term\/[^\s]+/gi, ''))
+    this.view.webContents.setUserAgent(userAgent)
     parent.contentView.addChildView(this.view)
     // Initialize the native content viewport while the view is still blank, before
     // hiding or loading. A 0x0 hidden viewport prevents virtual chat rows mounting.
@@ -93,7 +92,7 @@ export class CompactionPage {
   setTheme(theme: AppTheme): void { this.theme = theme; this.configuredUrl = '' }
   async read(marker: string, fileName: 'source.md' | 'summary.md'): Promise<CompactionPageSnapshot | null> {
     const contents = this.view.webContents
-    if (this.disposed || contents.isDestroyed()) throw new Error('压缩网页已关闭，请点“继续检查”重新打开。')
+    if (this.disposed || contents.isDestroyed()) throw new Error('处理网页已关闭，请点“重试”重新打开。')
     const url = this.url
     try { if (new URL(url).origin !== new URL(this.platform.homeUrl).origin) return null } catch { return null }
     if (this.configuredUrl !== url) {

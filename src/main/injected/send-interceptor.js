@@ -531,7 +531,32 @@
     return converted ? replaced.replace(DSML_WRAPPER, '').replace(/\n{3,}/g, '\n\n').trim() : text
   }
 
-  const readReplyText = (node) => normalizeDsmlToolCalls(String(replyRootOf(node)?.innerText || ''))
+  const replyAnnouncementOf = (root, text) => {
+    const prefix = PAGE.assistantReplyAnnouncementPrefix
+    if (!root || !prefix || !text.startsWith(prefix)) return null
+    for (const element of root.querySelectorAll('.sr-only, h1, h2, h3, h4, h5, h6')) {
+      const caption = String(element.innerText || '').trim()
+      if (!caption.startsWith(prefix) || !text.startsWith(caption)) continue
+      // A heading outside the answer can echo its first line. Require that echo
+      // before discarding a heading with content that is not marked sr-only.
+      const preview = caption.slice(prefix.length).trim()
+      if (element.matches('.sr-only') || (preview && text.slice(caption.length).trimStart().startsWith(preview))) {
+        return { element, length: caption.length }
+      }
+    }
+    return null
+  }
+
+  let assistantThinkingPrefix = null
+  const readReplyText = (node) => {
+    const root = replyRootOf(node)
+    const text = String(root?.innerText || '')
+    const leadingText = PAGE.assistantReplyAnnouncementPrefix ? text.trimStart() : text
+    const announcement = replyAnnouncementOf(root, leadingText)
+    const reply = announcement ? leadingText.slice(announcement.length).trimStart() : text
+    // Keep the caption in the Markdown capture so the focus view can show it as reasoning.
+    return normalizeDsmlToolCalls(assistantThinkingPrefix ? reply.replace(assistantThinkingPrefix, '') : reply)
+  }
 
   // Code preserves JSON escapes; prose has already passed through Markdown.
   // Read only the final-answer root, never the turn's reasoning or citations.
@@ -1332,6 +1357,8 @@
   const readReplyMarkdown = (node) => {
     const root = replyRootOf(node)
     if (!root) return ''
+    const announcement = PAGE.assistantReplyAnnouncementPrefix
+      ? replyAnnouncementOf(root, String(root.innerText || '').trimStart())?.element : null
     const smartCards = PAGE.focus?.smartUi ? smartUiCardsOf(node) : []
     const layouts = PAGE.focus?.smartUi ? smartUiLayoutsOf(node) : []
     const citations = PAGE.focus?.citations ? focusCitationGroupsOf(node) : []
@@ -1415,7 +1442,7 @@
     }
 
     const render = (current, depth = 0, strongContext = false) => {
-      if (!current) return ''
+      if (!current || current === announcement) return ''
       if (current.nodeType === Node.TEXT_NODE) return String(current.nodeValue || '')
       if (current.nodeType !== Node.ELEMENT_NODE) return ''
 
@@ -2460,15 +2487,72 @@
   const focusModelPickerParts = () => {
     const rules = PAGE.focus?.modelSettings
     if (!rules) return null
-    const triggers = queryAll([rules.triggerSelector]).filter(isVisibleElement)
+    const scope = rules.kind === 'gemini' ? getComposer()?.closest(rules.composerScopeSelector) : document
+    if (!scope) return null
+    const triggers = queryAll([rules.triggerSelector]).filter(node => isVisibleElement(node) && (scope === document || scope.contains(node)))
     if (triggers.length !== 1) return null
     const trigger = triggers[0], id = trigger.getAttribute('aria-controls')
+    if (trigger.getAttribute('aria-expanded') !== 'true') return { trigger, menu: null, rules }
     const candidate = id ? document.getElementById(id) : null
+    if (rules.kind === 'gemini') {
+      // Material menus render in a portal. An older trigger can omit aria-controls;
+      // only accept an unambiguous visible popup containing Gemini model buttons.
+      const menus = candidate ? [candidate] : queryAll(['[role="menu"], [role="listbox"]'])
+      const matches = menus.filter(node => isVisibleElement(node) && ['menu', 'listbox'].includes(node.getAttribute('role')) &&
+        (node === candidate || node.querySelector(rules.modelSelector)))
+      return { trigger, menu: matches.length === 1 ? matches[0] : null, rules }
+    }
     const menu = candidate?.getAttribute('role') === 'menu' && isVisibleElement(candidate) && trigger.id &&
-      (candidate.getAttribute('aria-labelledby') || '').split(/\s+/).includes(trigger.id) &&
-      trigger.getAttribute('aria-expanded') === 'true' ? candidate : null
+      (candidate.getAttribute('aria-labelledby') || '').split(/\s+/).includes(trigger.id) ? candidate : null
     return { trigger, menu, rules }
   }
+
+  const focusGeminiModelLabel = (node, selector) => {
+    const label = collapse(node.querySelector(selector)?.textContent)
+    if (label) return label
+    // Older menus put the model name first, before its description and icon labels.
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT)
+    for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+      if (text.parentElement?.closest('mat-icon, svg, [role="img"], [aria-hidden="true"], [hidden]')) continue
+      const content = collapse(text.nodeValue)
+      if (content) return content
+    }
+    return ''
+  }
+
+  const focusGeminiModelName = label => label.replace(/^(?:Gemini\s+)?\d+(?:\.\d+)*\s+/i, '').replace(/[\s-]+/g, '').toLowerCase()
+
+  const focusGeminiModelOptions = (menu, rules) => [...(menu?.querySelectorAll(rules.modelSelector) || [])]
+    .filter(node => isVisibleElement(node) && !controlDisabled(node) && !node.closest('[data-locked="true"]') &&
+      ![...node.querySelectorAll('mat-icon')].some(icon => /^(?:lock|lock_outline|lock_filled)$/.test(icon.getAttribute('fonticon') || collapse(icon.textContent))))
+    .map(node => {
+      const id = [node.getAttribute('data-test-id'), node.getAttribute('data-testid')].find(value => value?.startsWith('bard-mode-option-'))
+      return { node, value: id?.slice('bard-mode-option-'.length) || '', label: focusGeminiModelLabel(node, rules.modelLabelSelector),
+        selected: ['aria-checked', 'aria-selected'].some(attr => node.getAttribute(attr) === 'true') }
+    })
+    .filter(({ value, label }) => /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(value) && !/^upsell(?:[_-]|$)/i.test(value) && label.length > 0 && label.length <= 100)
+
+  const focusGeminiEffortParts = (menu, rules) => {
+    const settings = rules.effortMenu
+    const toggles = [...(menu?.querySelectorAll(settings.toggleSelector) || [])].filter(node => isVisibleElement(node) && !controlDisabled(node) &&
+      settings.toggleLabels.some(label => label.toLowerCase() === collapse(node.querySelector(settings.optionLabelSelector)?.textContent).toLowerCase()))
+    if (toggles.length !== 1) return null
+    const toggle = toggles[0], panel = document.getElementById(toggle.getAttribute('aria-controls'))
+    if (panel?.getAttribute('role') !== 'menu' || controlDisabled(panel)) return { toggle, panel: null, expanded: false }
+    return { toggle, panel, expanded: toggle.getAttribute('aria-expanded') === 'true' && isVisibleElement(panel) }
+  }
+
+  const focusGeminiEffortValue = (label, rules) => rules.effortMenu.levels.find(level =>
+    level.labels.some(name => name.toLowerCase() === label.toLowerCase()))?.value ?? null
+
+  const focusGeminiEffortOptions = (panel, rules) => [...(panel?.querySelectorAll(rules.effortMenu.optionSelector) || [])]
+    .filter(node => !controlDisabled(node))
+    .map(node => {
+      const label = collapse(node.querySelector(rules.effortMenu.optionLabelSelector)?.textContent)
+      return { node, label, value: focusGeminiEffortValue(label, rules), selected: node.getAttribute('aria-checked') === 'true' }
+    })
+    .filter(option => option.value !== null)
+
   /** Passive between explicit refreshes; never opens a menu from the polling loop. */
   const focusModelSettingsOf = () => {
     const rules = PAGE.focus?.modelSettings
@@ -2478,7 +2562,8 @@
     // the first hop. Explicit history navigation clears this in armBaseline.
     const sending = state.programmatic || state.awaitingReplySince !== 0 || fileSend?.submitted
     const firstSend = focusModelCache &&
-      (focusModelCache.path === rules.newChatPath || focusModelCache.firstSendGeneration === state.taskPromptGeneration) && sending &&
+      (focusModelCache.path === rules.newChatPath || (rules.kind === 'gemini' && focusModelCache.path === rules.newChatPath + '/') ||
+        focusModelCache.firstSendGeneration === state.taskPromptGeneration) && sending &&
       new RegExp(rules.conversationPathPattern).test(location.pathname)
     if (!focusModelCache || (focusModelCache.path !== location.pathname && !firstSend)) {
       focusModelCache = { path: location.pathname, data: { model: null, effort: null, models: [], efforts: [] } }
@@ -2492,6 +2577,35 @@
     const parts = focusModelPickerParts()
     if (!parts) return { ...data, models: data.models.slice(), efforts: data.efforts.slice() }
     const { trigger, menu } = parts
+    if (rules.kind === 'gemini') {
+      let checked = []
+      if (menu) {
+        const options = focusGeminiModelOptions(menu, rules)
+        const unique = options.length <= 20 && new Set(options.map(option => option.value)).size === options.length
+        data.models = unique ? options.map(({ value, label }) => ({ value, label })) : []
+        if (unique) checked = options.filter(option => option.selected)
+      }
+      const label = focusGeminiModelLabel(trigger, rules.triggerLabelSelector)
+      const exact = data.models.filter(option => option.label.toLowerCase() === label.toLowerCase())
+      const matching = exact.length ? exact : data.models.filter(option => focusGeminiModelName(option.label) === focusGeminiModelName(label))
+      data.model = checked.length === 1 ? checked[0].value : matching.length === 1 ? matching[0].value : null
+      if (focusModelCache.effortModel !== data.model) {
+        data.efforts = []
+        focusModelCache.effortModel = data.model
+      }
+      const level = collapse(trigger.querySelector(rules.effortMenu.triggerLabelSelector)?.textContent)
+      let selected = focusGeminiEffortValue(level, rules)
+      if (menu) {
+        // Gemini keeps the linked submenu and its checked rows mounted while collapsed.
+        const options = focusGeminiEffortOptions(focusGeminiEffortParts(menu, rules)?.panel, rules)
+        const unique = new Set(options.map(option => option.value)).size === options.length
+        data.efforts = unique ? options.map(({ value, label }) => ({ value, label })) : []
+        const checkedEfforts = unique ? options.filter(option => option.selected) : []
+        if (checkedEfforts.length === 1) selected = checkedEfforts[0].value
+      }
+      data.effort = data.efforts.some(option => option.value === selected) ? selected : null
+      return { ...data, models: data.models.slice(), efforts: data.efforts.slice() }
+    }
     if (menu) {
       // Both tracks stay mounted. The inactive model track is aria-hidden, but
       // its radio selection is authoritative and lets reads avoid changing views.
@@ -4908,7 +5022,11 @@
       }
       if (handleSafetyLeak(messageId, text, latest)) return
       const markdown = readReplyMarkdown(latest) || text
-      const completed = /^(?:#{1,6}\s*)?(?:\*\*)?(?:【任务完成】|任务完成(?=$|[\s。！!：:]))/.test(text.trimStart())
+      // Claude's plain-text read can flatten the thinking caption and the first
+      // answer line. The settled Markdown preserves that boundary.
+      const completed = /^(?:#{1,6}\s*)?(?:\*\*)?(?:【任务完成】|任务完成(?=$|[\s。！!：:]))/.test(text.trimStart()) ||
+        (assistantThinkingPrefix !== null &&
+          /^【任务完成】[ \t]*(?:\r?\n|$)/.test(markdown.replace(assistantThinkingPrefix, '').trimStart()))
       const refusal = geminiRefusalAfterCommand(messageId, markdown, latest)
       const completionSource = completed ? legacyTaskSource(latest) : {}
       replyScanSnapshot = snapshotReplyScan(latest, nodes)
@@ -6436,7 +6554,9 @@
         // read/write path decides from the ELEMENT (see readComposer), so a site that
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
-        PAGE = { ...PAGE, computerUseRequests: false, conversationPathPattern: '', ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', messageIdAttrs: [], disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileUserTurnIdAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileSplitNameCards: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [], ...selectors }
+        PAGE = { ...PAGE, computerUseRequests: false, conversationPathPattern: '', ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', messageIdAttrs: [], disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileUserTurnIdAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileSplitNameCards: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [],
+          assistantReplyAnnouncementPrefix: '', ...selectors }
+        assistantThinkingPrefix = selectors.assistantThinkingPrefixPattern ? new RegExp(selectors.assistantThinkingPrefixPattern) : null
         observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing
@@ -6757,6 +6877,7 @@
       click.prepared = true
       const target = click.target
       if (!target.isConnected || !isVisibleElement(target) || controlDisabled(target) || !click.validate()) { click.dispatched = false; return null }
+      if (click.dismiss) return { keyCode: 'Escape' }
       const box = target.getBoundingClientRect()
       const fraction = click.fraction === null ? .5 : getComputedStyle(target).direction === 'rtl' ? 1 - click.fraction : click.fraction
       const x = Math.max(box.left + 1, Math.min(box.right - 1, box.left + box.width * fraction)), y = box.top + box.height / 2
@@ -6764,7 +6885,7 @@
       if (box.width < 3 || box.height < 3 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight || !hit || !target.contains(hit)) {
         click.dispatched = false; return null
       }
-      return { x, y }
+      return { x, y, ...(click.hover ? { hover: true } : {}) }
     },
     finishFocusModelClick(token, step, dispatched, reason = null) {
       const operation = focusModeChanging, click = operation?.click
@@ -6777,7 +6898,8 @@
     /** One owned menu operation, driven by trusted native input and confirmed from DOM state. */
     async updateModelSettings(kind, value, expectedPath, token) {
       const result = (outcome, reason) => ({ outcome, reason, settings: focusModelSettingsOf() })
-      if (!PAGE.focus?.modelSettings || !['read', 'model', 'effort'].includes(kind) || typeof token !== 'string' ||
+      const rules = PAGE.focus?.modelSettings
+      if (!rules || !['read', 'model', 'effort'].includes(kind) || typeof token !== 'string' ||
         !/^[a-zA-Z0-9-]{1,80}$/.test(token) || (kind === 'read' ? value !== null : typeof value !== 'string' || value.length > 80)) return result('invalid', 'invalid-request')
       if (location.pathname !== expectedPath || !getComposer()) return result('unavailable', 'page-unavailable')
       if (focusModeChanging || focusEditing || fileSend || state.programmatic || state.awaitingReplySince || state.pendingQuestion || findStopButton()) return result('busy', 'page-busy')
@@ -6792,9 +6914,9 @@
         }
         return operation.current() && predicate()
       }
-      const nativeClick = async (target, fraction = null, validate = () => true) => {
-        if (!target || !operation.current() || Date.now() >= deadline || operation.step >= 5) return false
-        const click = { target, fraction, validate, step: ++operation.step, prepared: false, dispatched: null }
+      const nativeInput = async (target, { fraction = null, validate = () => true, dismiss = false, hover = false } = {}) => {
+        if (!target || !operation.current() || Date.now() >= deadline || operation.step >= 6) return false
+        const click = { target, fraction, validate, dismiss, hover, step: ++operation.step, prepared: false, dispatched: null }
         operation.click = click
         report({ event: 'focus-model-click', focusModelToken: token, count: click.step })
         await waitFor(() => click.dispatched !== null)
@@ -6804,15 +6926,16 @@
         let stable = 0
         return await waitFor(() => { stable = predicate() ? stable + 1 : 0; return stable >= 3 })
       }
+      const geminiEffortParts = () => focusGeminiEffortParts(focusModelPickerParts()?.menu, rules)
       focusModeChanging = operation
-      let openedHere = false, outcome = 'unknown', reason = 'selection-unconfirmed'
+      let openedHere = false, openedEffortHere = false, outcome = 'unknown', reason = 'selection-unconfirmed'
       try {
         const perform = async () => {
           await waitFor(() => !!focusModelPickerParts())
           let parts = focusModelPickerParts()
           if (!parts || controlDisabled(parts.trigger)) return ['unavailable', 'control-missing']
           if (parts.trigger.getAttribute('aria-expanded') !== 'true') {
-            if (!await nativeClick(parts.trigger, null, () => focusModelPickerParts()?.trigger === parts.trigger)) {
+            if (!await nativeInput(parts.trigger, { validate: () => focusModelPickerParts()?.trigger === parts.trigger })) {
               // Only an explicitly rejected first click is safe to retry. A missing
               // acknowledgement or a later failure may already have changed the menu.
               const click = operation.click
@@ -6822,47 +6945,104 @@
             openedHere = true
           }
           if (!await waitFor(() => !!focusModelPickerParts()?.menu)) return ['unknown', 'menu-unavailable']
+          if (rules.kind === 'gemini') {
+            await waitFor(() => !!focusModelPickerParts()?.menu?.querySelector(rules.modelSelector))
+            const effort = geminiEffortParts()
+            if (kind !== 'model' && effort && !effort.panel) await waitFor(() => !!geminiEffortParts()?.panel, 500)
+          }
           parts = focusModelPickerParts()
-          let data = focusModelSettingsOf()
+          if (!parts?.menu) return ['unknown', 'menu-unavailable']
+          const data = focusModelSettingsOf()
           if (!data.models.length) return ['unavailable', 'model-options-missing']
           if (kind === 'read') return data.model ? ['ok', 'settings-read'] : ['unknown', 'selection-unconfirmed']
           if (kind === 'model') {
             if (!data.models.some(item => item.value === value)) return ['invalid', 'option-unavailable']
             if (data.model === value) return ['ok', 'already-selected']
-            const locate = () => [...(focusModelPickerParts()?.menu?.querySelectorAll(parts.rules.modelSelector) || [])]
-              .filter(node => collapse(node.textContent || '') === value)
+            const locate = () => {
+              const menu = focusModelPickerParts()?.menu
+              return rules.kind === 'gemini' ? focusGeminiModelOptions(menu, rules).filter(option => option.value === value).map(option => option.node) :
+                [...(menu?.querySelectorAll(rules.modelSelector) || [])].filter(node => collapse(node.textContent || '') === value)
+            }
             let matches = locate()
             if (matches.length !== 1) return ['unavailable', 'option-unavailable']
-            if (!isVisibleElement(matches[0]) || matches[0].closest('[aria-hidden="true"]')) {
-              const toggles = [...parts.menu.querySelectorAll(parts.rules.viewToggleSelector)].filter(node => isVisibleElement(node) && !node.closest('[aria-hidden="true"]'))
-              if (toggles.length !== 1 || !await nativeClick(toggles[0])) return ['unknown', 'native-input-failed']
+            if (rules.kind === 'chatgpt' && (!isVisibleElement(matches[0]) || matches[0].closest('[aria-hidden="true"]'))) {
+              const toggles = [...parts.menu.querySelectorAll(rules.viewToggleSelector)].filter(node => isVisibleElement(node) && !node.closest('[aria-hidden="true"]'))
+              if (toggles.length !== 1 || !await nativeInput(toggles[0])) return ['unknown', 'native-input-failed']
               if (!await waitFor(() => locate().some(node => isVisibleElement(node) && !node.closest('[aria-hidden="true"]')))) return ['unknown', 'menu-unavailable']
             }
             matches = locate()
-            if (matches.length !== 1 || !await nativeClick(matches[0], null, () => locate().length === 1 && locate()[0] === matches[0])) return ['unknown', 'native-input-failed']
-            return await confirmed(() => focusModelSettingsOf().model === value) ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
+            if (matches.length !== 1 || !await nativeInput(matches[0], { validate: () => {
+              const current = locate()
+              return current.length === 1 && current[0] === matches[0]
+            } })) return ['unknown', 'native-input-failed']
+            return await confirmed(() => (rules.kind !== 'gemini' || !!focusModelPickerParts()) && focusModelSettingsOf().model === value)
+              ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
           }
           if (!data.efforts.some(item => item.value === value)) return ['invalid', 'option-unavailable']
           if (data.effort === value) return ['ok', 'already-selected']
+          if (rules.kind === 'gemini') {
+            const model = data.model, effort = geminiEffortParts()
+            if (!model || !effort) return ['unavailable', 'control-missing']
+            const visibleSubmenu = () => geminiEffortParts()?.expanded === true
+            const sameToggle = () => focusModelSettingsOf().model === model && geminiEffortParts()?.toggle === effort.toggle
+            if (!effort.expanded) {
+              // The desktop submenu can open on hover. Click only if it stays closed.
+              openedEffortHere = true
+              if (!await nativeInput(effort.toggle, { hover: true, validate: sameToggle })) return ['unknown', 'native-input-failed']
+              if (!await waitFor(visibleSubmenu, 450)) {
+                const clicked = await nativeInput(effort.toggle, { validate: () => sameToggle() && !visibleSubmenu() })
+                if (!clicked && !visibleSubmenu()) return ['unknown', 'native-input-failed']
+                if (!await waitFor(visibleSubmenu)) return ['unknown', 'menu-unavailable']
+              }
+            }
+            const locate = () => {
+              const current = geminiEffortParts()
+              return current?.expanded ? focusGeminiEffortOptions(current.panel, rules).filter(option => option.value === value && isVisibleElement(option.node)) : []
+            }
+            const options = locate()
+            if (options.length !== 1) return ['unavailable', 'option-unavailable']
+            const target = options[0].node
+            if (!await nativeInput(target, { validate: () => {
+              const live = locate()
+              return focusModelSettingsOf().model === model && live.length === 1 && live[0].node === target
+            } })) return ['unknown', 'native-input-failed']
+            return await confirmed(() => {
+              const settings = focusModelSettingsOf()
+              return !!focusModelPickerParts() && settings.model === model && settings.effort === value
+            }) ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
+          }
           const model = data.model, rule = parts.rules.efforts.find(item => item.value === value)
           const slider = parts.menu.querySelector(parts.rules.sliderSelector)
           const root = slider?.querySelector(parts.rules.sliderRootSelector)
           if (!root || slider.closest('[aria-hidden="true"]')) return ['unavailable', 'slider-unavailable']
-          if (!await nativeClick(root, rule.position / 2, () => focusModelSettingsOf().model === model &&
-            focusModelPickerParts()?.menu?.querySelector(parts.rules.sliderSelector) === slider)) return ['unknown', 'native-input-failed']
+          if (!await nativeInput(root, { fraction: rule.position / 2, validate: () => focusModelSettingsOf().model === model &&
+            focusModelPickerParts()?.menu?.querySelector(parts.rules.sliderSelector) === slider })) return ['unknown', 'native-input-failed']
           return await confirmed(() => focusModelSettingsOf().model === model && focusModelSettingsOf().effort === value)
             ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
         }
         ;[outcome, reason] = await perform()
       } catch { outcome = 'unknown'; reason = 'page-exception' }
       finally {
-        if (openedHere && operation.current()) {
-          const trigger = focusModelPickerParts()?.trigger
-          if (trigger?.getAttribute('aria-expanded') === 'true') {
-            const closed = await nativeClick(trigger) && await waitFor(() => focusModelPickerParts()?.trigger.getAttribute('aria-expanded') !== 'true', 500)
-            if (!closed && outcome === 'ok') { outcome = 'unknown'; reason = 'menu-close-unconfirmed' }
+        let closed = true
+        if (rules.kind === 'gemini' && (openedHere || openedEffortHere) && operation.current()) {
+          const effort = geminiEffortParts()
+          if (effort?.expanded) {
+            const panel = effort.panel
+            const dismissed = await nativeInput(panel, { dismiss: true, validate: () => geminiEffortParts()?.panel === panel &&
+              (panel.contains(document.activeElement) || effort.toggle.contains(document.activeElement)) })
+            closed = dismissed && await waitFor(() => !geminiEffortParts()?.expanded, 500)
           }
         }
+        if (openedHere && operation.current()) {
+          const { trigger, menu } = focusModelPickerParts() || {}
+          if (trigger?.getAttribute('aria-expanded') === 'true') {
+            const dispatched = rules.kind === 'gemini' ? await nativeInput(menu, { dismiss: true, validate: () =>
+              focusModelPickerParts()?.menu === menu && (menu.contains(document.activeElement) || trigger.contains(document.activeElement)) }) :
+              await nativeInput(trigger)
+            closed = dispatched && await waitFor(() => focusModelPickerParts()?.trigger.getAttribute('aria-expanded') !== 'true', 500)
+          }
+        }
+        if (!closed && outcome === 'ok') { outcome = 'unknown'; reason = 'menu-close-unconfirmed' }
         if (!operation.current()) { outcome = 'cancelled'; reason = 'conversation-changed' }
         if (focusModeChanging === operation) focusModeChanging = null
       }

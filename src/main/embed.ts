@@ -27,7 +27,7 @@ import { supportsSelectionQuestion } from '../shared/deepseek-question'
 import type { QuestionChatAction, QuestionChatState, SelectionQuestionDraft } from '../shared/deepseek-question'
 import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
 import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo, FocusEditDiagnostic, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
-import { supportsFocusView, validFocusComposerModes, validFocusModelSettings, validFocusSendFailure } from '../shared/focus-chat'
+import { CLAUDE_THINKING_PREFIX, supportsFocusView, validFocusComposerModes, validFocusModelSettings, validFocusSendFailure } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
 import { sendQuestionChatAttachment } from './question-chat-send'
 import { writeRawSendDiagnostic } from './raw-send-log'
@@ -130,6 +130,12 @@ function chromeLikeUserAgent(): string {
     `Mozilla/5.0 (${platformToken}) AppleWebKit/537.36 (KHTML, like Gecko) ` +
     `Chrome/${process.versions.chrome} Safari/537.36`
   )
+}
+
+/** Also used by isolated chat workers that can be the first view in a partition. */
+export function prepareChatBrowserIdentity(partition: string): string {
+  installChromeIdentity(partition)
+  return process.env.EMBED_USER_AGENT ?? chromeLikeUserAgent()
 }
 
 /**
@@ -662,7 +668,7 @@ export class ChatGptEmbed {
 
     // Before the view exists, so the very first request of the very first navigation already
     // carries a brand list that agrees with the User-Agent below.
-    installChromeIdentity(this.platform.partition)
+    const baseUserAgent = prepareChatBrowserIdentity(this.platform.partition)
     watchGoogleSessionCookies(this.platform.partition)
 
     const view = new WebContentsView({
@@ -705,7 +711,6 @@ export class ChatGptEmbed {
         } })
       } catch { console.warn('[embed:deepseek] hidden-view diagnostic could not be loaded') }
     }
-    const baseUserAgent = process.env.EMBED_USER_AGENT ?? chromeLikeUserAgent()
     contents.setUserAgent(baseUserAgent)
     if (supportsSelectionQuestion(this.platform.id)) {
       this.selectionQuestion = new SelectionQuestion(contents, parent, this.platform, () => this.theme,
@@ -1014,6 +1019,7 @@ export class ChatGptEmbed {
   }
 
   getQuestionChatState(): QuestionChatState | null { return this.selectionQuestion?.getState() ?? null }
+  questionChatGenerating(): Promise<boolean> | undefined { return this.selectionQuestion?.hasActiveReply() }
   createQuestionChat(): QuestionChatState | null { return this.selectionQuestion?.createChat() ?? null }
   /** @returns '' once the side chat is open, otherwise the message to show in the focus view. */
   askSelectionFromFocus(draft: Omit<SelectionQuestionDraft, 'sourcePath'>): Promise<string> {
@@ -1383,7 +1389,8 @@ export class ChatGptEmbed {
       armBaseline,
       // Which site's DOM to work against. The injected script is source text, so the
       // platform cannot be imported there — this is the only route it has.
-      page: this.platform.page
+      page: this.platform.id === 'claude'
+        ? { ...this.platform.page, assistantThinkingPrefixPattern: CLAUDE_THINKING_PREFIX.source } : this.platform.page
     })
 
     try {
@@ -1610,7 +1617,7 @@ export class ChatGptEmbed {
   private focusModelNativeClick: { token: string; dispatch(step: number): void } | null = null
   async updateFocusModelSettings(request: FocusModelSettingsRequest, token: string, owns: () => boolean): Promise<FocusModelSettingsResult> {
     const contents = this.focusPage()
-    if (!contents || this.platform.id !== 'chatgpt' || this.focusEditToken || this.focusModelNativeClick) return { outcome: 'unavailable', settings: null }
+    if (!contents || !this.platform.page.focus?.modelSettings || this.focusEditToken || this.focusModelNativeClick) return { outcome: 'unavailable', settings: null }
     const focused = (): boolean => !!this.view && (BrowserWindow.getFocusedWindow()?.contentView.children.includes(this.view) ?? false)
     if (!focused()) return { outcome: 'unavailable', settings: null, reason: 'native-click-window-unfocused' }
     const url = contents.getURL()
@@ -1625,7 +1632,7 @@ export class ChatGptEmbed {
       } catch { return false }
     }
     this.focusModelNativeClick = { token, dispatch: next => {
-      if (!current() || !Number.isSafeInteger(next) || next !== step + 1 || next > 5) return
+      if (!current() || !Number.isSafeInteger(next) || next !== step + 1 || next > 6) return
       step = next
       void dispatchFocusModelClick(contents, token, next, current, focused)
     } }

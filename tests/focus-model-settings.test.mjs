@@ -16,7 +16,7 @@ function moduleAt(path, dependencies = {}) {
   return exports
 }
 const shared = moduleAt('../src/shared/focus-chat.ts')
-const { CHATGPT_PAGE } = moduleAt('../src/shared/platforms.ts')
+const { CHATGPT_PAGE, GEMINI_PAGE } = moduleAt('../src/shared/platforms.ts')
 const { dispatchFocusModelClick } = moduleAt('../src/main/focus-model-click.ts')
 const { default: Controls } = moduleAt('../src/renderer/src/components/FocusModelSettings.tsx', { 'react/jsx-runtime': jsxRuntime })
 const pagePath = '../src/main/injected/send-interceptor.js'
@@ -33,6 +33,9 @@ function actual(name, context, method = false, path = pagePath) {
 }
 function automaticRead(context) {
   context.compaction ??= { blocked: false }
+  context.modelSettingsKind ??= context.owner.platformId
+  context.geminiReadModel ??= { current: null }
+  Object.defineProperty(context, 'modelSettingsBlocked', { get: () => !context.ready || context.working || context.editingId || context.compaction.blocked })
   context.setTimeout ??= callback => { callback(); return 1 }
   context.clearTimeout ??= () => {}
   const path = '../src/renderer/src/components/FocusChatView.tsx'
@@ -46,6 +49,199 @@ function automaticRead(context) {
   assert.ok(callback, 'automatic model-settings read effect')
   return new Script('(' + callback.getText(file) + ')').runInContext(context)
 }
+
+function geminiFixture() {
+  const rules = GEMINI_PAGE.focus.modelSettings
+  let open = false, effortOpen = false, active = '56fdd199312815e2', activeEffort = 'high', now = 0, nextHit, reject = false, requireClick = false
+  const clicks = [], draft = { value: '保持草稿', closest: selector => selector === rules.composerScopeSelector ? scope : null }
+  const element = (attributes, label, left, localName = 'button') => ({
+    isConnected: true, localName, label, getAttribute: name => attributes[name] ?? null,
+    contains(node) { return node === this }, closest: () => null, querySelector: () => null, querySelectorAll: () => [],
+    getBoundingClientRect: () => ({ left, right: left + 20, top: 10, bottom: 30, width: 20, height: 20 })
+  })
+  const option = (value, label, model, shortName, left, disabled = false) => {
+    const row = element({ role: 'menuitemradio', 'data-test-id': `bard-mode-option-${value}`, 'aria-disabled': String(disabled) }, label, left, 'gem-menu-item')
+    const getAttribute = row.getAttribute
+    row.getAttribute = name => name === 'aria-checked' ? String(active === value) : getAttribute(name)
+    row.querySelector = selector => selector === 'gem-menu-item-content .sublabel' ? { textContent: model } : null
+    return { ...row, value, shortName }
+  }
+  const flash = option('8c46e95b1a07cecc', '快速解答', '3.5 Flash-Lite', 'Flash Lite', 40)
+  const hydrogen = option('56fdd199312815e2', '日常帮助', '4 Hydrogen', 'Hydrogen', 70)
+  const pro = option('e6fa609c3fa255c0', '深度研究', '3.1 Pro', 'Pro', 100)
+  const argon = option('argon', '代码与分析', '4 Argon', 'Argon', 130)
+  const locked = option('upsell_MODE_CATEGORY_ULTRA', '高难任务', '4 Carbon', 'Carbon', 160)
+  locked.querySelectorAll = selector => selector === 'mat-icon' ? [element({ fonticon: 'lock' }, '', 0)] : []
+  const disabled = option('unavailable', '不可用', '3.0 Pro', 'Pro', 190, true)
+  const options = [flash, hydrogen, pro, argon, locked, disabled]
+  const trigger = element({}, '', 10)
+  const otherTrigger = element({}, '其他入口', 260)
+  trigger.getAttribute = name => ({ 'aria-expanded': String(open), 'aria-controls': open ? 'angular-menu' : null })[name] ?? null
+  trigger.querySelector = selector => {
+    if (selector === '[data-test-id="logo-pill-label-container"] .picker-primary-text') return { textContent: options.find(option => option.value === active).shortName }
+    if (selector === '[data-test-id="logo-pill-label-container"] .picker-secondary-text') return { textContent: levels.find(option => option.value === activeEffort).label }
+    return null
+  }
+  const scope = { contains: node => node === trigger }
+  const menu = element({ role: 'menu', 'data-test-id': 'gem-mode-menu' }, '', 230, 'gem-menu')
+  const thinking = element({}, '思考等级', 280, 'gem-menu-item')
+  thinking.getAttribute = name => ({ role: 'menuitem', 'aria-haspopup': 'true', 'aria-expanded': String(effortOpen), 'aria-controls': 'effort-menu' })[name] ?? null
+  thinking.querySelector = selector => selector === 'gem-menu-item-content .label' ? { textContent: thinking.label } : null
+  const effortMenu = element({ role: 'menu' }, '', 310, 'gem-menu')
+  const levels = [['low', '低'], ['medium', '中'], ['high', '高']].map(([value, label], index) => {
+    const row = element({ role: 'menuitemradio' }, label, 350 + index * 30, 'gem-menu-item')
+    row.getAttribute = name => ({ role: 'menuitemradio', 'aria-checked': String(activeEffort === value) })[name] ?? null
+    row.querySelector = selector => selector === 'gem-menu-item-content .label' ? { textContent: label } : null
+    return { ...row, value }
+  })
+  const findRows = (rows, selector) => rows.filter(row => selector.split(',').some(rule => {
+    const part = rule.trim()
+    return part.split('[')[0] === row.localName && [...part.matchAll(/\[([\w-]+)(?:(\^?=)"([^"]+)")?\]/g)].every(([, name, operator, value]) => {
+      const attr = row.getAttribute(name)
+      return operator === '=' ? attr === value : operator === '^=' ? attr?.startsWith(value) : attr !== null
+    })
+  }))
+  menu.querySelectorAll = selector => findRows([...options, thinking, ...levels], selector)
+  effortMenu.querySelectorAll = selector => findRows(levels, selector)
+  menu.querySelector = selector => menu.querySelectorAll(selector)[0] ?? null
+  menu.contains = node => node === menu || node === thinking || options.includes(node) || effortMenu.contains(node)
+  effortMenu.contains = node => node === effortMenu || levels.includes(node)
+  const visible = node => !!node && (node === trigger || node === otherTrigger || open && (!effortMenu.contains(node) || effortOpen))
+  const document = {
+    activeElement: trigger, getElementById: id => open ? ({ 'angular-menu': menu, 'effort-menu': effortMenu })[id] ?? null : null,
+    elementFromPoint(x) {
+      nextHit = [trigger, ...options, thinking, ...levels].find(node => visible(node) && x >= node.getBoundingClientRect().left && x <= node.getBoundingClientRect().right)
+      return nextHit
+    },
+    createTreeWalker(node) {
+      const texts = [{ nodeValue: 'check', parentElement: { closest: () => ({}) } }, { nodeValue: node.label }, { nodeValue: '模型说明' }]
+      return { nextNode: () => texts.shift() }
+    }
+  }
+  const context = createContext({ PAGE: GEMINI_PAGE, document, NodeFilter: { SHOW_TEXT: 4 }, location: { pathname: '/app' },
+    Date: { now: () => now }, setTimeout(callback, delay) { now += delay; queueMicrotask(callback) },
+    focusModelCache: null, focusModeChanging: null, focusEditing: null, fileSend: null,
+    state: { taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: false },
+    getComposer: () => draft, findStopButton: () => null,
+    queryAll: selectors => selectors.includes(rules.triggerSelector) ? [otherTrigger, trigger] : [],
+    collapse: value => String(value || '').replace(/\s+/g, ' ').trim(), controlDisabled: node => node.getAttribute('aria-disabled') === 'true',
+    isVisibleElement: visible,
+    innerWidth: 1000, innerHeight: 800, report(payload) {
+      queueMicrotask(() => { void dispatchFocusModelClick(contents, payload.focusModelToken, payload.count, () => true, () => true) })
+    } })
+  for (const name of ['focusModelPickerParts', 'focusGeminiModelLabel', 'focusGeminiModelName', 'focusGeminiModelOptions',
+    'focusGeminiEffortParts', 'focusGeminiEffortValue', 'focusGeminiEffortOptions', 'focusModelSettingsOf']) context[name] = actual(name, context)
+  const api = {}
+  for (const name of ['prepareFocusModelClick', 'finishFocusModelClick', 'updateModelSettings']) api[name] = actual(name, context, true)
+  context.window = { __cmdTerminalInterceptor: api }
+  const contents = { getZoomFactor: () => 1, executeJavaScript: source => Promise.resolve(new Script(source).runInContext(context)),
+    sendInputEvent(event) {
+      if (event.type === 'keyDown' && event.keyCode === 'Escape') {
+        if (effortOpen) {
+          clicks.push('dismiss-effort')
+          effortOpen = false
+          document.activeElement = thinking
+        } else {
+          clicks.push('dismiss')
+          open = false
+          document.activeElement = trigger
+        }
+      }
+      if (event.type === 'mouseMove' && nextHit === thinking && !requireClick) {
+        clicks.push('hover-effort')
+        effortOpen = true
+        document.activeElement = thinking
+      }
+      if (event.type !== 'mouseUp') return
+      if (nextHit === trigger) {
+        assert.equal(open, false, 'the backdrop covers the trigger while the menu is open')
+        clicks.push('open')
+        open = true
+        document.activeElement = flash
+      } else if (nextHit === thinking) {
+        clicks.push('open-effort')
+        effortOpen = true
+        document.activeElement = levels[0]
+      } else if (options.includes(nextHit) || levels.includes(nextHit)) {
+        const value = nextHit.value
+        clicks.push(value)
+        if (!reject && options.includes(nextHit)) active = value
+        if (!reject && levels.includes(nextHit)) activeEffort = value
+        open = false
+        effortOpen = false
+        document.activeElement = trigger
+      }
+    } }
+  return { context, clicks, draft, read: context.focusModelSettingsOf, declineChange() { reject = true }, clickOnly() { requireClick = true },
+    change: (kind, value = null) => api.updateModelSettings(kind, value, context.location.pathname, 'gemini-operation') }
+}
+
+test('Gemini reads model names from custom radio rows and confirms a choice from the abbreviated button label', async () => {
+  const f = geminiFixture()
+  const read = await f.change('read')
+  assert.equal(read.outcome, 'ok')
+  assert.equal(read.settings.model, '56fdd199312815e2')
+  assert.deepEqual(Array.from(read.settings.models, item => [item.value, item.label]), [
+    ['8c46e95b1a07cecc', '3.5 Flash-Lite'], ['56fdd199312815e2', '4 Hydrogen'], ['e6fa609c3fa255c0', '3.1 Pro'], ['argon', '4 Argon']
+  ])
+  assert.equal(read.settings.effort, 'high')
+  assert.deepEqual(Array.from(read.settings.efforts, item => [item.value, item.label]), [['low', '低'], ['medium', '中'], ['high', '高']])
+  assert.deepEqual(f.clicks, ['open', 'dismiss'])
+  assert.equal(shared.validFocusModelSettings(read.settings), true)
+
+  const switched = await f.change('model', 'argon')
+  assert.equal(switched.outcome, 'ok')
+  assert.equal(f.read().model, 'argon')
+  assert.equal(f.read().efforts.length, 0, 'another model must refresh its own available levels')
+  assert.equal(f.draft.value, '保持草稿')
+  assert.deepEqual(f.clicks, ['open', 'dismiss', 'open', 'argon'])
+
+  assert.equal((await f.change('model', '8c46e95b1a07cecc')).outcome, 'ok')
+  assert.equal(f.read().model, '8c46e95b1a07cecc', 'a hyphenated model name still matches the short button label')
+})
+
+test('Gemini rejects locked options and active tasks, and an unapplied native click remains unconfirmed', async () => {
+  const f = geminiFixture()
+  f.context.state.awaitingReplySince = 1
+  assert.equal((await f.change('model', 'argon')).outcome, 'busy')
+  assert.deepEqual(f.clicks, [])
+  f.context.state.awaitingReplySince = 0
+  assert.equal((await f.change('model', 'upsell_MODE_CATEGORY_ULTRA')).reason, 'option-unavailable')
+  assert.deepEqual(f.clicks, ['open', 'dismiss'])
+  f.declineChange()
+  const unchanged = await f.change('model', 'argon')
+  assert.equal(unchanged.reason, 'selection-unconfirmed')
+  assert.equal(unchanged.settings.model, '56fdd199312815e2')
+})
+
+test('Gemini selects strength from the linked menu and confirms it after the submenu closes', async () => {
+  for (const requireClick of [false, true]) {
+    const f = geminiFixture()
+    if (requireClick) f.clickOnly()
+    const changed = await f.change('effort', 'medium')
+    assert.equal(changed.outcome, 'ok')
+    assert.equal(changed.settings.effort, 'medium')
+    assert.equal(changed.settings.model, '56fdd199312815e2')
+    assert.equal(f.draft.value, '保持草稿')
+    assert.deepEqual(f.clicks, ['open', requireClick ? 'open-effort' : 'hover-effort', 'medium'])
+    assert.equal(f.read().effort, 'medium')
+  }
+})
+
+test('Gemini rejects an unavailable level and does not retry a selection the page did not apply', async () => {
+  const f = geminiFixture()
+  f.context.state.awaitingReplySince = 1
+  assert.equal((await f.change('effort', 'medium')).outcome, 'busy')
+  assert.deepEqual(f.clicks, [])
+  f.context.state.awaitingReplySince = 0
+  assert.equal((await f.change('effort', 'extreme')).reason, 'option-unavailable')
+  assert.deepEqual(f.clicks, ['open', 'dismiss'])
+  f.declineChange()
+  const unchanged = await f.change('effort', 'medium')
+  assert.equal(unchanged.reason, 'selection-unconfirmed')
+  assert.equal(unchanged.settings.effort, 'high')
+  assert.deepEqual(f.clicks, ['open', 'dismiss', 'open', 'hover-effort', 'medium'])
+})
 function fixture() {
   let open = false, view = 'effort', model = 'GPT-6', effort = 'high', now = 0, step = 0
   let focused = true, owner = true, blocked = false, duplicates = false, range = '2', afterInput = null, hit = null
@@ -288,15 +484,30 @@ test('initialization waits for a late model trigger instead of spending its only
 
 test('new chat resets initialization even when reloading home keeps the same null conversation owner', () => {
   let navigations = 0
-  const context = createContext({ modelReadAttempted: { current: true }, modelReadAttempts: { current: 3 }, setSettingError() {},
+  const context = createContext({ modelReadAttempted: { current: true }, modelReadAttempts: { current: 3 }, geminiReadModel: { current: 'argon' }, setSettingError() {},
     props: { onNewChat() {
       assert.equal(context.modelReadAttempted.current, false)
       assert.equal(context.modelReadAttempts.current, 0)
+      assert.equal(context.geminiReadModel.current, null)
       navigations++
     } } })
   const start = actual('startNewChat', context, false, '../src/renderer/src/components/FocusChatView.tsx')
   start()
   assert.equal(navigations, 1)
+})
+
+test('Gemini reads each changed model once when its levels need refreshing', () => {
+  const reads = []
+  const context = createContext({ owner: { platformId: 'gemini' }, visible: true, ready: true, working: false,
+    editingId: null, sendLock: { current: false }, modelReadAttempted: { current: false }, modelReadAttempts: { current: 0 },
+    settingPending: null, state: { modelSettingsReady: true, modelSettings: { model: 'argon', efforts: [{ value: 'high', label: '高' }] } },
+    updateModelSettings: kind => reads.push(kind) })
+  const effect = automaticRead(context)
+  effect()
+  assert.deepEqual(reads, [])
+  context.state.modelSettings = { model: 'hydrogen', efforts: [] }
+  effect(); effect()
+  assert.deepEqual(reads, ['read'])
 })
 
 function rendererInitialization(results) {
@@ -313,9 +524,10 @@ function rendererInitialization(results) {
       async updateFocusModelSettings() { requests++; return results.shift() },
       async getFocusChat() { return context.state }
     } } })
+  const effect = automaticRead(context)
   const update = actual('updateModelSettings', context, false, '../src/renderer/src/components/FocusChatView.tsx')
   context.updateModelSettings = (...args) => { pending = update(...args); return pending }
-  return { context, errors, effect: automaticRead(context), wait: () => pending, requests: () => requests }
+  return { context, errors, effect, wait: () => pending, requests: () => requests }
 }
 
 test('a pre-input trigger race recovers on readiness without showing a persistent error or replaying a click', async () => {
@@ -535,7 +747,7 @@ test('the embed defers a background-window read without opening the native menu'
   let calls = 0
   const context = createContext({ BrowserWindow: { getFocusedWindow: () => null } })
   const read = actual('updateFocusModelSettings', context, true, '../src/main/embed.ts')
-  const embed = { platform: { id: 'chatgpt' }, view: {}, focusEditToken: null, focusModelNativeClick: null,
+  const embed = { platform: { id: 'chatgpt', page: CHATGPT_PAGE }, view: {}, focusEditToken: null, focusModelNativeClick: null,
     focusPage: () => ({ executeJavaScript: async () => { calls++ } }) }
   const result = await read.call(embed, { kind: 'read' }, 'test-operation', () => true)
   assert.equal(result.outcome, 'unavailable')
@@ -558,14 +770,18 @@ test('native dispatcher rechecks owner after its awaited coordinate read', async
   assert.equal(sent, 0)
 })
 test('runtime shares the send lock and rejects a result whose workspace owner changed', async () => {
-  let resolve, owns = true
+  let resolve, owns = true, running = true
   const pending = new Promise(done => { resolve = done })
   const context = createContext({ validFocusModelSettingsRequest: shared.validFocusModelSettingsRequest,
     randomUUID: () => 'runtime-token', writeFocusDiagnostic() {} })
   const change = actual('updateFocusModelSettings', context, true, '../src/main/session-runtime.ts')
-  const runtime = { focusSending: false, focusRevision: null, ownsFocus: () => owns, runner: { hasInFlightWork: () => false },
+  const runtime = { active: true, activePlatform: { page: GEMINI_PAGE }, focusSending: false, focusRevision: null,
+    taskRunning() { return this.focusSending || running }, ownsFocus: () => owns, runner: { hasInFlightWork: () => false },
     embed: { getInterceptorStatus: () => ({ pendingQuestion: null }), updateFocusModelSettings: () => pending } }
-  const request = { sessionId: 's', platformId: 'chatgpt', conversationId: null, kind: 'read' }
+  const request = { sessionId: 's', platformId: 'gemini', conversationId: null, kind: 'read' }
+  assert.equal((await change.call(runtime, request)).outcome, 'busy')
+  assert.equal(runtime.focusSending, false)
+  running = false
   const first = change.call(runtime, request)
   assert.equal(runtime.focusSending, true)
   assert.equal((await change.call(runtime, request)).outcome, 'busy')
@@ -598,4 +814,15 @@ test('header renders two labelled native selects, actual options, and a recovera
   assert.match(waiting, /正在等待模型控件/)
   assert.match(waiting, /读取中…/)
   assert.doesNotMatch(waiting, /尚未读取/)
+})
+
+test('Gemini renders both settings with native labels and disables them during a task', () => {
+  const html = renderToStaticMarkup(Controls({ platformLabel: 'Gemini', settings: {
+    model: 'argon', effort: 'medium', models: [{ value: 'argon', label: '4 Argon' }], efforts: [{ value: 'medium', label: '中' }]
+  }, disabled: true, pending: null, onChange() {}, onRefresh() {} }))
+  assert.equal((html.match(/<select[^>]*disabled/g) || []).length, 2)
+  assert.match(html, /value="argon" selected="">4 Argon/)
+  assert.match(html, /value="medium" selected="">中/)
+  assert.match(html, /Gemini 模型设置/)
+  assert.match(html, /aria-label="刷新模型和思考强度"/)
 })

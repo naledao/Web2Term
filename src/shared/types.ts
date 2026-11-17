@@ -11,6 +11,8 @@ import type { TaskLease } from './autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from './task-presentation'
 import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo, FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from './focus-chat'
 import type { CompactionAction, CompactionRequest, CompactionState } from './conversation-compaction'
+import type { ClaudeAccount } from './claude-accounts'
+import type { SelectionQuestionPlatform } from './deepseek-question'
 import type { FocusUiRequest } from './focus-smart-ui'
 import type { FocusCitationRequest, FocusCitationResult, FocusCitationOpenRequest } from './focus-citations'
 import type { FocusFileLinkRequest, FocusFilePreviewRequest, FocusFilePreviewResult, FocusFilePreviewHandle } from './focus-file-links'
@@ -244,6 +246,9 @@ export const IpcChannels = {
   workspaceProjectRemove: 'workspace:project-remove',
   workspaceProjectsChanged: 'workspace:projects-changed',
   sessionSwitchPlatform: 'session:switch-platform',
+  claudeAccountsList: 'claude-accounts:list',
+  claudeAccountAdd: 'claude-accounts:add',
+  claudeAccountSwitch: 'claude-accounts:switch',
   sessionShowModelMenu: 'session:show-model-menu',
   workspaceGetState: 'workspace:get-state',
   workspaceShowManager: 'workspace:show-manager',
@@ -337,6 +342,7 @@ export interface ManagedSessionSummary {
   taskRunning: boolean
   /** A compaction is running or waiting to adopt its prepared context, including in the background. */
   compacting?: boolean
+  generatingHandoff?: boolean
   /** Number of completed tasks not yet viewed in this session. */
   unseenCompletedCount?: number
   createdAt: number
@@ -713,6 +719,7 @@ export const EMPTY_NACOS_VIEW_STATE: NacosViewState = {
 
 /** Snapshot of the embedded view, pushed from main to the renderer. */
 export interface EmbedState {
+  claudeAccountId?: string
   /** Stable local transcript identity across compaction; the page owner stays conversationId. */
   viewConversationId?: string | null
   url: string
@@ -2411,7 +2418,10 @@ export interface AppApi {
   getEmbedState(): Promise<EmbedState>
   getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
   getCompaction(owner: FocusOwner): Promise<CompactionState | null>
-  startCompaction(owner: FocusOwner): Promise<CompactionState>
+  listClaudeAccounts(): Promise<ClaudeAccount[]>
+  addClaudeAccount(owner: FocusOwner, label: string): Promise<ClaudeAccount>
+  switchClaudeAccount(owner: FocusOwner, accountId: string): Promise<void>
+  startCompaction(owner: FocusOwner, generationPlatformId?: SelectionQuestionPlatform, generationAccountId?: string): Promise<CompactionState>
   compactionAction(request: CompactionRequest, action: CompactionAction): Promise<void>
   setCompactionViewport(request: CompactionRequest, bounds: EmbedBounds, visible: boolean): void
   pollFocusChat(owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null>

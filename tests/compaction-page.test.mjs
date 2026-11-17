@@ -67,7 +67,7 @@ function fixture() {
   parent.getContentSize = () => [1440, 900]
   parent.contentView = { addChildView() {}, removeChildView() {} }
   const page = new exports.CompactionPage(parent, { partition: 'persist:test', homeUrl: 'https://example.invalid/', page: {} },
-    'light', 'https://example.invalid/', () => {}, { x: 50, y: 70, width: 1000, height: 700 })
+    'light', 'https://example.invalid/', () => {}, 'Test browser', { x: 50, y: 70, width: 1000, height: 700 })
   return { page, host, calls, sends }
 }
 

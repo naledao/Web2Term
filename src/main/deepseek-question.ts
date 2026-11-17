@@ -66,6 +66,9 @@ export class SelectionQuestion {
   cancel(): void { const previous = this.active; this.active = null; previous?.abort() }
   setTheme(theme: AppTheme): void { this.chat?.setTheme(theme) }
   getState(): QuestionChatState | null { return this.chat?.getState() ?? null }
+  async hasActiveReply(): Promise<boolean> {
+    return !!this.active || await this.chat?.hasActiveReply() === true
+  }
   createChat(): QuestionChatState | null {
     if (this.destroyed || this.contents.isDestroyed() || this.parent.isDestroyed() || !supportsSelectionQuestion(this.platform.id)) return null
     this.cancel()

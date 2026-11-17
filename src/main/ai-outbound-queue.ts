@@ -7,6 +7,7 @@ export interface AiOutboundOwner {
   sessionId: string
   platformId: string
   conversationId: string | null
+  claudeAccountId?: string
 }
 
 export interface AiOutboundQueueItem {
@@ -276,6 +277,7 @@ export class AiOutboundQueue {
 
   private belongsTo(job: Job<unknown>, owner: AiOutboundOwner): boolean {
     return job.owner.sessionId === owner.sessionId && job.owner.platformId === owner.platformId &&
+      job.owner.claudeAccountId === owner.claudeAccountId &&
       (job.owner.conversationId === owner.conversationId || job.owner.conversationId === null || owner.conversationId === null)
   }
 

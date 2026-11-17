@@ -468,6 +468,34 @@ test('Claude saves only the completed full answer after thinking and web search 
   assert.equal(app.events.filter(event => event.event === 'task-finished').length, 1)
 })
 
+test('Claude recognizes completion from the settled Markdown when the page flattens the thinking caption', () => {
+  const focusExports = {}
+  new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-chat.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText).runInNewContext({ exports: focusExports })
+  const caption = '比较数据库表与Redis有序集合两种方案'
+  const final = '【任务完成】\n建议使用数据库表。'
+  for (const { paragraphs, separator, completed } of [
+    { paragraphs: [caption, final], separator: '\n\n', completed: true },
+    { paragraphs: [caption + '\n\uF003\n' + caption, final], separator: '\n\n', completed: true },
+    { paragraphs: [caption, final], separator: '', completed: true },
+    { paragraphs: [caption, '正文提到【任务完成】几个字。'], separator: '', completed: false },
+    { paragraphs: [caption, '仍在核对结果。', final], separator: '', completed: false }
+  ]) {
+    const content = paragraphs.flatMap((paragraph, index) => [
+      ...(index && separator ? [separator] : []), element('p', {}, paragraph)
+    ])
+    const response = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'false' }, [
+      element('div', { class: 'font-claude-response' }, content)
+    ])
+    const app = fixture([response], { ...CLAUDE_PAGE, assistantThinkingPrefixPattern: focusExports.CLAUDE_THINKING_PREFIX.source })
+    app.controller.checkNow()
+    app.tick(250)
+    assert.equal(app.events.find(event => event.event === 'task-finished')?.completed, completed)
+    assert.equal(app.events.find(event => event.event === 'assistant-message')?.text, paragraphs.join('\n\n'))
+  }
+})
+
 test('Claude focus follows a virtual reply row through thinking, streaming and completion', async () => {
   const row = (index, message) => element('div', { 'data-testid': 'transcript-row', 'data-rs-index': String(index) }, [message])
   const assistant = (streaming, content) => element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': String(streaming) }, content)
@@ -546,6 +574,24 @@ test('a delayed answer keeps its Markdown formatting and is cancelled when the s
       assert.equal(saved[0].text, '【任务完成】**最终回答**')
       assert.equal(app.events.find(event => event.event === 'task-finished').completed, true)
     }
+  }
+})
+
+test('Claude accessibility headings stay out of the captured answer and do not mask completion', () => {
+  for (const heading of [
+    element('h3', {}, 'Claude responded: 【任务完成】'),
+    element('span', { class: 'sr-only' }, 'Claude responded: ')
+  ]) {
+    const reply = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'false' }, [
+      heading, element('p', {}, '【任务完成】'),
+      element('p', {}, ['这是', element('strong', {}, '最终回答'), '。'])
+    ])
+    const app = fixture([reply])
+    app.controller.checkNow()
+    app.tick(250)
+    const saved = app.events.find(event => event.event === 'assistant-message')
+    assert.equal(saved?.text, '【任务完成】\n\n这是**最终回答**。')
+    assert.equal(app.events.find(event => event.event === 'task-finished')?.completed, true)
   }
 })
 

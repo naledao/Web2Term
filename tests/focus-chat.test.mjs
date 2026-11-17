@@ -242,6 +242,75 @@ test('completion markers are hidden when formatted as a standalone heading or bo
   }
 })
 
+test('legacy Claude completion headings and their reply markers are hidden together', () => {
+  const prefix = '### Claude responded: 【任务完成】\n\n【任务完成】\n\n'
+  const body = '正文保留 **格式** 和引用的【任务完成】。'
+  assert.equal(shared.cleanFocusAnswer(prefix + body, 'claude'), body)
+  assert.equal(shared.cleanFocusAnswer(prefix, 'claude'), '')
+  assert.equal(shared.cleanFocusAnswer(prefix + body, 'chatgpt'), prefix + body)
+  for (const example of ['### Claude responded: An example', '> ### Claude responded: 【任务完成】',
+    '### Claude responded: 【任务完成】\n\n这是一个例子。',
+    '```markdown\n' + prefix + '```']) {
+    assert.equal(shared.cleanFocusAnswer(example, 'claude'), example)
+  }
+})
+
+test('Claude toolbar timestamps are removed from the end of a captured reply', () => {
+  const body = '【任务完成】\n\n正文里引用 just now。\n\n```text\njust now\n```'
+  for (const timestamp of ['just now', '2 minutes ago', 'about an hour ago']) {
+    const captured = body + '\n\n' + timestamp
+    assert.equal(shared.cleanFocusAnswer(captured, 'claude'), body.slice('【任务完成】\n\n'.length))
+    assert.ok(shared.cleanFocusAnswer(captured, 'chatgpt').endsWith(timestamp))
+  }
+  for (const text of ['just now', '发生在 just now', '正文。\n\n> just now', '正文。\n\n`just now`',
+    '正文。\n\n````text\n```\n\njust now']) {
+    assert.equal(shared.cleanFocusAnswer(text, 'claude'), text)
+  }
+})
+
+test('Claude promotion joined to a timestamp is removed as a reply footer', () => {
+  const body = '保留 **回答正文**。'
+  const promotion = 'Claude works directly with your codebase'
+  for (const footer of [promotion + 'just now', promotion + ' 4 minutes ago', promotion + '\r\nabout an hour ago']) {
+    const captured = body + '\n\n' + footer
+    assert.equal(shared.cleanFocusAnswer(captured, 'claude'), body)
+    assert.equal(shared.cleanFocusAnswer(captured, 'chatgpt'), captured)
+    assert.equal(shared.cleanFocusAnswer(body + '\n\n> ' + footer, 'claude'), body + '\n\n> ' + footer)
+    const streamingCode = '~~~text\n' + captured
+    assert.equal(shared.cleanFocusAnswer(streamingCode, 'claude'), streamingCode)
+  }
+  assert.equal(shared.cleanFocusAnswer(body + '\n\n' + promotion, 'claude'), body + '\n\n' + promotion)
+})
+
+test('Claude keeps the caption before the completion marker in the thinking process', () => {
+  const caption = '比较数据库表与 Redis 有序集合两种方案'
+  const repeatedCaption = caption + '\n\uF003\n' + caption
+  const body = '建议使用 **数据库表**。'
+  const completion = '\n\n【任务完成】\n\n' + body
+  const captured = repeatedCaption + completion
+  for (const prefix of [caption, repeatedCaption, caption + ' \uF003 ' + caption]) {
+    const text = prefix + completion
+    assert.equal(shared.cleanFocusAnswer(text, 'claude'), body)
+    assert.equal(shared.cleanFocusAnswer(text, 'deepseek'), text)
+    assert.deepEqual(clone(shared.focusReplyParts(text, 'claude')), [{ kind: 'reasoning', text: caption }])
+  }
+  for (const example of ['> ' + captured, '### ' + captured, '    ' + captured, '~~~text\n' + captured,
+    '正文。\n\n' + captured, caption + '\n\n' + body, caption + '\n\uF003\n另一个标题' + completion]) {
+    assert.equal(shared.cleanFocusAnswer(example, 'claude'), example)
+    assert.equal(shared.focusReplyParts(example, 'claude').length, 0)
+  }
+
+  const { chat, store } = fixture()
+  chat.begin('claude', 'chat-1', '热门搜索词应该保存在哪里？')
+  const token = chat.token('claude')
+  chat.settled('claude', 'answer', captured)
+  chat.snapshot('claude', token, page('answer', body))
+  const restarted = new FocusChat('workspace-1', store)
+  const [segment] = restarted.turns('claude', 'chat-1')[0].segments
+  assert.equal(segment.answer, body)
+  assert.deepEqual(clone(segment.parts), [{ kind: 'reasoning', text: caption }])
+})
+
 test('multiple commands, internal deliveries and final prose belong to one human turn', () => {
   const { chat, rows } = fixture()
   const id = chat.begin('deepseek', 'chat-1', '修改聊天视图')

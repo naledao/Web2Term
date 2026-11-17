@@ -14,12 +14,14 @@ interface SettingsStore {
 export class ConversationTools {
   /** An unsaved chat's ledger stays in memory: a stale draft must never claim a fresh chat has the prompt. */
   private readonly draftLedgers = new Map<string, InjectionLedger>()
+  claudeAccountId?: string
 
   constructor(private readonly sessionId: string, private readonly store: SettingsStore) {}
 
   private key(platformId: string, conversationId: string | null): string {
-    return 'conversationTools:' + JSON.stringify(conversationId === null
-      ? ['draft', this.sessionId, platformId] : ['conversation', platformId, conversationId])
+    const scope = conversationId === null ? ['draft', this.sessionId, platformId] : ['conversation', platformId, conversationId]
+    if (conversationId === null && platformId === 'claude' && this.claudeAccountId) scope.push(this.claudeAccountId)
+    return 'conversationTools:' + JSON.stringify(scope)
   }
 
   read(platformId: string, conversationId: string | null): ConversationToolPreferences {
@@ -38,15 +40,16 @@ export class ConversationTools {
   }
 
   injectionLedger(platformId: string, conversationId: string | null): InjectionLedger | null {
-    if (conversationId === null) return this.draftLedgers.get(platformId) ?? null
+    if (conversationId === null) return this.draftLedgers.get(this.key(platformId, null)) ?? null
     return parseInjectionLedger(this.store.getSetting(this.key(platformId, conversationId) + ':promptLedger'))
   }
 
   /** null forgets what the conversation was given, so its next task start sends the full prompt. */
   setInjectionLedger(platformId: string, conversationId: string | null, ledger: InjectionLedger | null): void {
     if (conversationId === null) {
-      if (ledger) this.draftLedgers.set(platformId, ledger)
-      else this.draftLedgers.delete(platformId)
+      const draft = this.key(platformId, null)
+      if (ledger) this.draftLedgers.set(draft, ledger)
+      else this.draftLedgers.delete(draft)
       return
     }
     this.store.setSetting(this.key(platformId, conversationId) + ':promptLedger', ledger ? JSON.stringify(ledger) : '')
@@ -77,8 +80,9 @@ export class ConversationTools {
 
   bind(platformId: string, previousId: string | null, conversationId: string | null): void {
     // Leaving for a new chat, or the draft becoming a conversation: either way the draft ledger is spent.
-    const draftLedger = this.draftLedgers.get(platformId)
-    this.draftLedgers.delete(platformId)
+    const draft = this.key(platformId, null)
+    const draftLedger = this.draftLedgers.get(draft)
+    this.draftLedgers.delete(draft)
     if (previousId === null && conversationId !== null && draftLedger) this.setInjectionLedger(platformId, conversationId, draftLedger)
     if (previousId !== null || conversationId === null) return
     const draftKey = this.key(platformId, null), raw = this.store.getSetting(draftKey)
