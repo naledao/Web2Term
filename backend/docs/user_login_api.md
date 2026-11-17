@@ -26,7 +26,7 @@
 {
   "accessToken":"<JWT>",
   "tokenType":"Bearer",
-  "expiresInSeconds":86400,
+  "expiresInSeconds":3784320000,
   "user":{
     "publicId":"usr_<随机标识>",
     "email":"user@example.com",
@@ -37,7 +37,7 @@
 }
 ```
 
-后续设备接口及 WebSocket 握手携带 `Authorization: Bearer <JWT>`。JWT 校验在 `internal/auth/service.go` 中直接完成，不调用其他服务。没有外部令牌 introspection 接口。
+`expiresInSeconds` 表示令牌自签发起的有效秒数，120 年按每年 365 天计。后续设备接口及 WebSocket 握手携带 `Authorization: Bearer <JWT>`。JWT 校验在 `internal/auth/service.go` 中直接完成，不调用其他服务。没有外部令牌 introspection 接口。
 
 ## 错误
 

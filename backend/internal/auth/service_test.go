@@ -58,8 +58,12 @@ func TestCodeLoginAndJWTContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.TokenType != "Bearer" || result.ExpiresInSeconds != 86400 || result.User.PublicID == "" || result.User.Role != "USER" || result.User.Nickname != mail.email || result.User.AvatarURL != nil {
+	if result.TokenType != "Bearer" || result.User.PublicID == "" || result.User.Role != "USER" || result.User.Nickname != mail.email || result.User.AvatarURL != nil {
 		t.Fatalf("login shape: %+v", result.User)
+	}
+	const wantLifetimeSeconds int64 = 3_784_320_000
+	if result.ExpiresInSeconds != wantLifetimeSeconds {
+		t.Fatalf("token lifetime: got %d seconds, want %d", result.ExpiresInSeconds, wantLifetimeSeconds)
 	}
 	id, err := svc.Introspect(ctx, "Bearer "+result.AccessToken)
 	if err != nil || id != result.User.ID {
@@ -71,8 +75,12 @@ func TestCodeLoginAndJWTContract(t *testing.T) {
 	if _, err := svc.Introspect(ctx, "Bearer "+result.AccessToken+"tampered"); FailureOf(err).Status != 401 {
 		t.Fatalf("tampered token: %v", err)
 	}
-	old := svc.now()
-	svc.now = func() time.Time { return old.Add(24 * time.Hour) }
+	expiresAt := svc.now().Add(time.Duration(wantLifetimeSeconds) * time.Second)
+	svc.now = func() time.Time { return expiresAt.Add(-time.Second) }
+	if id, err := svc.Introspect(ctx, "Bearer "+result.AccessToken); err != nil || id != result.User.ID {
+		t.Fatalf("JWT before expiry: %d %v", id, err)
+	}
+	svc.now = func() time.Time { return expiresAt }
 	if _, err := svc.Introspect(ctx, "Bearer "+result.AccessToken); FailureOf(err).Status != 401 {
 		t.Fatalf("expired token: %v", err)
 	}

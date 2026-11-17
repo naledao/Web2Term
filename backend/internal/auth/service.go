@@ -20,6 +20,8 @@ import (
 	"web2term/backend/internal/store"
 )
 
+const loginTokenLifetime = 120 * 365 * 24 * time.Hour
+
 type Failure struct {
 	Status        int
 	Code, Message string
@@ -140,13 +142,13 @@ func (s *Service) Login(ctx context.Context, raw, code string) (LoginResponse, e
 	now := s.now()
 	c := claims{PublicID: u.PublicID, Version: u.TokenVersion, RegisteredClaims: jwt.RegisteredClaims{
 		Issuer: "web2term", Audience: jwt.ClaimStrings{"web2term"}, Subject: strconv.FormatInt(u.ID, 10),
-		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(24 * time.Hour)),
+		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(loginTokenLifetime)),
 	}}
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString(s.key)
 	if err != nil {
 		return LoginResponse{}, err
 	}
-	return LoginResponse{AccessToken: token, TokenType: "Bearer", ExpiresInSeconds: 86400, User: u}, nil
+	return LoginResponse{AccessToken: token, TokenType: "Bearer", ExpiresInSeconds: int64(loginTokenLifetime / time.Second), User: u}, nil
 }
 
 func (s *Service) Introspect(ctx context.Context, authorization string) (int64, error) {

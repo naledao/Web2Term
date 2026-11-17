@@ -105,7 +105,7 @@ journalctl -u web2term-backend -n 100 --no-pager
 
 HTTP 层额外限制同一来源 IP 每 10 分钟最多发送 5 次验证码、尝试登录 30 次，不信任客户端自行提供的 `X-Forwarded-For`。若使用反向代理，代理后的请求会共用来源 IP 配额。
 
-首次成功验证邮箱时自动创建用户。登录成功返回兼容现有客户端的 `accessToken`、`tokenType`、`expiresInSeconds` 和 `user`。JWT 使用 HS256，固定校验算法、签发者、受众和 24 小时有效期；每次鉴权也检查本地用户是否启用及令牌版本。
+首次成功验证邮箱时自动创建用户。登录成功返回兼容现有客户端的 `accessToken`、`tokenType`、`expiresInSeconds` 和 `user`。JWT 使用 HS256，登录令牌自签发起有效 120 年（每年按 365 天计）。每次鉴权检查算法、签发者、受众、到期时间、用户是否启用及令牌版本。
 
 | 方法 | 路径 | 行为 |
 | --- | --- | --- |
