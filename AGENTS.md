@@ -66,6 +66,10 @@ npm run dist:win     # 打 Windows 安装包
 
 改完代码至少让 `npm run build` 通过再交付。
 
+## 推送前检查 README 和网站
+
+每次推送前，都要根据本次改动检查根目录的 `README.md` 和 `website/` 是否需要更新。如有需要，在本次推送中一并更新。
+
 ## 推送后写更新说明
 
 每次推送到 `main` 都会触发 `Build and Release Desktop`，自动把 patch 版本号加一并发布 Release。推送后：

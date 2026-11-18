@@ -18,6 +18,7 @@ import {
   CONVERSATION_COMPACTION_GUIDE_URL,
   MAIL_NOTIFICATIONS_GUIDE_URL,
   WINDOWS_AGENT_GUIDE_URL,
+  HTML_PREVIEW_GUIDE_URL,
 } from './site-config'
 
 type Step = {
@@ -56,27 +57,40 @@ const steps: Step[] = [
   },
 ]
 
-const features: { title: string; body: string; tag: string; guideUrl?: string }[] = [
+const features: { title: string; body: string; tag: string; guideUrl?: string; guideLabel?: string }[] = [
   {
     title: '按项目组织对话，共享补充说明',
     body: '为项目设置本机目录，将相关对话放在一起。项目内共享 Markdown 补充说明，新建本机会话从项目目录开始。',
     tag: 'PROJECT CONTEXT',
   },
   {
-    title: '专注当前任务，也能在侧边追问',
-    body: 'ChatGPT 和 DeepSeek 可切换专注对话，集中查看回答、思考与执行过程。四个平台均支持侧边聊天和选区追问，沿用各自的登录态。',
-    tag: 'FOCUS + SIDE CHAT',
+    title: '四平台默认专注对话，与有序发送队列',
+    body: 'ChatGPT、DeepSeek、Gemini 和 Claude 均支持专注对话与模型／思考设置，支持 HTML 代码块沙箱「运行预览」、Mermaid 图表与 KaTeX 公式。消息进入输入框上方发送队列，等待消息可编辑、删除或按 ↑ 取回，四个平台也支持侧边聊天和选区追问。',
+    tag: 'FOCUS + SEND QUEUE',
+    guideUrl: HTML_PREVIEW_GUIDE_URL,
+    guideLabel: '查看 HTML 预览说明',
   },
   {
-    title: '对话太长？压缩历史，继续聊天',
-    body: '在 ChatGPT 或 DeepSeek 的专注对话输入 //，选择「压缩会话」。软件在后台整理有效历史并生成交接摘要，在原工作区接入新的承接聊天；旧历史仍可查看，失败可重试或处理问题。仅在预计节省上下文时执行，原始附件不会自动迁移。',
-    tag: 'CONVERSATION COMPACTION',
+    title: '多账号独立隔离，随时标记额度',
+    body: 'ChatGPT、DeepSeek、Gemini 和 Claude 均可在专注对话顶部添加备注账号。每个账号使用独立浏览器分区与会话位置，登录态互不串号；可随时标记「有额度／无额度」或移除非默认账号。',
+    tag: 'MULTI-ACCOUNT ISOLATION',
+  },
+  {
+    title: '会话压缩、交接导出与跨账号续聊',
+    body: '在四个平台的专注对话输入 //，选择「压缩会话」整理历史并接入新上下文，「生成任务交接文档」可任选平台与账号导出独立 Markdown，或选「交给下一个号工作」自动切换到同平台下一个有额度账号无缝续聊。',
+    tag: 'COMPACTION + HANDOFF',
     guideUrl: CONVERSATION_COMPACTION_GUIDE_URL,
+    guideLabel: '阅读会话压缩说明',
   },
   {
-    title: '让模型读取文件，直接查看原内容',
-    body: '将本机或 SSH 主机上的源码、图片和文档作为完整附件发送。每次最多 3 个文件，单个 20 MiB、合计 25 MiB；Web2Term 设备连接暂未接入。',
-    tag: 'FILE ATTACHMENTS',
+    title: '按需 // 技能，不长期占用上下文',
+    body: '定时任务、邮件通知和电脑操作在新对话中默认开启但按需激活：输入 // 将所需技能标签附在当前任务上，点击标签滑杆即可按对话开关与配置参数；常驻工具目录仅保留文件读取与后台任务。',
+    tag: 'ON-DEMAND SKILLS',
+  },
+  {
+    title: '让模型读取完整文件，也支持 SFTP 编辑远程文本',
+    body: '通过 read_files 将本机或 SSH 主机上的源码、图片和文档作为完整附件上传（每次最多 3 个，单个 20 MiB、合计 25 MiB；Web2Term 暂未接入）。SSH 远程文件窗口另内置 CodeMirror 编辑器，可直接编辑最大 1 MB 的 UTF-8 远端文本并保留原换行与 BOM。',
+    tag: 'FILES + SFTP EDITOR',
   },
   {
     title: '长任务放到后台，结果自动回来',
@@ -85,12 +99,12 @@ const features: { title: string; body: string; tag: string; guideUrl?: string }[
   },
   {
     title: '重复检查交给定时任务',
-    body: '设置固定间隔或带时区的日历周期，到期向原 AI 对话提交任务。可手动创建或让 AI 创建计划，集中管理下次时间与运行记录。',
+    body: '设置固定间隔或带时区的日历周期，到期向原 AI 对话提交任务。可手动创建或通过 // 技能让 AI 创建、查询、修改与删除计划，集中管理下次时间与运行记录。',
     tag: 'SCHEDULED TASKS',
   },
   {
     title: '需要关注的结果，发到 QQ 邮箱',
-    body: '配置收发邮箱后，AI 可用邮件通知工具发送结果或提醒。标题和正文由模型提供，发送结果回到原对话；工具按对话开关。',
+    body: '配置收发邮箱后，AI 可通过邮件通知技能发送结果或提醒。标题和正文由模型提供，发送结果回到原对话；可在技能标签滑杆中按对话开关。',
     tag: 'EMAIL NOTIFICATIONS',
   },
   {
@@ -147,29 +161,29 @@ const modelPlatforms = [
     id: 'chatgpt',
     name: 'ChatGPT',
     icon: '/models/chatgpt.svg',
-    detail: '内置网页会话 · Windows Computer Use',
+    detail: '专注对话 · 多账号隔离 · 模型与推理强度 · Windows Computer Use',
     tone: 'blue',
-  },
-  {
-    id: 'claude',
-    name: 'Claude',
-    icon: '/models/claude.svg',
-    detail: '内置网页会话 · 独立登录态',
-    tone: 'amber',
   },
   {
     id: 'deepseek',
     name: 'DeepSeek',
     icon: '/models/deepseek.svg',
-    detail: '内置网页会话 · Windows Computer Use',
+    detail: '专注对话 · 多账号隔离 · 深度思考与搜索 · Windows Computer Use',
     tone: 'mint',
   },
   {
     id: 'gemini',
     name: 'Gemini',
     icon: '/models/gemini.svg',
-    detail: '内置网页会话 · 独立登录态',
+    detail: '专注对话 · 多账号隔离 · 模型与思考等级 · Google 登录',
     tone: 'violet',
+  },
+  {
+    id: 'claude',
+    name: 'Claude',
+    icon: '/models/claude.svg',
+    detail: '专注对话 · 多账号隔离 · 模型与思考强度 · 独立登录态',
+    tone: 'amber',
   },
 ]
 
@@ -300,7 +314,7 @@ export default function Home() {
         <div className="hero-copy">
           <p className="hero-overline"><span className="live-dot" /> AI × 本机与远程终端</p>
           <h1>让对话<br /><em>抵达终端。</em></h1>
-          <p className="hero-lede">{PRODUCT_NAME} 把模型网页、项目对话与本机、SSH、Linux 设备上的命令执行放进同一个工作区。支持定时任务与 AI 邮件通知；在 Windows 本机会话中，还能让 ChatGPT 或 DeepSeek 通过 Computer Use 查看界面、操作桌面应用。</p>
+          <p className="hero-lede">{PRODUCT_NAME} 把模型网页、四平台专注对话、多账号管理与本机、SSH、Linux 设备上的命令执行放进同一个工作区。支持 <code>//</code> 按需技能、会话压缩与跨账号交接、SFTP 远程文本编辑、定时任务与 AI 邮件通知；在 Windows 本机会话中，还能让 ChatGPT 或 DeepSeek 通过 Computer Use 查看界面、操作桌面应用。</p>
           <div className="hero-actions">
             <a className="button button--primary" href={WINDOWS_DOWNLOAD_URL} download>下载 Windows 版 <DownloadIcon /></a>
             <a className="button button--secondary" href={MACOS_DOWNLOAD_URL} download>下载 macOS 版 <DownloadIcon /></a>
@@ -348,7 +362,7 @@ export default function Home() {
               <ArrowIcon />
             </article>
           ))}
-          <p className="model-deck__note"><span className="status-dot" /> 四个平台都可在工作区内直接登录，Gemini 使用 Google 账号登录即可。</p>
+          <p className="model-deck__note"><span className="status-dot" /> 四个平台均默认支持专注对话、多账号独立分区与额度标记，也可随时切换原网页或本地会话摘要，Gemini 使用 Google 账号登录即可。</p>
         </div>
       </section>
 
@@ -375,8 +389,8 @@ export default function Home() {
           <p className="computer-use__scope">Windows x64 · 本机会话 · ChatGPT / DeepSeek</p>
           <p>把需要操作界面的步骤也交给模型。它可以发现和启动应用，查看真实窗口，再执行点击、输入、滚动或拖拽。截图与操作回执回到同一段对话，无需额外的视觉模型 API Key。</p>
           <ol className="computer-use__setup" aria-label="开启 Computer Use">
-            <li><strong>打开本机会话</strong><span>选择 ChatGPT 或 DeepSeek，登录网页账号，并开启终端模式与提示词注入。</span></li>
-            <li><strong>在设置中启用</strong><span>进入「设置 → computer use」，打开「启用 computer use」并保存。</span></li>
+            <li><strong>打开本机会话</strong><span>选择 ChatGPT 或 DeepSeek，登录网页账号，并在右侧「控制」保持终端模式与提示词注入开启。</span></li>
+            <li><strong>在专注对话选择「电脑操作」技能</strong><span>新本机会话默认启用电脑操作；输入 <code>//</code> 选择「电脑操作」加入本次任务，点标签上的滑杆可按对话开关或设置回传间隔。</span></li>
             <li><strong>描述目标，查看执行进度</strong><span>例如“打开 PowerPoint，新建一页标题为项目进度的幻灯片”。顶部居中浮层显示目标和当前动作。</span></li>
           </ol>
           <a className="text-link" href={COMPUTER_USE_GUIDE_URL} target="_blank" rel="noreferrer">阅读 Computer Use 使用说明 <ArrowIcon /></a>
@@ -399,7 +413,7 @@ export default function Home() {
           </dl>
           <div className="computer-use__stop">
             <h3>随时通过晃动鼠标急停</h3>
-            <p>控制期间快速左右或上下来回晃动鼠标数次，即可停止所有会话的自动操作与回传；也可点击「全局急停」。浮层显示急停状态 6 秒，解除急停后需重新提交或恢复任务。</p>
+            <p>控制期间快速左右或上下来回晃动鼠标数次，即可中断所有会话中的 Computer Use 桌面操作并释放辅助程序按下的键鼠，顶部浮层显示急停状态 6 秒；终端命令、会话压缩与定时任务投递不受影响。也可点击「结束任务」停止当前会话任务。</p>
           </div>
         </div>
       </section>
@@ -493,13 +507,13 @@ export default function Home() {
 
       <section className="capabilities section" id="capabilities">
         <div className="capabilities-heading"><p className="section-mark">THE WORKSPACE</p><h2>把上下文<br /><span>留在手边。</span></h2></div>
-        <div className="feature-rail">{features.map((feature, index) => <article className="feature-row" key={feature.tag}><span className="feature-index">0{index + 1}</span><div className="feature-content"><p>{feature.tag}</p><h3>{feature.title}</h3><span>{feature.body}</span>{feature.guideUrl && <a className="text-link" href={feature.guideUrl} target="_blank" rel="noreferrer">阅读会话压缩说明 <ArrowIcon /></a>}</div><ArrowIcon /></article>)}</div>
+        <div className="feature-rail">{features.map((feature, index) => <article className="feature-row" key={feature.tag}><span className="feature-index">{String(index + 1).padStart(2, '0')}</span><div className="feature-content"><p>{feature.tag}</p><h3>{feature.title}</h3><span>{feature.body}</span>{feature.guideUrl && <a className="text-link" href={feature.guideUrl} target="_blank" rel="noreferrer">{feature.guideLabel ?? '阅读说明'} <ArrowIcon /></a>}</div><ArrowIcon /></article>)}</div>
       </section>
 
       <section className="automation section" id="automation" aria-labelledby="automation-title">
         <div className="toolbox-heading">
           <h2 id="automation-title">按计划执行，<br /><span>需要时邮件通知。</span></h2>
-          <p>定好周期，让 AI 在原对话中开始下一次检查。需要把结果或提醒送到邮箱时，再调用邮件通知工具。两个工具都可在「查看工具提示词」中按对话开关，默认开启。</p>
+          <p>定好周期，让 AI 在原对话中开始下一次检查。需要把结果或提醒送到邮箱时，再调用邮件通知工具。两个工具新对话默认开启，可在专注对话输入 <code>//</code> 按需加入任务，并从技能标签的滑杆按钮按对话开关与查看说明。</p>
         </div>
         <div className="automation-grid">
           <article className="automation-card" aria-labelledby="scheduled-tasks-title">
@@ -570,7 +584,7 @@ export default function Home() {
           </div>
           <small>桌面端：Windows x64 / macOS arm64 · 设备工具：Linux x86_64 · 下载源：GitHub 最新 Release</small>
         </div>
-        <div className="download-terminal"><div className="download-terminal__head"><span>SESSION SETUP</span><span>工作区入口</span></div><dl className="download-environments"><div><dt>本机终端</dt><dd>Windows · PowerShell / macOS · zsh</dd></div><div><dt>Computer Use</dt><dd>Windows x64 · ChatGPT / DeepSeek · 本机</dd></div><div><dt>本机远程终端</dt><dd>Windows · PowerShell · ConPTY</dd></div><div><dt>远程连接</dt><dd>SSH / web2term</dd></div><div><dt>工具箱</dt><dd>Git / MySQL / Redis / Nacos</dd></div><div><dt>模型</dt><dd>ChatGPT / Claude / Gemini / DeepSeek</dd></div></dl></div>
+        <div className="download-terminal"><div className="download-terminal__head"><span>SESSION SETUP</span><span>工作区入口</span></div><dl className="download-environments"><div><dt>本机终端</dt><dd>Windows · PowerShell / macOS · zsh</dd></div><div><dt>Computer Use</dt><dd>Windows x64 · ChatGPT / DeepSeek · 本机</dd></div><div><dt>本机远程终端</dt><dd>Windows · PowerShell · ConPTY</dd></div><div><dt>远程连接与编辑</dt><dd>SSH（含 SFTP 文本编辑）/ web2term</dd></div><div><dt>工具箱</dt><dd>Git / MySQL / Redis / Nacos</dd></div><div><dt>模型与多账号</dt><dd>ChatGPT / DeepSeek / Gemini / Claude</dd></div></dl></div>
       </section>
 
       <footer className="site-footer">

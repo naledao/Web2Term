@@ -4,7 +4,7 @@ import { assetPath, PRODUCT_NAME } from './site-config'
 
 export const metadata: Metadata = {
   title: `${PRODUCT_NAME} — 让对话抵达终端`,
-  description: 'Web2Term 将模型网页、项目对话与本机／远程终端放进同一个工作区，支持 Windows 本机 PowerShell 远程终端、定时任务、AI 邮件通知、后台任务和数据库工具箱。提供 Windows x64、macOS Apple Silicon 客户端与 Linux 设备工具，Windows 本机的 ChatGPT、DeepSeek 还可使用 Computer Use 桌面操作，Windows 客户端本身也能作为 PowerShell 远程终端供同一账号的其他客户端连接。',
+  description: 'Web2Term 将 ChatGPT、DeepSeek、Gemini 和 Claude 网页账号、四平台专注对话与多账号隔离、本机／SSH／web2term 终端放进同一个桌面工作区。支持 // 按需技能、会话压缩与跨账号交接、有序发送队列、SFTP 远程文本编辑、Windows 本机 PowerShell 远程终端、Computer Use、定时任务、AI 邮件通知、后台任务与数据库工具箱。',
   icons: {
     icon: assetPath('/brand-icon.png'),
     shortcut: assetPath('/brand-icon.png'),
