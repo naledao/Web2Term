@@ -151,6 +151,15 @@ export class TaskCoordinator {
     return report
   }
 
+  /** Drops in-memory platform task state when an account switch replaces the live view. */
+  clearContext(platformId: string): void {
+    const previous = this.entries.get(platformId)
+    if (!previous) return
+    if (previous.task?.status === 'recorded') this.stop(platformId, 'interrupted')
+    this.computerTokens.delete(platformId)
+    this.entries.delete(platformId)
+  }
+
   context(platformId: string, conversationId: string | null): AutonomousTaskState {
     const previous = this.entries.get(platformId)
     if (previous?.conversationId === conversationId) return structuredClone(previous)

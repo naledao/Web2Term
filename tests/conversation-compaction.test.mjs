@@ -767,3 +767,18 @@ test('Gemini handoff resumes on the selected generation account while keeping th
   assert.deepEqual(f.openings.map(page => page.accountId), [accountB, accountB])
   assert.equal(f.calls.length, 1)
 })
+
+test('DeepSeek handoff resumes on the selected generation account while keeping the source account owner', async t => {
+  const accountA = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+  const accountB = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+  const f = fixture(t, new Map(), { platformId: 'deepseek', conversationId: 'ds_source_1', accountId: accountA, unknown: true })
+  await f.start('deepseek', accountB)
+  assert.equal((await settled(f)).phase, 'uncertain')
+  assert.equal(f.service.state({ ...f.owner, accountId: accountB }), null)
+  f.restart()
+  assert.equal(f.service.state(f.owner).generationAccountId, accountB)
+  await f.service.resume(f.owner)
+  assert.equal((await settled(f)).phase, 'ready-to-export')
+  assert.deepEqual(f.openings.map(page => page.accountId), [accountB, accountB])
+  assert.equal(f.calls.length, 1)
+})

@@ -1,6 +1,7 @@
 export const ACCOUNT_PLATFORMS = {
   claude: { label: 'Claude', sampleLabel: '例如 Claude 工作账号' },
-  gemini: { label: 'Gemini', sampleLabel: '例如 Gemini 工作账号' }
+  gemini: { label: 'Gemini', sampleLabel: '例如 Gemini 工作账号' },
+  deepseek: { label: 'DeepSeek', sampleLabel: '例如 DeepSeek 工作账号' }
 } as const
 
 export type AccountPlatformId = keyof typeof ACCOUNT_PLATFORMS

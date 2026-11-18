@@ -281,6 +281,7 @@ export interface SessionRuntimeOptions {
   initialConversationId?: string | null
   initialClaudeWorkspace?: string
   initialGeminiWorkspace?: string
+  initialDeepseekWorkspace?: string
   initialPaused?: boolean
   initialPromptInjectionEnabled?: boolean
   initialLocalCwd?: string
@@ -612,8 +613,13 @@ export class SessionRuntime {
     this.id = options.id ?? randomUUID()
     this.continuity = new ConversationContinuity(this.id, options.store)
     this.conversationTools = new ConversationTools(this.id, options.store)
+    const workspaceInputs: Record<AccountPlatformId, string | undefined> = {
+      claude: options.initialClaudeWorkspace,
+      gemini: options.initialGeminiWorkspace,
+      deepseek: options.initialDeepseekWorkspace
+    }
     for (const platformId of ACCOUNT_PLATFORM_IDS) {
-      const raw = platformId === 'claude' ? options.initialClaudeWorkspace : options.initialGeminiWorkspace
+      const raw = workspaceInputs[platformId]
       const workspace = restorePlatformWorkspace(platformId, raw, listPlatformAccounts(options.store, platformId))
       if (!raw && options.platform.id === platformId && options.initialUrl) {
         const legacyLocation = platformConversationLocation(platformId, options.initialUrl)
@@ -1662,8 +1668,10 @@ export class SessionRuntime {
     this.conversationTools.setAccountScope(platformId, this.accountScope(platformId))
     const next = this.accountEmbedEntry(platformId, accountId)
     this.embeds.set(platformId, next)
+    this.taskCoordinator.clearContext(platformId)
     if (this.window) previousEmbed?.destroy(this.window)
     if (activeOnPlatform) {
+      this.taskEnded = false
       this.pendingCompaction = null
       this.remoteRipgrepSend?.controller.abort()
       this.focusUiRecoveredTurn = null
@@ -1786,6 +1794,7 @@ export class SessionRuntime {
     platformId: string
     claudeWorkspace?: string
     geminiWorkspace?: string
+    deepseekWorkspace?: string
     paused: boolean
     promptInjectionEnabled: boolean
     localCwd: string
@@ -1823,6 +1832,7 @@ export class SessionRuntime {
       platformId: active.platform.id,
       claudeWorkspace: serializeWorkspace('claude'),
       geminiWorkspace: serializeWorkspace('gemini'),
+      deepseekWorkspace: serializeWorkspace('deepseek'),
       paused: automation.paused,
       promptInjectionEnabled: this.promptInjectionEnabled,
       localCwd: this.web2term ? '' : terminal.cwd,
@@ -1931,7 +1941,11 @@ export class SessionRuntime {
     return {
       ...this.continuity.decorate(state, this.activePlatformId),
       claudeAccountId: this.accountIdFor('claude'),
-      accountIds: { claude: this.accountIdFor('claude'), gemini: this.accountIdFor('gemini') }
+      accountIds: {
+        claude: this.accountIdFor('claude'),
+        gemini: this.accountIdFor('gemini'),
+        deepseek: this.accountIdFor('deepseek')
+      }
     }
   }
 
@@ -2239,7 +2253,7 @@ export class SessionRuntime {
 
   private focusOutboundQueueState(owner: FocusOwner): FocusChatState['outboundQueue'] {
     const failures = this.focusQueueFailures.filter(failure => failure.owner.sessionId === this.id && failure.owner.platformId === owner.platformId &&
-      failure.owner.claudeAccountId === owner.claudeAccountId &&
+      focusOwnerAccountId(failure.owner) === focusOwnerAccountId(owner) &&
       (failure.owner.conversationId === null || owner.conversationId === null || failure.owner.conversationId === owner.conversationId))
       .map(({ owner: _owner, ...failure }) => ({ ...failure, ...(failure.attachments ? { attachments: failure.attachments.map(file => ({ ...file })) } : {}) }))
     const state = this.aiOutboundQueue.stateFor(owner)

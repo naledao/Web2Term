@@ -1073,6 +1073,7 @@ function createSession(
     initialConversationId: restored?.conversationId ?? null,
     initialClaudeWorkspace: restored?.claudeWorkspace,
     initialGeminiWorkspace: restored?.geminiWorkspace,
+    initialDeepseekWorkspace: restored?.deepseekWorkspace,
     initialPaused: restored?.paused ?? false,
     initialPromptInjectionEnabled: restored?.promptInjectionEnabled ?? true,
     initialLocalCwd: restored?.localCwd ?? creation?.localCwd ?? '',

@@ -301,3 +301,102 @@ test('Gemini account scopes isolate drafts, owner keys, saved compaction checks,
   assert.equal(taskStore.platformAccountTasks('gemini', geminiA).length, 0)
   assert.equal(taskStore.tasks('s1').length, 2)
 })
+
+test('DeepSeek accounts are stored, restored, cleared, and isolated independently', async () => {
+  const store = memoryStore()
+  const deepseekWork = platformAccounts.newPlatformAccount('DeepSeek 工作号')
+  const deepseekPersonal = platformAccounts.newPlatformAccount('DeepSeek 个人号')
+  const claudeWork = platformAccounts.newPlatformAccount('Claude 工作号')
+  platformAccounts.savePlatformAccount(store, 'deepseek', deepseekWork)
+  platformAccounts.savePlatformAccount(store, 'deepseek', deepseekPersonal)
+  platformAccounts.savePlatformAccount(store, 'claude', claudeWork)
+
+  assert.deepEqual(platformAccounts.listPlatformAccounts(store, 'deepseek').map(item => item.id),
+    [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, deepseekWork.id, deepseekPersonal.id])
+  assert.deepEqual(platformAccounts.listPlatformAccounts(store, 'claude').map(item => item.id),
+    [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, claudeWork.id])
+
+  assert.throws(() => platformAccounts.removePlatformAccount(store, 'deepseek', sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID), /默认账号不能删除/)
+  assert.throws(() => platformAccounts.removePlatformAccount(store, 'deepseek', claudeWork.id), /DeepSeek 账号不可用/)
+
+  const remaining = platformAccounts.removePlatformAccount(store, 'deepseek', deepseekWork.id)
+  assert.deepEqual(remaining.map(item => item.id), [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, deepseekPersonal.id])
+
+  const restored = platformAccounts.restorePlatformWorkspace(
+    'deepseek',
+    JSON.stringify({
+      accountId: deepseekWork.id,
+      locations: {
+        [deepseekWork.id]: 'https://chat.deepseek.com/a/chat/s/ds_work_chat',
+        [deepseekPersonal.id]: 'https://chat.deepseek.com/a/chat/s/ds_personal_chat',
+        [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID]: 'https://chat.deepseek.com/sign_in'
+      }
+    }),
+    remaining
+  )
+  assert.equal(restored.accountId, sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID)
+  assert.equal(restored.locations.has(deepseekWork.id), false)
+  assert.equal(restored.locations.get(deepseekPersonal.id), 'https://chat.deepseek.com/a/chat/s/ds_personal_chat')
+  assert.equal(restored.locations.has(sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID), false)
+
+  partitionCalls.clear()
+  await platformAccounts.clearPlatformAccountPartition('deepseek', sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID)
+  await platformAccounts.clearPlatformAccountPartition('deepseek', deepseekPersonal.id)
+  assert.deepEqual(partitionCalls.get(`persist:deepseek-${deepseekPersonal.id}`), {
+    closeAllConnections: 1,
+    clearStorageData: 1,
+    clearCache: 1,
+    clearAuthCache: 1
+  })
+})
+
+test('DeepSeek account scopes isolate drafts, owner keys, saved compaction checks, and scheduled tasks', () => {
+  const store = memoryStore()
+  const tools = new ConversationTools('session-1', store)
+  const deepseekA = '55555555-5555-4555-8555-555555555555'
+  const deepseekB = '66666666-6666-4666-8666-666666666666'
+
+  tools.setAccountScope('deepseek', deepseekA)
+  tools.update('deepseek', null, { fileReadingEnabled: false })
+  tools.setAccountScope('deepseek', deepseekB)
+  assert.equal(tools.read('deepseek', null).fileReadingEnabled, true)
+  tools.update('deepseek', null, { backgroundTasksEnabled: false })
+  tools.clearPlatformAccountDraft('deepseek', deepseekA)
+  tools.setAccountScope('deepseek', deepseekA)
+  assert.equal(tools.read('deepseek', null).fileReadingEnabled, true)
+  tools.setAccountScope('deepseek', deepseekB)
+  assert.equal(tools.read('deepseek', null).backgroundTasksEnabled, false)
+
+  const ownerDefault = { sessionId: 'session-1', platformId: 'deepseek', conversationId: null }
+  const ownerA = { sessionId: 'session-1', platformId: 'deepseek', conversationId: null, accountId: deepseekA }
+  assert.notEqual(sharedFocusChat.focusOwnerKey(ownerDefault), sharedFocusChat.focusOwnerKey(ownerA))
+  assert.equal(sharedTools.sameConversationToolsOwner(ownerDefault, ownerA), false)
+
+  const key = compaction.compactionStorageKey('session-1')
+  store.setSetting(key, JSON.stringify({
+    version: 1,
+    state: { phase: 'paused', generationPlatformId: 'deepseek', generationAccountId: deepseekA }
+  }))
+  assert.equal(compaction.savedCompactionUsesAccount(store, 'session-1', undefined, 'deepseek', deepseekA), true)
+  assert.equal(compaction.savedCompactionUsesAccount(store, 'session-1', undefined, 'gemini', deepseekA), false)
+
+  const db = new DatabaseSync(':memory:')
+  const taskStore = new ScheduledTaskStore(db)
+  const scheduler = new ScheduledTasks(taskStore, {
+    now: () => 1_700_000_000_000,
+    ready: () => null,
+    changed: () => {},
+    schedule: () => ({ unref() {} }),
+    cancel: () => {}
+  })
+  const target = { machineId: 'm1', transport: 'local', key: 'm1', cwd: 'C:\\proj', label: '本机' }
+  const req = { type: 'scheduled_task', schedule: { kind: 'interval', minutes: 30 }, prompt: '检查状态' }
+  scheduler.create({ sessionId: 's1', platformId: 'deepseek', conversationId: 'ds_chat_1', accountId: deepseekA }, target, req, 'ds-1')
+  scheduler.create({ sessionId: 's1', platformId: 'deepseek', conversationId: 'ds_chat_2', accountId: deepseekB }, target, req, 'ds-2')
+  scheduler.create({ sessionId: 's1', platformId: 'deepseek', conversationId: 'ds_chat_3' }, target, req, 'ds-3')
+
+  assert.equal(taskStore.platformAccountTasks('deepseek', deepseekA).length, 1)
+  scheduler.removePlatformAccount('deepseek', deepseekA)
+  assert.equal(taskStore.platformAccountTasks('deepseek', deepseekA).length, 0)
+  assert.equal(taskStore.tasks('s1').length, 2)
+})

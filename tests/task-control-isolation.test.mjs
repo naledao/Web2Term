@@ -194,3 +194,14 @@ test('privileged controller routing requires the actual manager main frame', () 
     assert.equal(exports.route(event), null); assert.equal(exports.manager(event), false)
   }
 })
+
+test('clearing platform task context on account switch stops null-conversation carryover across accounts', t => {
+  const f = fixture(t)
+  const stopped = f.submit({ conversationId: null })
+  f.coordinator.stop('deepseek', 'stopped')
+  assert.equal(f.coordinator.latest('deepseek')?.id, stopped.id)
+  f.coordinator.clearContext('deepseek')
+  assert.equal(f.coordinator.latest('deepseek'), null)
+  const freshState = f.coordinator.context('deepseek', 'chat-b')
+  assert.equal(freshState.task, null)
+})

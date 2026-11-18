@@ -760,7 +760,8 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const transcriptScrollKey = conversationScrollKey(sessionId, platformId, conversationId)
   const accountIds = useMemo<Record<AccountPlatformId, string>>(() => ({
     claude: embed.accountIds?.claude ?? embed.claudeAccountId ?? DEFAULT_PLATFORM_ACCOUNT_ID,
-    gemini: embed.accountIds?.gemini ?? DEFAULT_PLATFORM_ACCOUNT_ID
+    gemini: embed.accountIds?.gemini ?? DEFAULT_PLATFORM_ACCOUNT_ID,
+    deepseek: embed.accountIds?.deepseek ?? DEFAULT_PLATFORM_ACCOUNT_ID
   }), [embed.accountIds, embed.claudeAccountId])
   const accountId = supportsPlatformAccounts(platformId) ? accountIds[platformId] : DEFAULT_PLATFORM_ACCOUNT_ID
   const accountScope = supportsPlatformAccounts(platformId) && accountId !== DEFAULT_PLATFORM_ACCOUNT_ID ? accountId : undefined

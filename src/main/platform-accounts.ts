@@ -8,7 +8,7 @@ import {
 } from '../shared/platform-accounts'
 import type { AccountPlatformId, PlatformAccount } from '../shared/platform-accounts'
 import { selectionQuestionConversation } from '../shared/deepseek-question'
-import { CLAUDE_PLATFORM, GEMINI_PLATFORM } from '../shared/platforms'
+import { CLAUDE_PLATFORM, DEEPSEEK_PLATFORM, GEMINI_PLATFORM } from '../shared/platforms'
 import type { ChatPlatform } from '../shared/platforms'
 
 interface SettingsStore {
@@ -23,7 +23,8 @@ const PLATFORM_CONFIG: Readonly<Record<AccountPlatformId, {
   label: string
 }>> = {
   claude: { platform: CLAUDE_PLATFORM, settingsKey: 'claudeAccounts', partitionPrefix: 'persist:claude-', label: ACCOUNT_PLATFORMS.claude.label },
-  gemini: { platform: GEMINI_PLATFORM, settingsKey: 'geminiAccounts', partitionPrefix: 'persist:gemini-', label: ACCOUNT_PLATFORMS.gemini.label }
+  gemini: { platform: GEMINI_PLATFORM, settingsKey: 'geminiAccounts', partitionPrefix: 'persist:gemini-', label: ACCOUNT_PLATFORMS.gemini.label },
+  deepseek: { platform: DEEPSEEK_PLATFORM, settingsKey: 'deepseekAccounts', partitionPrefix: 'persist:deepseek-', label: ACCOUNT_PLATFORMS.deepseek.label }
 }
 
 export function listPlatformAccounts(store: Pick<SettingsStore, 'getSetting'>, platformId: AccountPlatformId): PlatformAccount[] {
