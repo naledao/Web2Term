@@ -400,3 +400,102 @@ test('DeepSeek account scopes isolate drafts, owner keys, saved compaction check
   assert.equal(taskStore.platformAccountTasks('deepseek', deepseekA).length, 0)
   assert.equal(taskStore.tasks('s1').length, 2)
 })
+
+test('ChatGPT accounts are stored, restored, cleared, and isolated independently', async () => {
+  const store = memoryStore()
+  const chatgptWork = platformAccounts.newPlatformAccount('ChatGPT 工作号')
+  const chatgptPersonal = platformAccounts.newPlatformAccount('ChatGPT 个人号')
+  const claudeWork = platformAccounts.newPlatformAccount('Claude 工作号')
+  platformAccounts.savePlatformAccount(store, 'chatgpt', chatgptWork)
+  platformAccounts.savePlatformAccount(store, 'chatgpt', chatgptPersonal)
+  platformAccounts.savePlatformAccount(store, 'claude', claudeWork)
+
+  assert.deepEqual(platformAccounts.listPlatformAccounts(store, 'chatgpt').map(item => item.id),
+    [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, chatgptWork.id, chatgptPersonal.id])
+  assert.deepEqual(platformAccounts.listPlatformAccounts(store, 'claude').map(item => item.id),
+    [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, claudeWork.id])
+
+  assert.throws(() => platformAccounts.removePlatformAccount(store, 'chatgpt', sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID), /默认账号不能删除/)
+  assert.throws(() => platformAccounts.removePlatformAccount(store, 'chatgpt', claudeWork.id), /ChatGPT 账号不可用/)
+
+  const remaining = platformAccounts.removePlatformAccount(store, 'chatgpt', chatgptWork.id)
+  assert.deepEqual(remaining.map(item => item.id), [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, chatgptPersonal.id])
+
+  const restored = platformAccounts.restorePlatformWorkspace(
+    'chatgpt',
+    JSON.stringify({
+      accountId: chatgptWork.id,
+      locations: {
+        [chatgptWork.id]: 'https://chatgpt.com/c/11111111-1111-4111-8111-111111111111',
+        [chatgptPersonal.id]: 'https://chatgpt.com/c/22222222-2222-4222-8222-222222222222',
+        [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID]: 'https://auth.openai.com/log-in'
+      }
+    }),
+    remaining
+  )
+  assert.equal(restored.accountId, sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID)
+  assert.equal(restored.locations.has(chatgptWork.id), false)
+  assert.equal(restored.locations.get(chatgptPersonal.id), 'https://chatgpt.com/c/22222222-2222-4222-8222-222222222222')
+  assert.equal(restored.locations.has(sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID), false)
+
+  partitionCalls.clear()
+  await platformAccounts.clearPlatformAccountPartition('chatgpt', sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID)
+  await platformAccounts.clearPlatformAccountPartition('chatgpt', chatgptPersonal.id)
+  assert.deepEqual(partitionCalls.get(`persist:chatgpt-${chatgptPersonal.id}`), {
+    closeAllConnections: 1,
+    clearStorageData: 1,
+    clearCache: 1,
+    clearAuthCache: 1
+  })
+})
+
+test('ChatGPT account scopes isolate drafts, owner keys, saved compaction checks, and scheduled tasks', () => {
+  const store = memoryStore()
+  const tools = new ConversationTools('session-1', store)
+  const chatgptA = '77777777-7777-4777-8777-777777777777'
+  const chatgptB = '88888888-8888-4888-8888-888888888888'
+
+  tools.setAccountScope('chatgpt', chatgptA)
+  tools.update('chatgpt', null, { fileReadingEnabled: false })
+  tools.setAccountScope('chatgpt', chatgptB)
+  assert.equal(tools.read('chatgpt', null).fileReadingEnabled, true)
+  tools.update('chatgpt', null, { backgroundTasksEnabled: false })
+  tools.clearPlatformAccountDraft('chatgpt', chatgptA)
+  tools.setAccountScope('chatgpt', chatgptA)
+  assert.equal(tools.read('chatgpt', null).fileReadingEnabled, true)
+  tools.setAccountScope('chatgpt', chatgptB)
+  assert.equal(tools.read('chatgpt', null).backgroundTasksEnabled, false)
+
+  const ownerDefault = { sessionId: 'session-1', platformId: 'chatgpt', conversationId: null }
+  const ownerA = { sessionId: 'session-1', platformId: 'chatgpt', conversationId: null, accountId: chatgptA }
+  assert.notEqual(sharedFocusChat.focusOwnerKey(ownerDefault), sharedFocusChat.focusOwnerKey(ownerA))
+  assert.equal(sharedTools.sameConversationToolsOwner(ownerDefault, ownerA), false)
+
+  const key = compaction.compactionStorageKey('session-1')
+  store.setSetting(key, JSON.stringify({
+    version: 1,
+    state: { phase: 'paused', generationPlatformId: 'chatgpt', generationAccountId: chatgptA }
+  }))
+  assert.equal(compaction.savedCompactionUsesAccount(store, 'session-1', undefined, 'chatgpt', chatgptA), true)
+  assert.equal(compaction.savedCompactionUsesAccount(store, 'session-1', undefined, 'deepseek', chatgptA), false)
+
+  const db = new DatabaseSync(':memory:')
+  const taskStore = new ScheduledTaskStore(db)
+  const scheduler = new ScheduledTasks(taskStore, {
+    now: () => 1_700_000_000_000,
+    ready: () => null,
+    changed: () => {},
+    schedule: () => ({ unref() {} }),
+    cancel: () => {}
+  })
+  const target = { machineId: 'm1', transport: 'local', key: 'm1', cwd: 'C:\\proj', label: '本机' }
+  const req = { type: 'scheduled_task', schedule: { kind: 'interval', minutes: 30 }, prompt: '检查状态' }
+  scheduler.create({ sessionId: 's1', platformId: 'chatgpt', conversationId: '11111111-1111-4111-8111-111111111111', accountId: chatgptA }, target, req, 'gpt-1')
+  scheduler.create({ sessionId: 's1', platformId: 'chatgpt', conversationId: '22222222-2222-4222-8222-222222222222', accountId: chatgptB }, target, req, 'gpt-2')
+  scheduler.create({ sessionId: 's1', platformId: 'chatgpt', conversationId: '33333333-3333-4333-8333-333333333333' }, target, req, 'gpt-3')
+
+  assert.equal(taskStore.platformAccountTasks('chatgpt', chatgptA).length, 1)
+  scheduler.removePlatformAccount('chatgpt', chatgptA)
+  assert.equal(taskStore.platformAccountTasks('chatgpt', chatgptA).length, 0)
+  assert.equal(taskStore.tasks('s1').length, 2)
+})

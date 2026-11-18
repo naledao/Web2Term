@@ -782,3 +782,18 @@ test('DeepSeek handoff resumes on the selected generation account while keeping 
   assert.deepEqual(f.openings.map(page => page.accountId), [accountB, accountB])
   assert.equal(f.calls.length, 1)
 })
+
+test('ChatGPT handoff resumes on the selected generation account while keeping the source account owner', async t => {
+  const accountA = '77777777-7777-4777-8777-777777777777'
+  const accountB = '88888888-8888-4888-8888-888888888888'
+  const f = fixture(t, new Map(), { platformId: 'chatgpt', conversationId: '6ab156eb-1b00-83e8-b973-a6a59295a353', accountId: accountA, unknown: true })
+  await f.start('chatgpt', accountB)
+  assert.equal((await settled(f)).phase, 'uncertain')
+  assert.equal(f.service.state({ ...f.owner, accountId: accountB }), null)
+  f.restart()
+  assert.equal(f.service.state(f.owner).generationAccountId, accountB)
+  await f.service.resume(f.owner)
+  assert.equal((await settled(f)).phase, 'ready-to-export')
+  assert.deepEqual(f.openings.map(page => page.accountId), [accountB, accountB])
+  assert.equal(f.calls.length, 1)
+})

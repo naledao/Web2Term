@@ -311,6 +311,7 @@ CREATE TABLE IF NOT EXISTS managed_sessions (
   claude_workspace TEXT,
   gemini_workspace TEXT,
   deepseek_workspace TEXT,
+  chatgpt_workspace TEXT,
   workspace_project_id TEXT,
   paused          INTEGER NOT NULL DEFAULT 0,
   prompt_injection_enabled INTEGER NOT NULL DEFAULT 1,
@@ -446,6 +447,7 @@ export interface ManagedSessionRecord {
   claudeWorkspace?: string
   geminiWorkspace?: string
   deepseekWorkspace?: string
+  chatgptWorkspace?: string
   paused: boolean
   promptInjectionEnabled: boolean
   localCwd: string
@@ -598,7 +600,8 @@ export class ConversationStore {
       ['send_delay_customized', 'INTEGER'],
       ['claude_workspace', 'TEXT'],
       ['gemini_workspace', 'TEXT'],
-      ['deepseek_workspace', 'TEXT']
+      ['deepseek_workspace', 'TEXT'],
+      ['chatgpt_workspace', 'TEXT']
     ]
     for (const [name, definition] of managedSessionMigrations) {
       if (!managedSessionColumns.some((column) => column.name === name)) {
@@ -1775,7 +1778,7 @@ export class ConversationStore {
   listManagedSessions(): ManagedSessionRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT id, title, url, conversation_id, platform_id, claude_workspace, gemini_workspace, deepseek_workspace, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, send_delay_customized, created_at, updated_at
+        `SELECT id, title, url, conversation_id, platform_id, claude_workspace, gemini_workspace, deepseek_workspace, chatgpt_workspace, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, send_delay_customized, created_at, updated_at
            FROM managed_sessions ORDER BY created_at ASC`
       )
       .all() as unknown as Array<{
@@ -1787,6 +1790,7 @@ export class ConversationStore {
       claude_workspace: string | null
       gemini_workspace: string | null
       deepseek_workspace: string | null
+      chatgpt_workspace: string | null
       workspace_project_id: string | null
       paused: number
       prompt_injection_enabled: number
@@ -1810,6 +1814,7 @@ export class ConversationStore {
       claudeWorkspace: row.claude_workspace ?? undefined,
       geminiWorkspace: row.gemini_workspace ?? undefined,
       deepseekWorkspace: row.deepseek_workspace ?? undefined,
+      chatgptWorkspace: row.chatgpt_workspace ?? undefined,
       projectId: row.workspace_project_id,
       paused: row.paused !== 0,
       promptInjectionEnabled: row.prompt_injection_enabled !== 0,
@@ -1829,8 +1834,8 @@ export class ConversationStore {
     const now = Date.now()
     this.db
       .prepare(
-        `INSERT INTO managed_sessions (id, title, url, conversation_id, platform_id, claude_workspace, gemini_workspace, deepseek_workspace, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, send_delay_customized, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO managed_sessions (id, title, url, conversation_id, platform_id, claude_workspace, gemini_workspace, deepseek_workspace, chatgpt_workspace, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, send_delay_customized, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
@@ -1839,6 +1844,7 @@ export class ConversationStore {
            claude_workspace = excluded.claude_workspace,
            gemini_workspace = excluded.gemini_workspace,
            deepseek_workspace = excluded.deepseek_workspace,
+           chatgpt_workspace = excluded.chatgpt_workspace,
            workspace_project_id = excluded.workspace_project_id,
            paused = excluded.paused,
            prompt_injection_enabled = excluded.prompt_injection_enabled,
@@ -1860,6 +1866,7 @@ export class ConversationStore {
         record.claudeWorkspace ?? null,
         record.geminiWorkspace ?? null,
         record.deepseekWorkspace ?? null,
+        record.chatgptWorkspace ?? null,
         record.projectId ?? null,
         record.paused ? 1 : 0,
         record.promptInjectionEnabled ? 1 : 0,

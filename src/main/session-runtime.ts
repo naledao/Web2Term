@@ -282,6 +282,7 @@ export interface SessionRuntimeOptions {
   initialClaudeWorkspace?: string
   initialGeminiWorkspace?: string
   initialDeepseekWorkspace?: string
+  initialChatgptWorkspace?: string
   initialPaused?: boolean
   initialPromptInjectionEnabled?: boolean
   initialLocalCwd?: string
@@ -616,7 +617,8 @@ export class SessionRuntime {
     const workspaceInputs: Record<AccountPlatformId, string | undefined> = {
       claude: options.initialClaudeWorkspace,
       gemini: options.initialGeminiWorkspace,
-      deepseek: options.initialDeepseekWorkspace
+      deepseek: options.initialDeepseekWorkspace,
+      chatgpt: options.initialChatgptWorkspace
     }
     for (const platformId of ACCOUNT_PLATFORM_IDS) {
       const raw = workspaceInputs[platformId]
@@ -1795,6 +1797,7 @@ export class SessionRuntime {
     claudeWorkspace?: string
     geminiWorkspace?: string
     deepseekWorkspace?: string
+    chatgptWorkspace?: string
     paused: boolean
     promptInjectionEnabled: boolean
     localCwd: string
@@ -1833,6 +1836,7 @@ export class SessionRuntime {
       claudeWorkspace: serializeWorkspace('claude'),
       geminiWorkspace: serializeWorkspace('gemini'),
       deepseekWorkspace: serializeWorkspace('deepseek'),
+      chatgptWorkspace: serializeWorkspace('chatgpt'),
       paused: automation.paused,
       promptInjectionEnabled: this.promptInjectionEnabled,
       localCwd: this.web2term ? '' : terminal.cwd,
@@ -1944,7 +1948,8 @@ export class SessionRuntime {
       accountIds: {
         claude: this.accountIdFor('claude'),
         gemini: this.accountIdFor('gemini'),
-        deepseek: this.accountIdFor('deepseek')
+        deepseek: this.accountIdFor('deepseek'),
+        chatgpt: this.accountIdFor('chatgpt')
       }
     }
   }

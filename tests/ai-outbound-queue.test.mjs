@@ -89,6 +89,18 @@ test('DeepSeek draft queue state is isolated by accountId', async () => {
   queue.dispose()
 })
 
+test('ChatGPT draft queue state is isolated by accountId', async () => {
+  const Queue = loadQueue()
+  const queue = new Queue()
+  const original = { ...owner, platformId: 'chatgpt', conversationId: null }
+  const alternate = { ...original, accountId: '99999999-9999-4999-8999-999999999999' }
+  const ticket = queue.enqueue(request({ owner: alternate, execute: async () => 'unknown', blockOnFailure: () => true }))
+  assert.equal(await ticket.completion, 'unknown')
+  assert.equal(queue.stateFor(alternate).blocked?.id, ticket.item.id)
+  assert.equal(queue.stateFor(original).pending, 0)
+  queue.dispose()
+})
+
 test('retries a busy result on the same job before advancing', async () => {
   const Queue = loadQueue()
   const queue = new Queue()
