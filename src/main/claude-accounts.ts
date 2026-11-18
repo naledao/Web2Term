@@ -38,9 +38,30 @@ export function saveClaudeAccount(store: SettingsStore, account: ClaudeAccount):
   store.setSetting(ACCOUNTS_KEY, JSON.stringify([...listClaudeAccounts(store).slice(1), account]))
 }
 
+export function removeClaudeAccount(store: SettingsStore, accountId: unknown): ClaudeAccount[] {
+  if (accountId === DEFAULT_CLAUDE_ACCOUNT_ID) throw new Error('默认账号不能删除。')
+  if (!isClaudeAccountId(accountId)) throw new Error('Claude 账号不可用。')
+  const accounts = listClaudeAccounts(store)
+  if (!accounts.some(account => account.id === accountId)) throw new Error('Claude 账号不可用。')
+  const remaining = accounts.filter(account => account.id !== accountId)
+  store.setSetting(ACCOUNTS_KEY, JSON.stringify(remaining.slice(1)))
+  return remaining
+}
+
 export function claudePlatformForAccount(accountId: string): ChatPlatform {
   return accountId === DEFAULT_CLAUDE_ACCOUNT_ID ? CLAUDE_PLATFORM :
     { ...CLAUDE_PLATFORM, partition: `persist:claude-${accountId}` }
+}
+
+export async function clearClaudeAccountPartition(accountId: string): Promise<void> {
+  if (!isClaudeAccountId(accountId) || accountId === DEFAULT_CLAUDE_ACCOUNT_ID) return
+  const browserSession = session.fromPartition(claudePlatformForAccount(accountId).partition)
+  await browserSession.closeAllConnections().catch(() => {})
+  await Promise.allSettled([
+    browserSession.clearStorageData(),
+    browserSession.clearCache(),
+    browserSession.clearAuthCache()
+  ])
 }
 
 export async function applyChatPartitionProxy(partition: string, proxy: string): Promise<void> {

@@ -304,6 +304,14 @@ export interface FocusPageRules {
       triggerLabelSelector: string
       levels: Array<{ value: string; labels: string[] }>
     }
+  } | {
+    kind: 'claude'
+    moreModelsLabels: string[]
+    effortMenu: {
+      toggleSelector: string
+      toggleLabels: string[]
+      optionSelector: string
+    }
   })
   composerModeControlSelector?: string
   composerModes?: Array<{ id: 'thinking' | 'search'; labels: string[]; activeSelector?: string; inactiveSelector?: string }>
@@ -1111,7 +1119,22 @@ export const CLAUDE_PAGE: PageAdapter = {
     rowPositionAttr: 'data-rs-index',
     rowPositionSelector: '[data-testid="transcript-row"]',
     userTurnSelector: '[class~="group/message-row"][class~="ms-auto"]',
-    reasoningSelectors: []
+    reasoningSelectors: [],
+    // User-run model-settings probe 2026-11-18: Base UI menu trigger with
+    // menuitemradio[data-model-id] options, More models submenu, and Effort submenu.
+    modelSettings: {
+      kind: 'claude',
+      newChatPath: '/new',
+      conversationPathPattern: '^/chat/[^/?#]+/?$',
+      triggerSelector: 'button[data-testid="model-selector-dropdown"][aria-haspopup="menu"]',
+      modelSelector: '[role="menuitemradio"][data-model-id]',
+      moreModelsLabels: ['More models', 'Legacy models', 'Other models', '更多模型', '旧版模型', '其他模型'],
+      effortMenu: {
+        toggleSelector: '[role="menuitem"][aria-haspopup="menu"]',
+        toggleLabels: ['Effort', 'Thinking effort', 'Reasoning effort', '思考强度', '推理强度', '努力程度'],
+        optionSelector: '[role="menuitemradio"][data-effort-id]'
+      }
+    }
   },
   // Not measured yet; DeepSeek is the platform the theme probe runs against first.
   theme: THEME_UNMEASURED

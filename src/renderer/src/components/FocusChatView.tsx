@@ -65,6 +65,7 @@ interface Props {
   claudeAccountId: string
   onClaudeAccountSelect(id: string): Promise<void>
   onClaudeAccountAdd(label: string): Promise<void>
+  onClaudeAccountRemove(id: string): Promise<void>
   newChatDisabled: boolean
   onNewChat(): void
   onQuestion(): void
@@ -862,7 +863,7 @@ function FocusChatView(props: Props): JSX.Element {
   useEffect(() => {
     if (!modelSettingsKind || !visible || modelSettingsBlocked || sendLock.current) return
     const settings = state?.modelSettings
-    if (modelSettingsKind === 'gemini' && settings?.model) {
+    if ((modelSettingsKind === 'gemini' || modelSettingsKind === 'claude') && settings?.model) {
       // Strength availability follows the confirmed model. Read the new model once.
       if (geminiReadModel.current && geminiReadModel.current !== settings.model) {
         modelReadAttempted.current = false
@@ -1330,7 +1331,7 @@ function FocusChatView(props: Props): JSX.Element {
       {owner.platformId === 'claude' && props.dialogContainer ? <ClaudeAccountPicker
         accountId={props.claudeAccountId} accounts={props.claudeAccounts} container={props.dialogContainer}
         disabled={props.taskRunning || working || sending || stopping || !!editingId || compaction.blocked || !!outboundQueue?.pending}
-        onSelect={props.onClaudeAccountSelect} onAdd={props.onClaudeAccountAdd} /> : null}
+        onSelect={props.onClaudeAccountSelect} onAdd={props.onClaudeAccountAdd} onRemove={props.onClaudeAccountRemove} /> : null}
       <button type="button" className="focus-chat__new-chat" aria-label="新建对话" title="新建对话"
         disabled={props.newChatDisabled || working || sending || stopping || !!editingId || settingPending !== null || compaction.blocked} onClick={startNewChat}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">

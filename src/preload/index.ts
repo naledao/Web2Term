@@ -225,6 +225,7 @@ const api: AppApi = {
   listClaudeAccounts: () => ipcRenderer.invoke(IpcChannels.claudeAccountsList),
   addClaudeAccount: (owner, label) => ipcRenderer.invoke(IpcChannels.claudeAccountAdd, owner, label),
   switchClaudeAccount: (owner, accountId) => ipcRenderer.invoke(IpcChannels.claudeAccountSwitch, owner, accountId),
+  removeClaudeAccount: (owner, accountId) => ipcRenderer.invoke(IpcChannels.claudeAccountRemove, owner, accountId),
   startCompaction: (owner, generationPlatformId, generationAccountId) =>
     ipcRenderer.invoke(IpcChannels.compactionStart, owner, generationPlatformId, generationAccountId),
   compactionAction: (request, action) => ipcRenderer.invoke(IpcChannels.compactionAction, request, action),

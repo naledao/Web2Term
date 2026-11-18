@@ -108,7 +108,7 @@ import type {
   DiagnosticLogsExportResult
 } from '../shared/types'
 import { embedAuthState, importCookieSet, importSessionToken, previewSessionImport } from './session-import'
-import { applyChatPartitionProxy, claudePlatformForAccount, listClaudeAccounts, newClaudeAccount } from './claude-accounts'
+import { applyChatPartitionProxy, claudePlatformForAccount, clearClaudeAccountPartition, listClaudeAccounts, newClaudeAccount, removeClaudeAccount } from './claude-accounts'
 import { DEFAULT_CLAUDE_ACCOUNT_ID, isClaudeAccountId } from '../shared/claude-accounts'
 import { ConversationStore } from './db'
 import { readStartupTheme } from './startup-theme'
@@ -1566,22 +1566,50 @@ function registerIpcHandlers(): void {
       ? runtime.getFocusChat(owner, cursor) : runtime.getFocusChat(owner)
   })
   ipcMain.handle(IpcChannels.compactionGet, (event, owner) => focusRuntime(event, owner)?.getCompaction(owner) ?? null)
+  let claudeAccountOperation: Promise<unknown> = Promise.resolve()
+  const serializeClaudeAccountOperation = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = claudeAccountOperation.then(task, task)
+    claudeAccountOperation = run.catch(() => {})
+    return run
+  }
   ipcMain.handle(IpcChannels.claudeAccountsList, event =>
     store && fromManager(event) && event.senderFrame === event.sender.mainFrame ? listClaudeAccounts(store) : [])
-  ipcMain.handle(IpcChannels.claudeAccountAdd, async (event, owner, label) => {
+  ipcMain.handle(IpcChannels.claudeAccountAdd, (event, owner, label) => serializeClaudeAccountOperation(async () => {
     const runtime = focusRuntime(event, owner)
     if (!runtime || owner.platformId !== 'claude') throw new Error('请先打开 Claude 专注视图。')
     const account = newClaudeAccount(label)
     await runtime.switchClaudeAccount(owner, account, true)
     return account
-  })
-  ipcMain.handle(IpcChannels.claudeAccountSwitch, (event, owner, accountId) => {
+  }))
+  ipcMain.handle(IpcChannels.claudeAccountSwitch, (event, owner, accountId) => serializeClaudeAccountOperation(async () => {
     const runtime = focusRuntime(event, owner)
     if (!runtime || owner.platformId !== 'claude' || !store) throw new Error('请先打开 Claude 专注视图。')
     const account = listClaudeAccounts(store).find(item => item.id === accountId)
     if (!account) throw new Error('Claude 账号不可用。')
-    return runtime.switchClaudeAccount(owner, account)
-  })
+    await runtime.switchClaudeAccount(owner, account)
+  }))
+  ipcMain.handle(IpcChannels.claudeAccountRemove, (event, owner, accountId) => serializeClaudeAccountOperation(async () => {
+    const checkRemovable = (): void => {
+      const caller = focusRuntime(event, owner)
+      if (!caller || owner.platformId !== 'claude' || !store) throw new Error('请先打开 Claude 专注视图。')
+      if (!caller.ownsClaudeFocus(owner)) throw new Error('当前 Claude 对话已切换。')
+      if (accountId === DEFAULT_CLAUDE_ACCOUNT_ID) throw new Error('默认账号不能删除。')
+      if (!isClaudeAccountId(accountId)) throw new Error('Claude 账号不可用。')
+      const accounts = listClaudeAccounts(store)
+      if (!accounts.some(item => item.id === accountId)) throw new Error('Claude 账号不可用。')
+      if (scheduledTasks?.hasSendingClaudeAccount(accountId)) throw new Error('该 Claude 账号有定时任务正在投递，请稍后再试。')
+      for (const item of runtimes.values()) item.assertClaudeAccountRemovableSync(accountId, accounts)
+    }
+    checkRemovable()
+    await Promise.all([...runtimes.values()].map(item => item.assertClaudeAccountPageIdle(accountId)))
+    checkRemovable()
+    const remaining = removeClaudeAccount(store!, accountId)
+    scheduledTasks?.removeClaudeAccount(accountId)
+    for (const item of runtimes.values()) item.releaseClaudeAccount(accountId)
+    try { await clearClaudeAccountPartition(accountId) }
+    catch (error) { console.warn('[claude-accounts] failed to clear partition:', error instanceof Error ? error.message : String(error)) }
+    return remaining
+  }))
   ipcMain.handle(IpcChannels.compactionStart, (event, owner, generationPlatformId, generationAccountId) => {
     const runtime = focusRuntime(event, owner)
     if (!runtime) throw new Error('当前会话已切换。')

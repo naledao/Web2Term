@@ -62,6 +62,26 @@ interface Options {
 }
 const sameOwner = (a: FocusOwner, b: FocusOwner): boolean => a.sessionId === b.sessionId && a.platformId === b.platformId &&
   a.conversationId === b.conversationId && a.claudeAccountId === b.claudeAccountId
+const COMPACTION_RESUMABLE: readonly CompactionPhase[] = [...COMPACTION_ACTIVE, 'paused', 'failed', 'uncertain']
+export function compactionStorageKey(sessionId: string, claudeAccountId?: string): string {
+  return 'conversationCompaction:' + sessionId + (claudeAccountId ? ':' + claudeAccountId : '')
+}
+export function savedCompactionUsesClaudeAccount(
+  store: Pick<SettingsStore, 'getSetting'>,
+  sessionId: string,
+  scopeAccountId: string | undefined,
+  targetAccountId: string
+): boolean {
+  const raw = store.getSetting(compactionStorageKey(sessionId, scopeAccountId))
+  if (!raw) return false
+  try {
+    const job: StoredCompaction = JSON.parse(raw)
+    return job?.version === 1 &&
+      COMPACTION_RESUMABLE.includes(job.state?.phase) &&
+      job.state?.generationPlatformId === 'claude' &&
+      job.state?.generationAccountId === targetAccountId
+  } catch { return false }
+}
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
 const uuid = (value: unknown): value is string => typeof value === 'string' && /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)
 
@@ -135,8 +155,7 @@ export class ConversationCompaction {
     } catch { /* Invalid saved state is never used to navigate or send. */ }
   }
   private get key(): string {
-    const account = this.options.claudeAccountId
-    return 'conversationCompaction:' + this.options.sessionId + (account ? ':' + account : '')
+    return compactionStorageKey(this.options.sessionId, this.options.claudeAccountId)
   }
   private path(name: 'source.md' | 'summary.md'): string { return join(this.options.directory, this.job!.state.id, name) }
   file(name: 'source.md' | 'summary.md'): string | null {
@@ -156,6 +175,12 @@ export class ConversationCompaction {
   get busy(): boolean { return this.running }
   get isExport(): boolean { return this.job?.state.generationPlatformId !== undefined }
   get inProgress(): boolean { return !!this.job && COMPACTION_ACTIVE.includes(this.job.state.phase) }
+  get resumable(): boolean { return !!this.job && COMPACTION_RESUMABLE.includes(this.job.state.phase) }
+  usesClaudeAccount(accountId: string): boolean {
+    return this.options.claudeAccountId === accountId ||
+      this.job?.state.owner.claudeAccountId === accountId ||
+      (this.job?.state.generationPlatformId === 'claude' && this.job.state.generationAccountId === accountId)
+  }
   private save(): void {
     if (!this.job) return
     this.options.store.setSetting(this.key, JSON.stringify(this.job))

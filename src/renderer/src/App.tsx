@@ -2008,6 +2008,10 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     setClaudeAccounts(accounts => [...accounts.filter(item => item.id !== account.id), account])
     selectChatView('original')
   }, [focusOwner, selectChatView])
+  const removeClaudeAccount = useCallback(async (accountId: string) => {
+    const accounts = await window.api.removeClaudeAccount(focusOwner, accountId)
+    setClaudeAccounts(accounts)
+  }, [focusOwner])
   const focusNewChat = useCallback(() => window.api.sendEmbedCommand('home'), [])
   const focusQuestion = useCallback(() => setQuestionMinimized(false), [])
   const focusOriginal = useCallback(() => selectChatView('original'), [selectChatView])
@@ -2492,6 +2496,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               claudeAccounts={claudeAccounts}
               onClaudeAccountSelect={selectClaudeAccount}
               onClaudeAccountAdd={addClaudeAccount}
+              onClaudeAccountRemove={removeClaudeAccount}
               newChatDisabled={taskRunning || embed.isLoading || switchingPlatform}
               onNewChat={focusNewChat}
               onQuestion={focusQuestion}

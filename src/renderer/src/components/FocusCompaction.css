@@ -42,14 +42,41 @@
 .focus-compaction__platforms button { display: flex; align-items: center; gap: 9px; min-height: 40px; text-align: left; }
 .focus-compaction__platforms img { flex: none; width: 19px; height: 19px; object-fit: contain; }
 .focus-chat__accounts ul { display: grid; gap: 6px; margin: 0 0 14px; padding: 0; max-height: 230px; overflow: auto; list-style: none; }
-.focus-chat__accounts li button { display: flex; justify-content: space-between; gap: 16px; width: 100%; text-align: left; overflow-wrap: anywhere; }
-.focus-chat__accounts li button[aria-current="true"], .focus-compaction__platforms button[aria-pressed="true"] { border-color: var(--accent); }
-.focus-chat__accounts li button[aria-current="true"] span:last-child { flex-shrink: 0; color: var(--text-muted); }
+.focus-chat__accounts li { display: flex; align-items: stretch; gap: 6px; }
+.focus-chat__account-select { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex: 1; min-width: 0; text-align: left; overflow-wrap: anywhere; }
+.focus-chat__account-select[aria-current="true"], .focus-compaction__platforms button[aria-pressed="true"] { border-color: var(--accent); }
+.focus-chat__account-select[aria-current="true"] span:last-child { flex-shrink: 0; color: var(--text-muted); }
+.focus-compaction__picker .focus-chat__account-delete { flex: none; color: var(--text-muted); }
+.focus-compaction__picker .focus-chat__account-delete:hover:not(:disabled),
+.focus-compaction__picker .focus-chat__account-delete[aria-expanded="true"] {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.focus-chat__account-confirm {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg-chrome));
+}
+.focus-compaction__picker .focus-chat__account-confirm p { margin: 0; color: var(--text); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.focus-chat__account-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.focus-compaction__picker .focus-chat__account-confirm-danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+}
+.focus-compaction__picker .focus-chat__account-confirm-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  border-color: var(--danger);
+}
 .focus-chat__accounts form, .focus-compaction__account { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
 .focus-compaction__account { margin-top: 14px; }
 .focus-chat__accounts label, .focus-compaction__account label { display: grid; flex: 1; gap: 4px; min-width: 125px; }
 .focus-chat__accounts input, .focus-compaction__account select { box-sizing: border-box; width: 100%; min-height: 34px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-chrome); color: var(--text); font: inherit; }
-.focus-chat__accounts .focus-chat__error { margin: 8px 0 0; }
+.focus-chat__accounts .focus-chat__error { margin: 8px 0 0; color: var(--danger); }
 @keyframes focus-compaction-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.focus-compaction__spinner{animation:none}}
 .focus-composer{position:relative}

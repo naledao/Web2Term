@@ -2553,6 +2553,52 @@
     })
     .filter(option => option.value !== null)
 
+  const focusVisibleTextNodes = root => {
+    const parts = []
+    const visit = node => {
+      if (!node) return
+      if (node.nodeType === 3) {
+        const text = collapse(node.nodeValue)
+        if (text) parts.push(text)
+        return
+      }
+      if (node.nodeType !== 1) return
+      if (node.getAttribute?.('aria-hidden') === 'true' || node.getAttribute?.('hidden') != null ||
+        node.getAttribute?.('role') === 'img' || (node.tagName || node.localName || '').toLowerCase() === 'svg' ||
+        !isVisibleElement(node)) return
+      for (const child of node.childNodes || []) visit(child)
+    }
+    visit(root)
+    return parts
+  }
+
+  const focusClaudeMenuPanel = toggle => {
+    if (!toggle || toggle.getAttribute('aria-expanded') !== 'true') return null
+    const id = toggle.getAttribute('aria-controls')
+    const panel = id ? document.getElementById(id) : null
+    return panel?.getAttribute('role') === 'menu' && isVisibleElement(panel) && !controlDisabled(panel) ? panel : null
+  }
+
+  const focusClaudeSubmenuToggle = (menu, labels) => {
+    if (!menu || !Array.isArray(labels) || !labels.length) return null
+    const matches = [...menu.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].filter(node => {
+      if (!isVisibleElement(node) || controlDisabled(node)) return false
+      const label = (focusVisibleTextNodes(node)[0] || '').toLowerCase()
+      return labels.some(candidate => candidate.toLowerCase() === label)
+    })
+    return matches.length === 1 ? matches[0] : null
+  }
+
+  const focusClaudeRadioOptions = (menu, selector, idAttr) => [...(menu?.querySelectorAll(selector) || [])]
+    .filter(node => isVisibleElement(node) && !controlDisabled(node))
+    .map(node => {
+      const rawId = collapse(node.getAttribute(idAttr) || '')
+      const label = focusVisibleTextNodes(node)[0] || ''
+      const value = /^[A-Za-z0-9][A-Za-z0-9 ._()+:/-]{0,79}$/.test(rawId) ? rawId : label
+      return { node, value, label, selected: node.getAttribute('aria-checked') === 'true' }
+    })
+    .filter(({ value, label }) => /^[A-Za-z0-9][A-Za-z0-9 ._()+:/-]{0,79}$/.test(value) && label.length > 0 && label.length <= 100)
+
   /** Passive between explicit refreshes; never opens a menu from the polling loop. */
   const focusModelSettingsOf = () => {
     const rules = PAGE.focus?.modelSettings
@@ -2562,7 +2608,9 @@
     // the first hop. Explicit history navigation clears this in armBaseline.
     const sending = state.programmatic || state.awaitingReplySince !== 0 || fileSend?.submitted
     const firstSend = focusModelCache &&
-      (focusModelCache.path === rules.newChatPath || (rules.kind === 'gemini' && focusModelCache.path === rules.newChatPath + '/') ||
+      (focusModelCache.path === rules.newChatPath ||
+        (rules.kind === 'gemini' && focusModelCache.path === rules.newChatPath + '/') ||
+        (rules.kind === 'claude' && focusModelCache.path === '/') ||
         focusModelCache.firstSendGeneration === state.taskPromptGeneration) && sending &&
       new RegExp(rules.conversationPathPattern).test(location.pathname)
     if (!focusModelCache || (focusModelCache.path !== location.pathname && !firstSend)) {
@@ -2577,6 +2625,63 @@
     const parts = focusModelPickerParts()
     if (!parts) return { ...data, models: data.models.slice(), efforts: data.efforts.slice() }
     const { trigger, menu } = parts
+    if (rules.kind === 'claude') {
+      const [triggerModelLabel = '', triggerEffortLabel = ''] = focusVisibleTextNodes(trigger)
+      let checkedModel = []
+      if (menu) {
+        const main = focusClaudeRadioOptions(menu, rules.modelSelector, 'data-model-id')
+        const validMain = main.length <= 20 && new Set(main.map(option => option.value)).size === main.length
+        focusModelCache.claudeMain = validMain ? main.map(({ value, label }) => ({ value, label })) : []
+        if (validMain) checkedModel = main.filter(option => option.selected)
+        const moreToggle = focusClaudeSubmenuToggle(menu, rules.moreModelsLabels)
+        if (!moreToggle) focusModelCache.claudeMore = []
+        else {
+          const morePanel = focusClaudeMenuPanel(moreToggle)
+          if (morePanel) {
+            const more = focusClaudeRadioOptions(morePanel, rules.modelSelector, 'data-model-id')
+            const validMore = more.length <= 20 && new Set(more.map(option => option.value)).size === more.length
+            focusModelCache.claudeMore = validMore ? more.map(({ value, label }) => ({ value, label })) : []
+            if (validMore && !checkedModel.length) checkedModel = more.filter(option => option.selected)
+          }
+        }
+        const merged = [], seen = new Set()
+        for (const option of [...(focusModelCache.claudeMain || []), ...(focusModelCache.claudeMore || [])]) {
+          if (seen.has(option.value) || merged.length >= 20) continue
+          seen.add(option.value)
+          merged.push(option)
+        }
+        data.models = merged
+      }
+      const matchingModel = triggerModelLabel
+        ? data.models.filter(option => option.label.toLowerCase() === triggerModelLabel.toLowerCase()) : []
+      data.model = checkedModel.length === 1 ? checkedModel[0].value : matchingModel.length === 1 ? matchingModel[0].value : null
+      if (focusModelCache.effortModel !== data.model) {
+        data.efforts = []
+        focusModelCache.effortModel = data.model
+      }
+      let effortLabel = triggerEffortLabel
+      let checkedEffort = []
+      if (menu) {
+        const effortToggle = focusClaudeSubmenuToggle(menu, rules.effortMenu.toggleLabels)
+        if (!effortToggle) {
+          data.efforts = []
+          effortLabel = ''
+        } else {
+          effortLabel = focusVisibleTextNodes(effortToggle)[1] || effortLabel
+          const effortPanel = focusClaudeMenuPanel(effortToggle)
+          if (effortPanel) {
+            const efforts = focusClaudeRadioOptions(effortPanel, rules.effortMenu.optionSelector, 'data-effort-id')
+            const validEfforts = efforts.length <= 20 && new Set(efforts.map(option => option.value)).size === efforts.length
+            data.efforts = validEfforts ? efforts.map(({ value, label }) => ({ value, label })) : []
+            if (validEfforts) checkedEffort = efforts.filter(option => option.selected)
+          }
+        }
+      }
+      const matchingEffort = effortLabel
+        ? data.efforts.filter(option => option.label.toLowerCase() === effortLabel.toLowerCase()) : []
+      data.effort = checkedEffort.length === 1 ? checkedEffort[0].value : matchingEffort.length === 1 ? matchingEffort[0].value : null
+      return { ...data, models: data.models.slice(), efforts: data.efforts.slice() }
+    }
     if (rules.kind === 'gemini') {
       let checked = []
       if (menu) {
@@ -6905,7 +7010,7 @@
       if (focusModeChanging || focusEditing || fileSend || state.programmatic || state.awaitingReplySince || state.pendingQuestion || findStopButton()) return result('busy', 'page-busy')
       const operation = { token, generation: state.taskPromptGeneration, path: expectedPath, click: null, step: 0, current: null }
       operation.current = () => focusModeChanging === operation && location.pathname === operation.path && state.taskPromptGeneration === operation.generation
-      const deadline = Date.now() + 7000
+      const deadline = Date.now() + 10000
       const waitFor = async (predicate, timeout = 1100) => {
         const end = Math.min(deadline, Date.now() + timeout)
         while (operation.current() && Date.now() < end) {
@@ -6915,7 +7020,7 @@
         return operation.current() && predicate()
       }
       const nativeInput = async (target, { fraction = null, validate = () => true, dismiss = false, hover = false } = {}) => {
-        if (!target || !operation.current() || Date.now() >= deadline || operation.step >= 6) return false
+        if (!target || !operation.current() || Date.now() >= deadline || operation.step >= 8) return false
         const click = { target, fraction, validate, dismiss, hover, step: ++operation.step, prepared: false, dispatched: null }
         operation.click = click
         report({ event: 'focus-model-click', focusModelToken: token, count: click.step })
@@ -6926,7 +7031,29 @@
         let stable = 0
         return await waitFor(() => { stable = predicate() ? stable + 1 : 0; return stable >= 3 })
       }
+      const openSubmenu = async (toggle, panelOf, sameToggle) => {
+        if (panelOf()) return panelOf()
+        openedEffortHere = true
+        if (!await nativeInput(toggle, { hover: true, validate: sameToggle })) return null
+        if (!await waitFor(() => !!panelOf(), 450)) {
+          const clicked = await nativeInput(toggle, { validate: () => sameToggle() && !panelOf() })
+          if (!clicked && !panelOf()) return null
+          if (!await waitFor(() => !!panelOf())) return null
+        }
+        return panelOf()
+      }
       const geminiEffortParts = () => focusGeminiEffortParts(focusModelPickerParts()?.menu, rules)
+      const claudeSubmenu = labels => {
+        const toggle = focusClaudeSubmenuToggle(focusModelPickerParts()?.menu, labels)
+        return toggle ? { toggle, panel: focusClaudeMenuPanel(toggle) } : null
+      }
+      const activeClaudeSubmenu = () => {
+        for (const labels of [rules.effortMenu.toggleLabels, rules.moreModelsLabels]) {
+          const sub = claudeSubmenu(labels)
+          if (sub?.panel) return sub
+        }
+        return null
+      }
       focusModeChanging = operation
       let openedHere = false, openedEffortHere = false, outcome = 'unknown', reason = 'selection-unconfirmed'
       try {
@@ -6949,6 +7076,81 @@
             await waitFor(() => !!focusModelPickerParts()?.menu?.querySelector(rules.modelSelector))
             const effort = geminiEffortParts()
             if (kind !== 'model' && effort && !effort.panel) await waitFor(() => !!geminiEffortParts()?.panel, 500)
+          }
+          if (rules.kind === 'claude') {
+            await waitFor(() => !!focusModelPickerParts()?.menu?.querySelector(rules.modelSelector + ', ' + rules.effortMenu.toggleSelector))
+            const openClaudeSub = async (labels, waitSelector, idAttr) => {
+              const sub = claudeSubmenu(labels)
+              if (!sub) return null
+              const panel = await openSubmenu(sub.toggle, () => claudeSubmenu(labels)?.panel ?? null,
+                () => claudeSubmenu(labels)?.toggle === sub.toggle)
+              if (!panel) return null
+              await waitFor(() => focusClaudeRadioOptions(panel, waitSelector, idAttr).length > 0, 500)
+              focusModelSettingsOf()
+              return claudeSubmenu(labels)?.panel ?? null
+            }
+            if (kind === 'read') {
+              focusModelSettingsOf()
+              if (claudeSubmenu(rules.moreModelsLabels) &&
+                !await openClaudeSub(rules.moreModelsLabels, rules.modelSelector, 'data-model-id')) return ['unknown', 'menu-unavailable']
+              if (claudeSubmenu(rules.effortMenu.toggleLabels) &&
+                !await openClaudeSub(rules.effortMenu.toggleLabels, rules.effortMenu.optionSelector, 'data-effort-id')) return ['unknown', 'menu-unavailable']
+              const data = focusModelSettingsOf()
+              if (!data.models.length) return ['unavailable', 'model-options-missing']
+              return data.model ? ['ok', 'settings-read'] : ['unknown', 'selection-unconfirmed']
+            }
+            let data = focusModelSettingsOf()
+            if (kind === 'model') {
+              if (!data.models.length) return ['unavailable', 'model-options-missing']
+              if (data.model === value) return ['ok', 'already-selected']
+              let locate = () => focusClaudeRadioOptions(focusModelPickerParts()?.menu, rules.modelSelector, 'data-model-id')
+                .filter(option => option.value === value).map(option => option.node)
+              let matches = locate()
+              if (!matches.length && claudeSubmenu(rules.moreModelsLabels)) {
+                const morePanel = await openClaudeSub(rules.moreModelsLabels, rules.modelSelector, 'data-model-id')
+                if (!morePanel) return ['unknown', 'menu-unavailable']
+                data = focusModelSettingsOf()
+                locate = () => focusClaudeRadioOptions(claudeSubmenu(rules.moreModelsLabels)?.panel, rules.modelSelector, 'data-model-id')
+                  .filter(option => option.value === value).map(option => option.node)
+                matches = locate()
+              }
+              if (!data.models.some(item => item.value === value)) return ['invalid', 'option-unavailable']
+              if (matches.length !== 1) return ['unavailable', 'option-unavailable']
+              const target = matches[0]
+              if (!await nativeInput(target, { validate: () => {
+                const current = locate()
+                return current.length === 1 && current[0] === target
+              } })) return ['unknown', 'native-input-failed']
+              return await confirmed(() => {
+                const currentParts = focusModelPickerParts()
+                return !!currentParts && currentParts.trigger.getAttribute('aria-expanded') !== 'true' && focusModelSettingsOf().model === value
+              }) ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
+            }
+            if (!data.models.length) return ['unavailable', 'model-options-missing']
+            const model = data.model
+            if (!model || !claudeSubmenu(rules.effortMenu.toggleLabels)) {
+              return data.efforts.length ? ['unavailable', 'control-missing'] : ['invalid', 'option-unavailable']
+            }
+            const effortPanel = await openClaudeSub(rules.effortMenu.toggleLabels, rules.effortMenu.optionSelector, 'data-effort-id')
+            if (!effortPanel) return ['unknown', 'menu-unavailable']
+            data = focusModelSettingsOf()
+            if (!data.efforts.some(item => item.value === value)) return ['invalid', 'option-unavailable']
+            if (data.effort === value) return ['ok', 'already-selected']
+            const locate = () => focusClaudeRadioOptions(claudeSubmenu(rules.effortMenu.toggleLabels)?.panel, rules.effortMenu.optionSelector, 'data-effort-id')
+              .filter(option => option.value === value && isVisibleElement(option.node)).map(option => option.node)
+            const matches = locate()
+            if (matches.length !== 1) return ['unavailable', 'option-unavailable']
+            const target = matches[0]
+            if (!await nativeInput(target, { validate: () => {
+              const live = locate()
+              return focusModelSettingsOf().model === model && live.length === 1 && live[0] === target
+            } })) return ['unknown', 'native-input-failed']
+            return await confirmed(() => {
+              const currentParts = focusModelPickerParts()
+              const settings = focusModelSettingsOf()
+              return !!currentParts && currentParts.trigger.getAttribute('aria-expanded') !== 'true' &&
+                settings.model === model && settings.effort === value
+            }) ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
           }
           parts = focusModelPickerParts()
           if (!parts?.menu) return ['unknown', 'menu-unavailable']
@@ -6985,15 +7187,8 @@
             if (!model || !effort) return ['unavailable', 'control-missing']
             const visibleSubmenu = () => geminiEffortParts()?.expanded === true
             const sameToggle = () => focusModelSettingsOf().model === model && geminiEffortParts()?.toggle === effort.toggle
-            if (!effort.expanded) {
-              // The desktop submenu can open on hover. Click only if it stays closed.
-              openedEffortHere = true
-              if (!await nativeInput(effort.toggle, { hover: true, validate: sameToggle })) return ['unknown', 'native-input-failed']
-              if (!await waitFor(visibleSubmenu, 450)) {
-                const clicked = await nativeInput(effort.toggle, { validate: () => sameToggle() && !visibleSubmenu() })
-                if (!clicked && !visibleSubmenu()) return ['unknown', 'native-input-failed']
-                if (!await waitFor(visibleSubmenu)) return ['unknown', 'menu-unavailable']
-              }
+            if (!effort.expanded && !await openSubmenu(effort.toggle, () => visibleSubmenu() ? geminiEffortParts().panel : null, sameToggle)) {
+              return ['unknown', 'menu-unavailable']
             }
             const locate = () => {
               const current = geminiEffortParts()
@@ -7033,12 +7228,20 @@
             closed = dismissed && await waitFor(() => !geminiEffortParts()?.expanded, 500)
           }
         }
+        if (rules.kind === 'claude' && (openedHere || openedEffortHere) && operation.current()) {
+          const sub = activeClaudeSubmenu()
+          if (sub) {
+            const dismissed = await nativeInput(sub.panel, { dismiss: true, validate: () => activeClaudeSubmenu()?.panel === sub.panel })
+            closed = dismissed && await waitFor(() => !activeClaudeSubmenu(), 500)
+          }
+        }
         if (openedHere && operation.current()) {
           const { trigger, menu } = focusModelPickerParts() || {}
           if (trigger?.getAttribute('aria-expanded') === 'true') {
             const dispatched = rules.kind === 'gemini' ? await nativeInput(menu, { dismiss: true, validate: () =>
               focusModelPickerParts()?.menu === menu && (menu.contains(document.activeElement) || trigger.contains(document.activeElement)) }) :
-              await nativeInput(trigger)
+              rules.kind === 'claude' ? await nativeInput(menu, { dismiss: true, validate: () => focusModelPickerParts()?.menu === menu }) :
+                await nativeInput(trigger)
             closed = dispatched && await waitFor(() => focusModelPickerParts()?.trigger.getAttribute('aria-expanded') !== 'true', 500)
           }
         }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { ConversationCompaction } from './conversation-compaction'
+import { ConversationCompaction, compactionStorageKey, savedCompactionUsesClaudeAccount } from './conversation-compaction'
 import type { StoredCompaction } from './conversation-compaction'
 import { CompactionPage } from './compaction-page'
 import { applyChatPartitionProxy, claudeConversationLocation, claudePlatformForAccount, listClaudeAccounts, restoreClaudeWorkspace, saveClaudeAccount } from './claude-accounts'
@@ -1547,18 +1547,124 @@ export class SessionRuntime {
     return { platform, embed: null, ...(location ?? { url: platform.homeUrl, conversationId: null }) }
   }
 
+  private hasActiveRuntimeWork(): boolean {
+    return this.taskRunning() || Boolean(this.stoppingTask) || Boolean(this.focusRevision) || this.runner.hasInFlightWork() ||
+      Boolean(this.embed.getInterceptorStatus().pendingQuestion) || this.backgroundTaskResults.isSending ||
+      this.mailNotifications.busy || this.toolPromptReads.busy || this.scheduledTaskTools.busy ||
+      Boolean(this.scheduledSendAbort) || [...this.pageQueues.values()].some(queue => queue.state().pending > 0)
+  }
+
   private checkClaudeAccountSwitch(owner: FocusOwner): void {
-    if (!this.active || owner.platformId !== 'claude' || !this.ownsFocus(owner)) throw new Error('当前 Claude 对话已切换。')
-    if (this.taskRunning() || this.stoppingTask || this.focusRevision || this.runner.hasInFlightWork() ||
-        this.embed.getInterceptorStatus().pendingQuestion || this.backgroundTaskResults.isSending ||
-        this.mailNotifications.busy || this.toolPromptReads.busy || this.scheduledTaskTools.busy || this.scheduledSendAbort ||
-        this.taskCoordinator.current('claude') || [...this.compactions.values()].some(task => task.busy || task.inProgress) ||
+    if (!this.ownsClaudeFocus(owner)) throw new Error('当前 Claude 对话已切换。')
+    if (this.hasActiveRuntimeWork() || this.taskCoordinator.current('claude') ||
+        [...this.compactions.values()].some(task => task.busy || task.inProgress) ||
         !!owner.conversationId && this.backgroundTasks.getState().tasks.some(task => task.conversationId === owner.conversationId &&
-          ['checking', 'running'].includes(task.status)) ||
-        [...this.pageQueues.values()].some(queue => queue.state().pending > 0)) {
+          ['checking', 'running'].includes(task.status))) {
       throw new Error('任务正在运行，请等待完成或结束任务后再切换账号。')
     }
     if (this.aiOutboundQueue.state().pending > 0) throw new Error('请先处理发送队列中的消息，再切换账号。')
+  }
+
+  ownsClaudeFocus(owner: FocusOwner): boolean {
+    return this.active && owner.platformId === 'claude' && this.ownsFocus(owner)
+  }
+
+  assertClaudeAccountRemovableSync(accountId: string, accounts: ClaudeAccount[]): void {
+    for (const [scope, compaction] of this.compactions) {
+      if (!compaction.usesClaudeAccount(accountId)) continue
+      if (compaction.busy || compaction.inProgress) {
+        throw new Error('该 Claude 账号正在执行会话压缩或生成交接文档，请等待完成或取消任务后再删除。')
+      }
+      if (scope !== accountId && compaction.resumable) {
+        throw new Error('有尚未完成或待处理的任务交接正在使用该 Claude 账号，请先完成或取消该任务后再删除。')
+      }
+    }
+    for (const account of accounts) {
+      if (account.id === accountId || this.compactions.has(account.id)) continue
+      const scopeAccountId = account.id === DEFAULT_CLAUDE_ACCOUNT_ID ? undefined : account.id
+      if (savedCompactionUsesClaudeAccount(this.options.store, this.id, scopeAccountId, accountId)) {
+        throw new Error('有尚未完成或待处理的任务交接正在使用该 Claude 账号，请先完成或取消该任务后再删除。')
+      }
+    }
+    if (this.aiOutboundQueue.stateFor({ sessionId: this.id, platformId: 'claude', conversationId: null, claudeAccountId: accountId }).pending > 0) {
+      throw new Error('该 Claude 账号的发送队列中仍有待处理消息，请先处理后再删除。')
+    }
+    if (this.claudeAccountId !== accountId) return
+    if (this.switchingClaudeAccount) throw new Error('正在切换 Claude 账号，请稍后再试。')
+    if (this.taskCoordinator.current('claude')) {
+      throw new Error('该 Claude 账号仍有任务正在运行，请等待完成或结束任务后再删除。')
+    }
+    const claudeEntry = this.embeds.get('claude')
+    const claudeStatus = claudeEntry?.embed?.getInterceptorStatus()
+    if (claudeStatus?.pendingQuestion || (claudeStatus?.taskStartedAt !== null && claudeStatus?.taskFinishedAt === null)) {
+      throw new Error('该 Claude 账号有任务正在运行，请等待完成或结束任务后再删除。')
+    }
+    if (claudeEntry?.conversationId && this.backgroundTasks.getState().tasks.some(task =>
+      task.conversationId === claudeEntry.conversationId && ['checking', 'running'].includes(task.status))) {
+      throw new Error('该 Claude 账号仍有后台命令正在运行，请等待完成或结束后再删除。')
+    }
+    if (this.activePlatformId === 'claude' && this.hasActiveRuntimeWork()) {
+      throw new Error('该 Claude 账号有任务或操作正在运行，请等待完成或结束任务后再删除。')
+    }
+  }
+
+  async assertClaudeAccountPageIdle(accountId: string): Promise<void> {
+    if (this.claudeAccountId !== accountId) return
+    const embed = this.embeds.get('claude')?.embed
+    if (!embed) return
+    const [page, sideBusy] = await Promise.all([embed.readFocusSnapshot(), embed.questionChatGenerating()])
+    if (page?.generating === 'active' || page?.waiting || sideBusy) {
+      throw new Error('该 Claude 账号仍在回答，请等待完成或停止生成后再删除。')
+    }
+  }
+
+  private activateClaudeAccount(accountId: string, activeOnClaude: boolean, previousEmbed: ChatGptEmbed | null | undefined): void {
+    if (activeOnClaude) this.compaction?.hide()
+    this.focusChat.resetContext('claude')
+    this.pendingConversationMessages.delete('claude')
+    this.pendingContextUsage.delete('claude')
+    this.lastSubmissions.delete('claude')
+    this.claudeAccountId = accountId
+    this.conversationTools.claudeAccountId = this.claudeAccountScope
+    const next = this.claudeEmbedEntry(accountId)
+    this.embeds.set('claude', next)
+    if (this.window) previousEmbed?.destroy(this.window)
+    if (activeOnClaude) {
+      this.pendingCompaction = null
+      this.remoteRipgrepSend?.controller.abort()
+      this.focusUiRecoveredTurn = null
+      this.focusFileRequest = null
+      this.focusFileCache = null
+      this.pendingGoal = ''
+      this.deferredCommands.clear()
+      this.lastSummaryTaskRunning = false
+      this.focusChat.context('claude', next.conversationId)
+      const embed = this.ensureEmbed('claude').embed!
+      this.applyVisibility()
+      this.syncAutonomousTask('claude', next.conversationId)
+      this.refreshComputerUseCapabilities()
+      this.send(IpcChannels.embedState, this.getEmbedState())
+      this.send(IpcChannels.interceptorEvent, embed.getInterceptorStatus())
+      this.send(IpcChannels.questionChatState, null)
+    }
+    this.options.onSummaryChanged()
+  }
+
+  releaseClaudeAccount(accountId: string): void {
+    const hadLocation = this.claudeLocations.delete(accountId)
+    this.conversationTools.clearClaudeAccountDraft(accountId)
+    const accountCompaction = this.compactions.get(accountId)
+    if (accountCompaction) {
+      accountCompaction.dispose()
+      this.compactions.delete(accountId)
+    }
+    this.options.store.setSetting(compactionStorageKey(this.id, accountId), '')
+    if (this.claudeAccountId !== accountId) {
+      if (hadLocation) this.options.onSummaryChanged()
+      return
+    }
+    const previous = this.embeds.get('claude')
+    this.activateClaudeAccount(DEFAULT_CLAUDE_ACCOUNT_ID, this.activePlatformId === 'claude', previous?.embed)
   }
 
   async switchClaudeAccount(owner: FocusOwner, account: ClaudeAccount, adding = false): Promise<void> {
@@ -1579,34 +1685,7 @@ export class SessionRuntime {
       if (page?.generating === 'active' || page?.waiting || sideBusy) throw new Error('Claude 仍在回答，请等待完成或停止生成。')
       if (page?.nativeDraft) throw new Error('Claude 原始页面有草稿，请先处理草稿再切换账号。')
       if (adding) saveClaudeAccount(this.options.store, account)
-
-      this.compaction?.hide()
-      this.pendingCompaction = null
-      this.remoteRipgrepSend?.controller.abort()
-      this.focusChat.resetContext('claude')
-      this.focusUiRecoveredTurn = null
-      this.focusFileRequest = null
-      this.focusFileCache = null
-      this.pendingGoal = ''
-      this.pendingConversationMessages.delete('claude')
-      this.pendingContextUsage.delete('claude')
-      this.lastSubmissions.delete('claude')
-      this.deferredCommands.clear()
-      this.lastSummaryTaskRunning = false
-      this.claudeAccountId = account.id
-      this.conversationTools.claudeAccountId = this.claudeAccountScope
-      const next = this.claudeEmbedEntry(account.id)
-      this.embeds.set('claude', next)
-      if (this.window) previous.embed?.destroy(this.window)
-      this.focusChat.context('claude', next.conversationId)
-      const embed = this.ensureEmbed('claude').embed!
-      this.applyVisibility()
-      this.syncAutonomousTask('claude', next.conversationId)
-      this.refreshComputerUseCapabilities()
-      this.send(IpcChannels.embedState, this.getEmbedState())
-      this.send(IpcChannels.interceptorEvent, embed.getInterceptorStatus())
-      this.send(IpcChannels.questionChatState, null)
-      this.options.onSummaryChanged()
+      this.activateClaudeAccount(account.id, true, previous.embed)
     } finally { this.switchingClaudeAccount = false }
   }
 

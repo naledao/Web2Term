@@ -16,7 +16,7 @@ function moduleAt(path, dependencies = {}) {
   return exports
 }
 const shared = moduleAt('../src/shared/focus-chat.ts')
-const { CHATGPT_PAGE, GEMINI_PAGE } = moduleAt('../src/shared/platforms.ts')
+const { CHATGPT_PAGE, CLAUDE_PAGE, GEMINI_PAGE } = moduleAt('../src/shared/platforms.ts')
 const { dispatchFocusModelClick } = moduleAt('../src/main/focus-model-click.ts')
 const { default: Controls } = moduleAt('../src/renderer/src/components/FocusModelSettings.tsx', { 'react/jsx-runtime': jsxRuntime })
 const pagePath = '../src/main/injected/send-interceptor.js'
@@ -825,4 +825,324 @@ test('Gemini renders both settings with native labels and disables them during a
   assert.match(html, /value="medium" selected="">中/)
   assert.match(html, /Gemini 模型设置/)
   assert.match(html, /aria-label="刷新模型和思考强度"/)
+})
+
+function claudeFixture() {
+  const rules = CLAUDE_PAGE.focus.modelSettings
+  let open = false, subMenu = null, activeModel = 'claude-sonnet-5-5', activeEffort = 'medium'
+  let now = 0, nextHit = null, requireClick = false, decline = false
+  const clicks = [], draft = { value: '保留 Claude 草稿' }
+  const textNode = value => ({ nodeType: 3, nodeValue: value })
+  const span = (children, attributes = {}) => ({
+    nodeType: 1, tagName: 'SPAN', isConnected: true,
+    getAttribute: name => attributes[name] ?? null,
+    childNodes: Array.isArray(children) ? children : [textNode(children)],
+    getBoundingClientRect: () => ({ left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 })
+  })
+  const makeRadio = (attrs, children, left) => ({
+    nodeType: 1, tagName: 'DIV', isConnected: true,
+    getAttribute: name => attrs[name] ?? null,
+    childNodes: children,
+    contains(node) { return node === this },
+    closest: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    getBoundingClientRect: () => ({ left, right: left + 20, top: 10, bottom: 30, width: 20, height: 20 })
+  })
+  const lockedOpus = makeRadio({ role: 'menuitem', 'data-model-id': 'claude-opus-5-5' },
+    [span('Opus 5.5'), span('Pro'), span('Upgrade')], 40)
+  const sonnet55 = makeRadio({ role: 'menuitemradio', 'data-model-id': 'claude-sonnet-5-5' },
+    [span('Sonnet 5.5'), span('Everyday tasks')], 70)
+  const haiku55 = makeRadio({ role: 'menuitemradio', 'data-model-id': 'claude-haiku-5-5' },
+    [span('Haiku 5.5'), span('Fastest for quick answers')], 100)
+  const sonnet5 = makeRadio({ role: 'menuitemradio', 'data-model-id': 'claude-sonnet-5' },
+    [span('Sonnet 5')], 130)
+  const sonnet46 = makeRadio({ role: 'menuitemradio', 'data-model-id': 'claude-sonnet-4-6' },
+    [span('Sonnet 4.6')], 160)
+  const mainModels = [lockedOpus, sonnet55, haiku55]
+  const moreModels = [sonnet5, sonnet46]
+  const allModels = [
+    { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+    { id: 'claude-haiku-5-5', label: 'Haiku 5.5' },
+    { id: 'claude-sonnet-5', label: 'Sonnet 5' },
+    { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' }
+  ]
+  for (const [node, id] of [[sonnet55, 'claude-sonnet-5-5'], [haiku55, 'claude-haiku-5-5'],
+    [sonnet5, 'claude-sonnet-5'], [sonnet46, 'claude-sonnet-4-6']]) {
+    const base = node.getAttribute
+    node.getAttribute = name => name === 'aria-checked' ? String(activeModel === id) : base(name)
+  }
+  const effortLevels = [['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['extra', 'Extra'], ['max', 'Max']].map(([id, label], index) => {
+    const node = makeRadio({ role: 'menuitemradio', 'data-effort-id': id },
+      id === 'medium' ? [span(label), span('Recommended')] : [span(label)], 260 + index * 30)
+    const base = node.getAttribute
+    node.getAttribute = name => name === 'aria-checked' ? String(activeEffort === id) : base(name)
+    return { id, label, node }
+  })
+  const effortToggle = {
+    nodeType: 1, tagName: 'DIV', isConnected: true,
+    getAttribute: name => ({
+      role: 'menuitem', 'aria-haspopup': 'menu',
+      'aria-expanded': String(subMenu === 'effort'),
+      'aria-controls': subMenu === 'effort' ? 'claude-effort-menu' : null
+    })[name] ?? null,
+    get childNodes() {
+      const current = effortLevels.find(item => item.id === activeEffort)?.label ?? ''
+      return [span('Effort'), span(current)]
+    },
+    contains(node) { return node === this },
+    getBoundingClientRect: () => ({ left: 190, right: 210, top: 10, bottom: 30, width: 20, height: 20 })
+  }
+  const moreToggle = {
+    nodeType: 1, tagName: 'DIV', isConnected: true,
+    getAttribute: name => ({
+      role: 'menuitem', 'aria-haspopup': 'menu',
+      'aria-expanded': String(subMenu === 'more'),
+      'aria-controls': subMenu === 'more' ? 'claude-more-menu' : null
+    })[name] ?? null,
+    childNodes: [span('More models')],
+    contains(node) { return node === this },
+    getBoundingClientRect: () => ({ left: 220, right: 240, top: 10, bottom: 30, width: 20, height: 20 })
+  }
+  const trigger = {
+    nodeType: 1, tagName: 'BUTTON', id: 'claude-trigger', isConnected: true,
+    getAttribute: name => ({
+      type: 'button', 'data-testid': 'model-selector-dropdown',
+      'aria-haspopup': 'menu', 'aria-expanded': String(open),
+      'aria-controls': open ? 'claude-main-menu' : null
+    })[name] ?? null,
+    get childNodes() {
+      const modelLabel = allModels.find(item => item.id === activeModel)?.label ?? ''
+      const effortLabel = activeModel === 'claude-sonnet-4-6' ? '' : (effortLevels.find(item => item.id === activeEffort)?.label ?? '')
+      return [
+        span('', { 'aria-hidden': 'true' }),
+        span([
+          span([span(modelLabel), ...(effortLabel ? [span(effortLabel)] : [])]),
+          ...(activeEffort === 'max' && effortLabel ? [span('!', { role: 'img', 'aria-label': 'Max warning' })] : [])
+        ])
+      ]
+    },
+    contains(node) { return node === this },
+    closest: () => null,
+    getBoundingClientRect: () => ({ left: 10, right: 30, top: 10, bottom: 30, width: 20, height: 20 })
+  }
+  const matchRows = (rows, selector) => rows.filter(row => selector.split(',').some(part => {
+    const attrs = [...part.trim().matchAll(/\[([\w-]+)(?:="([^"]+)")?\]/g)]
+    return attrs.length > 0 && attrs.every(([, name, value]) => {
+      const actualValue = row.getAttribute(name)
+      return value === undefined ? actualValue !== null : actualValue === value
+    })
+  }))
+  const moreMenu = {
+    nodeType: 1, tagName: 'DIV', id: 'claude-more-menu', isConnected: true,
+    getAttribute: name => ({ role: 'menu' })[name] ?? null,
+    querySelectorAll: selector => matchRows(moreModels, selector),
+    querySelector: selector => matchRows(moreModels, selector)[0] ?? null,
+    contains: node => node === moreMenu || moreModels.includes(node),
+    getBoundingClientRect: () => ({ left: 120, right: 185, top: 40, bottom: 80, width: 65, height: 40 })
+  }
+  const effortMenu = {
+    nodeType: 1, tagName: 'DIV', id: 'claude-effort-menu', isConnected: true,
+    getAttribute: name => ({ role: 'menu' })[name] ?? null,
+    querySelectorAll: selector => matchRows(effortLevels.map(item => item.node), selector),
+    querySelector: selector => matchRows(effortLevels.map(item => item.node), selector)[0] ?? null,
+    contains: node => node === effortMenu || effortLevels.some(item => item.node === node),
+    getBoundingClientRect: () => ({ left: 250, right: 410, top: 40, bottom: 80, width: 160, height: 40 })
+  }
+  const mainMenu = {
+    nodeType: 1, tagName: 'DIV', id: 'claude-main-menu', isConnected: true,
+    getAttribute: name => ({ role: 'menu', 'aria-labelledby': 'claude-trigger' })[name] ?? null,
+    querySelectorAll: selector => {
+      const toggles = activeModel === 'claude-sonnet-4-6' ? [moreToggle] : [effortToggle, moreToggle]
+      return matchRows([...mainModels, ...toggles], selector)
+    },
+    querySelector: selector => mainMenu.querySelectorAll(selector)[0] ?? null,
+    contains: node => node === mainMenu || mainModels.includes(node) || node === effortToggle || node === moreToggle,
+    getBoundingClientRect: () => ({ left: 35, right: 245, top: 40, bottom: 120, width: 210, height: 80 })
+  }
+  const visible = node => {
+    if (!node) return false
+    if (node === trigger || trigger.childNodes.includes(node)) return true
+    if (open && (mainMenu.contains(node) || (node.nodeType === 1 && node.getAttribute?.('aria-hidden') !== 'true'))) {
+      if (subMenu === 'more' && moreMenu.contains(node)) return true
+      if (subMenu === 'effort' && effortMenu.contains(node)) return true
+      if (mainMenu.contains(node)) return true
+    }
+    return false
+  }
+  // Ensure inner text spans inside trigger and menu rows count as visible when their parent is visible.
+  const allNodesVisible = node => {
+    if (!node) return false
+    if (node.getAttribute?.('aria-hidden') === 'true' || node.getAttribute?.('role') === 'img') return false
+    if (node === trigger || mainMenu.contains(node) || (subMenu === 'more' && moreMenu.contains(node)) || (subMenu === 'effort' && effortMenu.contains(node))) return visible(node)
+    return true
+  }
+  const document = {
+    activeElement: trigger,
+    getElementById: id => open ? ({
+      'claude-main-menu': mainMenu,
+      'claude-more-menu': subMenu === 'more' ? moreMenu : null,
+      'claude-effort-menu': subMenu === 'effort' ? effortMenu : null
+    })[id] ?? null : null,
+    elementFromPoint(x) {
+      const hitPool = [trigger, ...mainModels, ...(activeModel === 'claude-sonnet-4-6' ? [moreToggle] : [effortToggle, moreToggle]),
+        ...(subMenu === 'more' ? moreModels : []), ...(subMenu === 'effort' ? effortLevels.map(item => item.node) : [])]
+      nextHit = hitPool.find(node => visible(node) && x >= node.getBoundingClientRect().left && x <= node.getBoundingClientRect().right) ?? null
+      return nextHit
+    }
+  }
+  const context = createContext({
+    PAGE: CLAUDE_PAGE, document, location: { pathname: '/new' },
+    Date: { now: () => now }, setTimeout(callback, delay) { now += delay; queueMicrotask(callback) },
+    focusModelCache: null, focusModeChanging: null, focusEditing: null, fileSend: null,
+    state: { taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: false },
+    getComposer: () => draft, findStopButton: () => null,
+    queryAll: selectors => selectors.includes(rules.triggerSelector) ? [trigger] : [],
+    collapse: value => String(value || '').replace(/\s+/g, ' ').trim(),
+    controlDisabled: node => node?.getAttribute('aria-disabled') === 'true',
+    isVisibleElement: allNodesVisible,
+    innerWidth: 1000, innerHeight: 800,
+    report(payload) {
+      queueMicrotask(() => { void dispatchFocusModelClick(contents, payload.focusModelToken, payload.count, () => true, () => true) })
+    }
+  })
+  for (const name of ['focusModelPickerParts', 'focusVisibleTextNodes', 'focusClaudeMenuPanel', 'focusClaudeSubmenuToggle',
+    'focusClaudeRadioOptions', 'focusGeminiModelLabel', 'focusGeminiModelName', 'focusGeminiModelOptions',
+    'focusGeminiEffortParts', 'focusGeminiEffortValue', 'focusGeminiEffortOptions', 'focusModelSettingsOf']) {
+    context[name] = actual(name, context)
+  }
+  const api = {}
+  for (const name of ['prepareFocusModelClick', 'finishFocusModelClick', 'updateModelSettings']) api[name] = actual(name, context, true)
+  context.window = { __cmdTerminalInterceptor: api }
+  const contents = {
+    getZoomFactor: () => 1,
+    executeJavaScript: source => Promise.resolve(new Script(source).runInContext(context)),
+    sendInputEvent(event) {
+      if (event.type === 'keyDown' && event.keyCode === 'Escape') {
+        if (subMenu) {
+          clicks.push('dismiss-' + subMenu)
+          subMenu = null
+          document.activeElement = mainMenu
+        } else if (open) {
+          clicks.push('dismiss-main')
+          open = false
+          document.activeElement = trigger
+        }
+      }
+      if (event.type === 'mouseMove' && !requireClick) {
+        if (nextHit === moreToggle && subMenu !== 'more') { clicks.push('hover-more'); subMenu = 'more' }
+        if (nextHit === effortToggle && subMenu !== 'effort') { clicks.push('hover-effort'); subMenu = 'effort' }
+      }
+      if (event.type !== 'mouseUp') return
+      if (nextHit === trigger) {
+        clicks.push('open')
+        open = !open
+        if (!open) subMenu = null
+      } else if (nextHit === moreToggle) {
+        clicks.push('click-more')
+        subMenu = 'more'
+      } else if (nextHit === effortToggle) {
+        clicks.push('click-effort')
+        subMenu = 'effort'
+      } else if ([...mainModels, ...moreModels].includes(nextHit) && nextHit.getAttribute('role') === 'menuitemradio') {
+        const id = nextHit.getAttribute('data-model-id')
+        clicks.push(id)
+        if (!decline) activeModel = id
+        open = false
+        subMenu = null
+        document.activeElement = trigger
+      } else if (effortLevels.some(item => item.node === nextHit)) {
+        const id = nextHit.getAttribute('data-effort-id')
+        clicks.push(id)
+        if (!decline) activeEffort = id
+        open = false
+        subMenu = null
+        document.activeElement = trigger
+      }
+    }
+  }
+  return {
+    context, clicks, draft, read: context.focusModelSettingsOf,
+    clickOnly() { requireClick = true },
+    declineChange() { decline = true },
+    change: (kind, value = null) => api.updateModelSettings(kind, value, context.location.pathname, 'claude-op')
+  }
+}
+
+test('Claude reads models across main/More-models menus, ignores locked Upgrade items, and reads all 5 Effort levels', async () => {
+  const f = claudeFixture()
+  const read = await f.change('read')
+  assert.equal(read.outcome, 'ok')
+  assert.equal(read.settings.model, 'claude-sonnet-5-5')
+  assert.deepEqual(Array.from(read.settings.models, item => [item.value, item.label]), [
+    ['claude-sonnet-5-5', 'Sonnet 5.5'],
+    ['claude-haiku-5-5', 'Haiku 5.5'],
+    ['claude-sonnet-5', 'Sonnet 5'],
+    ['claude-sonnet-4-6', 'Sonnet 4.6']
+  ])
+  assert.equal(read.settings.effort, 'medium')
+  assert.deepEqual(Array.from(read.settings.efforts, item => [item.value, item.label]), [
+    ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['extra', 'Extra'], ['max', 'Max']
+  ])
+  assert.deepEqual(f.clicks, ['open', 'hover-more', 'hover-effort', 'dismiss-effort', 'dismiss-main'])
+  assert.equal(shared.validFocusModelSettings(read.settings), true)
+})
+
+test('Claude switches main-menu and More-models models, preserves selection across /new -> /chat, and switches Effort', async () => {
+  for (const requireClick of [false, true]) {
+    const f = claudeFixture()
+    if (requireClick) f.clickOnly()
+    assert.equal((await f.change('read')).outcome, 'ok')
+    f.clicks.length = 0
+
+    // Switch to Max effort (trigger displays warning icon role="img" which must not break label reading).
+    const maxRes = await f.change('effort', 'max')
+    assert.equal(maxRes.outcome, 'ok')
+    assert.equal(maxRes.settings.effort, 'max')
+    assert.equal(f.read().model, 'claude-sonnet-5-5')
+    assert.equal(f.read().effort, 'max')
+    assert.deepEqual(f.clicks, ['open', requireClick ? 'click-effort' : 'hover-effort', 'max'])
+
+    // Switch to Haiku 5.5 on the main menu.
+    f.clicks.length = 0
+    const haiku = await f.change('model', 'claude-haiku-5-5')
+    assert.equal(haiku.outcome, 'ok')
+    assert.equal(haiku.settings.model, 'claude-haiku-5-5')
+    assert.deepEqual(f.clicks, ['open', 'claude-haiku-5-5'])
+
+    // Switch to Sonnet 4.6 inside More models (which has no Effort submenu).
+    f.clicks.length = 0
+    const legacy = await f.change('model', 'claude-sonnet-4-6')
+    assert.equal(legacy.outcome, 'ok')
+    assert.equal(legacy.settings.model, 'claude-sonnet-4-6')
+    assert.equal(legacy.settings.efforts.length, 0)
+    assert.equal(legacy.settings.effort, null)
+    assert.deepEqual(f.clicks, ['open', requireClick ? 'click-more' : 'hover-more', 'claude-sonnet-4-6'])
+
+    // First send from /new to /chat/<uuid> retains cached models.
+    f.context.state.awaitingReplySince = 1
+    f.context.location.pathname = '/chat/11111111-1111-4111-8111-111111111111'
+    assert.equal(f.read().model, 'claude-sonnet-4-6')
+    assert.equal(f.read().models.length, 4)
+    assert.equal(f.draft.value, '保留 Claude 草稿')
+  }
+})
+
+test('Claude rejects locked options and refreshes Effort availability after switching models in FocusChatView', async () => {
+  const f = claudeFixture()
+  await f.change('read')
+  assert.equal((await f.change('model', 'claude-opus-5-5')).reason, 'option-unavailable')
+  f.declineChange()
+  assert.equal((await f.change('effort', 'extra')).reason, 'selection-unconfirmed')
+
+  const reads = []
+  const view = {
+    owner: { platformId: 'claude' }, modelSettingsKind: 'claude', visible: true, ready: true, working: false, editingId: null, sending: false,
+    sendLock: { current: false }, modelReadAttempted: { current: true }, modelReadAttempts: { current: 1 },
+    geminiReadModel: { current: 'claude-sonnet-5-5' }, settingPending: null,
+    state: { modelSettingsReady: true, modelSettings: { model: 'claude-haiku-5-5', effort: null, models: [{ value: 'claude-haiku-5-5', label: 'Haiku 5.5' }], efforts: [] } },
+    updateModelSettings(kind, value, automatic) { reads.push({ kind, value, automatic }) }
+  }
+  automaticRead(view).call(view)
+  assert.deepEqual(reads, [{ kind: 'read', value: undefined, automatic: true }])
 })

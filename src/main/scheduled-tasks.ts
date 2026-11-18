@@ -169,6 +169,19 @@ export class ScheduledTasks {
     } else throw new Error('定时任务操作无效。')
     this.deps.changed(sessionId); this.wake()
   }
+  hasSendingClaudeAccount(accountId: string): boolean {
+    for (const runId of this.sending.keys()) {
+      const run = this.store.run(runId)
+      const task = run ? this.store.get(run.taskId) : undefined
+      if (task?.owner.platformId === 'claude' && task.owner.claudeAccountId === accountId) return true
+    }
+    return false
+  }
+  removeClaudeAccount(accountId: string): void {
+    for (const task of this.store.claudeAccountTasks(accountId)) {
+      this.act(task.owner.sessionId, task.id, 'delete')
+    }
+  }
   private owned(sessionId: string, id: string): ScheduledTask {
     const task = typeof id === 'string' && id.length <= 128 ? this.store.get(id) : undefined
     if (!task || task.deleted || task.owner.sessionId !== sessionId) throw new Error('定时任务不属于当前工作区，或已删除。')

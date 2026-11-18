@@ -72,6 +72,12 @@ export class ConversationTools {
     return preferences
   }
 
+  clearClaudeAccountDraft(accountId: string): void {
+    const draftKey = 'conversationTools:' + JSON.stringify(['draft', this.sessionId, 'claude', accountId])
+    this.draftLedgers.delete(draftKey)
+    this.store.setSettings({ [draftKey]: '', [draftKey + ':submitted']: '', [draftKey + ':promptInjected']: '' })
+  }
+
   /** Only a confirmed first human send may carry an unsaved chat's choices into its new id. */
   submitted(platformId: string): void {
     const key = this.key(platformId, null)

@@ -249,6 +249,7 @@ export const IpcChannels = {
   claudeAccountsList: 'claude-accounts:list',
   claudeAccountAdd: 'claude-accounts:add',
   claudeAccountSwitch: 'claude-accounts:switch',
+  claudeAccountRemove: 'claude-accounts:remove',
   sessionShowModelMenu: 'session:show-model-menu',
   workspaceGetState: 'workspace:get-state',
   workspaceShowManager: 'workspace:show-manager',
@@ -2421,6 +2422,7 @@ export interface AppApi {
   listClaudeAccounts(): Promise<ClaudeAccount[]>
   addClaudeAccount(owner: FocusOwner, label: string): Promise<ClaudeAccount>
   switchClaudeAccount(owner: FocusOwner, accountId: string): Promise<void>
+  removeClaudeAccount(owner: FocusOwner, accountId: string): Promise<ClaudeAccount[]>
   startCompaction(owner: FocusOwner, generationPlatformId?: SelectionQuestionPlatform, generationAccountId?: string): Promise<CompactionState>
   compactionAction(request: CompactionRequest, action: CompactionAction): Promise<void>
   setCompactionViewport(request: CompactionRequest, bounds: EmbedBounds, visible: boolean): void

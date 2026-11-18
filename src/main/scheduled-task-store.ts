@@ -46,6 +46,10 @@ export class ScheduledTaskStore {
   tasks(sessionId: string): ScheduledTask[] {
     return this.taskRows('SELECT payload FROM scheduled_tasks WHERE session_id=? AND deleted=0 ORDER BY next_run_at, id', sessionId)
   }
+  claudeAccountTasks(accountId: string): ScheduledTask[] {
+    return this.taskRows('SELECT payload FROM scheduled_tasks WHERE deleted=0 ORDER BY next_run_at, id')
+      .filter(task => task.owner.platformId === 'claude' && task.owner.claudeAccountId === accountId)
+  }
   save(task: ScheduledTask): void {
     this.db.prepare(`INSERT INTO scheduled_tasks(id,session_id,source_key,enabled,deleted,next_run_at,payload) VALUES(?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,deleted=excluded.deleted,next_run_at=excluded.next_run_at,payload=excluded.payload`)

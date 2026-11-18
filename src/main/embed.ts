@@ -1632,7 +1632,7 @@ export class ChatGptEmbed {
       } catch { return false }
     }
     this.focusModelNativeClick = { token, dispatch: next => {
-      if (!current() || !Number.isSafeInteger(next) || next !== step + 1 || next > 6) return
+      if (!current() || !Number.isSafeInteger(next) || next !== step + 1 || next > 8) return
       step = next
       void dispatchFocusModelClick(contents, token, next, current, focused)
     } }
@@ -1640,7 +1640,7 @@ export class ChatGptEmbed {
       const raw = await Promise.race([
         contents.executeJavaScript('window.__cmdTerminalInterceptor?.updateModelSettings(' + JSON.stringify(request.kind) + ',' +
           JSON.stringify(request.value ?? null) + ',' + JSON.stringify(new URL(url).pathname) + ',' + JSON.stringify(token) + ')'),
-        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 9500) })
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 12000) })
       ])
       if (!current()) return { outcome: 'cancelled', settings: null }
       if (!raw || !['ok', 'busy', 'unavailable', 'invalid', 'unknown', 'cancelled'].includes(raw.outcome) ||
