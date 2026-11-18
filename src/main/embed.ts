@@ -27,7 +27,7 @@ import { supportsSelectionQuestion } from '../shared/deepseek-question'
 import type { QuestionChatAction, QuestionChatState, SelectionQuestionDraft } from '../shared/deepseek-question'
 import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
 import { validFocusModelSettingDiagnostic, type FocusPageSnapshot, type FocusSendOutcome, type FocusAttachmentInfo, type FocusEditDiagnostic, type FocusModelSettingsRequest, type FocusModelSettingsResult } from '../shared/focus-chat'
-import { CLAUDE_THINKING_PREFIX, supportsFocusView, validFocusComposerModes, validFocusModelSettings, validFocusSendFailure } from '../shared/focus-chat'
+import { focusInterceptorPage, supportsFocusView, validFocusComposerModes, validFocusModelSettings, validFocusSendFailure } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
 import { sendQuestionChatAttachment } from './question-chat-send'
 import { writeRawSendDiagnostic } from './raw-send-log'
@@ -475,7 +475,7 @@ export interface EmbedHandlers {
   /** Attachments the page sent, as an estimate of the context they take, in characters. */
   onContextTraffic?(chars: number): void
   /** An assistant message that belongs in the app's conversation transcript. */
-  onAssistantMessage(messageId: string, text: string): void
+  onAssistantMessage(messageId: string, text: string, fallback?: boolean): void
   /** Re-read Markdown for an already stored assistant turn in restored history. */
   onAssistantHistoryMarkdown(messageId: string, text: string): void
   /** The model's reply contained a command. */
@@ -1389,8 +1389,7 @@ export class ChatGptEmbed {
       armBaseline,
       // Which site's DOM to work against. The injected script is source text, so the
       // platform cannot be imported there — this is the only route it has.
-      page: this.platform.id === 'claude'
-        ? { ...this.platform.page, assistantThinkingPrefixPattern: CLAUDE_THINKING_PREFIX.source } : this.platform.page
+      page: focusInterceptorPage(this.platform.id, this.platform.page)
     })
 
     try {
@@ -2458,7 +2457,7 @@ export class ChatGptEmbed {
         break
       case 'assistant-message':
         if (payload.messageId && typeof payload.text === 'string' && payload.text.trim() !== '') {
-          this.handlers.onAssistantMessage(payload.messageId, payload.text)
+          this.handlers.onAssistantMessage(payload.messageId, payload.text, payload.fallback === true)
         }
         break
       case 'assistant-history-markdown':

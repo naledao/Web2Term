@@ -226,14 +226,14 @@ function fixture(t, settings = new Map(), settingsOptions = {}) {
   let service = new ConversationCompaction(options)
   t.after(() => service.dispose())
   return { directory, options, records, calls, settings, created, pages, openings, owner: subjectOwner, get service() { return service },
-    async start(generationPlatformId, generationAccountId) {
+    async start(generationPlatformId, generationAccountId, targetAccountId, targetOwner = subjectOwner) {
       const snapshot = source(), initial = seed()
-      return service.start(subjectOwner, async () => ({
+      return service.start(targetOwner, async () => ({
         contextTokens: settingsOptions.contextTokens ?? 6000,
-        source: { ...snapshot, owner: subjectOwner, messages: snapshot.messages.map(message => ({ ...message, conversationId: subjectOwner.conversationId })) },
+        source: { ...snapshot, owner: targetOwner, messages: snapshot.messages.map(message => ({ ...message, conversationId: targetOwner.conversationId })) },
         seed: { ...initial, session: { ...initial.session, title: settingsOptions.title ?? initial.session.title,
-          platformId: subjectOwner.platformId, conversationId: subjectOwner.conversationId } }
-      }), generationPlatformId, generationAccountId)
+          platformId: targetOwner.platformId, conversationId: targetOwner.conversationId } }
+      }), generationPlatformId, generationAccountId, targetAccountId)
     },
     restart() { service.dispose(); service = new ConversationCompaction(options); return service } }
 }
@@ -796,4 +796,54 @@ test('ChatGPT handoff resumes on the selected generation account while keeping t
   assert.equal((await settled(f)).phase, 'ready-to-export')
   assert.deepEqual(f.openings.map(page => page.accountId), [accountB, accountB])
   assert.equal(f.calls.length, 1)
+})
+
+test('cross-account handoff summarizes and opens continuation on the target account even for short contexts', async t => {
+  const accountA = '11111111-1111-4111-8111-111111111111'
+  const accountB = '22222222-2222-4222-8222-222222222222'
+  const f = fixture(t, new Map(), { platformId: 'chatgpt', conversationId: '6ab156eb-1b00-83e8-b973-a6a59295a353', accountId: accountA, contextTokens: 250, unknown: true })
+  await f.start(undefined, undefined, accountB)
+  assert.equal((await settled(f)).phase, 'uncertain')
+  assert.equal(f.service.usesAccount('chatgpt', accountB), true)
+  f.restart()
+  assert.equal(f.service.state(f.owner).targetAccountId, accountB)
+  await f.service.resume(f.owner)
+  const done = await settled(f)
+  assert.equal(done.phase, 'completed')
+  assert.deepEqual(f.openings.map(page => page.accountId), [accountB, accountB, accountB])
+  assert.deepEqual(f.calls.map(call => call.handoff), [false, true])
+  assert.match(f.calls[0].prompt, /供另一个平台或账号继续任务/)
+  assert.equal(f.created.length, 1)
+})
+
+test('stopped compaction from an older conversation does not block a different conversation', async t => {
+  const f = fixture(t, new Map(), { unknown: true })
+  await f.start()
+  assert.equal((await settled(f)).phase, 'uncertain')
+  await assert.rejects(() => f.start(), /已有任务，请先完成或取消该任务/)
+
+  const nextOwner = { ...f.owner, conversationId: 'chat-next' }
+  f.options.canWork = current => current.conversationId === nextOwner.conversationId
+  await f.start(undefined, undefined, undefined, nextOwner)
+  assert.equal(f.service.busy, true)
+  await assert.rejects(() => f.start(), /已有进行中的任务/)
+  assert.equal((await settled({ ...f, owner: nextOwner })).phase, 'completed')
+  assert.equal(f.service.state(f.owner), null)
+})
+
+test('sidebar summaries distinguish account handoff from handoff-document export and compaction', async t => {
+  const accountB = '33333333-3333-4333-8333-333333333333'
+  const handoff = fixture(t, new Map(), { platformId: 'claude', conversationId: 'conv-1', contextTokens: 200 })
+  const handoffRuntime = backgroundRuntime(handoff)
+  await handoff.start(undefined, undefined, accountB)
+  assert.equal((await settled(handoff)).phase, 'completed')
+  assert.ok(handoffRuntime.updates.some(item => item.handingOffAccount && !item.generatingHandoff && !item.compacting))
+  assert.equal(handoffRuntime.updates.at(-1).handingOffAccount, false)
+
+  const exportFixture = fixture(t, new Map(), { platformId: 'claude', conversationId: 'conv-2', contextTokens: 200 })
+  const exportRuntime = backgroundRuntime(exportFixture)
+  await exportFixture.start('claude', accountB)
+  assert.equal((await settled(exportFixture)).phase, 'ready-to-export')
+  assert.ok(exportRuntime.updates.some(item => item.generatingHandoff && !item.handingOffAccount && !item.compacting))
+  assert.equal(exportRuntime.updates.at(-1).generatingHandoff, false)
 })

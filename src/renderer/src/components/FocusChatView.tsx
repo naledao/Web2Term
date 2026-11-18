@@ -17,7 +17,7 @@ import FocusFilePreviewProvider from './FocusFilePreview'
 import FocusComposerModes from './FocusComposerModes'
 import FocusCompaction, { useConversationCompaction } from './FocusCompaction'
 import PlatformAccountPicker from './PlatformAccountPicker'
-import { ACCOUNT_PLATFORMS, DEFAULT_PLATFORM_ACCOUNT_ID, supportsPlatformAccounts } from '@shared/platform-accounts'
+import { ACCOUNT_PLATFORMS, accountHasQuota, DEFAULT_PLATFORM_ACCOUNT_ID, nextAvailablePlatformAccount, supportsPlatformAccounts } from '@shared/platform-accounts'
 import type { AccountPlatformId, PlatformAccount } from '@shared/platform-accounts'
 import { supportsCompaction } from '@shared/conversation-compaction'
 import type { SelectionQuestionPlatform } from '@shared/deepseek-question'
@@ -67,6 +67,7 @@ interface Props {
   onAccountSelect(id: string): Promise<void>
   onAccountAdd(label: string): Promise<void>
   onAccountRemove(id: string): Promise<void>
+  onAccountSetQuota(id: string, hasQuota: boolean): Promise<void>
   newChatDisabled: boolean
   onNewChat(): void
   onQuestion(): void
@@ -683,8 +684,16 @@ function FocusChatView(props: Props): JSX.Element {
   const [selectedSkills, setSelectedSkills] = useState<FocusToolSkill[]>(() => readSkillDraft(viewOwnerKey))
   const [toolState, setToolState] = useState<ConversationToolsState | null>(null)
   const composerInput = useRef<HTMLTextAreaElement>(null)
+  const currentAccountId = supportsPlatformAccounts(owner.platformId)
+    ? props.accountIds[owner.platformId] ?? DEFAULT_PLATFORM_ACCOUNT_ID
+    : DEFAULT_PLATFORM_ACCOUNT_ID
+  const nextQuotaAccount = supportsPlatformAccounts(owner.platformId)
+    ? nextAvailablePlatformAccount(props.platformAccounts[owner.platformId] ?? [], currentAccountId)
+    : null
+  const accountHandoffSupported = compactionSupported && supportsPlatformAccounts(owner.platformId)
   const matchingSkills = FOCUS_SKILLS.filter(skill => skillQuery?.ids.includes(skill.id) &&
-    (compactionSupported || (skill.id !== 'compact' && skill.id !== 'task_handoff')))
+    (compactionSupported || (skill.id !== 'compact' && skill.id !== 'task_handoff')) &&
+    (accountHandoffSupported || skill.id !== 'account_handoff'))
   const activeSkill = matchingSkills[Math.min(skillIndex, Math.max(0, matchingSkills.length - 1))]
   const [sending, setSending] = useState(false)
   const [changingMode, setChangingMode] = useState<FocusComposerModeId | null>(null)
@@ -1029,21 +1038,25 @@ function FocusChatView(props: Props): JSX.Element {
       if (!ok && alive.current) setError('这条消息的发送已经结束，无需取消。')
     }).catch(() => {})
   }
-  const compactionDisabled = (skill: 'compact' | 'task_handoff'): string => {
+  const compactionDisabled = (skill: 'compact' | 'task_handoff' | 'account_handoff'): string => {
     if (!owner.conversationId) return '请先打开已有会话。'
     if (working || state?.generating === 'active' || sending || stopping || !!editingId || settingPending !== null ||
         (skill === 'compact' && (!ready || state?.nativeDraft || sendFailure))) return '请等待当前回答、发送或编辑结束后再试。'
     if (compaction.blocked) return '正在处理已有任务。'
     if (compaction.state?.phase === 'ready-to-export') return '请先导出或取消已生成的文档。'
-    return compaction.state && compaction.state.phase !== 'completed' ? '请先重试或取消已有任务。' : ''
+    if (compaction.state && compaction.state.phase !== 'completed') return '请先重试或取消已有任务。'
+    if (skill === 'account_handoff' && !nextQuotaAccount) {
+      return '当前平台没有其他有额度的账号，请先在账号管理中添加或恢复额度。'
+    }
+    return ''
   }
-  const startCompaction = async (platform?: SelectionQuestionPlatform, accountId?: string): Promise<void> => {
-    const skill = platform ? 'task_handoff' : 'compact'
+  const startCompaction = async (platform?: SelectionQuestionPlatform, accountId?: string, accountHandoff = false): Promise<void> => {
+    const skill = accountHandoff ? 'account_handoff' : platform ? 'task_handoff' : 'compact'
     if (!compactionSupported || compactionDisabled(skill) || sendLock.current || !skillQuery?.ids.includes(skill)) return
     const original = draftRef.current, query = { ...skillQuery }
     sendLock.current = true
     try {
-      if (await compaction.start(platform, accountId)) {
+      if (await compaction.start(platform, accountId, accountHandoff)) {
         setSkillsDismissed(true)
         if (alive.current && draftRef.current === original) {
           setDraftText(original.slice(0, query.start) + original.slice(query.end))
@@ -1053,11 +1066,51 @@ function FocusChatView(props: Props): JSX.Element {
     } finally { sendLock.current = false }
   }
   const changeSkills = (skills: FocusToolSkill[]): void => { setSelectedSkills(skills); saveSkillDraft(viewOwnerKey, skills) }
-  const skillDisabled = (id: FocusSkillId): string => id === 'compact' || id === 'task_handoff' ? compactionDisabled(id) :
+  useEffect(() => {
+    const handoffs = (state?.compactions ?? []).filter(item =>
+      item.kind === 'account-handoff' && item.targetAccountId === currentAccountId)
+    const latest = handoffs.at(-1)
+    if (!latest) return
+    const migratedKey = 'focus-chat.handoff-migrated.' + latest.id
+    try {
+      if (localStorage.getItem(migratedKey) === '1') return
+      localStorage.setItem(migratedKey, '1')
+    } catch { /* Proceed with in-memory migration if storage fails. */ }
+    const sourceAccount = latest.sourceAccountId && latest.sourceAccountId !== DEFAULT_PLATFORM_ACCOUNT_ID
+      ? latest.sourceAccountId : undefined
+    const sourceViewOwner: FocusOwner = {
+      sessionId: viewOwner.sessionId,
+      platformId: viewOwner.platformId,
+      conversationId: viewOwner.conversationId,
+      ...(sourceAccount ? { accountId: sourceAccount, ...(viewOwner.platformId === 'claude' ? { claudeAccountId: sourceAccount } : {}) } : {})
+    }
+    const sourceViewKey = focusOwnerKey(sourceViewOwner)
+    if (sourceViewKey === viewOwnerKey) return
+    const sourceDraft = readDraft(sourceViewOwner)
+    if (sourceDraft.trim() && !draftRef.current) {
+      setDraftText(sourceDraft)
+      setSkillCaret(sourceDraft.length)
+      try { localStorage.removeItem(draftKey(sourceViewOwner)) } catch { /* Optional cleanup. */ }
+    }
+    const sourceSkills = readSkillDraft(sourceViewKey)
+    if (sourceSkills.length && !selectedSkills.length) {
+      changeSkills(sourceSkills)
+      saveSkillDraft(sourceViewKey, [])
+    }
+    const sourceFiles = fileDrafts.get(sourceViewKey) ?? []
+    if (sourceFiles.length && !filesRef.current.length) {
+      filesRef.current = sourceFiles
+      saveFileDraft(viewOwnerKey, sourceFiles)
+      saveFileDraft(sourceViewKey, [])
+      setDraftFiles(sourceFiles)
+    }
+  }, [state?.compactions, currentAccountId, viewOwnerKey])
+  const skillDisabled = (id: FocusSkillId): string => id === 'compact' || id === 'task_handoff' || id === 'account_handoff' ? compactionDisabled(id) :
     sending || stopping || !!editingId || settingPending !== null || compaction.blocked ? '当前操作结束后可选择技能。' : skillModeUnavailable || focusSkillUnavailable(id, toolState)
   const chooseSkill = (id: FocusSkillId): void => {
     if (!skillQuery || skillDisabled(id)) return
     if (id === 'compact') { void startCompaction(); return }
+    if (id === 'account_handoff') { void startCompaction(undefined, undefined, true); return }
     if (id === 'task_handoff') {
       setSkillsDismissed(true)
       setHandoffAccount(null)
@@ -1297,7 +1350,7 @@ function FocusChatView(props: Props): JSX.Element {
             ? <button type="button" disabled={!!actionId} onClick={() => void retryFormat(turn.commandRecovery!.token)}>重试修正</button> : null}
           {!turn.archived ? <button type="button" onClick={props.onOpenTerminal}>查看执行控制</button> : null}
         </div> : null}
-        {answers.map(answer => <div className="focus-answer" key={answer.cycle} data-question-answer={turn.archived ? undefined : answer.sourceMessageId ?? ''}><Markdown text={answer.text} theme={theme} onOriginal={props.onOriginal} /></div>)}
+        {answers.map(answer => <div className="focus-answer" key={answer.cycle} data-question-answer={turn.archived ? undefined : answer.sourceMessageId ?? ''}><Markdown text={answer.text} theme={theme} platformId={owner.platformId} onOriginal={props.onOriginal} /></div>)}
         {answers.length > 0 && !turnWorking ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(turn.id, answers.map(answer => answer.text).join('\n\n'))}>{copiedId === turn.id ? '已复制' : '复制回答'}</button></div> : null}
       </div>
     </article>
@@ -1310,8 +1363,13 @@ function FocusChatView(props: Props): JSX.Element {
   const transcript = useMemo(() =>
       <ConversationTranscript scrollKey={'focus:' + viewOwnerKey} ready={messagesReady && state !== null}>
         {entries.length === 0 ? <div className="focus-chat__empty">{modelIcon ? <img src={modelIcon} alt="" /> : null}<h2>从一个目标开始</h2><p>说说你想解决的问题，一起找到下一步。</p></div> : entries.map(entry => entry.compaction ?
-          <div className="focus-chat__compacted" role="note" aria-label="会话已压缩" data-message-id={entry.compaction.id} key={entry.compaction.id}>
-            <span aria-hidden="true">✓</span><span>会话已压缩</span>
+          <div className="focus-chat__compacted" role="note"
+            aria-label={entry.compaction.kind === 'account-handoff' ? '已交接至新账号继续会话' : '会话已压缩'}
+            data-message-id={entry.compaction.id} key={entry.compaction.id}>
+            <span aria-hidden="true">✓</span>
+            <span>{entry.compaction.kind === 'account-handoff'
+              ? `已交接至${entry.compaction.targetAccountLabel ? `「${entry.compaction.targetAccountLabel}」` : '新账号'}继续会话`
+              : '会话已压缩'}</span>
           </div> : entry.turn ? renderTurn(entry.turn) :
           <article className={'focus-history focus-history--' + entry.message!.role + (editingId === entry.message!.id ? ' focus-user--editing' : '')} data-message-id={entry.message!.id} key={entry.message!.id}>
             {entry.message!.role === 'assistant' ? <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}{modelLabel}</div> : null}
@@ -1335,7 +1393,7 @@ function FocusChatView(props: Props): JSX.Element {
         accounts={props.platformAccounts[owner.platformId] ?? []}
         container={props.dialogContainer}
         disabled={props.taskRunning || working || sending || stopping || !!editingId || compaction.blocked || !!outboundQueue?.pending}
-        onSelect={props.onAccountSelect} onAdd={props.onAccountAdd} onRemove={props.onAccountRemove} /> : null}
+        onSelect={props.onAccountSelect} onAdd={props.onAccountAdd} onRemove={props.onAccountRemove} onSetQuota={props.onAccountSetQuota} /> : null}
       <button type="button" className="focus-chat__new-chat" aria-label="新建对话" title="新建对话"
         disabled={props.newChatDisabled || working || sending || stopping || !!editingId || settingPending !== null || compaction.blocked} onClick={startNewChat}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
@@ -1401,11 +1459,18 @@ function FocusChatView(props: Props): JSX.Element {
       {error ? <div className="focus-chat__error" role="alert">{error}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       <FocusCompaction owner={owner} visible={visible} state={compaction.state} pending={compaction.pending}
         startingPlatform={compaction.startingPlatform}
+        startingHandoff={compaction.startingHandoff}
         generationAccountLabel={(() => {
           const genPlatform = compaction.startingPlatform ?? compaction.state?.generationPlatformId
           const genAccountId = compaction.startingAccountId ?? compaction.state?.generationAccountId
           return genPlatform && genAccountId && supportsPlatformAccounts(genPlatform)
             ? props.platformAccounts[genPlatform]?.find(account => account.id === genAccountId)?.label
+            : undefined
+        })()}
+        targetAccountLabel={(() => {
+          const targetId = compaction.state?.targetAccountId ?? (compaction.startingHandoff ? nextQuotaAccount?.id : undefined)
+          return targetId && supportsPlatformAccounts(owner.platformId)
+            ? props.platformAccounts[owner.platformId]?.find(account => account.id === targetId)?.label
             : undefined
         })()}
         error={compaction.error} act={compaction.act} />
@@ -1423,7 +1488,13 @@ function FocusChatView(props: Props): JSX.Element {
                       aria-pressed={supportsPlatformAccounts(platform.id) ? handoffAccount?.platformId === platform.id : undefined}
                       onClick={() => {
                         if (supportsPlatformAccounts(platform.id)) {
-                          setHandoffAccount({ platformId: platform.id, accountId: props.accountIds[platform.id] ?? DEFAULT_PLATFORM_ACCOUNT_ID })
+                          const accounts = props.platformAccounts[platform.id] ?? []
+                          const currentId = props.accountIds[platform.id] ?? DEFAULT_PLATFORM_ACCOUNT_ID
+                          const currentAccount = accounts.find(account => account.id === currentId)
+                          const preferredId = currentAccount && accountHasQuota(currentAccount)
+                            ? currentId
+                            : (nextAvailablePlatformAccount(accounts, currentId)?.id ?? currentId)
+                          setHandoffAccount({ platformId: platform.id, accountId: preferredId })
                           return
                         }
                         setHandoffPickerOwner('')
@@ -1437,7 +1508,7 @@ function FocusChatView(props: Props): JSX.Element {
                     <select value={handoffAccount.accountId}
                       onChange={event => setHandoffAccount(current => current ? { ...current, accountId: event.target.value } : null)}>
                       {(props.platformAccounts[handoffAccount.platformId] ?? []).map(account =>
-                        <option key={account.id} value={account.id}>{account.label}</option>)}
+                        <option key={account.id} value={account.id}>{account.label}{accountHasQuota(account) ? '' : '（无额度）'}</option>)}
                     </select>
                   </label>
                   <button type="button" disabled={!!compactionDisabled('task_handoff') ||

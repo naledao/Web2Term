@@ -12,7 +12,7 @@ import type { ConversationViewSnapshot } from './conversation-continuity'
 import { focusOwnerAccountId } from '../shared/focus-chat'
 import type { FocusOwner } from '../shared/focus-chat'
 import type { ConversationToolPreferences } from '../shared/conversation-tools'
-import { isPlatformAccountId, supportsPlatformAccounts } from '../shared/platform-accounts'
+import { DEFAULT_PLATFORM_ACCOUNT_ID, isPlatformAccountId, supportsPlatformAccounts } from '../shared/platform-accounts'
 import type { AccountPlatformId } from '../shared/platform-accounts'
 import type { Web2termSessionBinding } from './web2term-shell'
 import type { CompactionPhase, CompactionSource, CompactionState, CompactionBudget } from '../shared/conversation-compaction'
@@ -83,7 +83,8 @@ export function savedCompactionUsesAccount(
     return job?.version === 1 &&
       COMPACTION_RESUMABLE.includes(job.state?.phase) && (
         (job.state?.owner?.platformId === platformId && focusOwnerAccountId(job.state.owner) === targetAccountId) ||
-        (job.state?.generationPlatformId === platformId && job.state?.generationAccountId === targetAccountId)
+        (job.state?.generationPlatformId === platformId && job.state?.generationAccountId === targetAccountId) ||
+        (job.state?.owner?.platformId === platformId && job.state?.targetAccountId === targetAccountId)
       )
   } catch { return false }
 }
@@ -118,7 +119,7 @@ function log(job: StoredCompaction): void {
       logPath = join(directory, `conversation-compaction-${Date.now()}-${process.pid}.log`)
     }
     appendFileSync(logPath, `${new Date().toISOString()} ${JSON.stringify({ jobId: job.state.id, platformId: job.state.owner.platformId,
-      generationPlatformId: job.state.generationPlatformId, phase: job.state.phase,
+      generationPlatformId: job.state.generationPlatformId, targetAccountId: job.state.targetAccountId, phase: job.state.phase,
       sourceDelivery: job.sourceDelivery, handoffDelivery: job.handoffDelivery,
       sourceMessages: job.state.sourceMessages, beforeTokens: job.budget?.beforeTokens,
       summaryTokens: job.state.summaryTokens, maxSummaryTokens: job.budget?.maxSummaryTokens,
@@ -153,6 +154,10 @@ export class ConversationCompaction {
           (job.state.generationAccountId === undefined ||
             !!job.state.generationPlatformId && supportsPlatformAccounts(job.state.generationPlatformId) &&
               isPlatformAccountId(job.state.generationAccountId)) &&
+          (job.state.targetAccountId === undefined ||
+            supportsPlatformAccounts(job.state.owner.platformId) && isPlatformAccountId(job.state.targetAccountId) &&
+              job.state.targetAccountId !== (focusOwnerAccountId(job.state.owner) ?? DEFAULT_PLATFORM_ACCOUNT_ID) &&
+              job.state.generationPlatformId === undefined && job.state.generationAccountId === undefined) &&
           [...COMPACTION_ACTIVE, 'completed', 'paused', 'failed', 'cancelled', 'uncertain', 'ready-to-export'].includes(job.state.phase) &&
           (job.state.phase !== 'ready-to-export' || !!job.state.generationPlatformId && job.state.hasSummary) &&
           typeof job.state.hasSource === 'boolean' && typeof job.state.hasSummary === 'boolean' &&
@@ -166,7 +171,7 @@ export class ConversationCompaction {
         job.state.workerVisible = false
         if (!this.isExport && options.isAdopted?.(job)) {
           job.state.targetSessionId = options.sessionId
-          this.update('completed', '对话已压缩，可以继续聊天。')
+          this.update('completed', this.isAccountHandoff ? '已切换至新账号并导入上下文，可以继续聊天。' : '对话已压缩，可以继续聊天。')
         } else if (COMPACTION_ACTIVE.includes(job.state.phase)) this.update('paused', '上次任务已中断。点“重试”可从已保存的阶段恢复。')
       }
     } catch { /* Invalid saved state is never used to navigate or send. */ }
@@ -183,20 +188,23 @@ export class ConversationCompaction {
     if (!this.job || this.job.sourceDelivery !== 'sent' || this.job.state.hasSummary || this.running) {
       throw new Error('请先等待原始快照发送和回答结束，再补全摘要。')
     }
+    const handoffMode = this.isExport || this.isAccountHandoff
     return compactionRecoveryPrompt(this.job.state.id,
-      this.isExport ? undefined : this.job.budget ?? compactionBudget(this.job.state.sourceTokens), this.isExport ? 'export' : 'compact')
+      handoffMode ? undefined : this.job.budget ?? compactionBudget(this.job.state.sourceTokens), handoffMode ? 'export' : 'compact')
   }
   state(owner: FocusOwner): CompactionState | null {
     return this.job && sameOwner(owner, this.job.state.owner) ? { ...this.job.state, owner: { ...this.job.state.owner } } : null
   }
   get busy(): boolean { return this.running }
   get isExport(): boolean { return this.job?.state.generationPlatformId !== undefined }
+  get isAccountHandoff(): boolean { return this.job?.state.targetAccountId !== undefined }
   get inProgress(): boolean { return !!this.job && COMPACTION_ACTIVE.includes(this.job.state.phase) }
   get resumable(): boolean { return !!this.job && COMPACTION_RESUMABLE.includes(this.job.state.phase) }
   usesAccount(platformId: AccountPlatformId, accountId: string): boolean {
     return (this.scopeAccountId !== undefined && this.scopeAccountId === accountId && (!this.job || this.job.state.owner.platformId === platformId)) ||
       (this.job?.state.owner.platformId === platformId && focusOwnerAccountId(this.job.state.owner) === accountId) ||
-      (this.job?.state.generationPlatformId === platformId && this.job.state.generationAccountId === accountId)
+      (this.job?.state.generationPlatformId === platformId && this.job.state.generationAccountId === accountId) ||
+      (this.job?.state.owner.platformId === platformId && this.job.state.targetAccountId === accountId)
   }
   usesClaudeAccount(accountId: string): boolean {
     return this.usesAccount('claude', accountId)
@@ -214,14 +222,28 @@ export class ConversationCompaction {
     this.save()
   }
   async start(owner: FocusOwner, capture: () => Promise<{ source: CompactionSource; seed: CompactionSeed; view?: ConversationViewSnapshot; contextTokens?: number }>,
-    generationPlatformId?: SelectionQuestionPlatform, generationAccountId?: string): Promise<CompactionState> {
-    if (this.running || this.job && !['completed', 'cancelled'].includes(this.job.state.phase)) throw new Error('已有任务，请先完成或取消该任务。')
+    generationPlatformId?: SelectionQuestionPlatform, generationAccountId?: string, targetAccountId?: string): Promise<CompactionState> {
+    const sameJobOwner = !!this.job && sameOwner(owner, this.job.state.owner)
+    const activeJob = !!this.job && COMPACTION_ACTIVE.includes(this.job.state.phase)
+    if (this.running || activeJob) {
+      throw new Error(sameJobOwner ? '已有任务，请先完成或取消该任务。' : '当前工作区已有进行中的任务，请等待完成或切回原会话取消。')
+    }
+    if (this.job && sameJobOwner && !['completed', 'cancelled'].includes(this.job.state.phase)) {
+      throw new Error('已有任务，请先完成或取消该任务。')
+    }
     if (!supportsCompaction(owner.platformId) || !owner.conversationId || this.disposed ||
         focusOwnerAccountId(owner) !== this.scopeAccountId) throw new Error('当前会话暂不支持此操作。')
     if (generationPlatformId !== undefined && !supportsCompaction(generationPlatformId)) throw new Error('生成平台不可用。')
     if (generationAccountId !== undefined && (!generationPlatformId || !supportsPlatformAccounts(generationPlatformId) ||
         !isPlatformAccountId(generationAccountId))) {
       throw new Error('生成账号不可用。')
+    }
+    if (targetAccountId !== undefined) {
+      if (generationPlatformId !== undefined || generationAccountId !== undefined) throw new Error('跨账号交接不支持另选生成平台。')
+      if (!supportsPlatformAccounts(owner.platformId) || !isPlatformAccountId(targetAccountId) ||
+          targetAccountId === (focusOwnerAccountId(owner) ?? DEFAULT_PLATFORM_ACCOUNT_ID)) {
+        throw new Error('目标账号不可用。')
+      }
     }
     this.running = true
     const controller = new AbortController()
@@ -232,12 +254,12 @@ export class ConversationCompaction {
       controller.signal.throwIfAborted()
       if (!sameOwner(owner, source.owner) || !this.options.canWork(owner)) throw new Error('原会话已切换，请返回原会话后重试。')
       const snapshot = compactionSourceMarkdown(source)
-      const budget = generationPlatformId ? undefined : compactionBudget(contextTokens ?? snapshot.tokens)
+      const budget = generationPlatformId || targetAccountId ? undefined : compactionBudget(contextTokens ?? snapshot.tokens)
       this.closePage()
       this.job = { version: 1, seed, budget, targetId: randomUUID(), sourceHash: hash(snapshot.markdown), summaryHash: '',
         sourceUrl: null, handoffUrl: null, sourceDelivery: 'none', handoffDelivery: 'none', handoffAnswer: null,
         state: { id: randomUUID(), owner: { ...owner }, ...(generationPlatformId && { generationPlatformId }),
-          ...(generationAccountId && { generationAccountId }),
+          ...(generationAccountId && { generationAccountId }), ...(targetAccountId && { targetAccountId }),
           phase: 'preparing', message: '正在保存会话快照…', createdAt: this.now(),
           updatedAt: this.now(), sourceMessages: snapshot.messageCount, sourceTokens: snapshot.tokens, summaryTokens: null,
           hasSource: false, hasSummary: false, workerVisible: false, targetSessionId: null } }
@@ -247,7 +269,7 @@ export class ConversationCompaction {
       await writeFile(this.path('source.md'), snapshot.markdown, { encoding: 'utf8', flag: 'wx', mode: 0o600, signal: controller.signal })
       controller.signal.throwIfAborted()
       this.job.state.hasSource = true
-      this.update('opening', this.isExport ? '正在打开生成平台…' : '正在压缩对话…')
+      this.update('opening', this.isAccountHandoff ? '正在打开下一个账号准备交接…' : this.isExport ? '正在打开生成平台…' : '正在压缩对话…')
     } catch (error) {
       if (this.job && this.job !== previous && this.controller === controller && !controller.signal.aborted) this.update('failed', error instanceof Error ? error.message : '保存会话快照失败。')
       throw error
@@ -263,7 +285,7 @@ export class ConversationCompaction {
     this.running = true
     try {
       if (!this.job.state.hasSource) throw new Error('原始快照未保存成功，请取消任务后重新开始。')
-      if (!this.isExport) this.job.budget ??= compactionBudget(this.job.state.sourceTokens)
+      if (!this.isExport && !this.isAccountHandoff) this.job.budget ??= compactionBudget(this.job.state.sourceTokens)
       if (!this.job.state.hasSummary) {
         await this.checkedFile('source.md', this.job.sourceHash)
         this.current(controller.signal)
@@ -299,15 +321,16 @@ export class ConversationCompaction {
       // The isolated pages can finish in the background. Adoption also waits for
       // the source platform and its shared runtime to be safe to replace.
       if (this.options.canAdopt?.(this.job.state.owner) === false) {
-        this.update('importing', '摘要已准备完成，等待返回来源平台并结束当前操作后接入…')
+        this.update('importing', this.isAccountHandoff ? '交接已准备完成，等待返回来源平台并结束当前操作后切换账号…' : '摘要已准备完成，等待返回来源平台并结束当前操作后接入…')
       }
       while (!this.options.canWork(this.job.state.owner) || this.options.canAdopt?.(this.job.state.owner) === false) {
         this.current(controller.signal); await this.pause()
       }
       this.current(controller.signal)
+      const handoff = this.isAccountHandoff
       this.job.state.targetSessionId = this.options.createTarget(this.job, summary)
       this.closePage()
-      this.update('completed', '对话已压缩，可以继续聊天。')
+      this.update('completed', handoff ? '已切换至新账号并导入上下文，可以继续聊天。' : '对话已压缩，可以继续聊天。')
     } catch (error) {
       if (this.controller === controller && !controller.signal.aborted) {
         const uncertain = this.job.sourceDelivery === 'uncertain' || this.job.handoffDelivery === 'uncertain'
@@ -376,7 +399,7 @@ export class ConversationCompaction {
       if (currentDelivery !== 'none' && selectionQuestionConversation(platformId, target) && !job[key]) {
         job[key] = target; this.save()
       }
-    }, job.state.generationPlatformId ? job.state.generationAccountId : focusOwnerAccountId(job.state.owner))
+    }, job.state.targetAccountId ?? (job.state.generationPlatformId ? job.state.generationAccountId : focusOwnerAccountId(job.state.owner)))
     job.state.workerVisible = false
     this.save()
     return this.page
@@ -388,7 +411,9 @@ export class ConversationCompaction {
     const urlKey = handoff ? 'handoffUrl' : 'sourceUrl'
     const name = handoff ? 'summary.md' : 'source.md'
     const page = this.ensurePage(handoff)
-    this.update(handoff ? 'importing' : 'opening', this.isExport ? '正在打开生成平台…' : '正在压缩对话…')
+    this.update(handoff ? 'importing' : 'opening', handoff
+      ? (this.isAccountHandoff ? '正在新账号中创建承接会话…' : '正在压缩对话…')
+      : (this.isAccountHandoff ? '正在打开下一个账号生成交接文档…' : this.isExport ? '正在打开生成平台…' : '正在压缩对话…'))
     let activeMs = 0, readErrors = 0, last = '', stableSince = 0, draftClears = 0
     for (;;) {
       await this.waitRunnable(signal)
@@ -410,8 +435,11 @@ export class ConversationCompaction {
           } else if (snapshot.ready && snapshot.uploadReady && snapshot.generating === 'idle' && isQuestionChatHome(platform, page.url)) {
             await this.checkedFile(name, handoff ? job.summaryHash : job.sourceHash)
             this.current(signal)
-            this.update(handoff ? 'importing' : 'uploading', handoff ? '正在上传交接摘要并发送到新会话…' : '正在向生成平台发送会话快照…')
-            const prompt = handoff ? compactionHandoffPrompt(id) : compactionPrompt(id, job.budget, this.isExport ? 'export' : 'compact')
+            this.update(handoff ? 'importing' : 'uploading', handoff
+              ? '正在上传交接摘要并发送到新会话…'
+              : (this.isAccountHandoff ? '正在向下一个账号发送会话快照…' : '正在向生成平台发送会话快照…'))
+            const handoffMode = this.isExport || this.isAccountHandoff
+            const prompt = handoff ? compactionHandoffPrompt(id) : compactionPrompt(id, handoffMode ? undefined : job.budget, handoffMode ? 'export' : 'compact')
             const result = await page.send(this.path(name), prompt, signal,
               () => this.canContinue(job), () => {
                 this.current(signal)

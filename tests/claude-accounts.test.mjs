@@ -1,9 +1,10 @@
 // User-run only: node --test tests/claude-accounts.test.mjs
 // Offline unit tests for Claude account removal and cleanup helpers. No Electron or network.
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Script } from 'node:vm'
@@ -498,4 +499,82 @@ test('ChatGPT account scopes isolate drafts, owner keys, saved compaction checks
   scheduler.removePlatformAccount('chatgpt', chatgptA)
   assert.equal(taskStore.platformAccountTasks('chatgpt', chatgptA).length, 0)
   assert.equal(taskStore.tasks('s1').length, 2)
+})
+
+test('quota flags persist in SQLite platform_accounts and select the next available account', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'web2term-accounts-db-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dbPath = join(dir, 'test.db')
+  const { ConversationStore } = (() => {
+    const dbCache = new Map()
+    function loadDb(path) {
+      path = resolve(path)
+      if (dbCache.has(path)) return dbCache.get(path)
+      const exports = {}
+      dbCache.set(path, exports)
+      const code = ts.transpileModule(readFileSync(path, 'utf8'), {
+        compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
+      }).outputText
+      new Script(code, { filename: path }).runInNewContext({
+        exports, Buffer, process, URL, Intl, console,
+        require(name) {
+          if (name === 'electron') return { nativeImage: {} }
+          if (name.startsWith('node:')) return nodeRequire(name)
+          if (name === '../shared/file-requests') return { parseReadFilesRequest() { return null } }
+          if (name === '../shared/background-tasks') return { parseBackgroundOptions() { return null } }
+          if (name === '../shared/types') return { isRecentCommandPayload() { return false } }
+          if (name === './terminal-notes') return { normalizeTerminalNotesDirectory() { return '' } }
+          if (name === './execution-recovery') return { recoverInterruptedExecutions: () => 0, interruptRunningCommands: () => 0 }
+          return loadDb(resolve(dirname(path), name + '.ts'))
+        }
+      })
+      return exports
+    }
+    return loadDb(join(root, 'src/main/db.ts'))
+  })()
+
+  const legacyDb = new DatabaseSync(dbPath)
+  legacyDb.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+  const legacyA = '11111111-1111-4111-8111-111111111111'
+  const legacyB = '22222222-2222-4222-8222-222222222222'
+  legacyDb.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(
+    'chatgptAccounts',
+    JSON.stringify([{ id: legacyA, label: '工作号' }, { id: legacyB, label: '备用号' }])
+  )
+  legacyDb.close()
+
+  let store = new ConversationStore(dbPath)
+  let accounts = platformAccounts.listPlatformAccounts(store, 'chatgpt')
+  assert.deepEqual(accounts.map(item => [item.id, item.label, item.hasQuota]), [
+    [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, '默认账号', true],
+    [legacyA, '工作号', true],
+    [legacyB, '备用号', true]
+  ])
+
+  assert.equal(sharedPlatformAccounts.nextAvailablePlatformAccount(accounts, sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID).id, legacyA)
+  accounts = platformAccounts.setPlatformAccountQuota(store, 'chatgpt', sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, false)
+  accounts = platformAccounts.setPlatformAccountQuota(store, 'chatgpt', legacyA, false)
+  assert.equal(sharedPlatformAccounts.nextAvailablePlatformAccount(accounts, sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID).id, legacyB)
+  assert.equal(sharedPlatformAccounts.nextAvailablePlatformAccount(accounts, legacyB), null)
+
+  store.close()
+  store = new ConversationStore(dbPath)
+  t.after(() => store.close())
+  const reopened = platformAccounts.listPlatformAccounts(store, 'chatgpt')
+  assert.deepEqual(reopened.map(item => [item.id, item.hasQuota]), [
+    [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, false],
+    [legacyA, false],
+    [legacyB, true]
+  ])
+
+  const restored = platformAccounts.setPlatformAccountQuota(store, 'chatgpt', sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, true)
+  assert.equal(sharedPlatformAccounts.nextAvailablePlatformAccount(restored, legacyB).id, sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID)
+
+  const mem = memoryStore()
+  const key = compaction.compactionStorageKey('session-1')
+  mem.setSetting(key, JSON.stringify({
+    version: 1,
+    state: { phase: 'paused', owner: { sessionId: 'session-1', platformId: 'chatgpt', conversationId: 'c1' }, targetAccountId: legacyB }
+  }))
+  assert.equal(compaction.savedCompactionUsesAccount(mem, 'session-1', undefined, 'chatgpt', legacyB), true)
 })

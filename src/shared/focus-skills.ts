@@ -1,13 +1,14 @@
 import type { ConversationToolsState, ConversationToolId } from './conversation-tools'
 
 export type FocusToolSkill = 'scheduled_task' | 'send_email' | 'computer'
-export type FocusSkillId = 'compact' | 'task_handoff' | FocusToolSkill
+export type FocusSkillId = 'compact' | 'task_handoff' | 'account_handoff' | FocusToolSkill
 export function focusSkillToolId(id: FocusToolSkill): ConversationToolId {
   return id === 'scheduled_task' ? 'scheduled' : id === 'send_email' ? 'mail' : 'computer'
 }
 export const FOCUS_SKILLS: readonly { id: FocusSkillId; name: string; description: string; keywords: string }[] = [
   { id: 'compact', name: '压缩会话', description: '精简当前上下文，继续原对话', keywords: '压缩 compress compact conversation' },
   { id: 'task_handoff', name: '生成任务交接文档', description: '选择生成平台，把交接文档保存到本机', keywords: '交接 导出 markdown summary handoff export' },
+  { id: 'account_handoff', name: '交给下一个号工作', description: '用下一个有额度的账号生成交接文档并继续会话', keywords: '交接 换号 下一个号 额度 账号 handoff account next quota' },
   { id: 'scheduled_task', name: '定时任务', description: '按指定周期创建或管理当前对话的计划', keywords: '定时 计划 schedule scheduled task' },
   { id: 'send_email', name: '邮件通知', description: '向已配置的收件邮箱发送任务通知', keywords: '邮件 通知 email mail notification' },
   { id: 'computer', name: '电脑操作', description: '使用本机桌面应用完成本次任务', keywords: '电脑 桌面 computer desktop' }

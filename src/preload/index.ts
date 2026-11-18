@@ -226,8 +226,16 @@ const api: AppApi = {
   addPlatformAccount: (owner, label) => ipcRenderer.invoke(IpcChannels.platformAccountAdd, owner, label),
   switchPlatformAccount: (owner, accountId) => ipcRenderer.invoke(IpcChannels.platformAccountSwitch, owner, accountId),
   removePlatformAccount: (owner, accountId) => ipcRenderer.invoke(IpcChannels.platformAccountRemove, owner, accountId),
-  startCompaction: (owner, generationPlatformId, generationAccountId) =>
-    ipcRenderer.invoke(IpcChannels.compactionStart, owner, generationPlatformId, generationAccountId),
+  setPlatformAccountQuota: (platformId, accountId, hasQuota) =>
+    ipcRenderer.invoke(IpcChannels.platformAccountSetQuota, platformId, accountId, hasQuota),
+  onPlatformAccountsChanged: (listener) => {
+    const handler = (_event: IpcRendererEvent, platformId: Parameters<typeof listener>[0], accounts: Parameters<typeof listener>[1]): void =>
+      listener(platformId, accounts)
+    ipcRenderer.on(IpcChannels.platformAccountsChanged, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.platformAccountsChanged, handler)
+  },
+  startCompaction: (owner, generationPlatformId, generationAccountId, accountHandoff) =>
+    ipcRenderer.invoke(IpcChannels.compactionStart, owner, generationPlatformId, generationAccountId, accountHandoff),
   compactionAction: (request, action) => ipcRenderer.invoke(IpcChannels.compactionAction, request, action),
   setCompactionViewport: (request, bounds, visible) => ipcRenderer.send(IpcChannels.compactionViewport, request, bounds, visible),
   pollFocusChat: (owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner, cursor),

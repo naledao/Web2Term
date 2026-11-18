@@ -45,7 +45,11 @@
 .focus-chat__accounts li { display: flex; align-items: stretch; gap: 6px; }
 .focus-chat__account-select { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex: 1; min-width: 0; text-align: left; overflow-wrap: anywhere; }
 .focus-chat__account-select[aria-current="true"], .focus-compaction__platforms button[aria-pressed="true"] { border-color: var(--accent); }
-.focus-chat__account-select[aria-current="true"] span:last-child { flex-shrink: 0; color: var(--text-muted); }
+.focus-chat__account-current { flex-shrink: 0; font-size: 11px; color: var(--text-muted); }
+.focus-chat__account-badge.is-exhausted { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: color-mix(in srgb, var(--danger, #ba5362) 12%, transparent); color: var(--danger, #ba5362); }
+.focus-compaction__picker .focus-chat__account-quota-btn { flex: none; font-size: 12px; white-space: nowrap; }
+.focus-compaction__picker .focus-chat__account-quota-btn.is-available { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.focus-compaction__picker .focus-chat__account-quota-btn.is-exhausted { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 8%, transparent); }
 .focus-compaction__picker .focus-chat__account-delete { flex: none; color: var(--text-muted); }
 .focus-compaction__picker .focus-chat__account-delete:hover:not(:disabled),
 .focus-compaction__picker .focus-chat__account-delete[aria-expanded="true"] {

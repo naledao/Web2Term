@@ -12,10 +12,28 @@ export const DEFAULT_PLATFORM_ACCOUNT_ID = 'default'
 export interface PlatformAccount {
   id: string
   label: string
+  hasQuota: boolean
 }
 
 export const DEFAULT_PLATFORM_ACCOUNT: Readonly<PlatformAccount> = {
-  id: DEFAULT_PLATFORM_ACCOUNT_ID, label: '默认账号'
+  id: DEFAULT_PLATFORM_ACCOUNT_ID, label: '默认账号', hasQuota: true
+}
+
+export function accountHasQuota(account: Pick<PlatformAccount, 'hasQuota'> | null | undefined): boolean {
+  return account?.hasQuota !== false
+}
+
+export function nextAvailablePlatformAccount(
+  accounts: readonly PlatformAccount[],
+  currentAccountId: string
+): PlatformAccount | null {
+  if (accounts.length < 2) return null
+  const start = accounts.findIndex(account => account.id === currentAccountId)
+  for (let offset = 1; offset <= accounts.length; offset++) {
+    const candidate = accounts[(start >= 0 ? start + offset : offset - 1) % accounts.length]
+    if (candidate.id !== currentAccountId && accountHasQuota(candidate)) return candidate
+  }
+  return null
 }
 
 export function supportsPlatformAccounts(platformId: string): platformId is AccountPlatformId {

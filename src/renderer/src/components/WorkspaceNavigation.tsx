@@ -5,6 +5,17 @@ import type { ManagedSessionSummary, WorkspaceProject } from '@shared/types'
 import { platformById } from '@shared/platforms'
 import './WorkspaceNavigation.css'
 
+function compactionBadge(item: Pick<ManagedSessionSummary, 'compacting' | 'generatingHandoff' | 'handingOffAccount'>): {
+  label: string
+  status: string
+  suffix: string
+} | null {
+  if (item.handingOffAccount) return { label: '交接中', status: '正在交接至新账号', suffix: ' · 交接中' }
+  if (item.generatingHandoff) return { label: '生成中', status: '正在生成交接文档', suffix: ' · 生成交接文档中' }
+  if (item.compacting) return { label: '压缩中', status: '正在压缩会话', suffix: ' · 压缩中' }
+  return null
+}
+
 function Icon({ kind }: { kind: 'folder' | 'open' | 'plus' | 'more' }): ReactElement {
   return <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     {kind === 'folder' || kind === 'open' ? <><path d="M3 8V6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2" />{kind === 'open' ? <path d="M3 9h17a1 1 0 0 1 1 1.3l-2 8a2 2 0 0 1-2 1.7H5a2 2 0 0 1-2-2z" /> : <path d="M3 8h18v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />}</> : null}
@@ -84,7 +95,9 @@ export default function WorkspaceNavigation({ sessions, projects, activeId, them
       if (!await window.api.renameManagedSession(id, draft)) throw new Error('对话已关闭。')
     })
   }
-  const row = (item: ManagedSessionSummary): ReactElement => <div key={item.id}
+  const row = (item: ManagedSessionSummary): ReactElement => {
+    const badge = compactionBadge(item)
+    return <div key={item.id}
     className={'workspace-navigation__chat' + (item.id === activeId ? ' is-active' : '')}
     draggable={renaming !== item.id}
     onDragStart={event => { event.dataTransfer.setData('application/x-workspace-session', item.id); event.dataTransfer.effectAllowed = 'move' }}>
@@ -95,13 +108,13 @@ export default function WorkspaceNavigation({ sessions, projects, activeId, them
         if (event.key === 'Escape') { saving.current = true; setRenaming(null) }
       }} /> : <>
       <button type="button" className="workspace-navigation__chat-link" aria-current={item.id === activeId ? 'page' : undefined}
-        title={`${item.title}\n${platformById(item.platformId)?.label ?? item.platformId} · ${item.target}${item.generatingHandoff ? ' · 生成交接文档中' : item.compacting ? ' · 压缩中' : ''}${item.taskRunning ? ' · 执行中' : ''}`}
+        title={`${item.title}\n${platformById(item.platformId)?.label ?? item.platformId} · ${item.target}${badge?.suffix ?? ''}${item.taskRunning ? ' · 执行中' : ''}`}
         onClick={() => void run(async () => { if (!await window.api.openManagedSession(item.id)) throw new Error('对话已关闭，请重新选择。') })}
         onDoubleClick={() => rename(item)}>
         <span className="workspace-navigation__title">{item.title || '本地'}</span>
-        {item.compacting || item.generatingHandoff ? <span className="workspace-navigation__compacting" role="status"
-          aria-label={item.generatingHandoff ? '正在生成交接文档' : '正在压缩会话'} title={item.generatingHandoff ? '正在生成交接文档' : '正在压缩会话'}>
-          <span className="workspace-navigation__compacting-spinner" aria-hidden="true" />{item.generatingHandoff ? '生成中' : '压缩中'}
+        {badge ? <span className="workspace-navigation__compacting" role="status"
+          aria-label={badge.status} title={badge.status}>
+          <span className="workspace-navigation__compacting-spinner" aria-hidden="true" />{badge.label}
         </span> : null}
         {item.taskRunning ? <span className="workspace-navigation__running" role="img" aria-label="执行中" title="执行中" /> : null}
         {item.unseenCompletedCount ? <span className="workspace-navigation__unseen" aria-label={`${item.unseenCompletedCount} 个任务已完成`}>{item.unseenCompletedCount}</span> : null}
@@ -115,6 +128,7 @@ export default function WorkspaceNavigation({ sessions, projects, activeId, them
       </Actions>
     </>}
   </div>
+  }
   const drop = (event: DragEvent, projectId: string | null): void => {
     event.preventDefault()
     const id = event.dataTransfer.getData('application/x-workspace-session')

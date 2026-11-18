@@ -548,12 +548,33 @@
   }
 
   let assistantThinkingPrefix = null
+  let assistantThinkingStatus = null
+  const readVisibleReplyText = (root) => {
+    const block = /^(?:p|div|section|article|blockquote|li|h[1-6]|tr|table|ul|ol|figure)$/
+    const walk = (current) => {
+      if (!current) return ''
+      if (current.nodeType === Node.TEXT_NODE) return String(current.nodeValue || '')
+      if (current.nodeType !== Node.ELEMENT_NODE) return ''
+      const tag = String(current.tagName || '').toLowerCase()
+      if (tag === 'script' || tag === 'style' || current.matches?.('.sr-only')) return ''
+      if (tag === 'br') return '\n'
+      if (tag === 'pre') return '\n' + String(current.innerText || '') + '\n'
+      const body = [...(current.childNodes || [])].map(walk).join('')
+      return block.test(tag) ? '\n' + body + '\n' : body
+    }
+    return walk(root).replace(/[ \t]*\n[ \t]*(?:\n[ \t]*)+/g, '\n\n').trim()
+  }
   const readReplyText = (node) => {
     const root = replyRootOf(node)
-    const text = String(root?.innerText || '')
+    if (!root) return ''
+    // Screen-reader badges lacking the announcement prefix (e.g. Claude's "running"
+    // status) still appear in `innerText`; read non-sr text when `.sr-only` is present.
+    const text = root.querySelector?.('.sr-only') && root.childNodes ? readVisibleReplyText(root) : String(root.innerText || '')
     const leadingText = PAGE.assistantReplyAnnouncementPrefix ? text.trimStart() : text
     const announcement = replyAnnouncementOf(root, leadingText)
-    const reply = announcement ? leadingText.slice(announcement.length).trimStart() : text
+    let reply = announcement ? leadingText.slice(announcement.length).trimStart() : text
+    const thinkingStatus = assistantThinkingStatus || (PAGE.assistantThinkingStatusPattern ? new RegExp(PAGE.assistantThinkingStatusPattern) : null)
+    if (thinkingStatus) reply = reply.replace(thinkingStatus, '')
     // Keep the caption in the Markdown capture so the focus view can show it as reasoning.
     return normalizeDsmlToolCalls(assistantThinkingPrefix ? reply.replace(assistantThinkingPrefix, '') : reply)
   }
@@ -1467,7 +1488,7 @@
       const tag = element.tagName.toLowerCase()
       if (tag === 'script' || tag === 'style') return ''
       if (tag === 'button' || element.getAttribute('role') === 'button' || element.getAttribute('aria-hidden') === 'true') return ''
-      if (element.getAttribute('role') === 'status' && element.matches('.sr-only')) return ''
+      if (element.matches?.('.sr-only') && !(PAGE.answerCharts && element.matches?.(PAGE.answerCharts.rootSelector))) return ''
       if (tag === 'svg') {
         const diagram = /^(?:chatgpt-)?mermaid[-_]/i.test(element.getAttribute('id') || '') ||
           !!element.getAttribute('aria-roledescription')
@@ -1577,12 +1598,15 @@
       return emphasis(children())
     }
 
-    return render(root)
+    const markdown = render(root)
       .replace(/[ \t]+\n/g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim()
       .replace(/(^|\n)([ \t]*)\u0000focus-code:(\d+)\u0000/g, (_, before, indent, index) =>
         before + indent + codeMarkdown[Number(index)].replace(/\n/g, '\n' + indent))
+    const thinkingStatus = typeof PAGE !== 'undefined' && PAGE.assistantThinkingStatusPattern
+      ? new RegExp(PAGE.assistantThinkingStatusPattern) : null
+    return thinkingStatus ? markdown.replace(thinkingStatus, '').trim() : markdown
   }
   /** True when this turn is an ASSISTANT one, decided by structure rather than by class. */
   const isAssistantTurn = (node) => {
@@ -5059,7 +5083,11 @@
       // or execute a JSON example in an unfinished reply.
       state.lastCommandMessageId = messageId
       setReplyWaiting(0, 'stopped-retry-abandoned', messageId)
-      if (isAssistantTurn(node)) report({ event: 'assistant-message', messageId, text: readReplyMarkdown(node) || readReplyText(node) })
+      if (isAssistantTurn(node)) {
+        const settled = readSettledReply(node, readReplyText(node))
+        report({ event: 'assistant-message', messageId, text: settled.markdown, ...(settled.fallback ? { fallback: true } : {}) })
+        if (settled.fallback) watchFallbackMarkdown(node, messageId, location.pathname)
+      }
       report({ event: 'task-finished', messageId, completed: false, live: true,
         taskPromptGeneration: state.taskPromptGeneration, pagePath: location.pathname })
     }
@@ -5114,6 +5142,56 @@
     return user && (user.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) ? { ...wait, messageId } : null
   }
 
+  let pendingFallbackMarkdown = null
+  let pendingFallbackMarkdownTimer = null
+  const clearFallbackMarkdown = () => {
+    if (pendingFallbackMarkdownTimer) clearTimeout(pendingFallbackMarkdownTimer)
+    pendingFallbackMarkdownTimer = null
+    pendingFallbackMarkdown = null
+  }
+  const scheduleFallbackMarkdown = () => {
+    if (!pendingFallbackMarkdown || pendingFallbackMarkdownTimer) return
+    pendingFallbackMarkdownTimer = setTimeout(() => {
+      pendingFallbackMarkdownTimer = null
+      flushFallbackMarkdown()
+    }, 1000)
+  }
+  const watchFallbackMarkdown = (node, messageId, path) => {
+    clearFallbackMarkdown()
+    pendingFallbackMarkdown = { node, messageId, path, expiresAt: Date.now() + 60_000 }
+    scheduleFallbackMarkdown()
+  }
+  const flushFallbackMarkdown = () => {
+    const item = pendingFallbackMarkdown
+    if (!item) return
+    if (location.pathname !== item.path || Date.now() > item.expiresAt) {
+      clearFallbackMarkdown()
+      return
+    }
+    let target = item.node?.isConnected ? item.node : null
+    if (!target && state.lastCommandMessageId === item.messageId && state.awaitingReplySince === 0) {
+      const candidate = latestReplyNode(queryAllAssistant())
+      if (candidate && isAssistantTurn(candidate)) target = candidate
+    }
+    if (!target || !isAssistantTurn(target) || replyIsGenerating(target)) {
+      scheduleFallbackMarkdown()
+      return
+    }
+    const recovered = readReplyMarkdown(target)
+    if (!recovered.trim() || looksLikeCommandReply(recovered) || looksLikeQuestionReply(recovered) ||
+      looksLikeComputerReply(recovered) || looksLikeDsmlToolCall(recovered)) {
+      scheduleFallbackMarkdown()
+      return
+    }
+    clearFallbackMarkdown()
+    report({ event: 'assistant-history-markdown', messageId: item.messageId, text: recovered })
+  }
+  const readSettledReply = (node, fallbackText) => {
+    const raw = readReplyMarkdown(node)
+    const fallback = !raw.trim()
+    return { markdown: fallback ? fallbackText : raw, fallback }
+  }
+
   /** Final prose and leaked analysis both settle without inspecting nested command examples. */
   const settleAssistantReply = (messageId, text) => {
     if (!text.trim() || state.awaitingReplySince === 0 || pendingAssistantCompletion?.messageId === messageId) return
@@ -5140,7 +5218,7 @@
         return
       }
       if (handleSafetyLeak(messageId, text, latest)) return
-      const markdown = readReplyMarkdown(latest) || text
+      const { markdown, fallback } = readSettledReply(latest, text)
       // Claude's plain-text read can flatten the thinking caption and the first
       // answer line. The settled Markdown preserves that boundary.
       const completed = /^(?:#{1,6}\s*)?(?:\*\*)?(?:【任务完成】|任务完成(?=$|[\s。！!：:]))/.test(text.trimStart()) ||
@@ -5156,7 +5234,10 @@
         resetTaskPrompt()
       }
       // A resend that gave up still ends the task, but its raw DSML never enters the transcript.
-      if (!dsmlInProse(text, latest)) report({ event: 'assistant-message', messageId, text: markdown })
+      if (!dsmlInProse(text, latest)) {
+        report({ event: 'assistant-message', messageId, text: markdown, ...(fallback ? { fallback: true } : {}) })
+        if (fallback) watchFallbackMarkdown(latest, messageId, completion.path)
+      }
       report({ event: 'task-finished', messageId, completed, live: true,
         taskPromptGeneration: completion.generation, pagePath: completion.path,
         ...completionSource, computerPageEpoch })
@@ -5178,6 +5259,7 @@
     lastReplyScanAt = Date.now()
     replyScanSnapshot = {}
     if (focusEditing || focusModeChanging || nativeEditRetry || safetyLeak.busy) return
+    flushFallbackMarkdown()
     // Confirm our submitted user turn before accepting a fast next assistant action.
     if (fileSend?.submitted) {
       fileSendStatus(fileSend.token)
@@ -5513,6 +5595,7 @@
   const armBaseline = () => {
     pendingCommandFailure = null
     failedCommandReply = null
+    clearFallbackMarkdown()
     if (focusModelCache) delete focusModelCache.firstSendGeneration
     setReplyWaiting(0, 'history-baseline')
     state.lastCommandMessageId = null
@@ -6674,8 +6757,9 @@
         // changes its composer still works without a descriptor update.
         const { composerKind: _kind, ...selectors } = config.page
         PAGE = { ...PAGE, computerUseRequests: false, conversationPathPattern: '', ignoreHiddenReplyNodes: false, assistantRoleSelectors: [], replyStreamingAttribute: '', messageIdAttrs: [], disabledControlSelectors: [], conversationLinkSelectors: [], continueButtonLabels: [], stoppedReplyLabels: [], focus: null, nativeEdit: null, answerCharts: null, fileTurnPositionAttr: '', fileTurnPositionSelector: '', fileAssistantSelectors: [], fileUserTurnSelector: '', fileUserTurnFallbackSelector: '', fileUserTurnKeyAttr: '', fileUserTurnIdAttr: '', fileImagesMayUseNames: false, fileDuplicateNameSuffix: false, fileSplitNameCards: false, fileAttachmentCardSelector: '', fileDraftCardSelector: '', fileDraftIgnoreSelector: '', fileDraftImageSelector: '', fileSentImageSelector: '', fileDraftNameReferenceAttribute: '', fileUploadProgressSelector: '', fileComposerRootSelector: '', fileUploadMenuSelectors: [], fileLocalUploadSelector: '', fileLocalUploadLabels: [],
-          assistantReplyAnnouncementPrefix: '', ...selectors }
+          assistantReplyAnnouncementPrefix: '', assistantThinkingPrefixPattern: '', assistantThinkingStatusPattern: '', ...selectors }
         assistantThinkingPrefix = selectors.assistantThinkingPrefixPattern ? new RegExp(selectors.assistantThinkingPrefixPattern) : null
+        assistantThinkingStatus = selectors.assistantThinkingStatusPattern ? new RegExp(selectors.assistantThinkingStatusPattern) : null
         observeReplyMutations()
       }
       // A freshly (re)loaded page has no message of ours outstanding, so nothing

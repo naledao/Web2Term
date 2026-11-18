@@ -67,6 +67,8 @@ export interface FocusSegment {
   parts: FocusPart[]
   answer: string
   settled: boolean
+  /** True when settled from plain-text fallback because readReplyMarkdown was temporarily empty. */
+  fallback?: boolean
 }
 export type FocusToolKind = 'read_tool_prompt' | 'scheduled_task' | 'send_email' | 'computer'
 export type FocusToolStatus = 'running' | 'done' | 'failed' | 'blocked' | 'cancelled' | 'unknown'
@@ -416,9 +418,10 @@ export function focusOwnerKey(owner: FocusOwner): string {
 
 /** Claude can append the toolbar timestamp alone or concatenate it with a promotion. */
 export function stripClaudeReplyFooter(text: string): string {
-  const footer = /\r?\n[ \t]*\r?\n(?:Claude works directly with your codebase\s*)?(?:just now|(?:about )?(?:\d+|an?) (?:seconds?|minutes?|hours?|days?|weeks?|months?|years?) ago)[ \t]*(?:\r?\n[ \t]*)*$/i.exec(text)
+  const footer = /(?:(?:\r?\n[ \t]*)+|[。！？][ \t]*)(?:Claude works directly with your codebase\s*)?(?:just now|(?:about )?(?:\d+|an?) (?:seconds?|minutes?|hours?|days?|weeks?|months?|years?) ago)[ \t]*(?:\r?\n[ \t]*)*$/i.exec(text)
   if (!footer) return text
-  const body = text.slice(0, footer.index)
+  const cut = /^[。！？]/.test(footer[0]) ? footer.index + 1 : footer.index
+  const body = text.slice(0, cut)
   if (!body.trim()) return text
   // A streaming code fence may still be open when the last line is captured.
   let fence = ''
@@ -431,15 +434,37 @@ export function stripClaudeReplyFooter(text: string): string {
 
 // Claude can serialize a one-line caption twice with an icon-font glyph in
 // between. Only treat a duplicate as UI text if both captions match exactly.
+/**
+ * Claude renders an inline Thinking status row (and an `.sr-only` "running" label)
+ * before collapsible thoughts or answer text mount, sometimes with no streaming
+ * flag yet. Filter both live status text and saved `Thinkingrunning` captures.
+ */
+export const CLAUDE_THINKING_STATUS =
+  /^(?:(?:[ \t]*\r?\n)* {0,3}Thinking(?:[ \t]*(?:\.{3}|…))?(?:[ \t]*running)?[ \t]*(?:\r?\n(?:[ \t]*\r?\n)*|$))+/
+
 export const CLAUDE_THINKING_PREFIX = new RegExp(
   /^(?! {4}|\t| {0,3}(?:[#>~\x60*_]|[-+][ \t]|\d+[.)][ \t]|【任务完成】)) {0,3}([^\s\uE000-\uF8FF][^\r\n\uE000-\uF8FF]{0,159}?)[ \t]*/.source +
-  String.raw`(?:[ \t\r\n]*[\uE000-\uF8FF][ \t\r\n]*\1[ \t]*)?` +
+  String.raw`(?:[ \t\r\n]*[\uE000-\uF8FF]+(?:[ \t\r\n]*\1)?[ \t]*)?` +
   /\r?\n(?:[ \t]*\r?\n)*(?=【任务完成】[ \t]*(?:\r?\n|$))/.source
 )
 
+/** Attaches Claude's shared thinking-caption and status patterns to an injected page config. */
+export function focusInterceptorPage<T extends object>(platformId: string, page: T): T & {
+  assistantThinkingPrefixPattern?: string
+  assistantThinkingStatusPattern?: string
+} {
+  return platformId === 'claude'
+    ? {
+        ...page,
+        assistantThinkingPrefixPattern: CLAUDE_THINKING_PREFIX.source,
+        assistantThinkingStatusPattern: CLAUDE_THINKING_STATUS.source
+      }
+    : page
+}
+
 export function focusReplyParts(text: string, platformId: string, parts: FocusPart[] = []): FocusPart[] {
   if (platformId !== 'claude' || parts.some(part => part.kind === 'reasoning')) return parts
-  const caption = CLAUDE_THINKING_PREFIX.exec(text)?.[1].trimEnd()
+  const caption = CLAUDE_THINKING_PREFIX.exec(text.replace(CLAUDE_THINKING_STATUS, ''))?.[1].trimEnd()
   return caption ? [{ kind: 'reasoning', text: caption }, ...parts] : parts
 }
 
@@ -449,6 +474,7 @@ export function cleanFocusAnswer(text: string, platformId?: string): string {
   const content = platformId === 'claude'
     ? stripClaudeReplyFooter(text)
       .replace(/^\s*#{1,6}[ \t]+Claude responded:[ \t]*【任务完成】[ \t]*(?:\r?\n|$)(?=\s*(?:【任务完成】|$))/, '')
+      .replace(CLAUDE_THINKING_STATUS, '')
       .replace(CLAUDE_THINKING_PREFIX, '')
     : text
   const answer = content.replace(/^\s*(?:#{1,6}[ \t]+)?(?:\*\*【任务完成】\*\*|__【任务完成】__|【任务完成】)\s*/, '')

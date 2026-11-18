@@ -47,6 +47,7 @@ function fixture() {
   }
   const exports = {}, dependencies = {
     electron: { WebContentsView: View, shell: { openExternal() { throw new Error('No external browser in this test') } } },
+    '../shared/focus-chat': { focusInterceptorPage: (_platformId, page) => page },
     '../shared/deepseek-question': { questionChatBounds: raw => raw },
     './question-chat-page': { questionPageCall() { throw new Error('No page execution in native-host tests') } },
     './question-chat-send': { async sendQuestionChatAttachment(_contents, _platform, _path, _prompt, _signal, current, beforeSubmit, sizePolicy, background) {

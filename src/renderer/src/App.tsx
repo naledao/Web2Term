@@ -416,12 +416,15 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     Object.fromEntries(ACCOUNT_PLATFORM_IDS.map(id => [id, [{ ...DEFAULT_PLATFORM_ACCOUNT }]])) as Record<AccountPlatformId, PlatformAccount[]>)
   useEffect(() => {
     let cancelled = false
+    const off = window.api.onPlatformAccountsChanged((targetPlatform, accounts) => {
+      if (!cancelled && accounts.length) setPlatformAccounts(current => ({ ...current, [targetPlatform]: accounts }))
+    })
     for (const id of ACCOUNT_PLATFORM_IDS) {
       void window.api.listPlatformAccounts(id).then(accounts => {
         if (!cancelled && accounts.length) setPlatformAccounts(current => ({ ...current, [id]: accounts }))
       }).catch(() => {})
     }
-    return () => { cancelled = true }
+    return () => { cancelled = true; off() }
   }, [])
   /*
    * The site this session is actually showing.
@@ -2032,6 +2035,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setPlatformAccounts(current => ({ ...current, [targetPlatform]: accounts }))
     }
   }, [focusOwner])
+  const setPlatformAccountQuota = useCallback(async (id: string, hasQuota: boolean) => {
+    if (!supportsPlatformAccounts(focusOwner.platformId)) return
+    const targetPlatform = focusOwner.platformId
+    const accounts = await window.api.setPlatformAccountQuota(targetPlatform, id, hasQuota)
+    setPlatformAccounts(current => ({ ...current, [targetPlatform]: accounts }))
+  }, [focusOwner.platformId])
   const focusNewChat = useCallback(() => window.api.sendEmbedCommand('home'), [])
   const focusQuestion = useCallback(() => setQuestionMinimized(false), [])
   const focusOriginal = useCallback(() => selectChatView('original'), [selectChatView])
@@ -2517,6 +2526,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               onAccountSelect={selectPlatformAccount}
               onAccountAdd={addPlatformAccount}
               onAccountRemove={removePlatformAccount}
+              onAccountSetQuota={setPlatformAccountQuota}
               newChatDisabled={taskRunning || embed.isLoading || switchingPlatform}
               onNewChat={focusNewChat}
               onQuestion={focusQuestion}

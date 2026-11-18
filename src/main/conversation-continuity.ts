@@ -24,6 +24,9 @@ interface Continuation {
   completedAt?: number
   beforeTokens?: number
   afterTokens?: number
+  kind?: 'compact' | 'account-handoff'
+  targetAccountId?: string
+  targetAccountLabel?: string
 }
 interface ContinuityStore {
   contextUsage?: { save(platformId: string, entry: ContextUsageEntry): void }
@@ -62,6 +65,9 @@ export class ConversationContinuity {
       if (parsed?.version === 1 && uuid(parsed.jobId) && parsed.source?.platformId === platformId &&
           typeof parsed.source.sessionId === 'string' && typeof parsed.source.conversationId === 'string' &&
           parsed.source.conversationId !== conversationId && typeof parsed.rootConversationId === 'string' &&
+          (parsed.kind === undefined || parsed.kind === 'compact' || parsed.kind === 'account-handoff') &&
+          (parsed.targetAccountId === undefined || typeof parsed.targetAccountId === 'string') &&
+          (parsed.targetAccountLabel === undefined || typeof parsed.targetAccountLabel === 'string') &&
           Array.isArray(parsed.hiddenMessageIds) && parsed.hiddenMessageIds.every(item => typeof item === 'string') &&
           Array.isArray(parsed.hiddenSourceIds) && parsed.hiddenSourceIds.every(item => typeof item === 'string')) value = parsed
     } catch { /* Broken display metadata cannot replace live conversation data. */ }
@@ -98,6 +104,10 @@ export class ConversationContinuity {
   owns(platformId: string, conversationId: string | null, jobId: string): boolean {
     return !!conversationId && this.read(platformId, conversationId)?.jobId === jobId
   }
+  ownsHandoff(platformId: string, handoffUrl: string | null, jobId: string): boolean {
+    const target = handoffUrl ? selectionQuestionConversation(platformId, handoffUrl) : null
+    return this.owns(platformId, target?.id ?? null, jobId)
+  }
   private seedText(text: string, metadata: Continuation): boolean {
     const lines = text.trim().split(/\r?\n/)
     const marker = '任务标识：' + compactionRequestMarker(metadata.jobId, true)
@@ -133,7 +143,7 @@ export class ConversationContinuity {
       turns: turns.filter(turn => !turn.supersededBy && !turn.archived && (!turn.userMessageId || !internalIds.has(turn.userMessageId))),
       executions: executions.filter(record => !record.archived).map(record => ({ ...record, output: '', outputDeferred: true })) }
   }
-  install(job: StoredCompaction, summary: string | undefined): void {
+  install(job: StoredCompaction, summary: string | undefined, options?: { targetAccountLabel?: string }): void {
     const owner = job.state.owner, target = job.handoffUrl && selectionQuestionConversation(owner.platformId, job.handoffUrl)
     if (!target || !owner.conversationId || owner.conversationId === target.id || !uuid(job.state.id)) throw new Error('会话承接来源无效。')
     const existing = this.read(owner.platformId, target.id)
@@ -168,6 +178,11 @@ export class ConversationContinuity {
       completedAt: job.state.updatedAt ?? job.state.createdAt,
       beforeTokens: job.budget?.beforeTokens,
       afterTokens: imported ? estimateContextText(compactionHandoffContext(job.state.id, imported, job.handoffAnswer ?? '')).estimatedTokens : undefined,
+      ...(job.state.targetAccountId ? {
+        kind: 'account-handoff',
+        targetAccountId: job.state.targetAccountId,
+        ...(options?.targetAccountLabel ? { targetAccountLabel: options.targetAccountLabel } : {})
+      } : {}),
       rootConversationId: this.read(owner.platformId, owner.conversationId)?.rootConversationId ?? owner.conversationId,
       hiddenMessageIds: rows.filter(row => row.sourceMessageId === userSource || row.sourceMessageId === answerSource).map(row => row.id),
       hiddenSourceIds: [userSource, answerSource, ...(job.handoffReplyId ? [job.handoffReplyId] : [])] }
@@ -199,7 +214,13 @@ export class ConversationContinuity {
         const lastSource = Math.max(0, ...snapshot.messages.map(message => message.createdAt), ...snapshot.turns.map(turn => turn.updatedAt))
         compactions.unshift({ id: 'compaction:' + metadata.jobId,
           createdAt: Math.max(Number.isFinite(metadata.completedAt) ? metadata.completedAt! : 0, lastSource + 1),
-          beforeTokens: metadata.beforeTokens, afterTokens: metadata.afterTokens })
+          beforeTokens: metadata.beforeTokens, afterTokens: metadata.afterTokens,
+          ...(metadata.kind ? { kind: metadata.kind } : {}),
+          ...(metadata.kind === 'account-handoff' ? {
+            sourceAccountId: metadata.source.accountId ?? metadata.source.claudeAccountId,
+            ...(metadata.targetAccountId ? { targetAccountId: metadata.targetAccountId } : {}),
+            ...(metadata.targetAccountLabel ? { targetAccountLabel: metadata.targetAccountLabel } : {})
+          } : {}) })
       } catch { break }
       current = metadata.source.conversationId
     }

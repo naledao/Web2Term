@@ -174,14 +174,14 @@ export class FocusChat {
     const turns = entry.turns.filter(turn => !turn.supersededBy)
     return turns.find(turn => turn.id === entry.current)?.id ?? turns.at(-1)?.id
   }
-  snapshot(platformId: string, token: string, page: FocusPageSnapshot): void {
-    if (token !== this.token(platformId)) return
+  snapshot(platformId: string, token: string, page: FocusPageSnapshot): string | undefined {
+    if (token !== this.token(platformId)) return undefined
     const current = this.current(platformId)
-    if (!current || !page.reply || current.turn.status === 'stopped') return
+    if (!current || !page.reply || current.turn.status === 'stopped') return undefined
     const { entry, turn } = current
     // An answer already owned by an earlier turn is history the page re-rendered, never this turn's reply.
     if (page.reply.sourceMessageId && entry.turns.some(other => other !== turn &&
-      other.segments.some(item => item.sourceMessageId === page.reply!.sourceMessageId))) return
+      other.segments.some(item => item.sourceMessageId === page.reply!.sourceMessageId))) return undefined
     const segment = this.segment(entry, turn)
     const parts = focusReplyParts(page.reply.answer, platformId, page.reply.parts)
     // A settled Markdown read is authoritative; a late streaming sample cannot replace it.
@@ -193,16 +193,33 @@ export class FocusChat {
         this.changed(entry, turn)
         this.persist(platformId, entry)
       }
-      return
+      // If settle had to fall back to plain text while readReplyMarkdown was temporarily empty,
+      // upgrade the settled answer once a complete non-streaming Markdown read succeeds.
+      if (segment.fallback && page.generating !== 'active') {
+        const upgraded = cleanFocusAnswer(page.reply.answer, platformId)
+        if (upgraded.trim() && (!segment.sourceMessageId || !page.reply.sourceMessageId ||
+          segment.sourceMessageId === page.reply.sourceMessageId || page.reply.sourceMessageId.startsWith('text:'))) {
+          segment.sourceMessageId ||= page.reply.sourceMessageId
+          segment.answer = upgraded
+          segment.parts = settledParts
+          delete segment.fallback
+          turn.updatedAt = Date.now()
+          this.changed(entry, turn)
+          this.persist(platformId, entry, true)
+          return segment.sourceMessageId ?? undefined
+        }
+      }
+      return undefined
     }
     const next = { sourceMessageId: page.reply.sourceMessageId, parts, answer: cleanFocusAnswer(page.reply.answer, platformId) }
-    if (JSON.stringify([segment.sourceMessageId, segment.parts, segment.answer]) === JSON.stringify([next.sourceMessageId, next.parts, next.answer])) return
+    if (JSON.stringify([segment.sourceMessageId, segment.parts, segment.answer]) === JSON.stringify([next.sourceMessageId, next.parts, next.answer])) return undefined
     Object.assign(segment, next)
     turn.updatedAt = Date.now()
     this.changed(entry, turn)
     this.persist(platformId, entry)
+    return undefined
   }
-  settled(platformId: string, messageId: string, text: string): void {
+  settled(platformId: string, messageId: string, text: string, options?: { fallback?: boolean }): void {
     const current = this.live(platformId)
     if (!current || current.turn.status === 'stopped') return
     const { entry, turn } = current
@@ -211,6 +228,8 @@ export class FocusChat {
     segment.parts = focusReplyParts(text, platformId, segment.parts)
     segment.answer = cleanFocusAnswer(text, platformId)
     segment.settled = true
+    if (options?.fallback) segment.fallback = true
+    else delete segment.fallback
     delete turn.notice
     delete turn.commandRecovery
     turn.status = 'answered'
@@ -231,8 +250,12 @@ export class FocusChat {
     let changed = false
     for (const turn of entry.turns) {
       for (const segment of turn.segments) {
-        if (segment.sourceMessageId !== messageId || !segment.settled || !segment.answer || segment.answer === answer) continue
+        if (segment.sourceMessageId !== messageId || !segment.settled || !segment.answer) continue
+        const parts = focusReplyParts(text, platformId, segment.parts)
+        if (segment.answer === answer && !segment.fallback && JSON.stringify(segment.parts) === JSON.stringify(parts)) continue
         segment.answer = answer
+        segment.parts = parts
+        delete segment.fallback
         this.changed(entry, turn)
         changed = true
       }

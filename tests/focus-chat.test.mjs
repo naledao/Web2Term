@@ -261,9 +261,13 @@ test('Claude toolbar timestamps are removed from the end of a captured reply', (
     const captured = body + '\n\n' + timestamp
     assert.equal(shared.cleanFocusAnswer(captured, 'claude'), body.slice('【任务完成】\n\n'.length))
     assert.ok(shared.cleanFocusAnswer(captured, 'chatgpt').endsWith(timestamp))
+    const listEnding = '- 改完后需要实际构建并部署验证一次。'
+    assert.equal(shared.cleanFocusAnswer(`${listEnding}\n${timestamp}`, 'claude'), listEnding)
+    assert.equal(shared.cleanFocusAnswer(`${listEnding}\n  ${timestamp}`, 'claude'), listEnding)
+    assert.equal(shared.cleanFocusAnswer(`改完后需要实际构建并部署验证一次。 ${timestamp}`, 'claude'), '改完后需要实际构建并部署验证一次。')
   }
-  for (const text of ['just now', '发生在 just now', '正文。\n\n> just now', '正文。\n\n`just now`',
-    '正文。\n\n````text\n```\n\njust now']) {
+  for (const text of ['just now', '发生在 just now', '正文。\n\n> just now', '正文。\n> just now', '正文。\n\n`just now`',
+    '正文。\n\n````text\n```\n\njust now', '正文。\n````text\njust now']) {
     assert.equal(shared.cleanFocusAnswer(text, 'claude'), text)
   }
 })
@@ -559,4 +563,70 @@ test('a file-only human turn persists attachment metadata without an internal re
   assert.deepEqual(clone(onlyTurn(chat).userAttachments), files)
   assert.deepEqual(rows.get(id).turn.userAttachments, files)
   assert.equal(chat.turns('deepseek', 'chat-1').length, 1)
+})
+
+test('Claude Thinking status indicators are stripped from focus answers without hiding normal prose', () => {
+  for (const status of ['Thinking', 'Thinking...', 'Thinking…', 'Thinkingrunning', 'Thinking running', '\n\n  Thinkingrunning\n\n']) {
+    assert.equal(shared.cleanFocusAnswer(status, 'claude'), '')
+    assert.equal(shared.focusReplyParts(status, 'claude').length, 0)
+  }
+  const withCompletion = 'Thinkingrunning\n\n【任务完成】\n\n建议保留 **现有架构**。'
+  assert.equal(shared.cleanFocusAnswer(withCompletion, 'claude'), '建议保留 **现有架构**。')
+  assert.equal(shared.focusReplyParts(withCompletion, 'claude').length, 0)
+
+  const withCaptionAndCompletion = 'Thinking\n\n比较数据库表与缓存方案\n\n【任务完成】\n\n建议使用数据库表。'
+  assert.equal(shared.cleanFocusAnswer(withCaptionAndCompletion, 'claude'), '建议使用数据库表。')
+  assert.deepEqual(clone(shared.focusReplyParts(withCaptionAndCompletion, 'claude')), [{ kind: 'reasoning', text: '比较数据库表与缓存方案' }])
+
+  assert.equal(shared.cleanFocusAnswer('Thinkingrunning\n\n这是当前项目的介绍。', 'claude'), '这是当前项目的介绍。')
+  assert.equal(shared.cleanFocusAnswer('Thinkingrunning', 'chatgpt'), 'Thinkingrunning')
+
+  for (const text of ['Thinking about the architecture first.', '> Thinkingrunning', '    Thinking', '```text\nThinking\n```', '第一段。\n\nThinking']) {
+    assert.equal(shared.cleanFocusAnswer(text, 'claude'), text)
+  }
+})
+
+test('Claude thinking captions ending with a single icon glyph strip cleanly without hiding non-completion prose', () => {
+  const raw = 'Checking how the search joins and sorts rows\uF003\n\n【任务完成】\n\n**优化点**：示例。'
+  assert.equal(shared.cleanFocusAnswer(raw, 'claude'), '**优化点**：示例。')
+  assert.deepEqual(clone(shared.focusReplyParts(raw, 'claude')), [{ kind: 'reasoning', text: 'Checking how the search joins and sorts rows' }])
+
+  const duplicated = 'Checking how the search joins and sorts rows\n\uF003\nChecking how the search joins and sorts rows\n\n【任务完成】\n\n正文。'
+  assert.equal(shared.cleanFocusAnswer(duplicated, 'claude'), '正文。')
+  assert.deepEqual(clone(shared.focusReplyParts(duplicated, 'claude')), [{ kind: 'reasoning', text: 'Checking how the search joins and sorts rows' }])
+
+  const normalProse = 'Checking how the search joins and sorts rows\uF003\n\n正文内容。'
+  assert.equal(shared.cleanFocusAnswer(normalProse, 'claude'), normalProse)
+  assert.equal(shared.focusReplyParts(normalProse, 'claude').length, 0)
+})
+
+test('fallback plain-text settle upgrades to formatted Markdown once snapshot or history refresh recovers it', () => {
+  const { chat, store } = fixture()
+  chat.begin('claude', 'chat-1', '分析搜索性能')
+  const token = chat.token('claude')
+  chat.settled('claude', 'text:plain:100', '【任务完成】\n\n纯文本正文。', { fallback: true })
+  assert.equal(onlyTurn(chat).segments[0].answer, '纯文本正文。')
+  assert.equal(onlyTurn(chat).segments[0].fallback, true)
+
+  const upgradedId = chat.snapshot('claude', token, page('text:markdown:108', '**优化点**：示例。\n\n- 第一条 `searchCategories`', [
+    { kind: 'reasoning', text: 'Checking how the search joins and sorts rows' }
+  ]))
+  assert.equal(upgradedId, 'text:plain:100', 'keeps the original sourceMessageId bound to stored history')
+  assert.equal(onlyTurn(chat).segments[0].sourceMessageId, 'text:plain:100')
+  assert.equal(onlyTurn(chat).segments[0].answer, '**优化点**：示例。\n\n- 第一条 `searchCategories`')
+  assert.equal(onlyTurn(chat).segments[0].fallback, undefined)
+  assert.equal(onlyTurn(chat).segments[0].parts[0].text, 'Checking how the search joins and sorts rows')
+
+  const second = chat.snapshot('claude', token, page('text:markdown:108', '不应覆盖已升级正文'))
+  assert.equal(second, undefined)
+  assert.equal(onlyTurn(chat).segments[0].answer, '**优化点**：示例。\n\n- 第一条 `searchCategories`')
+
+  const { chat: restartedChat, store: secondStore } = fixture()
+  restartedChat.begin('claude', 'chat-2', '再次检查')
+  restartedChat.settled('claude', 'text:msg:50', '【任务完成】\n\n普通文本', { fallback: true })
+  const reloaded = new FocusChat('workspace-1', secondStore)
+  reloaded.refreshAnswer('claude', 'chat-2', 'text:msg:50', '**恢复后的 Markdown**')
+  const reloadedTurn = reloaded.turns('claude', 'chat-2')[0]
+  assert.equal(reloadedTurn.segments[0].answer, '**恢复后的 Markdown**')
+  assert.equal(reloadedTurn.segments[0].fallback, undefined)
 })

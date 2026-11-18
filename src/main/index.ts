@@ -108,8 +108,9 @@ import type {
   DiagnosticLogsExportResult
 } from '../shared/types'
 import { embedAuthState, importCookieSet, importSessionToken, previewSessionImport } from './session-import'
-import { applyChatPartitionProxy, clearPlatformAccountPartition, listPlatformAccounts, newPlatformAccount, platformForAccount, removePlatformAccount } from './platform-accounts'
+import { applyChatPartitionProxy, clearPlatformAccountPartition, listPlatformAccounts, newPlatformAccount, platformForAccount, removePlatformAccount, setPlatformAccountQuota } from './platform-accounts'
 import { ACCOUNT_PLATFORMS, DEFAULT_PLATFORM_ACCOUNT_ID, isPlatformAccountId, supportsPlatformAccounts } from '../shared/platform-accounts'
+import type { AccountPlatformId } from '../shared/platform-accounts'
 import { ConversationStore } from './db'
 import { readStartupTheme } from './startup-theme'
 import { workspaceProjectDraft, workspaceSessionOptions } from './workspace-projects'
@@ -871,6 +872,11 @@ function broadcastWorkspaceProjects(): void {
   managerWindow.webContents.send(IpcChannels.workspaceProjectsChanged, store.listWorkspaceProjects())
 }
 
+function broadcastPlatformAccounts(platformId: AccountPlatformId): void {
+  if (!managerWindow || managerWindow.isDestroyed() || !store) return
+  managerWindow.webContents.send(IpcChannels.platformAccountsChanged, platformId, listPlatformAccounts(store, platformId))
+}
+
 function sshTransfers(): SshTransferTask[] {
   const items: SshTransferTask[] = []
   for (const runtime of runtimes.values()) {
@@ -1047,6 +1053,7 @@ function createSession(
   runtime = new SessionRuntime({
     onCompactionTarget: createCompactionTarget,
     onCompactionTargetOpen: id => { selectSession(id) },
+    onPlatformAccountsChanged: platformId => { broadcastPlatformAccounts(platformId) },
     qqMail: qqMail ?? undefined,
     scheduledTasks: scheduledTasks ?? undefined,
     windowsHelper,
@@ -1587,6 +1594,7 @@ function registerIpcHandlers(): void {
     if (!runtime || !supportsPlatformAccounts(owner.platformId)) throw new Error('请先打开支持多账号的专注视图。')
     const account = newPlatformAccount(label)
     await runtime.switchAccount(owner, account, true)
+    broadcastPlatformAccounts(owner.platformId)
     return account
   }))
   ipcMain.handle(IpcChannels.platformAccountSwitch, (event, owner: FocusOwner, accountId: unknown) => serializeAccountOperation(async () => {
@@ -1620,12 +1628,22 @@ function registerIpcHandlers(): void {
     for (const item of runtimes.values()) item.releaseAccount(platformId, accountId)
     try { await clearPlatformAccountPartition(platformId, accountId) }
     catch (error) { console.warn(`[${platformId}-accounts] failed to clear partition:`, error instanceof Error ? error.message : String(error)) }
+    broadcastPlatformAccounts(platformId)
     return remaining
   }))
-  ipcMain.handle(IpcChannels.compactionStart, (event, owner, generationPlatformId, generationAccountId) => {
+  ipcMain.handle(IpcChannels.platformAccountSetQuota, (event, platformId: unknown, accountId: unknown, hasQuota: unknown) => {
+    if (!fromManager(event) || event.senderFrame !== event.sender.mainFrame || !store ||
+        typeof platformId !== 'string' || !supportsPlatformAccounts(platformId) || typeof hasQuota !== 'boolean') {
+      throw new Error('账号额度操作无效。')
+    }
+    const updated = setPlatformAccountQuota(store, platformId, accountId, hasQuota)
+    broadcastPlatformAccounts(platformId)
+    return updated
+  })
+  ipcMain.handle(IpcChannels.compactionStart, (event, owner, generationPlatformId, generationAccountId, accountHandoff) => {
     const runtime = focusRuntime(event, owner)
     if (!runtime) throw new Error('当前会话已切换。')
-    return runtime.startCompaction(owner, generationPlatformId, generationAccountId)
+    return runtime.startCompaction(owner, generationPlatformId, generationAccountId, accountHandoff)
   })
   ipcMain.handle(IpcChannels.compactionAction, (event, request, action: CompactionAction) => {
     if (typeof request?.jobId !== 'string' || request.jobId.length > 128 ||

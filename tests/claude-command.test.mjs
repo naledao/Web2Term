@@ -904,3 +904,96 @@ test('idle pages produce no watchdog records and diagnostic failures leave the t
   assert.ok(heartbeats.every((event) => event.replySnapshotAvailable === false))
   assert.equal(app.commands().length, 1)
 })
+
+test('Claude Thinking-with-sr-only-running status neither settles early nor leaks into focus snapshots', () => {
+  const focusExports = {}
+  new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-chat.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText).runInNewContext({ exports: focusExports })
+  const claudePage = focusExports.focusInterceptorPage('claude', CLAUDE_PAGE)
+  const thinkingTurn = element('div', { 'data-testid': 'transcript-row', 'data-rs-index': '1' }, [
+    element('div', { 'data-testid': 'assistant-message' }, [
+      element('span', { class: 'sr-only', role: 'status', 'aria-live': 'polite' }, 'Claude is thinking'),
+      element('div', {}, [
+        element('span', {}, 'Thinking'),
+        element('span', { class: 'sr-only' }, 'running')
+      ])
+    ])
+  ])
+  const composer = element('div', { contenteditable: 'true' }, '')
+  const app = fixture([thinkingTurn, composer], claudePage)
+  app.controller.checkNow()
+  app.tick(250)
+  assert.equal(app.events.some((event) => event.event === 'assistant-message' || event.event === 'task-finished'), false)
+  assert.notEqual(app.controller.status().awaitingReplySince, 0)
+  assert.equal(app.controller.status().lastCommandMessageId, null)
+  assert.equal(app.controller.focusSnapshot().reply?.answer, '')
+
+  const commandTurn = element('div', { 'data-testid': 'transcript-row', 'data-rs-index': '1' }, [
+    codeReply('Get-Location')
+  ])
+  app.replaceNodes([commandTurn, composer])
+  app.scan()
+  assert.equal(app.commands().length, 1)
+  assert.equal(app.commands()[0].command, 'Get-Location')
+  assert.equal(app.commands()[0].live, true)
+
+  const answerTurn = element('div', { 'data-testid': 'transcript-row', 'data-rs-index': '2' }, [
+    element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'false' }, [
+      element('span', { class: 'sr-only', role: 'status', 'aria-live': 'polite' }, 'Claude responded: '),
+      element('div', {}, [
+        element('span', {}, 'Thinking'),
+        element('span', { class: 'sr-only' }, 'running')
+      ]),
+      element('p', {}, '这是当前项目的简要说明。')
+    ])
+  ])
+  const answerApp = fixture([commandTurn, answerTurn, composer], claudePage)
+  answerApp.controller.checkNow()
+  answerApp.tick(250)
+  const saved = answerApp.events.filter((event) => event.event === 'assistant-message')
+  assert.equal(saved.length, 1)
+  assert.equal(saved[0].text, '这是当前项目的简要说明。')
+  assert.equal(answerApp.controller.focusSnapshot().reply?.answer, '这是当前项目的简要说明。')
+})
+
+test('Claude fallback plain-text settle recognizes completion with single glyph and upgrades to Markdown once recovered', () => {
+  const focusExports = {}
+  new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-chat.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText).runInNewContext({ exports: focusExports })
+  const claudePage = focusExports.focusInterceptorPage('claude', CLAUDE_PAGE)
+  const wrapper = element('div', { 'aria-hidden': 'true' }, [
+    element('button', { type: 'button' }, ['Checking how the search joins and sorts rows', '\uF003']),
+    '\n\n',
+    element('p', {}, '【任务完成】'),
+    '\n\n',
+    element('p', {}, [element('strong', {}, '优化点：'), '全表扫描。']),
+    '\n\n',
+    element('ul', {}, [element('li', {}, [element('code', {}, 'searchCategories'), ' 使用前缀通配符。'])])
+  ])
+  const reply = element('div', { 'data-testid': 'assistant-message', 'data-is-streaming': 'false' }, [
+    element('span', { class: 'sr-only', role: 'status', 'aria-live': 'polite' }, 'Claude responded: '),
+    wrapper
+  ])
+  const app = fixture([reply], claudePage)
+  app.controller.checkNow()
+  app.tick(250)
+  const message = app.events.find((event) => event.event === 'assistant-message')
+  const finished = app.events.find((event) => event.event === 'task-finished')
+  assert.equal(finished?.completed, true)
+  assert.equal(message?.fallback, true)
+  assert.ok(message?.text.startsWith('【任务完成】'))
+
+  delete wrapper.attributes['aria-hidden']
+  app.tick(1000)
+  const refreshes = app.events.filter((event) => event.event === 'assistant-history-markdown')
+  assert.equal(refreshes.length, 1)
+  assert.equal(refreshes[0].messageId, message.messageId)
+  assert.ok(refreshes[0].text.includes('**优化点：**'))
+  assert.ok(refreshes[0].text.includes('- `searchCategories` 使用前缀通配符。'))
+  assert.equal(refreshes[0].text.includes('Checking how the search joins and sorts rows'), false)
+
+  app.tick(1000)
+  assert.equal(app.events.filter((event) => event.event === 'assistant-history-markdown').length, 1)
+})

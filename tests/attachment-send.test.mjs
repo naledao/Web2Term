@@ -561,6 +561,34 @@ test('Claude identifies prose and code-only answers and confirms the file and qu
   }
 })
 
+test('Claude file sends from /new follow the created /chat/<uuid> conversation route', () => {
+  const file = { fileName: 'source.md', mimeType: 'text/markdown', sizeBytes: 1024 }
+  const app = fixture([file], {
+    ...platformExports.CLAUDE_PAGE, sendButtonSelectors: ['button[aria-label="发送"]']
+  })
+  app.navigate('/new')
+  app.cards.replaceChildren(element('div', { 'data-testid': 'file-thumbnail' }, file.fileName))
+  assert.equal(app.status().status, 'ready')
+  const caption = '请读取 source.md 并整理任务交接摘要。'
+  assert.equal(app.controller.prepareFileSendCaption(token, caption), true)
+  app.send.onClick = () => {
+    app.navigate('/chat/fa4e73a6-92b9-4b7b-832c-2de7b09e48bd')
+    app.composer.replaceChildren()
+    app.cards.replaceChildren()
+    app.body.replaceChildren(
+      element('div', { 'data-testid': 'transcript-row', 'data-rs-index': '0' }, [
+        element('div', { class: 'group/message-row ms-auto' }, [
+          element('div', { 'data-testid': 'file-thumbnail' }, file.fileName),
+          element('div', { 'data-testid': 'user-message' }, caption)
+        ])
+      ]),
+      app.root
+    )
+  }
+  assert.equal(app.submit(), true)
+  assert.equal(app.status().status, 'sent')
+})
+
 test('DeepSeek hidden remote decorations do not block Markdown upload or sent confirmation', () => {
   for (const mode of ['no-layout', 'zero-area', 'aria-hidden']) {
     const files = [{ fileName: 'deepseek-context.md', mimeType: 'text/markdown', sizeBytes: 1582 }]

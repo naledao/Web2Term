@@ -3,9 +3,9 @@ import { join } from 'node:path'
 import { ConversationCompaction, compactionStorageKey, savedCompactionUsesAccount } from './conversation-compaction'
 import type { StoredCompaction } from './conversation-compaction'
 import { CompactionPage } from './compaction-page'
-import { applyChatPartitionProxy, listPlatformAccounts, platformConversationLocation, platformForAccount, restorePlatformWorkspace, savePlatformAccount } from './platform-accounts'
+import { applyChatPartitionProxy, listPlatformAccounts, platformConversationLocation, platformForAccount, restorePlatformWorkspace, savePlatformAccount, setPlatformAccountQuota } from './platform-accounts'
 import { blockGeminiWebNotifications } from './embed-permissions'
-import { ACCOUNT_PLATFORMS, ACCOUNT_PLATFORM_IDS, DEFAULT_PLATFORM_ACCOUNT_ID, isPlatformAccountId, supportsPlatformAccounts } from '../shared/platform-accounts'
+import { ACCOUNT_PLATFORMS, ACCOUNT_PLATFORM_IDS, DEFAULT_PLATFORM_ACCOUNT_ID, isPlatformAccountId, nextAvailablePlatformAccount, supportsPlatformAccounts } from '../shared/platform-accounts'
 import type { AccountPlatformId, PlatformAccount } from '../shared/platform-accounts'
 import { ConversationContinuity } from './conversation-continuity'
 import type { CompactionAction, CompactionRequest, CompactionState } from '../shared/conversation-compaction'
@@ -255,6 +255,7 @@ function defaultTerminalSendDelaySeconds(platformId: string): number {
 export interface SessionRuntimeOptions {
   onCompactionTarget?: (job: StoredCompaction, summary: string) => string
   onCompactionTargetOpen?: (id: string) => void
+  onPlatformAccountsChanged?: (platformId: AccountPlatformId) => void
   qqMail?: QqMailService
   scheduledTasks?: ScheduledTasks
   windowsHelper?: WindowsHelperManager
@@ -1236,10 +1237,10 @@ export class SessionRuntime {
           JSON.stringify([this.id, platform.id, call.conversationId, call.sourceSubmissionId, call.messageId]))
       },
       onToolPromptRead: call => { if (isActive()) this.toolPromptReads.receive(call) },
-      onAssistantMessage: (messageId, text) => {
+      onAssistantMessage: (messageId, text, fallback) => {
         if (!isCurrent()) return
         this.captureConversationMessage(platform.id, 'assistant', text, messageId)
-        this.focusChat.settled(platform.id, messageId, text)
+        this.focusChat.settled(platform.id, messageId, text, fallback ? { fallback: true } : undefined)
         this.noteAutonomousReply(platform.id, messageId, 'response')
       },
       onAssistantHistoryMarkdown: (messageId, text) => {
@@ -1659,7 +1660,8 @@ export class SessionRuntime {
     platformId: AccountPlatformId,
     accountId: string,
     activeOnPlatform: boolean,
-    previousEmbed: ChatGptEmbed | null | undefined
+    previousEmbed: ChatGptEmbed | null | undefined,
+    pendingCompaction: { conversationId: string; url: string } | null = null
   ): void {
     if (activeOnPlatform) this.compaction?.hide()
     this.focusChat.resetContext(platformId)
@@ -1674,7 +1676,7 @@ export class SessionRuntime {
     if (this.window) previousEmbed?.destroy(this.window)
     if (activeOnPlatform) {
       this.taskEnded = false
-      this.pendingCompaction = null
+      this.pendingCompaction = pendingCompaction
       this.remoteRipgrepSend?.controller.abort()
       this.focusUiRecoveredTurn = null
       this.focusFileRequest = null
@@ -1873,8 +1875,9 @@ export class SessionRuntime {
       conversationId: state.conversationId,
       platformId: this.activeEmbed().platform.id,
       taskRunning: this.taskRunning(),
-      compacting: [...this.compactions.values()].some(task => task.inProgress && !task.isExport),
-      generatingHandoff: [...this.compactions.values()].some(task => task.inProgress && task.isExport),
+      compacting: [...this.compactions.values()].some(task => task.inProgress && !task.isExport && !task.isAccountHandoff),
+      generatingHandoff: [...this.compactions.values()].some(task => task.inProgress && task.isExport && !task.isAccountHandoff),
+      handingOffAccount: [...this.compactions.values()].some(task => task.inProgress && task.isAccountHandoff),
       createdAt: this.createdAt
     }
   }
@@ -1964,11 +1967,41 @@ export class SessionRuntime {
   }
   adoptCompaction(job: StoredCompaction, summary: string): string {
     const owner = job.state.owner, target = job.handoffUrl && selectionQuestionConversation(owner.platformId, job.handoffUrl)
+    const targetAccountId = job.state.targetAccountId
     const entry = this.activeEmbed()
-    if (this.disposed || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId || !target ||
-        focusOwnerAccountId(owner) !== this.accountScope(owner.platformId) ||
-        entry.conversationId !== owner.conversationId && entry.conversationId !== target.id) throw new Error('来源会话已变化，暂未切换压缩上下文。')
+    if (this.disposed || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId || !target) {
+      throw new Error('来源会话已变化，暂未切换压缩上下文。')
+    }
+    if (targetAccountId) {
+      if (!supportsPlatformAccounts(owner.platformId)) throw new Error('来源会话已变化，暂未切换压缩上下文。')
+      if (this.accountIdFor(owner.platformId) === targetAccountId && entry.conversationId === target.id) return this.id
+      if (focusOwnerAccountId(owner) !== this.accountScope(owner.platformId) || entry.conversationId !== owner.conversationId) {
+        throw new Error('来源会话已变化，暂未切换压缩上下文。')
+      }
+    } else if (focusOwnerAccountId(owner) !== this.accountScope(owner.platformId) ||
+        entry.conversationId !== owner.conversationId && entry.conversationId !== target.id) {
+      throw new Error('来源会话已变化，暂未切换压缩上下文。')
+    }
     if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork()) throw new Error('请等待当前操作结束后继续承接压缩上下文。')
+    if (targetAccountId) {
+      const platformId = owner.platformId as AccountPlatformId
+      const targetAccount = listPlatformAccounts(this.options.store, platformId).find(item => item.id === targetAccountId)
+      if (!targetAccount) throw new Error('目标账号已不存在，请取消后重新交接。')
+      this.options.store.upsert({ id: target.id, url: job.handoffUrl!, title: this.customTitle || job.seed.session.title })
+      this.continuity.install(job, summary, { targetAccountLabel: targetAccount.label })
+      this.conversationTools.update(owner.platformId, target.id, job.seed.preferences)
+      const sourceAccountId = focusOwnerAccountId(owner) ?? DEFAULT_PLATFORM_ACCOUNT_ID
+      try {
+        setPlatformAccountQuota(this.options.store, platformId, sourceAccountId, false)
+        this.options.onPlatformAccountsChanged?.(platformId)
+      } catch { /* Source account may have been removed concurrently. */ }
+      this.interruptTaskControl(owner.platformId)
+      this.focusChat.flush(owner.platformId)
+      this.customTitle = this.customTitle || job.seed.session.title
+      this.accountLocations(platformId).set(targetAccountId, job.handoffUrl!)
+      this.activateAccount(platformId, targetAccountId, true, entry.embed, { conversationId: target.id, url: job.handoffUrl! })
+      return this.id
+    }
     this.options.store.upsert({ id: target.id, url: job.handoffUrl!, title: this.customTitle || job.seed.session.title })
     this.continuity.install(job, summary)
     this.conversationTools.update(owner.platformId, target.id, job.seed.preferences)
@@ -2020,7 +2053,9 @@ export class SessionRuntime {
         return this.options.onCompactionTarget(job, summary)
       },
       onStateChanged: () => this.options.onSummaryChanged(),
-      isAdopted: job => this.continuity.owns(job.state.owner.platformId, this.activeEmbed().conversationId, job.state.id)
+      isAdopted: job => job.state.targetAccountId
+        ? this.continuity.ownsHandoff(job.state.owner.platformId, job.handoffUrl, job.state.id)
+        : this.continuity.owns(job.state.owner.platformId, this.activeEmbed().conversationId, job.state.id)
     })
     this.compactions.set(scope, service)
     return service
@@ -2028,10 +2063,24 @@ export class SessionRuntime {
   getCompaction(owner: FocusOwner): CompactionState | null {
     return this.ownsFocus(owner) ? this.compactionService().state(owner) : null
   }
-  async startCompaction(owner: FocusOwner, generationPlatformId?: unknown, generationAccountId?: unknown): Promise<CompactionState> {
+  async startCompaction(owner: FocusOwner, generationPlatformId?: unknown, generationAccountId?: unknown, accountHandoff?: unknown): Promise<CompactionState> {
+    if (accountHandoff !== undefined && typeof accountHandoff !== 'boolean') throw new Error('会话任务参数无效。')
+    const handoff = accountHandoff === true
+    if (handoff && (generationPlatformId !== undefined || generationAccountId !== undefined)) {
+      throw new Error('跨账号交接不支持另选生成平台。')
+    }
     if (generationPlatformId !== undefined &&
         (typeof generationPlatformId !== 'string' || !supportsCompaction(generationPlatformId))) throw new Error('请选择有效的生成平台。')
     if (!this.active || !this.ownsFocus(owner) || !owner.conversationId) throw new Error('请先打开已有会话。')
+    let targetAccountId: string | undefined
+    if (handoff) {
+      if (!supportsPlatformAccounts(owner.platformId)) throw new Error('当前平台不支持多账号交接。')
+      const nextAccount = nextAvailablePlatformAccount(listPlatformAccounts(this.options.store, owner.platformId), this.accountIdFor(owner.platformId))
+      if (!nextAccount) {
+        throw new Error(`当前 ${ACCOUNT_PLATFORMS[owner.platformId].label} 没有其他有额度的账号，请先在账号管理中添加账号或标记可用额度。`)
+      }
+      targetAccountId = nextAccount.id
+    }
     if (generationAccountId !== undefined && (!generationPlatformId || !supportsPlatformAccounts(generationPlatformId) ||
         !isPlatformAccountId(generationAccountId) ||
         !listPlatformAccounts(this.options.store, generationPlatformId).some(account => account.id === generationAccountId))) {
@@ -2051,11 +2100,11 @@ export class SessionRuntime {
       const page = await this.embed.readFocusSnapshot()
       if (!this.ownsFocus(owner)) throw new Error('当前会话已切换。')
       const lastTurnWorking = this.focusChat.turns(owner.platformId, owner.conversationId!).at(-1)?.status === 'working'
-      if (exporting) {
+      if (exporting || handoff) {
         // A quota error can replace the source composer. The export reads the
         // saved transcript and uses the selected platform's independent page.
         if (page?.generating === 'active' || (!page?.sendFailure && (page?.waiting || lastTurnWorking))) {
-          throw new Error('请等待当前回答结束后再生成交接文档。')
+          throw new Error(handoff ? '请等待当前回答结束后再交给下一个号工作。' : '请等待当前回答结束后再生成交接文档。')
         }
       } else if (!page?.ready || page.generating !== 'idle' || page.waiting || page.sendFailure || page.nativeDraft || lastTurnWorking) {
         throw new Error('请等待当前回答结束，并处理原网页草稿或发送失败后再压缩。')
@@ -2079,7 +2128,7 @@ export class SessionRuntime {
         view: exporting ? undefined : this.continuity.capture(owner, source.messages, source.turns, source.executions, hidden),
         seed: { session: { ...this.persistentState(), title: this.summary().title }, preferences: this.conversationTools.read(owner.platformId, conversationId),
           ...(this.web2term ? { binding: this.web2term.persistentBinding() } : {}) } }
-    }, generationPlatformId, accountId)
+    }, generationPlatformId, accountId, targetAccountId)
   }
   async compactionAction(request: CompactionRequest, action: CompactionAction): Promise<void> {
     const service = this.compactionService(), state = service.state(request)
@@ -2201,7 +2250,10 @@ export class SessionRuntime {
     const token = this.focusChat.token(owner.platformId)
     const page = await this.embed.readFocusSnapshot()
     if (!this.ownsFocus(owner)) return null
-    if (page) this.focusChat.snapshot(owner.platformId, token, page)
+    const upgradedMessageId = page ? this.focusChat.snapshot(owner.platformId, token, page) : undefined
+    if (upgradedMessageId && owner.conversationId && page?.reply?.answer) {
+      this.options.store.refreshAssistantMessageMarkdown(owner.conversationId, upgradedMessageId, page.reply.answer)
+    }
     const recovered = this.focusUiRecoveredTurn
     if (recovered && recovered.platformId === owner.platformId && recovered.conversationId === owner.conversationId &&
       recovered.turnId === this.focusChat.currentTurnId(owner.platformId) && page?.ready && page.generating === 'idle' && page.reply?.sourceMessageId) {

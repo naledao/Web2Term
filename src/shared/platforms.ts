@@ -1056,6 +1056,7 @@ export const DEEPSEEK_PLATFORM: ChatPlatform = {
  *     controls there must tolerate duplicates rather than assume one of each.
  */
 export const CLAUDE_PAGE: PageAdapter = {
+  conversationPathPattern: `^/chat/${CONVERSATION_ID_PATTERN}/?$`,
   composerKind: 'contenteditable',
   /*
    * The test id first, then the two structural restatements of the same element. It is TipTap

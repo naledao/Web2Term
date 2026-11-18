@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Dialog } from '@base-ui/react/dialog'
-import { ACCOUNT_PLATFORMS, DEFAULT_PLATFORM_ACCOUNT_ID } from '@shared/platform-accounts'
+import { ACCOUNT_PLATFORMS, accountHasQuota, DEFAULT_PLATFORM_ACCOUNT_ID } from '@shared/platform-accounts'
 import type { AccountPlatformId, PlatformAccount } from '@shared/platform-accounts'
 
 interface Props {
@@ -12,9 +12,10 @@ interface Props {
   onSelect(id: string): Promise<void>
   onAdd(label: string): Promise<void>
   onRemove(id: string): Promise<void>
+  onSetQuota(id: string, hasQuota: boolean): Promise<void>
 }
 
-export default function PlatformAccountPicker({ platformId, accounts, accountId, disabled, container, onSelect, onAdd, onRemove }: Props) {
+export default function PlatformAccountPicker({ platformId, accounts, accountId, disabled, container, onSelect, onAdd, onRemove, onSetQuota }: Props) {
   const { label: platformLabel, sampleLabel } = ACCOUNT_PLATFORMS[platformId]
   const [open, setOpen] = useState(false)
   const [label, setLabel] = useState('')
@@ -22,6 +23,7 @@ export default function PlatformAccountPicker({ platformId, accounts, accountId,
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const current = accounts.find(account => account.id === accountId)
+  const currentExhausted = current ? !accountHasQuota(current) : false
   const confirmAccount = accounts.find(account => account.id === confirmDeleteId && account.id !== DEFAULT_PLATFORM_ACCOUNT_ID) ?? null
   const updateOpen = (next: boolean): void => {
     if (pending) return
@@ -45,21 +47,24 @@ export default function PlatformAccountPicker({ platformId, accounts, accountId,
 
   return (
     <Dialog.Root open={open} onOpenChange={updateOpen}>
-      <Dialog.Trigger className="focus-chat__account" disabled={disabled || pending}
-        aria-label={`切换 ${platformLabel} 账号，当前为${current?.label ?? platformLabel}`}
-        title={disabled ? `当前操作结束后可切换 ${platformLabel} 账号` : `切换 ${platformLabel} 账号`}>
-        <span>{current?.label ?? `${platformLabel} 账号`}</span><span aria-hidden="true">▾</span>
+      <Dialog.Trigger className={'focus-chat__account' + (currentExhausted ? ' is-exhausted' : '')} disabled={disabled || pending}
+        aria-label={`切换 ${platformLabel} 账号，当前为${current?.label ?? platformLabel}${currentExhausted ? '（无额度）' : ''}`}
+        title={disabled ? `当前操作结束后可切换 ${platformLabel} 账号` : `管理或切换 ${platformLabel} 账号`}>
+        <span>{current?.label ?? `${platformLabel} 账号`}</span>
+        {currentExhausted ? <span className="focus-chat__account-badge is-exhausted">无额度</span> : null}
+        <span aria-hidden="true">▾</span>
       </Dialog.Trigger>
       <Dialog.Portal container={container}>
         <Dialog.Popup className="modal" onMouseDown={event => {
           if (!pending && event.target === event.currentTarget && event.button === 0) updateOpen(false)
         }}>
           <div className="modal__box focus-compaction__picker">
-            <Dialog.Title className="modal__head">切换 {platformLabel} 账号</Dialog.Title>
+            <Dialog.Title className="modal__head">{platformLabel} 账号管理</Dialog.Title>
             <div className="modal__body focus-chat__accounts">
               <ul>
                 {accounts.map(account => {
                   const isCurrent = account.id === accountId
+                  const hasQuota = accountHasQuota(account)
                   const removable = account.id !== DEFAULT_PLATFORM_ACCOUNT_ID
                   const confirming = confirmAccount?.id === account.id
                   return (
@@ -67,7 +72,15 @@ export default function PlatformAccountPicker({ platformId, accounts, accountId,
                       <button type="button" className="focus-chat__account-select" aria-current={isCurrent ? 'true' : undefined}
                         disabled={disabled || pending || isCurrent}
                         onClick={() => void run(() => onSelect(account.id), { close: true, clearLabel: true })}>
-                        <span>{account.label}</span>{isCurrent ? <span>当前账号</span> : null}
+                        <span>{account.label}</span>
+                        {isCurrent ? <span className="focus-chat__account-current">当前账号</span> : null}
+                      </button>
+                      <button type="button" className={'focus-chat__account-quota-btn' + (hasQuota ? ' is-available' : ' is-exhausted')}
+                        aria-pressed={hasQuota} disabled={pending}
+                        title={hasQuota ? `点击将「${account.label}」标为无额度` : `点击将「${account.label}」标为有额度`}
+                        aria-label={hasQuota ? `将账号 ${account.label} 标为无额度` : `将账号 ${account.label} 标为有额度`}
+                        onClick={() => void run(() => onSetQuota(account.id, !hasQuota))}>
+                        {hasQuota ? '有额度' : '无额度'}
                       </button>
                       {removable ? (
                         <button type="button" className="focus-chat__account-delete"

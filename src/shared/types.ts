@@ -250,6 +250,8 @@ export const IpcChannels = {
   platformAccountAdd: 'platform-accounts:add',
   platformAccountSwitch: 'platform-accounts:switch',
   platformAccountRemove: 'platform-accounts:remove',
+  platformAccountSetQuota: 'platform-accounts:set-quota',
+  platformAccountsChanged: 'platform-accounts:changed',
   sessionShowModelMenu: 'session:show-model-menu',
   workspaceGetState: 'workspace:get-state',
   workspaceShowManager: 'workspace:show-manager',
@@ -344,6 +346,8 @@ export interface ManagedSessionSummary {
   /** A compaction is running or waiting to adopt its prepared context, including in the background. */
   compacting?: boolean
   generatingHandoff?: boolean
+  /** An account handoff is running to prepare and switch to the next account. */
+  handingOffAccount?: boolean
   /** Number of completed tasks not yet viewed in this session. */
   unseenCompletedCount?: number
   createdAt: number
@@ -1410,6 +1414,8 @@ export interface InterceptorPageEvent {
   /** Outcome of Gemini's single continuation attempt. */
   geminiRefusalOutcome?: string
   text?: string
+  /** True when assistant-message fell back to plain text because readReplyMarkdown returned empty. */
+  fallback?: boolean
   /** Token for a page-side batch of user image attachments, on user-message. */
   attachmentToken?: string
   focusFiles?: FocusAttachmentInfo[]
@@ -2424,7 +2430,9 @@ export interface AppApi {
   addPlatformAccount(owner: FocusOwner, label: string): Promise<PlatformAccount>
   switchPlatformAccount(owner: FocusOwner, accountId: string): Promise<void>
   removePlatformAccount(owner: FocusOwner, accountId: string): Promise<PlatformAccount[]>
-  startCompaction(owner: FocusOwner, generationPlatformId?: SelectionQuestionPlatform, generationAccountId?: string): Promise<CompactionState>
+  setPlatformAccountQuota(platformId: AccountPlatformId, accountId: string, hasQuota: boolean): Promise<PlatformAccount[]>
+  onPlatformAccountsChanged(listener: (platformId: AccountPlatformId, accounts: PlatformAccount[]) => void): () => void
+  startCompaction(owner: FocusOwner, generationPlatformId?: SelectionQuestionPlatform, generationAccountId?: string, accountHandoff?: boolean): Promise<CompactionState>
   compactionAction(request: CompactionRequest, action: CompactionAction): Promise<void>
   setCompactionViewport(request: CompactionRequest, bounds: EmbedBounds, visible: boolean): void
   pollFocusChat(owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null>

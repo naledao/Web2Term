@@ -20,6 +20,10 @@ export interface CompactionBoundary {
   createdAt: number
   beforeTokens?: number
   afterTokens?: number
+  kind?: 'compact' | 'account-handoff'
+  sourceAccountId?: string
+  targetAccountId?: string
+  targetAccountLabel?: string
 }
 export interface CompactionState {
   id: string
@@ -28,6 +32,8 @@ export interface CompactionState {
   generationPlatformId?: SelectionQuestionPlatform
   /** Persisted separately from the source account so a retry uses the same login. */
   generationAccountId?: string
+  /** Set for a cross-account handoff on the same platform; switches here once C confirms. */
+  targetAccountId?: string
   phase: CompactionPhase
   message: string
   createdAt: number

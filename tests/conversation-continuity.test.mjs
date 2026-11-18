@@ -186,23 +186,68 @@ test('legacy target sessions recover trusted lineage; unrelated chats and platfo
   assert.throws(() => legacy.install(job(physicalE, physicalC, jobTwo), '# 冲突来源'), /已有其他来源/)
 })
 
+test('account-handoff continuity retains source and target account metadata across reloads', () => {
+  const f = fixture()
+  const sourceAccountId = '11111111-1111-4111-8111-111111111111'
+  const targetAccountId = '22222222-2222-4222-8222-222222222222'
+  const handoffJob = job(physicalA, physicalC, jobOne, 'chatgpt')
+  handoffJob.state.owner = { ...owner(physicalA, 'chatgpt'), accountId: sourceAccountId }
+  handoffJob.state.targetAccountId = targetAccountId
+  f.continuity.install(handoffJob, '# 交接摘要', { targetAccountLabel: '备用账号' })
+
+  const restored = new ConversationContinuity('workspace', f.store)
+  assert.equal(restored.ownsHandoff('chatgpt', handoffJob.handoffUrl, jobOne), true)
+  const boundary = restored.history('chatgpt', physicalC).compactions[0]
+  assert.equal(boundary.kind, 'account-handoff')
+  assert.equal(boundary.sourceAccountId, sourceAccountId)
+  assert.equal(boundary.targetAccountId, targetAccountId)
+  assert.equal(boundary.targetAccountLabel, '备用账号')
+})
+
 // Exercise actual SessionRuntime adoption/output methods without constructing Electron.
+const { focusOwnerAccountId } = load('src/shared/focus-chat.ts')
+const { DEFAULT_PLATFORM_ACCOUNT_ID, supportsPlatformAccounts } = load('src/shared/platform-accounts.ts')
 const runtimePath = resolve(root, 'src/main/session-runtime.ts'), runtimeText = readFileSync(runtimePath, 'utf8')
 const ast = ts.createSourceFile(runtimePath, runtimeText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 const runtimeClass = ast.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'SessionRuntime')
 function runtimeFixture() {
   const f = fixture(), calls = [], entry = { conversationId: physicalA, url: 'https://chatgpt.com/c/' + physicalA }
+  const locations = new Map(), accounts = [
+    { id: DEFAULT_PLATFORM_ACCOUNT_ID, label: '默认账号', hasQuota: true },
+    { id: '22222222-2222-4222-8222-222222222222', label: '备用账号', hasQuota: true }
+  ]
+  let currentAccountId = DEFAULT_PLATFORM_ACCOUNT_ID
   const exports = {}, names = ['adoptCompaction', 'readFocusExecutionOutput', 'getEmbedState']
   const methods = runtimeClass.members.filter(node => names.includes(node.name?.getText(ast)))
   new Script(ts.transpileModule('class Runtime {' + methods.map(node => node.getText(ast)).join('\n') + '} exports.Runtime = Runtime', {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
-  }).outputText).runInNewContext({ exports, selectionQuestionConversation, IpcChannels: { embedState: 'state' } })
+  }).outputText).runInNewContext({
+    exports, selectionQuestionConversation, IpcChannels: { embedState: 'state' },
+    focusOwnerAccountId, supportsPlatformAccounts, DEFAULT_PLATFORM_ACCOUNT_ID,
+    listPlatformAccounts: () => accounts.map(item => ({ ...item })),
+    setPlatformAccountQuota: (_store, _platformId, id, hasQuota) => {
+      const found = accounts.find(item => item.id === id)
+      if (found) found.hasQuota = hasQuota
+      return accounts.map(item => ({ ...item }))
+    }
+  })
   let actual = physicalA
   const runtime = new exports.Runtime()
   Object.assign(runtime, { id: 'workspace', disposed: false, activePlatformId: 'chatgpt', customTitle: '原来的标题',
     continuity: f.continuity, activeEmbed: () => entry, runner: { hasInFlightWork: () => false },
+    accountScope: () => currentAccountId === DEFAULT_PLATFORM_ACCOUNT_ID ? undefined : currentAccountId,
+    accountIdFor: () => currentAccountId,
+    accountLocations: () => locations,
+    activateAccount: (_platformId, accountId, _active, _prev, pending) => {
+      currentAccountId = accountId
+      entry.conversationId = pending?.conversationId ?? null
+      entry.url = pending?.url ?? ''
+      calls.push(['activate', accountId, pending?.conversationId, pending?.url])
+    },
     options: { store: { ...f.store, upsert: row => calls.push(['upsert', row.id]),
-      getExecution: id => [...f.executions.values()].flat().find(row => row.messageId === id) }, onSummaryChanged: () => calls.push(['persist', entry.conversationId]) },
+      getExecution: id => [...f.executions.values()].flat().find(row => row.messageId === id) },
+      onSummaryChanged: () => calls.push(['persist', entry.conversationId]),
+      onPlatformAccountsChanged: platformId => calls.push(['accountsChanged', platformId]) },
     conversationTools: { update: (...args) => calls.push(['preferences', ...args]) },
     interruptTaskControl: id => calls.push(['interrupt', id]),
     focusChat: { flush: () => {}, context: (_platform, id) => calls.push(['focus', id]), supersededExecutionIds: () => new Set() },
@@ -210,7 +255,7 @@ function runtimeFixture() {
       getState: () => ({ url: entry.url, conversationId: actual, title: '旧页面标题', isLoading: false }) },
     ownsFocus: request => request.sessionId === 'workspace' && request.conversationId === physicalC,
     send: (_channel, state) => calls.push(['state', state]) })
-  return { ...f, runtime, calls, entry, loaded: () => { actual = physicalC } }
+  return { ...f, runtime, calls, entry, locations, accounts, currentAccountId: () => currentAccountId, loaded: () => { actual = physicalC } }
 }
 
 test('runtime reuses the same workspace and persists target before navigation; pending display keeps its root', () => {
@@ -243,4 +288,19 @@ test('a changed source, another platform or ongoing execution prevents adoption'
     assert.throws(() => f.runtime.adoptCompaction(job(), '# 摘要'), /来源会话已变化|当前操作结束/)
     assert.equal(f.calls.length, 0)
   }
+})
+
+test('cross-account handoff marks the source account out of quota and switches to the target account', () => {
+  const f = runtimeFixture()
+  const targetAccountId = '22222222-2222-4222-8222-222222222222'
+  const handoffJob = job()
+  handoffJob.state.targetAccountId = targetAccountId
+  assert.equal(f.runtime.adoptCompaction(handoffJob, '# 交接摘要'), 'workspace')
+  assert.equal(f.accounts[0].hasQuota, false)
+  assert.equal(f.accounts[1].hasQuota, true)
+  assert.equal(f.currentAccountId(), targetAccountId)
+  assert.equal(f.locations.get(targetAccountId), handoffJob.handoffUrl)
+  assert.deepEqual(f.calls.filter(call => call[0] === 'accountsChanged'), [['accountsChanged', 'chatgpt']])
+  assert.deepEqual(f.calls.filter(call => call[0] === 'activate'), [['activate', targetAccountId, physicalC, handoffJob.handoffUrl]])
+  assert.equal(f.continuity.history('chatgpt', physicalC).compactions[0].targetAccountLabel, '备用账号')
 })

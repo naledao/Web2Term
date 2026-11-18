@@ -20,6 +20,7 @@ import { interruptRunningCommands, recoverInterruptedExecutions } from './execut
 import type { StoredFileReadRequest, FileDeliveryStatus } from '../shared/file-requests'
 import { isRecentCommandPayload } from '../shared/types'
 import type { FocusTurn } from '../shared/focus-chat'
+import type { AccountPlatformId, PlatformAccount } from '../shared/platform-accounts'
 import type {
   Conversation,
   ConversationImageAttachmentInput,
@@ -362,6 +363,19 @@ CREATE TABLE IF NOT EXISTS terminal_directory_notes (
   PRIMARY KEY (machine_scope, host_id, directory_key)
 );
 
+CREATE TABLE IF NOT EXISTS platform_accounts (
+  platform_id TEXT NOT NULL,
+  id          TEXT NOT NULL,
+  label       TEXT NOT NULL,
+  has_quota   INTEGER NOT NULL DEFAULT 1,
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (platform_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_platform_accounts_order
+  ON platform_accounts (platform_id, sort_order ASC, created_at ASC);
+
 ${MYSQL_CONNECTIONS_TABLE}
 ${NACOS_CONNECTIONS_TABLE}
 ${REDIS_CONNECTIONS_TABLE}
@@ -662,6 +676,54 @@ export class ConversationStore {
     }
     if (removedCommandReplies > 0) {
       console.info(`[db] removed ${removedCommandReplies} assistant command reply record(s)`)
+    }
+    this.migratePlatformAccounts()
+  }
+
+  private migratePlatformAccounts(): void {
+    const platforms: ReadonlyArray<{ id: AccountPlatformId; key: string }> = [
+      { id: 'claude', key: 'claudeAccounts' },
+      { id: 'gemini', key: 'geminiAccounts' },
+      { id: 'deepseek', key: 'deepseekAccounts' },
+      { id: 'chatgpt', key: 'chatgptAccounts' }
+    ]
+    const now = Date.now()
+    const uuidPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/
+    const ensureDefault = this.db.prepare(
+      `INSERT OR IGNORE INTO platform_accounts (platform_id, id, label, has_quota, sort_order, created_at, updated_at)
+       VALUES (?, 'default', '默认账号', 1, 0, ?, ?)`
+    )
+    const migrated = this.getSetting('platformAccountsMigrated') === '1'
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const platform of platforms) ensureDefault.run(platform.id, now, now)
+      if (!migrated) {
+        const insert = this.db.prepare(
+          `INSERT OR IGNORE INTO platform_accounts (platform_id, id, label, has_quota, sort_order, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        for (const platform of platforms) {
+          let order = 1
+          try {
+            const raw = this.getSetting(platform.key)
+            const saved: unknown = raw ? JSON.parse(raw) : []
+            if (Array.isArray(saved)) {
+              for (const item of saved) {
+                const record = item as { id?: unknown; label?: unknown; hasQuota?: unknown }
+                if (typeof record?.id === 'string' && uuidPattern.test(record.id) &&
+                    typeof record.label === 'string' && record.label.trim() && record.label.length <= 40) {
+                  insert.run(platform.id, record.id, record.label, record.hasQuota === false ? 0 : 1, order++, now, now)
+                }
+              }
+            }
+          } catch { /* Ignore malformed legacy account entries; default remains available. */ }
+        }
+        this.setSetting('platformAccountsMigrated', '1')
+      }
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
     }
   }
 
@@ -1152,6 +1214,7 @@ export class ConversationStore {
           turn.segments.some(segment => !segment || !Number.isInteger(segment.cycle) || segment.cycle < 0 ||
             (segment.sourceMessageId !== null && typeof segment.sourceMessageId !== 'string') ||
             typeof segment.answer !== 'string' || typeof segment.settled !== 'boolean' || !Array.isArray(segment.parts) ||
+            (segment.fallback !== undefined && typeof segment.fallback !== 'boolean') ||
             segment.parts.some(part => !part || !['reasoning', 'search'].includes(part.kind) || typeof part.text !== 'string' ||
               (part.url !== undefined && (typeof part.url !== 'string' || !/^https?:\/\//.test(part.url)))))) return []
         turn.executionCycles ??= {}
@@ -1891,6 +1954,60 @@ export class ConversationStore {
     this.db.prepare('DELETE FROM managed_sessions WHERE id = ?').run(id)
     this.db.prepare('DELETE FROM settings WHERE key = ?').run(`unseenCompletedCount:${id}`)
   }
+  /* ---------------- platform accounts ---------------- */
+
+  private platformAccountLabel(platformId: AccountPlatformId): string {
+    return { claude: 'Claude', gemini: 'Gemini', deepseek: 'DeepSeek', chatgpt: 'ChatGPT' }[platformId]
+  }
+
+  private ensureDefaultPlatformAccount(platformId: AccountPlatformId): void {
+    const now = Date.now()
+    this.db.prepare(
+      `INSERT OR IGNORE INTO platform_accounts (platform_id, id, label, has_quota, sort_order, created_at, updated_at)
+       VALUES (?, 'default', '默认账号', 1, 0, ?, ?)`
+    ).run(platformId, now, now)
+  }
+
+  listPlatformAccountRecords(platformId: AccountPlatformId): PlatformAccount[] {
+    this.ensureDefaultPlatformAccount(platformId)
+    const rows = this.db.prepare(
+      'SELECT id, label, has_quota FROM platform_accounts WHERE platform_id = ? ORDER BY sort_order ASC, created_at ASC'
+    ).all(platformId) as unknown as Array<{ id: string; label: string; has_quota: number }>
+    return rows.map(row => ({ id: row.id, label: row.label, hasQuota: row.has_quota !== 0 }))
+  }
+
+  savePlatformAccountRecord(platformId: AccountPlatformId, account: PlatformAccount): void {
+    this.ensureDefaultPlatformAccount(platformId)
+    const now = Date.now()
+    const nextOrder = (this.db.prepare(
+      'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_order FROM platform_accounts WHERE platform_id = ?'
+    ).get(platformId) as { next_order: number }).next_order
+    this.db.prepare(
+      `INSERT INTO platform_accounts (platform_id, id, label, has_quota, sort_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(platform_id, id) DO UPDATE SET
+         label = excluded.label,
+         has_quota = excluded.has_quota,
+         updated_at = excluded.updated_at`
+    ).run(platformId, account.id, account.label, account.hasQuota === false ? 0 : 1, nextOrder, now, now)
+  }
+
+  removePlatformAccountRecord(platformId: AccountPlatformId, accountId: string): PlatformAccount[] {
+    if (accountId === 'default') throw new Error('默认账号不能删除。')
+    const result = this.db.prepare('DELETE FROM platform_accounts WHERE platform_id = ? AND id = ?').run(platformId, accountId)
+    if (Number(result.changes) === 0) throw new Error(`${this.platformAccountLabel(platformId)} 账号不可用。`)
+    return this.listPlatformAccountRecords(platformId)
+  }
+
+  setPlatformAccountQuotaRecord(platformId: AccountPlatformId, accountId: string, hasQuota: boolean): PlatformAccount[] {
+    this.ensureDefaultPlatformAccount(platformId)
+    const result = this.db.prepare(
+      'UPDATE platform_accounts SET has_quota = ?, updated_at = ? WHERE platform_id = ? AND id = ?'
+    ).run(hasQuota ? 1 : 0, Date.now(), platformId, accountId)
+    if (Number(result.changes) === 0) throw new Error(`${this.platformAccountLabel(platformId)} 账号不可用。`)
+    return this.listPlatformAccountRecords(platformId)
+  }
+
   /* ---------------- settings ---------------- */
 
   getSetting(key: string): string | null {

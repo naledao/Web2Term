@@ -16,6 +16,16 @@ interface SettingsStore {
   setSetting(key: string, value: string): void
 }
 
+interface SqliteAccountStore {
+  listPlatformAccountRecords(platformId: AccountPlatformId): PlatformAccount[]
+  savePlatformAccountRecord(platformId: AccountPlatformId, account: PlatformAccount): void
+  removePlatformAccountRecord(platformId: AccountPlatformId, accountId: string): PlatformAccount[]
+  setPlatformAccountQuotaRecord(platformId: AccountPlatformId, accountId: string, hasQuota: boolean): PlatformAccount[]
+}
+
+export type PlatformAccountStore = SettingsStore & Partial<SqliteAccountStore>
+export type PlatformAccountReadStore = Pick<SettingsStore, 'getSetting'> & Partial<Pick<SqliteAccountStore, 'listPlatformAccountRecords'>>
+
 const PLATFORM_CONFIG: Readonly<Record<AccountPlatformId, {
   platform: ChatPlatform
   settingsKey: string
@@ -28,15 +38,23 @@ const PLATFORM_CONFIG: Readonly<Record<AccountPlatformId, {
   chatgpt: { platform: CHATGPT_PLATFORM, settingsKey: 'chatgptAccounts', partitionPrefix: 'persist:chatgpt-', label: ACCOUNT_PLATFORMS.chatgpt.label }
 }
 
-export function listPlatformAccounts(store: Pick<SettingsStore, 'getSetting'>, platformId: AccountPlatformId): PlatformAccount[] {
+const defaultQuotaSettingKey = (settingsKey: string): string => `${settingsKey}DefaultQuota`
+
+export function listPlatformAccounts(store: PlatformAccountReadStore, platformId: AccountPlatformId): PlatformAccount[] {
+  if (typeof store.listPlatformAccountRecords === 'function') {
+    return store.listPlatformAccountRecords(platformId)
+  }
   const { settingsKey } = PLATFORM_CONFIG[platformId]
-  const accounts = new Map<string, PlatformAccount>([[DEFAULT_PLATFORM_ACCOUNT_ID, { ...DEFAULT_PLATFORM_ACCOUNT }]])
+  const defaultHasQuota = store.getSetting(defaultQuotaSettingKey(settingsKey)) !== '0'
+  const accounts = new Map<string, PlatformAccount>([
+    [DEFAULT_PLATFORM_ACCOUNT_ID, { ...DEFAULT_PLATFORM_ACCOUNT, hasQuota: defaultHasQuota }]
+  ])
   try {
     const saved: unknown = JSON.parse(store.getSetting(settingsKey) ?? '[]')
     if (Array.isArray(saved)) for (const item of saved) {
       if (isPlatformAccountId(item?.id) && !accounts.has(item.id) &&
           typeof item.label === 'string' && item.label.trim() && item.label.length <= 40) {
-        accounts.set(item.id, { id: item.id, label: item.label })
+        accounts.set(item.id, { id: item.id, label: item.label, hasQuota: item.hasQuota !== false })
       }
     }
   } catch { /* The default login stays available. */ }
@@ -47,27 +65,58 @@ export function newPlatformAccount(label: unknown): PlatformAccount {
   if (typeof label !== 'string' || !label.trim() || label.trim().length > 40) {
     throw new Error('请输入 1 到 40 个字符的账号备注。')
   }
-  return { id: randomUUID(), label: label.trim() }
+  return { id: randomUUID(), label: label.trim(), hasQuota: true }
 }
 
-export function savePlatformAccount(store: SettingsStore, platformId: AccountPlatformId, account: PlatformAccount): void {
+export function savePlatformAccount(store: PlatformAccountStore, platformId: AccountPlatformId, account: PlatformAccount): void {
+  if (typeof store.savePlatformAccountRecord === 'function') {
+    store.savePlatformAccountRecord(platformId, account)
+    return
+  }
   const { settingsKey } = PLATFORM_CONFIG[platformId]
   store.setSetting(settingsKey, JSON.stringify([...listPlatformAccounts(store, platformId).slice(1), account]))
 }
 
 export function removePlatformAccount(
-  store: SettingsStore,
+  store: PlatformAccountStore,
   platformId: AccountPlatformId,
   accountId: unknown
 ): PlatformAccount[] {
   const { settingsKey, label } = PLATFORM_CONFIG[platformId]
   if (accountId === DEFAULT_PLATFORM_ACCOUNT_ID) throw new Error('默认账号不能删除。')
   if (!isPlatformAccountId(accountId)) throw new Error(`${label} 账号不可用。`)
+  if (typeof store.removePlatformAccountRecord === 'function') {
+    return store.removePlatformAccountRecord(platformId, accountId)
+  }
   const accounts = listPlatformAccounts(store, platformId)
   if (!accounts.some(account => account.id === accountId)) throw new Error(`${label} 账号不可用。`)
   const remaining = accounts.filter(account => account.id !== accountId)
   store.setSetting(settingsKey, JSON.stringify(remaining.slice(1)))
   return remaining
+}
+
+export function setPlatformAccountQuota(
+  store: PlatformAccountStore,
+  platformId: AccountPlatformId,
+  accountId: unknown,
+  hasQuota: boolean
+): PlatformAccount[] {
+  const { settingsKey, label } = PLATFORM_CONFIG[platformId]
+  if (!isPlatformAccountId(accountId)) throw new Error(`${label} 账号不可用。`)
+  if (typeof store.setPlatformAccountQuotaRecord === 'function') {
+    return store.setPlatformAccountQuotaRecord(platformId, accountId, hasQuota)
+  }
+  const accounts = listPlatformAccounts(store, platformId)
+  if (!accounts.some(account => account.id === accountId)) throw new Error(`${label} 账号不可用。`)
+  if (accountId === DEFAULT_PLATFORM_ACCOUNT_ID) {
+    store.setSetting(defaultQuotaSettingKey(settingsKey), hasQuota ? '1' : '0')
+    return listPlatformAccounts(store, platformId)
+  }
+  const updated = accounts.slice(1).map(account =>
+    account.id === accountId ? { ...account, hasQuota } : account
+  )
+  store.setSetting(settingsKey, JSON.stringify(updated))
+  return listPlatformAccounts(store, platformId)
 }
 
 export function platformForAccount(platformId: AccountPlatformId, accountId: string): ChatPlatform {

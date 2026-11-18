@@ -1,6 +1,7 @@
 import { WebContentsView, shell } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { ChatPlatform } from '../shared/platforms'
+import { focusInterceptorPage } from '../shared/focus-chat'
 import type { AppTheme, EmbedBounds } from '../shared/types'
 import { questionChatBounds } from '../shared/deepseek-question'
 import { questionPageCall } from './question-chat-page'
@@ -98,7 +99,8 @@ export class CompactionPage {
     if (this.configuredUrl !== url) {
       const theme = this.platform.page.theme
       await questionPageCall(contents, `${interceptorSource}\n;window.__cmdTerminalInterceptor.configure(${JSON.stringify({
-        enabled: false, computerUseEnabled: false, promptInjectionEnabled: false, prefix: '', armBaseline: true, page: this.platform.page
+        enabled: false, computerUseEnabled: false, promptInjectionEnabled: false, prefix: '', armBaseline: true,
+        page: focusInterceptorPage(this.platform.id, this.platform.page)
       })});${themeSource}\n;window.__cmdTerminalTheme.configure(${JSON.stringify({ theme: this.theme,
         dark: theme?.dark ?? [], light: theme?.light ?? [], storage: theme?.storage ?? [] })});true`)
       this.configuredUrl = url
