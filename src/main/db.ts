@@ -309,6 +309,7 @@ CREATE TABLE IF NOT EXISTS managed_sessions (
   conversation_id TEXT,
   platform_id     TEXT NOT NULL DEFAULT 'chatgpt',
   claude_workspace TEXT,
+  gemini_workspace TEXT,
   workspace_project_id TEXT,
   paused          INTEGER NOT NULL DEFAULT 0,
   prompt_injection_enabled INTEGER NOT NULL DEFAULT 1,
@@ -442,6 +443,7 @@ export interface ManagedSessionRecord {
   /** Which chat site this session drives. See `ManagedSessionSummary.platformId`. */
   platformId: string
   claudeWorkspace?: string
+  geminiWorkspace?: string
   paused: boolean
   promptInjectionEnabled: boolean
   localCwd: string
@@ -592,7 +594,8 @@ export class ConversationStore {
       ['ssh_cwd', "TEXT NOT NULL DEFAULT ''"],
       ['send_delay_seconds', 'INTEGER NOT NULL DEFAULT 0'],
       ['send_delay_customized', 'INTEGER'],
-      ['claude_workspace', 'TEXT']
+      ['claude_workspace', 'TEXT'],
+      ['gemini_workspace', 'TEXT']
     ]
     for (const [name, definition] of managedSessionMigrations) {
       if (!managedSessionColumns.some((column) => column.name === name)) {
@@ -1769,7 +1772,7 @@ export class ConversationStore {
   listManagedSessions(): ManagedSessionRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT id, title, url, conversation_id, platform_id, claude_workspace, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, send_delay_customized, created_at, updated_at
+        `SELECT id, title, url, conversation_id, platform_id, claude_workspace, gemini_workspace, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, send_delay_customized, created_at, updated_at
            FROM managed_sessions ORDER BY created_at ASC`
       )
       .all() as unknown as Array<{
@@ -1779,6 +1782,7 @@ export class ConversationStore {
       conversation_id: string | null
       platform_id: string
       claude_workspace: string | null
+      gemini_workspace: string | null
       workspace_project_id: string | null
       paused: number
       prompt_injection_enabled: number
@@ -1800,6 +1804,7 @@ export class ConversationStore {
       conversationId: row.conversation_id,
       platformId: row.platform_id,
       claudeWorkspace: row.claude_workspace ?? undefined,
+      geminiWorkspace: row.gemini_workspace ?? undefined,
       projectId: row.workspace_project_id,
       paused: row.paused !== 0,
       promptInjectionEnabled: row.prompt_injection_enabled !== 0,
@@ -1819,14 +1824,15 @@ export class ConversationStore {
     const now = Date.now()
     this.db
       .prepare(
-        `INSERT INTO managed_sessions (id, title, url, conversation_id, platform_id, claude_workspace, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, send_delay_customized, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO managed_sessions (id, title, url, conversation_id, platform_id, claude_workspace, gemini_workspace, workspace_project_id, paused, prompt_injection_enabled, local_cwd, ssh_host_id, ssh_attached, ssh_reconnect, ssh_cwd, send_delay_seconds, send_delay_customized, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title,
            url = excluded.url,
            conversation_id = excluded.conversation_id,
            platform_id = excluded.platform_id,
            claude_workspace = excluded.claude_workspace,
+           gemini_workspace = excluded.gemini_workspace,
            workspace_project_id = excluded.workspace_project_id,
            paused = excluded.paused,
            prompt_injection_enabled = excluded.prompt_injection_enabled,
@@ -1846,6 +1852,7 @@ export class ConversationStore {
         record.conversationId,
         record.platformId,
         record.claudeWorkspace ?? null,
+        record.geminiWorkspace ?? null,
         record.projectId ?? null,
         record.paused ? 1 : 0,
         record.promptInjectionEnabled ? 1 : 0,

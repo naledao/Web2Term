@@ -41,8 +41,8 @@ import ConversationTranscript from './components/ConversationTranscript'
 import FocusChatView from './components/FocusChatView'
 import type { ChatView } from '@shared/focus-chat'
 import { DEFAULT_CHAT_VIEW, focusPlatformLabels, supportsFocusView } from '@shared/focus-chat'
-import { DEFAULT_CLAUDE_ACCOUNT, DEFAULT_CLAUDE_ACCOUNT_ID } from '@shared/claude-accounts'
-import type { ClaudeAccount } from '@shared/claude-accounts'
+import { ACCOUNT_PLATFORM_IDS, DEFAULT_PLATFORM_ACCOUNT, DEFAULT_PLATFORM_ACCOUNT_ID, supportsPlatformAccounts } from '@shared/platform-accounts'
+import type { AccountPlatformId, PlatformAccount } from '@shared/platform-accounts'
 import QuestionChatPanel from './components/QuestionChatPanel'
 import type { QuestionChatState } from '@shared/deepseek-question'
 import { supportsSelectionQuestion } from '@shared/deepseek-question'
@@ -412,12 +412,15 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const showFocusView = isFocusView || (leavingView === 'focus' && supportsFocusView(platformId))
   const showLocalView = placeholderToggle || leavingView === 'local'
   const [embed, setEmbed] = useState<EmbedState>(INITIAL_EMBED_STATE)
-  const [claudeAccounts, setClaudeAccounts] = useState<ClaudeAccount[]>([{ ...DEFAULT_CLAUDE_ACCOUNT }])
+  const [platformAccounts, setPlatformAccounts] = useState<Record<AccountPlatformId, PlatformAccount[]>>(() =>
+    Object.fromEntries(ACCOUNT_PLATFORM_IDS.map(id => [id, [{ ...DEFAULT_PLATFORM_ACCOUNT }]])) as Record<AccountPlatformId, PlatformAccount[]>)
   useEffect(() => {
     let cancelled = false
-    void window.api.listClaudeAccounts().then(accounts => {
-      if (!cancelled && accounts.length) setClaudeAccounts(accounts)
-    }).catch(() => {})
+    for (const id of ACCOUNT_PLATFORM_IDS) {
+      void window.api.listPlatformAccounts(id).then(accounts => {
+        if (!cancelled && accounts.length) setPlatformAccounts(current => ({ ...current, [id]: accounts }))
+      }).catch(() => {})
+    }
     return () => { cancelled = true }
   }, [])
   /*
@@ -755,8 +758,12 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     return () => { cancelled = true; off() }
   }, [sessionId, platformId, conversationId])
   const transcriptScrollKey = conversationScrollKey(sessionId, platformId, conversationId)
-  const claudeAccountId = embed.claudeAccountId ?? DEFAULT_CLAUDE_ACCOUNT_ID
-  const claudeAccountScope = platformId === 'claude' && claudeAccountId !== DEFAULT_CLAUDE_ACCOUNT_ID ? claudeAccountId : undefined
+  const accountIds = useMemo<Record<AccountPlatformId, string>>(() => ({
+    claude: embed.accountIds?.claude ?? embed.claudeAccountId ?? DEFAULT_PLATFORM_ACCOUNT_ID,
+    gemini: embed.accountIds?.gemini ?? DEFAULT_PLATFORM_ACCOUNT_ID
+  }), [embed.accountIds, embed.claudeAccountId])
+  const accountId = supportsPlatformAccounts(platformId) ? accountIds[platformId] : DEFAULT_PLATFORM_ACCOUNT_ID
+  const accountScope = supportsPlatformAccounts(platformId) && accountId !== DEFAULT_PLATFORM_ACCOUNT_ID ? accountId : undefined
   const conversationMessagesReady = conversationTranscript.ownerKey === transcriptScrollKey
   const conversationMessages = conversationMessagesReady ? conversationTranscript.messages : EMPTY_MESSAGES
   const isAuto = automation?.mode === 'auto'
@@ -2000,17 +2007,28 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   }, [sessionId, platformId, chatView])
 
   // Terminal streaming must not invalidate the focus transcript's memoized props.
-  const focusOwner = useMemo(() => ({ sessionId, platformId, conversationId, claudeAccountId: claudeAccountScope }),
-    [sessionId, platformId, conversationId, claudeAccountScope])
-  const selectClaudeAccount = useCallback((accountId: string) => window.api.switchClaudeAccount(focusOwner, accountId), [focusOwner])
-  const addClaudeAccount = useCallback(async (label: string) => {
-    const account = await window.api.addClaudeAccount(focusOwner, label)
-    setClaudeAccounts(accounts => [...accounts.filter(item => item.id !== account.id), account])
+  const focusOwner = useMemo(() => ({
+    sessionId, platformId, conversationId,
+    ...(accountScope ? { accountId: accountScope, ...(platformId === 'claude' ? { claudeAccountId: accountScope } : {}) } : {})
+  }), [sessionId, platformId, conversationId, accountScope])
+  const selectPlatformAccount = useCallback((id: string) => window.api.switchPlatformAccount(focusOwner, id), [focusOwner])
+  const addPlatformAccount = useCallback(async (label: string) => {
+    const account = await window.api.addPlatformAccount(focusOwner, label)
+    if (supportsPlatformAccounts(focusOwner.platformId)) {
+      const targetPlatform = focusOwner.platformId
+      setPlatformAccounts(current => ({
+        ...current,
+        [targetPlatform]: [...current[targetPlatform].filter(item => item.id !== account.id), account]
+      }))
+    }
     selectChatView('original')
   }, [focusOwner, selectChatView])
-  const removeClaudeAccount = useCallback(async (accountId: string) => {
-    const accounts = await window.api.removeClaudeAccount(focusOwner, accountId)
-    setClaudeAccounts(accounts)
+  const removePlatformAccount = useCallback(async (id: string) => {
+    const accounts = await window.api.removePlatformAccount(focusOwner, id)
+    if (supportsPlatformAccounts(focusOwner.platformId)) {
+      const targetPlatform = focusOwner.platformId
+      setPlatformAccounts(current => ({ ...current, [targetPlatform]: accounts }))
+    }
   }, [focusOwner])
   const focusNewChat = useCallback(() => window.api.sendEmbedCommand('home'), [])
   const focusQuestion = useCallback(() => setQuestionMinimized(false), [])
@@ -2486,17 +2504,17 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
           aria-labelledby={'chat-view-tab-' + (isFocusView ? 'focus' : placeholderToggle ? 'local' : 'original')}>
           {showFocusView ? (
             <div className={'stage__view' + (isFocusView ? '' : ' stage__view--leaving')}>
-            <FocusChatView key={claudeAccountScope ? transcriptScrollKey + ':' + claudeAccountScope : transcriptScrollKey}
+            <FocusChatView key={accountScope ? transcriptScrollKey + ':' + accountScope : transcriptScrollKey}
               owner={focusOwner} theme={theme} viewConversationId={embed.viewConversationId ?? conversationId}
               visible={chatSurfaceVisible} messages={conversationMessages} messagesReady={conversationMessagesReady}
               dialogContainer={appContainer?.closest<HTMLElement>('.workspace') ?? appContainer}
               needsAnswer={!!pendingQuestion}
               taskRunning={taskRunning}
-              claudeAccountId={claudeAccountId}
-              claudeAccounts={claudeAccounts}
-              onClaudeAccountSelect={selectClaudeAccount}
-              onClaudeAccountAdd={addClaudeAccount}
-              onClaudeAccountRemove={removeClaudeAccount}
+              accountIds={accountIds}
+              platformAccounts={platformAccounts}
+              onAccountSelect={selectPlatformAccount}
+              onAccountAdd={addPlatformAccount}
+              onAccountRemove={removePlatformAccount}
               newChatDisabled={taskRunning || embed.isLoading || switchingPlatform}
               onNewChat={focusNewChat}
               onQuestion={focusQuestion}
@@ -3526,7 +3544,7 @@ ${record.command}`
           </Dialog.Root>
         ) : null}
 
-        {toolsOpen && appContainer ? <ToolPromptsDialog key={JSON.stringify([sessionId, platformId, embed.conversationId, toolsSkill, claudeAccountScope])}
+        {toolsOpen && appContainer ? <ToolPromptsDialog key={JSON.stringify([sessionId, platformId, embed.conversationId, toolsSkill, accountScope])}
           owner={{ ...focusOwner, conversationId: embed.conversationId }} container={appContainer} theme={theme}
           skillId={toolsSkill} trigger={toolsSkill ? skillSettingsTriggerRef : toolsTriggerRef} onClose={() => setToolsOpen(false)} /> : null}
         {/* System prompt keeps its searchable, read-only viewer. */}

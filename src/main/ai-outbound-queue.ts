@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { focusOwnerAccountId } from '../shared/focus-chat'
 import type { FocusOutboundQueueItem, FocusOutboundQueueState } from '../shared/focus-chat'
 
 export type AiOutboundKind = 'user' | 'tool-result' | 'scheduled' | 'question' | 'recovery' | 'auxiliary'
@@ -7,6 +8,7 @@ export interface AiOutboundOwner {
   sessionId: string
   platformId: string
   conversationId: string | null
+  accountId?: string
   claudeAccountId?: string
 }
 
@@ -277,7 +279,7 @@ export class AiOutboundQueue {
 
   private belongsTo(job: Job<unknown>, owner: AiOutboundOwner): boolean {
     return job.owner.sessionId === owner.sessionId && job.owner.platformId === owner.platformId &&
-      job.owner.claudeAccountId === owner.claudeAccountId &&
+      focusOwnerAccountId(job.owner) === focusOwnerAccountId(owner) &&
       (job.owner.conversationId === owner.conversationId || job.owner.conversationId === null || owner.conversationId === null)
   }
 

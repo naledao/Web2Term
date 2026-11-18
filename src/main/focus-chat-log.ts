@@ -1,10 +1,13 @@
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { FocusOwner, FocusSendOutcome, FocusEditDiagnostic } from '../shared/focus-chat'
+import { FOCUS_MODEL_SETTING_DETAILS, FOCUS_MODEL_SETTING_TARGETS, type FocusOwner, type FocusSendOutcome, type FocusEditDiagnostic, type FocusModelSettingDetail, type FocusModelSettingTarget } from '../shared/focus-chat'
 import type { FocusFilePreviewStage } from '../shared/focus-file-links'
 
 interface FocusDiagnostic extends FocusEditDiagnostic {
+  target?: FocusModelSettingTarget
+  detail?: FocusModelSettingDetail
+  stepCount?: number
   event: 'view-state' | 'send-retry-request' | 'send-retry-outcome' | 'send-request' | 'send-outcome' | 'edit-request' | 'edit-page' | 'edit-outcome' | 'smart-ui-request' | 'smart-ui-page' | 'smart-ui-outcome' | 'smart-ui-recovered' | 'composer-mode-request' | 'composer-mode-outcome' | 'model-setting-request' | 'model-setting-outcome' | 'end-task' | 'user-started' | 'user-captured' | 'user-stored' | 'user-discarded' | 'file-preview-request' | 'file-preview-page' | 'file-preview-outcome' | 'file-preview-saved' | 'citation-open-request' | 'citation-open-page' | 'citation-open-outcome'
   sourceIndex?: number
   fileStage?: FocusFilePreviewStage
@@ -59,6 +62,9 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
       if (Number.isSafeInteger(payload[key]) && Number(payload[key]) >= 0) details[key] = Number(payload[key])
     }
     if (['prepare', 'locate', 'open', 'verify', 'insert', 'submit', 'request', 'confirm'].includes(payload.stage ?? '')) details.stage = payload.stage!
+  if (typeof payload.target === 'string' && (FOCUS_MODEL_SETTING_TARGETS as readonly string[]).includes(payload.target)) details.target = payload.target
+  if (typeof payload.detail === 'string' && (FOCUS_MODEL_SETTING_DETAILS as readonly string[]).includes(payload.detail)) details.detail = payload.detail
+  if (typeof payload.stepCount === 'number' && Number.isSafeInteger(payload.stepCount) && payload.stepCount >= 0 && payload.stepCount <= 20) details.stepCount = payload.stepCount
     if (['invalid-request', 'conversation-changed', 'page-busy', 'no-composer', 'native-draft', 'missing-prefix', 'candidate-not-unique',
       'invalid-position', 'edit-button-missing', 'cancelled', 'editor-missing', 'original-text-mismatch', 'insert-failed', 'form-not-ready',
       'new-user-confirmed', 'submit-unconfirmed', 'page-unavailable', 'rules-missing', 'edit-in-progress', 'api-missing', 'invalid-result',
@@ -70,7 +76,7 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
       'native-click-target-changed', 'native-click-unreachable', 'native-click-window-unfocused',
       'native-click-dispatch-failed', 'request-unrelated', 'request-state-mismatch', 'request-state-absent',
       'control-missing', 'native-input-failed', 'native-click-not-dispatched', 'menu-unavailable', 'model-options-missing', 'settings-read', 'already-selected',
-      'option-unavailable', 'selection-confirmed', 'selection-unconfirmed', 'slider-unavailable', 'menu-close-unconfirmed',
+      'option-unavailable', 'selection-confirmed', 'selection-unconfirmed', 'slider-unavailable', 'menu-close-unconfirmed', 'page-busy', 'conversation-changed',
       'file-download-received', 'file-download-completed', 'file-download-failed', 'file-preview-timeout',
       'too-large', 'timeout', 'file-unavailable', 'source-navigation-received', 'source-navigation-opened',
       'source-navigation-timeout', 'source-navigation-failed', 'invalid-source-url'].includes(payload.reason ?? '')) details.reason = payload.reason!

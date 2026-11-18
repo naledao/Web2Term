@@ -1,5 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
+import { focusOwnerAccountId } from '../shared/focus-chat'
+import type { AccountPlatformId } from '../shared/platform-accounts'
 import type { ScheduledTask, ScheduledTaskRun, ScheduledTasksState, ScheduledRunStatus } from '../shared/scheduled-tasks'
 
 export const SCHEDULED_TASK_SCHEMA = `
@@ -46,9 +48,12 @@ export class ScheduledTaskStore {
   tasks(sessionId: string): ScheduledTask[] {
     return this.taskRows('SELECT payload FROM scheduled_tasks WHERE session_id=? AND deleted=0 ORDER BY next_run_at, id', sessionId)
   }
-  claudeAccountTasks(accountId: string): ScheduledTask[] {
+  platformAccountTasks(platformId: AccountPlatformId, accountId: string): ScheduledTask[] {
     return this.taskRows('SELECT payload FROM scheduled_tasks WHERE deleted=0 ORDER BY next_run_at, id')
-      .filter(task => task.owner.platformId === 'claude' && task.owner.claudeAccountId === accountId)
+      .filter(task => task.owner.platformId === platformId && focusOwnerAccountId(task.owner) === accountId)
+  }
+  claudeAccountTasks(accountId: string): ScheduledTask[] {
+    return this.platformAccountTasks('claude', accountId)
   }
   save(task: ScheduledTask): void {
     this.db.prepare(`INSERT INTO scheduled_tasks(id,session_id,source_key,enabled,deleted,next_run_at,payload) VALUES(?,?,?,?,?,?,?)

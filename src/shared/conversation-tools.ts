@@ -27,6 +27,7 @@ export interface ConversationToolsOwner {
   sessionId: string
   platformId: string
   conversationId: string | null
+  accountId?: string
   claudeAccountId?: string
 }
 
@@ -70,5 +71,5 @@ export function normalizeConversationTools(value: unknown): ConversationToolPref
 
 export function sameConversationToolsOwner(a: ConversationToolsOwner, b: ConversationToolsOwner): boolean {
   return a.sessionId === b.sessionId && a.platformId === b.platformId && a.conversationId === b.conversationId &&
-    a.claudeAccountId === b.claudeAccountId
+    (a.accountId ?? a.claudeAccountId) === (b.accountId ?? b.claudeAccountId)
 }

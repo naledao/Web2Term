@@ -9,9 +9,11 @@ import type { CompactionPageSnapshot } from './compaction-page'
 import type { WebContents } from 'electron'
 import { compactionViewKey } from './conversation-continuity'
 import type { ConversationViewSnapshot } from './conversation-continuity'
+import { focusOwnerAccountId } from '../shared/focus-chat'
 import type { FocusOwner } from '../shared/focus-chat'
 import type { ConversationToolPreferences } from '../shared/conversation-tools'
-import { isClaudeAccountId } from '../shared/claude-accounts'
+import { isPlatformAccountId, supportsPlatformAccounts } from '../shared/platform-accounts'
+import type { AccountPlatformId } from '../shared/platform-accounts'
 import type { Web2termSessionBinding } from './web2term-shell'
 import type { CompactionPhase, CompactionSource, CompactionState, CompactionBudget } from '../shared/conversation-compaction'
 import { COMPACTION_ACTIVE, compactionSourceMarkdown, compactionPrompt, compactionHandoffPrompt, compactionRequestMarker,
@@ -46,6 +48,7 @@ interface SettingsStore { getSetting(key: string): string | null; setSetting(key
 type Page = Pick<CompactionPage, 'url' | 'available' | 'setViewport' | 'setOwnerVisible' | 'setTheme' | 'read' | 'clearDraft' | 'send' | 'close'>
 interface Options {
   sessionId: string
+  accountId?: string
   claudeAccountId?: string
   directory: string
   store: SettingsStore
@@ -61,15 +64,16 @@ interface Options {
     path: string, prompt: string, signal: AbortSignal, current: () => boolean, beforeSubmit: () => void): Promise<import('../shared/file-requests').FileSendOutcome>
 }
 const sameOwner = (a: FocusOwner, b: FocusOwner): boolean => a.sessionId === b.sessionId && a.platformId === b.platformId &&
-  a.conversationId === b.conversationId && a.claudeAccountId === b.claudeAccountId
+  a.conversationId === b.conversationId && focusOwnerAccountId(a) === focusOwnerAccountId(b)
 const COMPACTION_RESUMABLE: readonly CompactionPhase[] = [...COMPACTION_ACTIVE, 'paused', 'failed', 'uncertain']
-export function compactionStorageKey(sessionId: string, claudeAccountId?: string): string {
-  return 'conversationCompaction:' + sessionId + (claudeAccountId ? ':' + claudeAccountId : '')
+export function compactionStorageKey(sessionId: string, accountId?: string): string {
+  return 'conversationCompaction:' + sessionId + (accountId ? ':' + accountId : '')
 }
-export function savedCompactionUsesClaudeAccount(
+export function savedCompactionUsesAccount(
   store: Pick<SettingsStore, 'getSetting'>,
   sessionId: string,
   scopeAccountId: string | undefined,
+  platformId: AccountPlatformId,
   targetAccountId: string
 ): boolean {
   const raw = store.getSetting(compactionStorageKey(sessionId, scopeAccountId))
@@ -77,10 +81,19 @@ export function savedCompactionUsesClaudeAccount(
   try {
     const job: StoredCompaction = JSON.parse(raw)
     return job?.version === 1 &&
-      COMPACTION_RESUMABLE.includes(job.state?.phase) &&
-      job.state?.generationPlatformId === 'claude' &&
-      job.state?.generationAccountId === targetAccountId
+      COMPACTION_RESUMABLE.includes(job.state?.phase) && (
+        (job.state?.owner?.platformId === platformId && focusOwnerAccountId(job.state.owner) === targetAccountId) ||
+        (job.state?.generationPlatformId === platformId && job.state?.generationAccountId === targetAccountId)
+      )
   } catch { return false }
+}
+export function savedCompactionUsesClaudeAccount(
+  store: Pick<SettingsStore, 'getSetting'>,
+  sessionId: string,
+  scopeAccountId: string | undefined,
+  targetAccountId: string
+): boolean {
+  return savedCompactionUsesAccount(store, sessionId, scopeAccountId, 'claude', targetAccountId)
 }
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
 const uuid = (value: unknown): value is string => typeof value === 'string' && /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)
@@ -124,6 +137,9 @@ export class ConversationCompaction {
   private disposed = false
   private readonly now: () => number
   private readonly pause: () => Promise<void>
+  private get scopeAccountId(): string | undefined {
+    return this.options.accountId ?? this.options.claudeAccountId
+  }
   constructor(private readonly options: Options) {
     this.now = options.now ?? Date.now
     this.pause = options.pause ?? (() => new Promise(resolve => setTimeout(resolve, 900)))
@@ -132,10 +148,11 @@ export class ConversationCompaction {
       const job: StoredCompaction = raw ? JSON.parse(raw) : null
       if (job?.version === 1 && uuid(job.state?.id) && uuid(job.targetId) && job.state.owner?.sessionId === options.sessionId &&
           typeof job.state.owner.conversationId === 'string' && !!job.state.owner.conversationId && supportsCompaction(job.state.owner.platformId) &&
-          job.state.owner.claudeAccountId === options.claudeAccountId &&
+          focusOwnerAccountId(job.state.owner) === this.scopeAccountId &&
           (job.state.generationPlatformId === undefined || supportsCompaction(job.state.generationPlatformId)) &&
           (job.state.generationAccountId === undefined ||
-            job.state.generationPlatformId === 'claude' && isClaudeAccountId(job.state.generationAccountId)) &&
+            !!job.state.generationPlatformId && supportsPlatformAccounts(job.state.generationPlatformId) &&
+              isPlatformAccountId(job.state.generationAccountId)) &&
           [...COMPACTION_ACTIVE, 'completed', 'paused', 'failed', 'cancelled', 'uncertain', 'ready-to-export'].includes(job.state.phase) &&
           (job.state.phase !== 'ready-to-export' || !!job.state.generationPlatformId && job.state.hasSummary) &&
           typeof job.state.hasSource === 'boolean' && typeof job.state.hasSummary === 'boolean' &&
@@ -155,7 +172,7 @@ export class ConversationCompaction {
     } catch { /* Invalid saved state is never used to navigate or send. */ }
   }
   private get key(): string {
-    return compactionStorageKey(this.options.sessionId, this.options.claudeAccountId)
+    return compactionStorageKey(this.options.sessionId, this.scopeAccountId)
   }
   private path(name: 'source.md' | 'summary.md'): string { return join(this.options.directory, this.job!.state.id, name) }
   file(name: 'source.md' | 'summary.md'): string | null {
@@ -176,10 +193,13 @@ export class ConversationCompaction {
   get isExport(): boolean { return this.job?.state.generationPlatformId !== undefined }
   get inProgress(): boolean { return !!this.job && COMPACTION_ACTIVE.includes(this.job.state.phase) }
   get resumable(): boolean { return !!this.job && COMPACTION_RESUMABLE.includes(this.job.state.phase) }
+  usesAccount(platformId: AccountPlatformId, accountId: string): boolean {
+    return (this.scopeAccountId !== undefined && this.scopeAccountId === accountId && (!this.job || this.job.state.owner.platformId === platformId)) ||
+      (this.job?.state.owner.platformId === platformId && focusOwnerAccountId(this.job.state.owner) === accountId) ||
+      (this.job?.state.generationPlatformId === platformId && this.job.state.generationAccountId === accountId)
+  }
   usesClaudeAccount(accountId: string): boolean {
-    return this.options.claudeAccountId === accountId ||
-      this.job?.state.owner.claudeAccountId === accountId ||
-      (this.job?.state.generationPlatformId === 'claude' && this.job.state.generationAccountId === accountId)
+    return this.usesAccount('claude', accountId)
   }
   private save(): void {
     if (!this.job) return
@@ -197,9 +217,10 @@ export class ConversationCompaction {
     generationPlatformId?: SelectionQuestionPlatform, generationAccountId?: string): Promise<CompactionState> {
     if (this.running || this.job && !['completed', 'cancelled'].includes(this.job.state.phase)) throw new Error('已有任务，请先完成或取消该任务。')
     if (!supportsCompaction(owner.platformId) || !owner.conversationId || this.disposed ||
-        owner.claudeAccountId !== this.options.claudeAccountId) throw new Error('当前会话暂不支持此操作。')
+        focusOwnerAccountId(owner) !== this.scopeAccountId) throw new Error('当前会话暂不支持此操作。')
     if (generationPlatformId !== undefined && !supportsCompaction(generationPlatformId)) throw new Error('生成平台不可用。')
-    if (generationAccountId !== undefined && (generationPlatformId !== 'claude' || !isClaudeAccountId(generationAccountId))) {
+    if (generationAccountId !== undefined && (!generationPlatformId || !supportsPlatformAccounts(generationPlatformId) ||
+        !isPlatformAccountId(generationAccountId))) {
       throw new Error('生成账号不可用。')
     }
     this.running = true
@@ -355,7 +376,7 @@ export class ConversationCompaction {
       if (currentDelivery !== 'none' && selectionQuestionConversation(platformId, target) && !job[key]) {
         job[key] = target; this.save()
       }
-    }, job.state.generationPlatformId ? job.state.generationAccountId : job.state.owner.claudeAccountId)
+    }, job.state.generationPlatformId ? job.state.generationAccountId : focusOwnerAccountId(job.state.owner))
     job.state.workerVisible = false
     this.save()
     return this.page

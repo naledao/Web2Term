@@ -9,7 +9,7 @@ const STATUS: Record<ScheduledRunStatus, string> = {
   pending: '等待投递', sending: '投递中', sent: '已投递', 'needs-attention': '需要核对', cancelled: '已取消', skipped: '已跳过'
 }
 const formatTime = (value: number): string => new Date(value).toLocaleString()
-const ownerKey = (owner: ConversationToolsOwner): string => JSON.stringify([owner.sessionId, owner.platformId, owner.conversationId])
+const ownerKey = (owner: ConversationToolsOwner): string => JSON.stringify([owner.sessionId, owner.platformId, owner.conversationId, owner.accountId ?? owner.claudeAccountId ?? null])
 type Cycle = 'interval' | 'daily' | 'weekdays' | 'weekly' | 'cron'
 
 export default function ScheduledTasksPane({ owner, visible }: { owner: ConversationToolsOwner; visible: boolean }): JSX.Element {

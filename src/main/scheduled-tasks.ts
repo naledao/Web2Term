@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { focusOwnerAccountId } from '../shared/focus-chat'
+import type { AccountPlatformId } from '../shared/platform-accounts'
 import { parseScheduledTaskRequest, scheduleLabel } from '../shared/scheduled-tasks'
 import type { ScheduledTask, ScheduledTaskAction, ScheduledTaskDraft, ScheduledTaskManagementRequest, ScheduledTaskRequest, ScheduledTaskRun, ScheduledTaskTarget } from '../shared/scheduled-tasks'
 import type { ConversationToolsOwner } from '../shared/conversation-tools'
@@ -99,14 +101,16 @@ export class ScheduledTasks {
         let result: string
         if (!owner.conversationId) throw new Error('请先在当前 AI 对话发送一条消息。')
         if (request.action === 'list') {
-          const tasks = this.store.tasks(owner.sessionId).filter(task => task.owner.platformId === owner.platformId && task.owner.conversationId === owner.conversationId)
+          const tasks = this.store.tasks(owner.sessionId).filter(task => task.owner.platformId === owner.platformId &&
+            task.owner.conversationId === owner.conversationId && focusOwnerAccountId(task.owner) === focusOwnerAccountId(owner))
           const page = tasks.slice(request.offset, request.offset + 10)
           result = '【定时任务列表】\n' + JSON.stringify({ total: tasks.length,
             tasks: page.map(task => ({ ...details(task), prompt: task.prompt.slice(0, 1000), promptTruncated: task.prompt.length > 1000 })),
             nextOffset: request.offset + page.length < tasks.length ? request.offset + page.length : null })
         } else {
           const task = this.owned(owner.sessionId, request.id)
-          if (task.owner.platformId !== owner.platformId || task.owner.conversationId !== owner.conversationId) throw new Error('只能管理当前 AI 平台和对话的定时任务。')
+          if (task.owner.platformId !== owner.platformId || task.owner.conversationId !== owner.conversationId ||
+              focusOwnerAccountId(task.owner) !== focusOwnerAccountId(owner)) throw new Error('只能管理当前 AI 平台和对话的定时任务。')
           if (request.action === 'get') result = '【定时任务详情】\n' + JSON.stringify(details(task))
           else {
             if (request.revision !== task.revision) throw new Error('计划已被修改，请重新查询最新 id 和 revision 后再操作。')
@@ -169,18 +173,24 @@ export class ScheduledTasks {
     } else throw new Error('定时任务操作无效。')
     this.deps.changed(sessionId); this.wake()
   }
-  hasSendingClaudeAccount(accountId: string): boolean {
+  hasSendingPlatformAccount(platformId: AccountPlatformId, accountId: string): boolean {
     for (const runId of this.sending.keys()) {
       const run = this.store.run(runId)
       const task = run ? this.store.get(run.taskId) : undefined
-      if (task?.owner.platformId === 'claude' && task.owner.claudeAccountId === accountId) return true
+      if (task?.owner.platformId === platformId && focusOwnerAccountId(task.owner) === accountId) return true
     }
     return false
   }
-  removeClaudeAccount(accountId: string): void {
-    for (const task of this.store.claudeAccountTasks(accountId)) {
+  removePlatformAccount(platformId: AccountPlatformId, accountId: string): void {
+    for (const task of this.store.platformAccountTasks(platformId, accountId)) {
       this.act(task.owner.sessionId, task.id, 'delete')
     }
+  }
+  hasSendingClaudeAccount(accountId: string): boolean {
+    return this.hasSendingPlatformAccount('claude', accountId)
+  }
+  removeClaudeAccount(accountId: string): void {
+    this.removePlatformAccount('claude', accountId)
   }
   private owned(sessionId: string, id: string): ScheduledTask {
     const task = typeof id === 'string' && id.length <= 128 ? this.store.get(id) : undefined

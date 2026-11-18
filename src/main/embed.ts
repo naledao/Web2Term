@@ -26,7 +26,7 @@ import { writeQuestionLog } from './question-chat-page'
 import { supportsSelectionQuestion } from '../shared/deepseek-question'
 import type { QuestionChatAction, QuestionChatState, SelectionQuestionDraft } from '../shared/deepseek-question'
 import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
-import type { FocusPageSnapshot, FocusSendOutcome, FocusAttachmentInfo, FocusEditDiagnostic, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
+import { validFocusModelSettingDiagnostic, type FocusPageSnapshot, type FocusSendOutcome, type FocusAttachmentInfo, type FocusEditDiagnostic, type FocusModelSettingsRequest, type FocusModelSettingsResult } from '../shared/focus-chat'
 import { CLAUDE_THINKING_PREFIX, supportsFocusView, validFocusComposerModes, validFocusModelSettings, validFocusSendFailure } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
 import { sendQuestionChatAttachment } from './question-chat-send'
@@ -1632,7 +1632,7 @@ export class ChatGptEmbed {
       } catch { return false }
     }
     this.focusModelNativeClick = { token, dispatch: next => {
-      if (!current() || !Number.isSafeInteger(next) || next !== step + 1 || next > 8) return
+      if (!current() || !Number.isSafeInteger(next) || next !== step + 1 || next > 10) return
       step = next
       void dispatchFocusModelClick(contents, token, next, current, focused)
     } }
@@ -1645,8 +1645,10 @@ export class ChatGptEmbed {
       if (!current()) return { outcome: 'cancelled', settings: null }
       if (!raw || !['ok', 'busy', 'unavailable', 'invalid', 'unknown', 'cancelled'].includes(raw.outcome) ||
         !validFocusModelSettings(raw.settings)) return { outcome: 'unknown', settings: null }
+      const diagnostic = raw.diagnostic ? validFocusModelSettingDiagnostic(raw.diagnostic) : undefined
       return { outcome: raw.outcome, settings: raw.settings,
-        ...(typeof raw.reason === 'string' && /^[a-z-]{1,60}$/.test(raw.reason) ? { reason: raw.reason } : {}) }
+        ...(typeof raw.reason === 'string' && /^[a-z-]{1,60}$/.test(raw.reason) ? { reason: raw.reason } : {}),
+        ...(diagnostic ? { diagnostic } : {}) }
     } catch { return { outcome: 'unknown', settings: null, reason: 'page-exception' } }
     finally { if (timer) clearTimeout(timer); if (this.focusModelNativeClick?.token === token) this.focusModelNativeClick = null }
   }

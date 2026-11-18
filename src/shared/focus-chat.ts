@@ -169,8 +169,13 @@ export interface FocusOwner {
   sessionId: string
   platformId: string
   conversationId: string | null
-  /** Omitted for the original Claude partition and for other platforms. */
+  /** Active non-default account id on multi-account platforms (Claude, Gemini). */
+  accountId?: string
+  /** Legacy alias for Claude accounts persisted before unified multi-platform accounts. */
   claudeAccountId?: string
+}
+export function focusOwnerAccountId(owner: { accountId?: string; claudeAccountId?: string }): string | undefined {
+  return owner.accountId ?? owner.claudeAccountId
 }
 export type FocusComposerModeId = 'thinking' | 'search'
 export const FOCUS_COMPOSER_MODES = [{ id: 'thinking', label: '深度思考' }, { id: 'search', label: '智能搜索' }] as const
@@ -188,8 +193,44 @@ export interface FocusModelSettings {
   efforts: FocusModelOption[]
 }
 export type FocusModelSettingKind = 'read' | 'model' | 'effort'
+export const FOCUS_MODEL_SETTING_STAGES = ['prepare', 'locate', 'open', 'verify', 'confirm'] as const
+export type FocusModelSettingStage = (typeof FOCUS_MODEL_SETTING_STAGES)[number]
+export const FOCUS_MODEL_SETTING_TARGETS = ['trigger', 'root-menu', 'more-models', 'effort-menu', 'model-option', 'effort-option', 'slider', 'submenu'] as const
+export type FocusModelSettingTarget = (typeof FOCUS_MODEL_SETTING_TARGETS)[number]
+export const FOCUS_MODEL_SETTING_DETAILS = [
+  'control-missing', 'menu-not-mounted', 'toggle-missing', 'target-not-visible', 'target-disabled',
+  'target-offscreen', 'hit-test-missed', 'target-stale', 'target-not-ready', 'submenu-no-panel',
+  'panel-vanished', 'options-empty', 'option-missing', 'option-ambiguous', 'model-options-missing',
+  'active-model-missing', 'slider-unavailable', 'native-input-failed', 'native-click-not-dispatched',
+  'native-click-window-unfocused', 'native-click-unreachable', 'native-click-dispatch-failed',
+  'step-limit', 'selection-unconfirmed', 'menu-close-unconfirmed', 'page-busy', 'page-exception', 'conversation-changed'
+] as const
+export type FocusModelSettingDetail = (typeof FOCUS_MODEL_SETTING_DETAILS)[number]
+export interface FocusModelSettingDiagnostic {
+  stage?: FocusModelSettingStage
+  target?: FocusModelSettingTarget
+  detail?: FocusModelSettingDetail
+  stepCount?: number
+  settleMs?: number
+}
+export function validFocusModelSettingDiagnostic(value: unknown): FocusModelSettingDiagnostic | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const raw = value as Record<string, unknown>
+  const parsed: FocusModelSettingDiagnostic = {}
+  if (typeof raw.stage === 'string' && (FOCUS_MODEL_SETTING_STAGES as readonly string[]).includes(raw.stage)) parsed.stage = raw.stage as FocusModelSettingStage
+  if (typeof raw.target === 'string' && (FOCUS_MODEL_SETTING_TARGETS as readonly string[]).includes(raw.target)) parsed.target = raw.target as FocusModelSettingTarget
+  if (typeof raw.detail === 'string' && (FOCUS_MODEL_SETTING_DETAILS as readonly string[]).includes(raw.detail)) parsed.detail = raw.detail as FocusModelSettingDetail
+  if (typeof raw.stepCount === 'number' && Number.isSafeInteger(raw.stepCount) && raw.stepCount >= 0 && raw.stepCount <= 20) parsed.stepCount = raw.stepCount
+  if (typeof raw.settleMs === 'number' && Number.isSafeInteger(raw.settleMs) && raw.settleMs >= 0 && raw.settleMs <= 60_000) parsed.settleMs = raw.settleMs
+  return Object.keys(parsed).length ? parsed : undefined
+}
 export interface FocusModelSettingsRequest extends FocusOwner { kind: FocusModelSettingKind; value?: string }
-export interface FocusModelSettingsResult { outcome: FocusSendOutcome; settings: FocusModelSettings | null; reason?: string }
+export interface FocusModelSettingsResult {
+  outcome: FocusSendOutcome
+  settings: FocusModelSettings | null
+  reason?: string
+  diagnostic?: FocusModelSettingDiagnostic
+}
 export function validFocusModelSettings(value: unknown): value is FocusModelSettings {
   if (!value || typeof value !== 'object') return false
   const settings = value as FocusModelSettings
@@ -368,7 +409,8 @@ export interface FocusSelectionRequest extends FocusOwner {
 }
 export function focusOwnerKey(owner: FocusOwner): string {
   const key = [owner.sessionId, owner.platformId, owner.conversationId]
-  if (owner.claudeAccountId) key.push(owner.claudeAccountId)
+  const accountId = focusOwnerAccountId(owner)
+  if (accountId) key.push(accountId)
   return JSON.stringify(key)
 }
 

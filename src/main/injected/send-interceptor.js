@@ -2484,6 +2484,20 @@
     return root ? [...root.querySelectorAll(CONTROL_SELECTOR)].filter(isVisibleElement) : []
   }
 
+  function focusModelClickPoint(target, fraction = null, dismiss = false, validate = null) {
+    if (!target?.isConnected || !isVisibleElement(target)) return { ok: false, detail: 'target-not-visible' }
+    if (controlDisabled(target)) return { ok: false, detail: 'target-disabled' }
+    if (validate && !validate()) return { ok: false, detail: 'target-stale' }
+    if (dismiss) return { ok: true, keyCode: 'Escape' }
+    const box = target.getBoundingClientRect()
+    const scaled = fraction === null ? .5 : getComputedStyle(target).direction === 'rtl' ? 1 - fraction : fraction
+    const x = Math.max(box.left + 1, Math.min(box.right - 1, box.left + box.width * scaled)), y = box.top + box.height / 2
+    if (box.width < 3 || box.height < 3 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return { ok: false, detail: 'target-offscreen' }
+    const hit = document.elementFromPoint(x, y)
+    if (!hit || !target.contains(hit)) return { ok: false, detail: 'hit-test-missed' }
+    return { ok: true, x, y }
+  }
+
   const focusModelPickerParts = () => {
     const rules = PAGE.focus?.modelSettings
     if (!rules) return null
@@ -6980,17 +6994,9 @@
       const operation = focusModeChanging, click = operation?.click
       if (!operation || operation.token !== token || !click || click.step !== step || click.prepared || !operation.current()) return null
       click.prepared = true
-      const target = click.target
-      if (!target.isConnected || !isVisibleElement(target) || controlDisabled(target) || !click.validate()) { click.dispatched = false; return null }
-      if (click.dismiss) return { keyCode: 'Escape' }
-      const box = target.getBoundingClientRect()
-      const fraction = click.fraction === null ? .5 : getComputedStyle(target).direction === 'rtl' ? 1 - click.fraction : click.fraction
-      const x = Math.max(box.left + 1, Math.min(box.right - 1, box.left + box.width * fraction)), y = box.top + box.height / 2
-      const hit = document.elementFromPoint(x, y)
-      if (box.width < 3 || box.height < 3 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight || !hit || !target.contains(hit)) {
-        click.dispatched = false; return null
-      }
-      return { x, y, ...(click.hover ? { hover: true } : {}) }
+      const point = focusModelClickPoint(click.target, click.fraction, click.dismiss, click.validate)
+      if (!point.ok) { click.dispatched = false; click.detailReason = point.detail; return null }
+      return point.keyCode ? { keyCode: point.keyCode } : { x: point.x, y: point.y, ...(click.hover ? { hover: true } : {}) }
     },
     finishFocusModelClick(token, step, dispatched, reason = null) {
       const operation = focusModeChanging, click = operation?.click
@@ -7007,8 +7013,10 @@
       if (!rules || !['read', 'model', 'effort'].includes(kind) || typeof token !== 'string' ||
         !/^[a-zA-Z0-9-]{1,80}$/.test(token) || (kind === 'read' ? value !== null : typeof value !== 'string' || value.length > 80)) return result('invalid', 'invalid-request')
       if (location.pathname !== expectedPath || !getComposer()) return result('unavailable', 'page-unavailable')
-      if (focusModeChanging || focusEditing || fileSend || state.programmatic || state.awaitingReplySince || state.pendingQuestion || findStopButton()) return result('busy', 'page-busy')
-      const operation = { token, generation: state.taskPromptGeneration, path: expectedPath, click: null, step: 0, current: null }
+      if (focusModeChanging || focusEditing || fileSend || state.programmatic || state.awaitingReplySince || state.pendingQuestion || findStopButton()) {
+        return { ...result('busy', 'page-busy'), diagnostic: { stage: 'prepare', target: 'trigger', detail: 'page-busy', stepCount: 0 } }
+      }
+      const operation = { token, generation: state.taskPromptGeneration, path: expectedPath, click: null, lastFailure: null, step: 0, current: null }
       operation.current = () => focusModeChanging === operation && location.pathname === operation.path && state.taskPromptGeneration === operation.generation
       const deadline = Date.now() + 10000
       const waitFor = async (predicate, timeout = 1100) => {
@@ -7019,8 +7027,25 @@
         }
         return operation.current() && predicate()
       }
+      const diag = { stage: 'prepare', target: null, detail: null, settleMs: 0 }
+      const note = (stage, target, detail = null, settleMs = 0) => {
+        diag.stage = stage
+        diag.target = target
+        diag.detail = detail
+        if (settleMs > 0) diag.settleMs = settleMs
+      }
+      const fail = (nextOutcome, nextReason, stage, target, detail) => {
+        note(stage, target, detail)
+        return [nextOutcome, nextReason]
+      }
+      const clickDetail = (click, fallback = 'native-input-failed') =>
+        operation.lastFailure || click?.reason || click?.detailReason || (click?.dispatched === false ? 'native-click-not-dispatched' : fallback)
       const nativeInput = async (target, { fraction = null, validate = () => true, dismiss = false, hover = false } = {}) => {
-        if (!target || !operation.current() || Date.now() >= deadline || operation.step >= 8) return false
+        if (!target || !operation.current() || Date.now() >= deadline || operation.step >= 10) {
+          operation.lastFailure = !target ? 'control-missing' : !operation.current() ? 'conversation-changed' : operation.step >= 10 ? 'step-limit' : 'target-not-ready'
+          return false
+        }
+        operation.lastFailure = null
         const click = { target, fraction, validate, dismiss, hover, step: ++operation.step, prepared: false, dispatched: null }
         operation.click = click
         report({ event: 'focus-model-click', focusModelToken: token, count: click.step })
@@ -7030,6 +7055,22 @@
       const confirmed = async predicate => {
         let stable = 0
         return await waitFor(() => { stable = predicate() ? stable + 1 : 0; return stable >= 3 })
+      }
+      const settleClickTarget = async (getTarget, skipWhen = null) => {
+        let ready = null
+        const started = Date.now()
+        await waitFor(() => {
+          if (skipWhen?.()) { ready = { ok: true }; return true }
+          const live = getTarget()
+          if (!live) return false
+          ready = focusModelClickPoint(live)
+          if (!ready.ok && ready.detail === 'target-offscreen') {
+            live.scrollIntoView?.({ block: 'nearest' })
+            ready = focusModelClickPoint(live)
+          }
+          return ready.ok
+        }, 500)
+        return { ready, settleMs: Date.now() - started }
       }
       const openSubmenu = async (toggle, panelOf, sameToggle) => {
         if (panelOf()) return panelOf()
@@ -7054,24 +7095,35 @@
         }
         return null
       }
+      const dismissClaudeSubmenu = async sub => {
+        if (!sub?.panel) return false
+        const panel = sub.panel
+        const dismissed = await nativeInput(panel, { dismiss: true, validate: () => activeClaudeSubmenu()?.panel === panel })
+        return dismissed && await waitFor(() => !activeClaudeSubmenu(), 500)
+      }
       focusModeChanging = operation
       let openedHere = false, openedEffortHere = false, outcome = 'unknown', reason = 'selection-unconfirmed'
       try {
         const perform = async () => {
           await waitFor(() => !!focusModelPickerParts())
           let parts = focusModelPickerParts()
-          if (!parts || controlDisabled(parts.trigger)) return ['unavailable', 'control-missing']
+          if (!parts || controlDisabled(parts.trigger)) {
+            return fail('unavailable', 'control-missing', 'prepare', 'trigger', parts ? 'target-disabled' : 'control-missing')
+          }
           if (parts.trigger.getAttribute('aria-expanded') !== 'true') {
             if (!await nativeInput(parts.trigger, { validate: () => focusModelPickerParts()?.trigger === parts.trigger })) {
               // Only an explicitly rejected first click is safe to retry. A missing
               // acknowledgement or a later failure may already have changed the menu.
               const click = operation.click
+              note('open', 'trigger', clickDetail(click))
               return operation.step === 1 && click?.dispatched === false
                 ? ['unavailable', click.reason || 'native-click-not-dispatched'] : ['unknown', 'native-input-failed']
             }
             openedHere = true
           }
-          if (!await waitFor(() => !!focusModelPickerParts()?.menu)) return ['unknown', 'menu-unavailable']
+          if (!await waitFor(() => !!focusModelPickerParts()?.menu)) {
+            return fail('unknown', 'menu-unavailable', 'locate', 'root-menu', 'menu-not-mounted')
+          }
           if (rules.kind === 'gemini') {
             await waitFor(() => !!focusModelPickerParts()?.menu?.querySelector(rules.modelSelector))
             const effort = geminiEffortParts()
@@ -7079,86 +7131,120 @@
           }
           if (rules.kind === 'claude') {
             await waitFor(() => !!focusModelPickerParts()?.menu?.querySelector(rules.modelSelector + ', ' + rules.effortMenu.toggleSelector))
-            const openClaudeSub = async (labels, waitSelector, idAttr) => {
-              const sub = claudeSubmenu(labels)
-              if (!sub) return null
-              const panel = await openSubmenu(sub.toggle, () => claudeSubmenu(labels)?.panel ?? null,
+            const openClaudeSub = async (labels, waitSelector, idAttr, targetName) => {
+              if (!claudeSubmenu(labels)) { note('locate', targetName, 'toggle-missing'); return null }
+              let settled = await settleClickTarget(() => claudeSubmenu(labels)?.toggle, () => !!claudeSubmenu(labels)?.panel)
+              let sub = claudeSubmenu(labels)
+              // If an open sibling submenu overlaps or blocks this toggle, dismiss it and re-settle once.
+              if (sub && !sub.panel && !settled.ready?.ok) {
+                const other = activeClaudeSubmenu()
+                if (other && other.toggle !== sub.toggle && await dismissClaudeSubmenu(other)) {
+                  settled = await settleClickTarget(() => claudeSubmenu(labels)?.toggle, () => !!claudeSubmenu(labels)?.panel)
+                  sub = claudeSubmenu(labels)
+                }
+              }
+              if (!sub) { note('locate', targetName, 'toggle-missing', settled.settleMs); return null }
+              if (!sub.panel && !settled.ready?.ok) {
+                note('open', targetName, settled.ready?.detail || 'target-not-ready', settled.settleMs)
+                return null
+              }
+              let panel = await openSubmenu(sub.toggle, () => claudeSubmenu(labels)?.panel ?? null,
                 () => claudeSubmenu(labels)?.toggle === sub.toggle)
-              if (!panel) return null
+              if (!panel) {
+                const other = activeClaudeSubmenu()
+                if (other && other.toggle !== sub.toggle && operation.step < 9 && await dismissClaudeSubmenu(other)) {
+                  settled = await settleClickTarget(() => claudeSubmenu(labels)?.toggle, () => !!claudeSubmenu(labels)?.panel)
+                  sub = claudeSubmenu(labels)
+                  if (sub && (sub.panel || settled.ready?.ok)) {
+                    panel = await openSubmenu(sub.toggle, () => claudeSubmenu(labels)?.panel ?? null,
+                      () => claudeSubmenu(labels)?.toggle === sub.toggle)
+                  }
+                }
+              }
+              if (!panel) {
+                note('open', targetName, clickDetail(operation.click, 'submenu-no-panel'), settled.settleMs)
+                return null
+              }
               await waitFor(() => focusClaudeRadioOptions(panel, waitSelector, idAttr).length > 0, 500)
               focusModelSettingsOf()
-              return claudeSubmenu(labels)?.panel ?? null
+              const livePanel = claudeSubmenu(labels)?.panel ?? null
+              if (!livePanel) { note('verify', targetName, 'panel-vanished', settled.settleMs); return null }
+              return livePanel
             }
             if (kind === 'read') {
               focusModelSettingsOf()
               if (claudeSubmenu(rules.moreModelsLabels) &&
-                !await openClaudeSub(rules.moreModelsLabels, rules.modelSelector, 'data-model-id')) return ['unknown', 'menu-unavailable']
+                !await openClaudeSub(rules.moreModelsLabels, rules.modelSelector, 'data-model-id', 'more-models')) return ['unknown', 'menu-unavailable']
               if (claudeSubmenu(rules.effortMenu.toggleLabels) &&
-                !await openClaudeSub(rules.effortMenu.toggleLabels, rules.effortMenu.optionSelector, 'data-effort-id')) return ['unknown', 'menu-unavailable']
+                !await openClaudeSub(rules.effortMenu.toggleLabels, rules.effortMenu.optionSelector, 'data-effort-id', 'effort-menu')) return ['unknown', 'menu-unavailable']
               const data = focusModelSettingsOf()
-              if (!data.models.length) return ['unavailable', 'model-options-missing']
-              return data.model ? ['ok', 'settings-read'] : ['unknown', 'selection-unconfirmed']
+              if (!data.models.length) return fail('unavailable', 'model-options-missing', 'verify', 'root-menu', 'model-options-missing')
+              return data.model ? ['ok', 'settings-read'] : fail('unknown', 'selection-unconfirmed', 'verify', 'trigger', 'active-model-missing')
             }
             let data = focusModelSettingsOf()
             if (kind === 'model') {
-              if (!data.models.length) return ['unavailable', 'model-options-missing']
+              if (!data.models.length) return fail('unavailable', 'model-options-missing', 'locate', 'root-menu', 'model-options-missing')
               if (data.model === value) return ['ok', 'already-selected']
               let locate = () => focusClaudeRadioOptions(focusModelPickerParts()?.menu, rules.modelSelector, 'data-model-id')
                 .filter(option => option.value === value).map(option => option.node)
               let matches = locate()
               if (!matches.length && claudeSubmenu(rules.moreModelsLabels)) {
-                const morePanel = await openClaudeSub(rules.moreModelsLabels, rules.modelSelector, 'data-model-id')
+                const morePanel = await openClaudeSub(rules.moreModelsLabels, rules.modelSelector, 'data-model-id', 'more-models')
                 if (!morePanel) return ['unknown', 'menu-unavailable']
                 data = focusModelSettingsOf()
                 locate = () => focusClaudeRadioOptions(claudeSubmenu(rules.moreModelsLabels)?.panel, rules.modelSelector, 'data-model-id')
                   .filter(option => option.value === value).map(option => option.node)
+                await settleClickTarget(() => locate()[0] || null)
                 matches = locate()
               }
-              if (!data.models.some(item => item.value === value)) return ['invalid', 'option-unavailable']
-              if (matches.length !== 1) return ['unavailable', 'option-unavailable']
+              if (!data.models.some(item => item.value === value)) return fail('invalid', 'option-unavailable', 'locate', 'model-option', 'option-missing')
+              if (matches.length !== 1) return fail('unavailable', 'option-unavailable', 'locate', 'model-option', matches.length ? 'option-ambiguous' : 'option-missing')
               const target = matches[0]
               if (!await nativeInput(target, { validate: () => {
                 const current = locate()
                 return current.length === 1 && current[0] === target
-              } })) return ['unknown', 'native-input-failed']
+              } })) return fail('unknown', 'native-input-failed', 'confirm', 'model-option', clickDetail(operation.click))
               return await confirmed(() => {
                 const currentParts = focusModelPickerParts()
                 return !!currentParts && currentParts.trigger.getAttribute('aria-expanded') !== 'true' && focusModelSettingsOf().model === value
-              }) ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
+              }) ? ['ok', 'selection-confirmed'] : fail('unknown', 'selection-unconfirmed', 'verify', 'model-option', 'selection-unconfirmed')
             }
-            if (!data.models.length) return ['unavailable', 'model-options-missing']
+            if (!data.models.length) return fail('unavailable', 'model-options-missing', 'locate', 'root-menu', 'model-options-missing')
             const model = data.model
             if (!model || !claudeSubmenu(rules.effortMenu.toggleLabels)) {
-              return data.efforts.length ? ['unavailable', 'control-missing'] : ['invalid', 'option-unavailable']
+              return data.efforts.length
+                ? fail('unavailable', 'control-missing', 'locate', model ? 'effort-menu' : 'trigger', model ? 'toggle-missing' : 'active-model-missing')
+                : fail('invalid', 'option-unavailable', 'locate', 'effort-option', 'option-missing')
             }
-            const effortPanel = await openClaudeSub(rules.effortMenu.toggleLabels, rules.effortMenu.optionSelector, 'data-effort-id')
+            const effortPanel = await openClaudeSub(rules.effortMenu.toggleLabels, rules.effortMenu.optionSelector, 'data-effort-id', 'effort-menu')
             if (!effortPanel) return ['unknown', 'menu-unavailable']
             data = focusModelSettingsOf()
-            if (!data.efforts.some(item => item.value === value)) return ['invalid', 'option-unavailable']
+            if (!data.efforts.some(item => item.value === value)) return fail('invalid', 'option-unavailable', 'locate', 'effort-option', 'option-missing')
             if (data.effort === value) return ['ok', 'already-selected']
             const locate = () => focusClaudeRadioOptions(claudeSubmenu(rules.effortMenu.toggleLabels)?.panel, rules.effortMenu.optionSelector, 'data-effort-id')
               .filter(option => option.value === value && isVisibleElement(option.node)).map(option => option.node)
+            await settleClickTarget(() => locate()[0] || null)
             const matches = locate()
-            if (matches.length !== 1) return ['unavailable', 'option-unavailable']
+            if (matches.length !== 1) return fail('unavailable', 'option-unavailable', 'locate', 'effort-option', matches.length ? 'option-ambiguous' : 'option-missing')
             const target = matches[0]
             if (!await nativeInput(target, { validate: () => {
               const live = locate()
               return focusModelSettingsOf().model === model && live.length === 1 && live[0] === target
-            } })) return ['unknown', 'native-input-failed']
+            } })) return fail('unknown', 'native-input-failed', 'confirm', 'effort-option', clickDetail(operation.click))
             return await confirmed(() => {
               const currentParts = focusModelPickerParts()
               const settings = focusModelSettingsOf()
               return !!currentParts && currentParts.trigger.getAttribute('aria-expanded') !== 'true' &&
                 settings.model === model && settings.effort === value
-            }) ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
+            }) ? ['ok', 'selection-confirmed'] : fail('unknown', 'selection-unconfirmed', 'verify', 'effort-option', 'selection-unconfirmed')
           }
           parts = focusModelPickerParts()
-          if (!parts?.menu) return ['unknown', 'menu-unavailable']
+          if (!parts?.menu) return fail('unknown', 'menu-unavailable', 'locate', 'root-menu', 'menu-not-mounted')
           const data = focusModelSettingsOf()
-          if (!data.models.length) return ['unavailable', 'model-options-missing']
-          if (kind === 'read') return data.model ? ['ok', 'settings-read'] : ['unknown', 'selection-unconfirmed']
+          if (!data.models.length) return fail('unavailable', 'model-options-missing', 'locate', 'root-menu', 'model-options-missing')
+          if (kind === 'read') return data.model ? ['ok', 'settings-read'] : fail('unknown', 'selection-unconfirmed', 'verify', 'trigger', 'active-model-missing')
           if (kind === 'model') {
-            if (!data.models.some(item => item.value === value)) return ['invalid', 'option-unavailable']
+            if (!data.models.some(item => item.value === value)) return fail('invalid', 'option-unavailable', 'locate', 'model-option', 'option-missing')
             if (data.model === value) return ['ok', 'already-selected']
             const locate = () => {
               const menu = focusModelPickerParts()?.menu
@@ -7166,62 +7252,74 @@
                 [...(menu?.querySelectorAll(rules.modelSelector) || [])].filter(node => collapse(node.textContent || '') === value)
             }
             let matches = locate()
-            if (matches.length !== 1) return ['unavailable', 'option-unavailable']
+            if (matches.length !== 1) return fail('unavailable', 'option-unavailable', 'locate', 'model-option', matches.length ? 'option-ambiguous' : 'option-missing')
             if (rules.kind === 'chatgpt' && (!isVisibleElement(matches[0]) || matches[0].closest('[aria-hidden="true"]'))) {
               const toggles = [...parts.menu.querySelectorAll(rules.viewToggleSelector)].filter(node => isVisibleElement(node) && !node.closest('[aria-hidden="true"]'))
-              if (toggles.length !== 1 || !await nativeInput(toggles[0])) return ['unknown', 'native-input-failed']
-              if (!await waitFor(() => locate().some(node => isVisibleElement(node) && !node.closest('[aria-hidden="true"]')))) return ['unknown', 'menu-unavailable']
+              if (toggles.length !== 1 || !await nativeInput(toggles[0])) {
+                return fail('unknown', 'native-input-failed', 'open', 'submenu', toggles.length !== 1 ? 'toggle-missing' : clickDetail(operation.click))
+              }
+              if (!await waitFor(() => locate().some(node => isVisibleElement(node) && !node.closest('[aria-hidden="true"]')))) {
+                return fail('unknown', 'menu-unavailable', 'locate', 'model-option', 'option-missing')
+              }
             }
             matches = locate()
             if (matches.length !== 1 || !await nativeInput(matches[0], { validate: () => {
               const current = locate()
               return current.length === 1 && current[0] === matches[0]
-            } })) return ['unknown', 'native-input-failed']
+            } })) {
+              return fail('unknown', 'native-input-failed', 'confirm', 'model-option', matches.length !== 1 ? 'option-missing' : clickDetail(operation.click))
+            }
             return await confirmed(() => (rules.kind !== 'gemini' || !!focusModelPickerParts()) && focusModelSettingsOf().model === value)
-              ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
+              ? ['ok', 'selection-confirmed'] : fail('unknown', 'selection-unconfirmed', 'verify', 'model-option', 'selection-unconfirmed')
           }
-          if (!data.efforts.some(item => item.value === value)) return ['invalid', 'option-unavailable']
+          if (!data.efforts.some(item => item.value === value)) return fail('invalid', 'option-unavailable', 'locate', 'effort-option', 'option-missing')
           if (data.effort === value) return ['ok', 'already-selected']
           if (rules.kind === 'gemini') {
             const model = data.model, effort = geminiEffortParts()
-            if (!model || !effort) return ['unavailable', 'control-missing']
+            if (!model || !effort) return fail('unavailable', 'control-missing', 'locate', model ? 'effort-menu' : 'trigger', model ? 'toggle-missing' : 'active-model-missing')
             const visibleSubmenu = () => geminiEffortParts()?.expanded === true
             const sameToggle = () => focusModelSettingsOf().model === model && geminiEffortParts()?.toggle === effort.toggle
             if (!effort.expanded && !await openSubmenu(effort.toggle, () => visibleSubmenu() ? geminiEffortParts().panel : null, sameToggle)) {
-              return ['unknown', 'menu-unavailable']
+              return fail('unknown', 'menu-unavailable', 'open', 'effort-menu', clickDetail(operation.click, 'submenu-no-panel'))
             }
             const locate = () => {
               const current = geminiEffortParts()
               return current?.expanded ? focusGeminiEffortOptions(current.panel, rules).filter(option => option.value === value && isVisibleElement(option.node)) : []
             }
             const options = locate()
-            if (options.length !== 1) return ['unavailable', 'option-unavailable']
+            if (options.length !== 1) return fail('unavailable', 'option-unavailable', 'locate', 'effort-option', options.length ? 'option-ambiguous' : 'option-missing')
             const target = options[0].node
             if (!await nativeInput(target, { validate: () => {
               const live = locate()
               return focusModelSettingsOf().model === model && live.length === 1 && live[0].node === target
-            } })) return ['unknown', 'native-input-failed']
+            } })) return fail('unknown', 'native-input-failed', 'confirm', 'effort-option', clickDetail(operation.click))
             return await confirmed(() => {
               const settings = focusModelSettingsOf()
               return !!focusModelPickerParts() && settings.model === model && settings.effort === value
-            }) ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
+            }) ? ['ok', 'selection-confirmed'] : fail('unknown', 'selection-unconfirmed', 'verify', 'effort-option', 'selection-unconfirmed')
           }
           const model = data.model, rule = parts.rules.efforts.find(item => item.value === value)
           const slider = parts.menu.querySelector(parts.rules.sliderSelector)
           const root = slider?.querySelector(parts.rules.sliderRootSelector)
-          if (!root || slider.closest('[aria-hidden="true"]')) return ['unavailable', 'slider-unavailable']
+          if (!root || slider.closest('[aria-hidden="true"]')) return fail('unavailable', 'slider-unavailable', 'locate', 'slider', 'slider-unavailable')
           if (!await nativeInput(root, { fraction: rule.position / 2, validate: () => focusModelSettingsOf().model === model &&
-            focusModelPickerParts()?.menu?.querySelector(parts.rules.sliderSelector) === slider })) return ['unknown', 'native-input-failed']
+            focusModelPickerParts()?.menu?.querySelector(parts.rules.sliderSelector) === slider })) {
+            return fail('unknown', 'native-input-failed', 'confirm', 'slider', clickDetail(operation.click))
+          }
           return await confirmed(() => focusModelSettingsOf().model === model && focusModelSettingsOf().effort === value)
-            ? ['ok', 'selection-confirmed'] : ['unknown', 'selection-unconfirmed']
+            ? ['ok', 'selection-confirmed'] : fail('unknown', 'selection-unconfirmed', 'verify', 'slider', 'selection-unconfirmed')
         }
         ;[outcome, reason] = await perform()
-      } catch { outcome = 'unknown'; reason = 'page-exception' }
+      } catch {
+        outcome = 'unknown'; reason = 'page-exception'
+        if (!diag.detail) note(diag.stage || 'prepare', diag.target || 'trigger', 'page-exception')
+      }
       finally {
-        let closed = true
+        let closed = true, closingTarget = 'root-menu'
         if (rules.kind === 'gemini' && (openedHere || openedEffortHere) && operation.current()) {
           const effort = geminiEffortParts()
           if (effort?.expanded) {
+            closingTarget = 'effort-menu'
             const panel = effort.panel
             const dismissed = await nativeInput(panel, { dismiss: true, validate: () => geminiEffortParts()?.panel === panel &&
               (panel.contains(document.activeElement) || effort.toggle.contains(document.activeElement)) })
@@ -7230,14 +7328,12 @@
         }
         if (rules.kind === 'claude' && (openedHere || openedEffortHere) && operation.current()) {
           const sub = activeClaudeSubmenu()
-          if (sub) {
-            const dismissed = await nativeInput(sub.panel, { dismiss: true, validate: () => activeClaudeSubmenu()?.panel === sub.panel })
-            closed = dismissed && await waitFor(() => !activeClaudeSubmenu(), 500)
-          }
+          if (sub) { closingTarget = 'submenu'; closed = await dismissClaudeSubmenu(sub) }
         }
         if (openedHere && operation.current()) {
           const { trigger, menu } = focusModelPickerParts() || {}
           if (trigger?.getAttribute('aria-expanded') === 'true') {
+            closingTarget = 'root-menu'
             const dispatched = rules.kind === 'gemini' ? await nativeInput(menu, { dismiss: true, validate: () =>
               focusModelPickerParts()?.menu === menu && (menu.contains(document.activeElement) || trigger.contains(document.activeElement)) }) :
               rules.kind === 'claude' ? await nativeInput(menu, { dismiss: true, validate: () => focusModelPickerParts()?.menu === menu }) :
@@ -7245,11 +7341,26 @@
             closed = dispatched && await waitFor(() => focusModelPickerParts()?.trigger.getAttribute('aria-expanded') !== 'true', 500)
           }
         }
-        if (!closed && outcome === 'ok') { outcome = 'unknown'; reason = 'menu-close-unconfirmed' }
-        if (!operation.current()) { outcome = 'cancelled'; reason = 'conversation-changed' }
+        if (!closed && outcome === 'ok') {
+          outcome = 'unknown'; reason = 'menu-close-unconfirmed'
+          note('confirm', closingTarget, clickDetail(operation.click, 'menu-close-unconfirmed'))
+        }
+        if (!operation.current()) {
+          outcome = 'cancelled'; reason = 'conversation-changed'
+          note(diag.stage || 'confirm', diag.target || 'root-menu', 'conversation-changed')
+        }
         if (focusModeChanging === operation) focusModeChanging = null
       }
-      return result(outcome, reason)
+      const reply = result(outcome, reason)
+      if (outcome === 'ok') return reply
+      const diagnostic = {
+        ...(diag.stage ? { stage: diag.stage } : {}),
+        ...(diag.target ? { target: diag.target } : {}),
+        ...(diag.detail ? { detail: diag.detail } : {}),
+        stepCount: operation.step,
+        ...(diag.settleMs > 0 ? { settleMs: diag.settleMs } : {})
+      }
+      return { ...reply, diagnostic }
     },
 
     /** One requested mode change. No draft writes, submit, state replay or automatic retry. */

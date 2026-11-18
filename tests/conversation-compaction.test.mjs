@@ -153,14 +153,16 @@ test('checkpoint prompt preserves continuation state without requesting a fixed-
 function fixture(t, settings = new Map(), settingsOptions = {}) {
   const subjectOwner = { ...owner, platformId: settingsOptions.platformId ?? owner.platformId,
     conversationId: settingsOptions.conversationId ?? owner.conversationId,
+    ...(settingsOptions.accountId && { accountId: settingsOptions.accountId }),
     ...(settingsOptions.claudeAccountId && { claudeAccountId: settingsOptions.claudeAccountId }) }
+  const scopeAccountId = subjectOwner.accountId ?? subjectOwner.claudeAccountId
   const settingsKey = 'conversationCompaction:' + owner.sessionId +
-    (subjectOwner.claudeAccountId ? ':' + subjectOwner.claudeAccountId : '')
+    (scopeAccountId ? ':' + scopeAccountId : '')
   const directory = mkdtempSync(join(tmpdir(), 'web2term-compaction-test-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const calls = [], records = new Map(), created = [], pages = [], openings = []
   let clock = settingsOptions.initialTime ?? 1_000, failTarget = settingsOptions.failTarget === true
-  const options = { sessionId: owner.sessionId, directory, claudeAccountId: subjectOwner.claudeAccountId,
+  const options = { sessionId: owner.sessionId, directory, accountId: subjectOwner.accountId, claudeAccountId: subjectOwner.claudeAccountId,
     store: { getSetting: key => settings.get(key) ?? null,
     setSetting: (key, value) => settings.set(key, value) }, canWork: () => true,
     now: () => clock, pause: async () => { clock += 900; await settingsOptions.beforePause?.(); await immediate() },
@@ -247,10 +249,15 @@ const runtimePath = join(root, 'src/main/session-runtime.ts')
 const runtimeAst = ts.createSourceFile(runtimePath, readFileSync(runtimePath, 'utf8'), ts.ScriptTarget.Latest, true)
 const runtimeClass = runtimeAst.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'SessionRuntime')
 const runtimeMethods = ['ownsFocus', 'compactionService', 'summary'].map(name => runtimeClass.members.find(node => node.name?.getText(runtimeAst) === name).getText(runtimeAst))
+const sharedFocus = load(join(root, 'src/shared/focus-chat.ts'))
+const sharedPlatformAccounts = load(join(root, 'src/shared/platform-accounts.ts'))
 const Runtime = new Script(ts.transpileModule(`class Runtime { ${runtimeMethods.join('\n')} }; Runtime`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
 }).outputText).runInNewContext({ join, app: { getPath: () => tmpdir() },
-  supportsFocusView: load(join(root, 'src/shared/focus-chat.ts')).supportsFocusView,
+  supportsFocusView: sharedFocus.supportsFocusView,
+  focusOwnerAccountId: sharedFocus.focusOwnerAccountId,
+  supportsPlatformAccounts: sharedPlatformAccounts.supportsPlatformAccounts,
+  DEFAULT_PLATFORM_ACCOUNT_ID: sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID,
   ConversationCompaction: class { constructor(options) { this.options = options } } })
 function backgroundRuntime(f) {
   const selected = [], updates = [], state = { conversationId: f.owner.conversationId, blocked: false, executing: false }
@@ -258,6 +265,7 @@ function backgroundRuntime(f) {
   const otherPlatformId = f.owner.platformId === 'chatgpt' ? 'deepseek' : 'chatgpt'
   const runtime = Object.assign(new Runtime(), { id: f.owner.sessionId, active: true, disposed: false,
     activePlatformId: f.owner.platformId, customTitle: '来源聊天', createdAt: 1,
+    compactions: new Map(), compactionScope: sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, accountScope: () => undefined,
     embeds: new Map([[f.owner.platformId, { platform: { id: f.owner.platformId }, embed: sourceEmbed }],
       [otherPlatformId, { platform: { id: otherPlatformId }, embed: { getState: () => ({ conversationId: 'other-chat' }) } }]]),
     activeEmbed() { return this.embeds.get(this.activePlatformId) }, taskRunning: () => false,
@@ -267,7 +275,7 @@ function backgroundRuntime(f) {
       onSummaryChanged: () => updates.push(runtime.summary()) } })
   Object.defineProperty(runtime, 'embed', { get() { return this.embeds.get(this.activePlatformId).embed } })
   const options = runtime.compactionService().options
-  runtime.compaction = f.service
+  runtime.compactions.set(sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, f.service)
   Object.assign(f.options, { canWork: options.canWork, canAdopt: options.canAdopt, onComplete: options.onComplete,
     onStateChanged: options.onStateChanged })
   return { runtime, state, selected, updates, otherPlatformId }
@@ -743,4 +751,19 @@ test('troubleshooting pages open only on request and hiding them does not disabl
   await f.service.resume(owner)
   assert.equal((await settled(f)).phase, 'completed')
   assert.equal(f.calls.length, 2)
+})
+
+test('Gemini handoff resumes on the selected generation account while keeping the source account owner', async t => {
+  const accountA = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+  const accountB = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+  const f = fixture(t, new Map(), { platformId: 'gemini', conversationId: 'fedcba9876543210', accountId: accountA, unknown: true })
+  await f.start('gemini', accountB)
+  assert.equal((await settled(f)).phase, 'uncertain')
+  assert.equal(f.service.state({ ...f.owner, accountId: accountB }), null)
+  f.restart()
+  assert.equal(f.service.state(f.owner).generationAccountId, accountB)
+  await f.service.resume(f.owner)
+  assert.equal((await settled(f)).phase, 'ready-to-export')
+  assert.deepEqual(f.openings.map(page => page.accountId), [accountB, accountB])
+  assert.equal(f.calls.length, 1)
 })

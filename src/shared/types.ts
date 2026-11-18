@@ -11,7 +11,7 @@ import type { TaskLease } from './autonomous-task'
 import type { TaskActivity, TaskObservationRequest, TaskArtifactRequest } from './task-presentation'
 import type { FocusOwner, FocusChatState, FocusChatUpdate, FocusHistoryCursor, FocusSelectionRequest, FocusSendRequest, FocusEditRequest, FocusSendOutcome, FocusAttachmentInfo, FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from './focus-chat'
 import type { CompactionAction, CompactionRequest, CompactionState } from './conversation-compaction'
-import type { ClaudeAccount } from './claude-accounts'
+import type { AccountPlatformId, PlatformAccount } from './platform-accounts'
 import type { SelectionQuestionPlatform } from './deepseek-question'
 import type { FocusUiRequest } from './focus-smart-ui'
 import type { FocusCitationRequest, FocusCitationResult, FocusCitationOpenRequest } from './focus-citations'
@@ -246,10 +246,10 @@ export const IpcChannels = {
   workspaceProjectRemove: 'workspace:project-remove',
   workspaceProjectsChanged: 'workspace:projects-changed',
   sessionSwitchPlatform: 'session:switch-platform',
-  claudeAccountsList: 'claude-accounts:list',
-  claudeAccountAdd: 'claude-accounts:add',
-  claudeAccountSwitch: 'claude-accounts:switch',
-  claudeAccountRemove: 'claude-accounts:remove',
+  platformAccountsList: 'platform-accounts:list',
+  platformAccountAdd: 'platform-accounts:add',
+  platformAccountSwitch: 'platform-accounts:switch',
+  platformAccountRemove: 'platform-accounts:remove',
   sessionShowModelMenu: 'session:show-model-menu',
   workspaceGetState: 'workspace:get-state',
   workspaceShowManager: 'workspace:show-manager',
@@ -720,6 +720,7 @@ export const EMPTY_NACOS_VIEW_STATE: NacosViewState = {
 
 /** Snapshot of the embedded view, pushed from main to the renderer. */
 export interface EmbedState {
+  accountIds?: Partial<Record<AccountPlatformId, string>>
   claudeAccountId?: string
   /** Stable local transcript identity across compaction; the page owner stays conversationId. */
   viewConversationId?: string | null
@@ -2419,10 +2420,10 @@ export interface AppApi {
   getEmbedState(): Promise<EmbedState>
   getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
   getCompaction(owner: FocusOwner): Promise<CompactionState | null>
-  listClaudeAccounts(): Promise<ClaudeAccount[]>
-  addClaudeAccount(owner: FocusOwner, label: string): Promise<ClaudeAccount>
-  switchClaudeAccount(owner: FocusOwner, accountId: string): Promise<void>
-  removeClaudeAccount(owner: FocusOwner, accountId: string): Promise<ClaudeAccount[]>
+  listPlatformAccounts(platformId: AccountPlatformId): Promise<PlatformAccount[]>
+  addPlatformAccount(owner: FocusOwner, label: string): Promise<PlatformAccount>
+  switchPlatformAccount(owner: FocusOwner, accountId: string): Promise<void>
+  removePlatformAccount(owner: FocusOwner, accountId: string): Promise<PlatformAccount[]>
   startCompaction(owner: FocusOwner, generationPlatformId?: SelectionQuestionPlatform, generationAccountId?: string): Promise<CompactionState>
   compactionAction(request: CompactionRequest, action: CompactionAction): Promise<void>
   setCompactionViewport(request: CompactionRequest, bounds: EmbedBounds, visible: boolean): void

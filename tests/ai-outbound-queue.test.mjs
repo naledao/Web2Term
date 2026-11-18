@@ -65,6 +65,18 @@ test('Claude draft queue state is visible only to its account', async () => {
   queue.dispose()
 })
 
+test('Gemini draft queue state is isolated by accountId', async () => {
+  const Queue = loadQueue()
+  const queue = new Queue()
+  const original = { ...owner, platformId: 'gemini', conversationId: null }
+  const alternate = { ...original, accountId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }
+  const ticket = queue.enqueue(request({ owner: alternate, execute: async () => 'unknown', blockOnFailure: () => true }))
+  assert.equal(await ticket.completion, 'unknown')
+  assert.equal(queue.stateFor(alternate).blocked?.id, ticket.item.id)
+  assert.equal(queue.stateFor(original).pending, 0)
+  queue.dispose()
+})
+
 test('retries a busy result on the same job before advancing', async () => {
   const Queue = loadQueue()
   const queue = new Queue()

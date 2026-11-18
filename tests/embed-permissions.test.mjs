@@ -6,7 +6,7 @@ import { Script } from 'node:vm'
 import { test } from 'node:test'
 import ts from 'typescript'
 
-function fixture() {
+function fixture(partitionArg) {
   const partitions = []
   let check, request
   const geminiSession = {
@@ -16,7 +16,7 @@ function fixture() {
   const dependencies = {
     electron: { session: { fromPartition(partition) {
       partitions.push(partition)
-      assert.equal(partition, 'persist:gemini', 'other chat sessions must retain their permissions')
+      assert.equal(partition, partitionArg ?? 'persist:gemini', 'other chat sessions must retain their permissions')
       return geminiSession
     } } },
     '../shared/platforms': { GEMINI_PLATFORM: { partition: 'persist:gemini' } }
@@ -29,8 +29,8 @@ function fixture() {
     assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`)
     return dependencies[name]
   } })
-  exports.blockGeminiWebNotifications()
-  return { partitions, check, request }
+  exports.blockGeminiWebNotifications(partitionArg)
+  return { partitions, check, request, block: exports.blockGeminiWebNotifications }
 }
 
 test('Gemini reply notifications are denied for pages and service workers', () => {
@@ -52,4 +52,15 @@ test('microphone, clipboard and storage permissions retain their existing behavi
     f.request(null, permission, granted => decisions.push(granted), {})
     assert.deepEqual(decisions, [true])
   }
+})
+
+test('custom Gemini account partitions also block notifications idempotently', () => {
+  const customPartition = 'persist:gemini-11111111-1111-4111-8111-111111111111'
+  const f = fixture(customPartition)
+  f.block(customPartition)
+  assert.deepEqual(f.partitions, [customPartition])
+  assert.equal(f.check(null, 'notifications', 'https://gemini.google.com', {}), false)
+  const decisions = []
+  f.request(null, 'notifications', granted => decisions.push(granted), {})
+  assert.deepEqual(decisions, [false])
 })

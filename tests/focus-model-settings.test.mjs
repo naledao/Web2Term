@@ -132,6 +132,7 @@ function geminiFixture() {
   for (const name of ['focusModelPickerParts', 'focusGeminiModelLabel', 'focusGeminiModelName', 'focusGeminiModelOptions',
     'focusGeminiEffortParts', 'focusGeminiEffortValue', 'focusGeminiEffortOptions', 'focusModelSettingsOf']) context[name] = actual(name, context)
   const api = {}
+  context.focusModelClickPoint = actual('focusModelClickPoint', context)
   for (const name of ['prepareFocusModelClick', 'finishFocusModelClick', 'updateModelSettings']) api[name] = actual(name, context, true)
   context.window = { __cmdTerminalInterceptor: api }
   const contents = { getZoomFactor: () => 1, executeJavaScript: source => Promise.resolve(new Script(source).runInContext(context)),
@@ -302,6 +303,7 @@ function fixture() {
   context.focusModelPickerParts = actual('focusModelPickerParts', context)
   context.focusModelSettingsOf = actual('focusModelSettingsOf', context)
   const api = {}
+  context.focusModelClickPoint = actual('focusModelClickPoint', context)
   for (const name of ['prepareFocusModelClick', 'finishFocusModelClick', 'updateModelSettings']) api[name] = actual(name, context, true)
   context.window = { __cmdTerminalInterceptor: api }
   const contents = { getZoomFactor: () => 1.5, executeJavaScript: source => Promise.resolve(new Script(source).runInContext(context)),
@@ -1012,6 +1014,7 @@ function claudeFixture() {
     context[name] = actual(name, context)
   }
   const api = {}
+  context.focusModelClickPoint = actual('focusModelClickPoint', context)
   for (const name of ['prepareFocusModelClick', 'finishFocusModelClick', 'updateModelSettings']) api[name] = actual(name, context, true)
   context.window = { __cmdTerminalInterceptor: api }
   const contents = {
@@ -1145,4 +1148,123 @@ test('Claude rejects locked options and refreshes Effort availability after swit
   }
   automaticRead(view).call(view)
   assert.deepEqual(reads, [{ kind: 'read', value: undefined, automatic: true }])
+})
+
+test('claude focus view waits for Base UI submenu toggle hit-test readiness before hovering', async () => {
+  const f = claudeFixture()
+  const rules = f.context.PAGE.focus.modelSettings
+  const originalHit = f.context.document.elementFromPoint
+  let blockedHits = 2
+  f.context.document.elementFromPoint = (x, y) => {
+    const menu = f.context.focusModelPickerParts()?.menu
+    const more = menu ? f.context.focusClaudeSubmenuToggle(menu, rules.moreModelsLabels) : null
+    if (more && blockedHits > 0) {
+      const b = more.getBoundingClientRect()
+      if (x >= b.left && x < b.right && y >= b.top && y < b.bottom) {
+        blockedHits -= 1
+        return null
+      }
+    }
+    return originalHit(x, y)
+  }
+  const res = await f.change('read')
+  assert.equal(blockedHits, 0)
+  assert.equal(res.outcome, 'ok')
+  assert.ok(res.settings.models.length >= 4)
+  assert.ok(res.settings.efforts.length > 0)
+  assert.ok(res.settings.effort !== null)
+  assert.deepEqual(f.clicks, ['open', 'hover-more', 'hover-effort', 'dismiss-effort', 'dismiss-main'])
+})
+
+test('claude focus view dismisses an overlapping sibling submenu so effort remains readable', async () => {
+  const f = claudeFixture()
+  const rules = f.context.PAGE.focus.modelSettings
+  const originalHit = f.context.document.elementFromPoint
+  f.context.document.elementFromPoint = (x, y) => {
+    const menu = f.context.focusModelPickerParts()?.menu
+    const more = menu ? f.context.focusClaudeSubmenuToggle(menu, rules.moreModelsLabels) : null
+    const effort = menu ? f.context.focusClaudeSubmenuToggle(menu, rules.effortMenu.toggleLabels) : null
+    const morePanel = more ? f.context.focusClaudeMenuPanel(more) : null
+    if (morePanel && effort) {
+      const b = effort.getBoundingClientRect()
+      if (x >= b.left && x < b.right && y >= b.top && y < b.bottom) return morePanel
+    }
+    return originalHit(x, y)
+  }
+  const res = await f.change('read')
+  assert.equal(res.outcome, 'ok')
+  assert.ok(res.settings.models.length >= 4)
+  assert.ok(res.settings.efforts.length > 0)
+  assert.ok(f.clicks.includes('hover-more'))
+  assert.ok(f.clicks.includes('hover-effort'))
+})
+
+test('claude focus view scrolls offscreen submenu toggles into view before dispatching hover', async () => {
+  const f = claudeFixture()
+  const rules = f.context.PAGE.focus.modelSettings
+  const originalSend = f.contents.sendInputEvent
+  let scrolled = null, wrapped = false
+  f.contents.sendInputEvent = event => {
+    originalSend(event)
+    if (wrapped || event.type !== 'mouseUp') return
+    const menu = f.context.focusModelPickerParts()?.menu
+    const effort = menu ? f.context.focusClaudeSubmenuToggle(menu, rules.effortMenu.toggleLabels) : null
+    if (!effort) return
+    wrapped = true
+    const originalRect = effort.getBoundingClientRect.bind(effort)
+    let offscreen = true
+    effort.getBoundingClientRect = () => offscreen ? { left: 10, top: 960, width: 220, height: 30, right: 230, bottom: 990 } : originalRect()
+    effort.scrollIntoView = options => { scrolled = options; offscreen = false }
+  }
+  const res = await f.change('read')
+  assert.deepEqual(scrolled, { block: 'nearest' })
+  assert.equal(res.outcome, 'ok')
+  assert.ok(res.settings.efforts.length > 0)
+})
+
+test('claude submenu failure returns allowlisted sub-step diagnostics across interceptor and embed', async () => {
+  const f = claudeFixture()
+  const rules = f.context.PAGE.focus.modelSettings
+  const originalHit = f.context.document.elementFromPoint
+  f.context.document.elementFromPoint = (x, y) => {
+    const menu = f.context.focusModelPickerParts()?.menu
+    const effort = menu ? f.context.focusClaudeSubmenuToggle(menu, rules.effortMenu.toggleLabels) : null
+    if (effort) {
+      const b = effort.getBoundingClientRect()
+      if (x >= b.left && x < b.right && y >= b.top && y < b.bottom) return null
+    }
+    return originalHit(x, y)
+  }
+  const failed = await f.change('read')
+  assert.equal(failed.outcome, 'unknown')
+  assert.equal(failed.reason, 'menu-unavailable')
+  assert.equal(failed.diagnostic?.stage, 'open')
+  assert.equal(failed.diagnostic?.target, 'effort-menu')
+  assert.equal(failed.diagnostic?.detail, 'hit-test-missed')
+  assert.ok(failed.diagnostic?.settleMs >= 500)
+  assert.ok(failed.diagnostic?.stepCount >= 2)
+
+  const view = {}
+  const embedContext = createContext({
+    URL, Promise, setTimeout, clearTimeout,
+    BrowserWindow: { getFocusedWindow: () => ({ contentView: { children: [view] } }) },
+    validFocusModelSettings: shared.validFocusModelSettings,
+    validFocusModelSettingDiagnostic: shared.validFocusModelSettingDiagnostic,
+    dispatchFocusModelClick: () => {}
+  })
+  const updateEmbed = actual('updateFocusModelSettings', embedContext, true, '../src/main/embed.ts')
+  const sanitized = await updateEmbed.call({
+    platform: { id: 'claude', page: { focus: { modelSettings: rules } } },
+    view, focusEditToken: null, focusModelNativeClick: null,
+    focusPage: () => ({
+      isDestroyed: () => false,
+      getURL: () => 'https://claude.ai/chat/123',
+      executeJavaScript: async () => ({
+        outcome: 'unknown', reason: 'menu-unavailable',
+        settings: { model: 'claude-sonnet-4-6', effort: null, models: [{ value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' }], efforts: [] },
+        diagnostic: { stage: 'open', target: 'effort-menu', detail: 'hit-test-missed', stepCount: 3, settleMs: 520, extra: 'drop-me' }
+      })
+    })
+  }, { kind: 'read' }, 'embed-diag-op', () => true)
+  assert.deepEqual(sanitized.diagnostic, { stage: 'open', target: 'effort-menu', detail: 'hit-test-missed', stepCount: 3, settleMs: 520 })
 })

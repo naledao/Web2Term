@@ -1,5 +1,7 @@
 import { normalizeConversationTools } from '../shared/conversation-tools'
 import type { ConversationToolPreferences, ConversationToolsUpdate } from '../shared/conversation-tools'
+import { supportsPlatformAccounts } from '../shared/platform-accounts'
+import type { AccountPlatformId } from '../shared/platform-accounts'
 import { parseComputerUsePreferencesPatch } from './computer-use-settings'
 import { parseInjectionLedger } from '../shared/prompt-injection'
 import type { InjectionLedger } from '../shared/prompt-injection'
@@ -14,13 +16,23 @@ interface SettingsStore {
 export class ConversationTools {
   /** An unsaved chat's ledger stays in memory: a stale draft must never claim a fresh chat has the prompt. */
   private readonly draftLedgers = new Map<string, InjectionLedger>()
-  claudeAccountId?: string
+  private readonly accountScopes = new Map<AccountPlatformId, string>()
 
   constructor(private readonly sessionId: string, private readonly store: SettingsStore) {}
 
+  get claudeAccountId(): string | undefined { return this.accountScopes.get('claude') }
+  set claudeAccountId(accountId: string | undefined) { this.setAccountScope('claude', accountId) }
+
+  setAccountScope(platformId: AccountPlatformId, accountId?: string): void {
+    if (accountId) this.accountScopes.set(platformId, accountId)
+    else this.accountScopes.delete(platformId)
+  }
+
   private key(platformId: string, conversationId: string | null): string {
     const scope = conversationId === null ? ['draft', this.sessionId, platformId] : ['conversation', platformId, conversationId]
-    if (conversationId === null && platformId === 'claude' && this.claudeAccountId) scope.push(this.claudeAccountId)
+    const accountId = conversationId === null && supportsPlatformAccounts(platformId)
+      ? this.accountScopes.get(platformId) : undefined
+    if (accountId) scope.push(accountId)
     return 'conversationTools:' + JSON.stringify(scope)
   }
 
@@ -72,10 +84,14 @@ export class ConversationTools {
     return preferences
   }
 
-  clearClaudeAccountDraft(accountId: string): void {
-    const draftKey = 'conversationTools:' + JSON.stringify(['draft', this.sessionId, 'claude', accountId])
+  clearPlatformAccountDraft(platformId: AccountPlatformId, accountId: string): void {
+    const draftKey = 'conversationTools:' + JSON.stringify(['draft', this.sessionId, platformId, accountId])
     this.draftLedgers.delete(draftKey)
     this.store.setSettings({ [draftKey]: '', [draftKey + ':submitted']: '', [draftKey + ':promptInjected']: '' })
+  }
+
+  clearClaudeAccountDraft(accountId: string): void {
+    this.clearPlatformAccountDraft('claude', accountId)
   }
 
   /** Only a confirmed first human send may carry an unsaved chat's choices into its new id. */

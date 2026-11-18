@@ -16,8 +16,9 @@ import { rehypeFocusFileLinks, cleanFocusFileLinkCopy } from '@shared/focus-file
 import FocusFilePreviewProvider from './FocusFilePreview'
 import FocusComposerModes from './FocusComposerModes'
 import FocusCompaction, { useConversationCompaction } from './FocusCompaction'
-import ClaudeAccountPicker from './ClaudeAccountPicker'
-import type { ClaudeAccount } from '@shared/claude-accounts'
+import PlatformAccountPicker from './PlatformAccountPicker'
+import { ACCOUNT_PLATFORMS, DEFAULT_PLATFORM_ACCOUNT_ID, supportsPlatformAccounts } from '@shared/platform-accounts'
+import type { AccountPlatformId, PlatformAccount } from '@shared/platform-accounts'
 import { supportsCompaction } from '@shared/conversation-compaction'
 import type { SelectionQuestionPlatform } from '@shared/deepseek-question'
 import { CHAT_PLATFORMS, platformById } from '@shared/platforms'
@@ -61,11 +62,11 @@ interface Props {
   messagesReady: boolean
   needsAnswer: boolean
   taskRunning: boolean
-  claudeAccounts: ClaudeAccount[]
-  claudeAccountId: string
-  onClaudeAccountSelect(id: string): Promise<void>
-  onClaudeAccountAdd(label: string): Promise<void>
-  onClaudeAccountRemove(id: string): Promise<void>
+  platformAccounts: Record<AccountPlatformId, PlatformAccount[]>
+  accountIds: Record<AccountPlatformId, string>
+  onAccountSelect(id: string): Promise<void>
+  onAccountAdd(label: string): Promise<void>
+  onAccountRemove(id: string): Promise<void>
   newChatDisabled: boolean
   onNewChat(): void
   onQuestion(): void
@@ -673,7 +674,7 @@ function FocusChatView(props: Props): JSX.Element {
   const compactionSupported = supportsCompaction(owner.platformId)
   const compaction = useConversationCompaction(owner, visible && compactionSupported)
   const [handoffPickerOwner, setHandoffPickerOwner] = useState('')
-  const [handoffClaudeAccount, setHandoffClaudeAccount] = useState<string | null>(null)
+  const [handoffAccount, setHandoffAccount] = useState<{ platformId: AccountPlatformId; accountId: string } | null>(null)
   useEffect(() => { setHandoffPickerOwner('') }, [ownerKey, visible])
   const [skillCaret, setSkillCaret] = useState(draft.length)
   const [skillsDismissed, setSkillsDismissed] = useState(false)
@@ -1059,7 +1060,7 @@ function FocusChatView(props: Props): JSX.Element {
     if (id === 'compact') { void startCompaction(); return }
     if (id === 'task_handoff') {
       setSkillsDismissed(true)
-      setHandoffClaudeAccount(null)
+      setHandoffAccount(null)
       setHandoffPickerOwner(ownerKey)
       return
     }
@@ -1328,10 +1329,13 @@ function FocusChatView(props: Props): JSX.Element {
     <FocusFilePreviewProvider key={ownerKey} owner={owner} visible={visible}>
     <header className="focus-chat__header">
       <span>{modelIcon ? <img className="focus-chat__brand-icon" src={modelIcon} alt={modelLabel} /> : <strong>{modelLabel}</strong>}</span>
-      {owner.platformId === 'claude' && props.dialogContainer ? <ClaudeAccountPicker
-        accountId={props.claudeAccountId} accounts={props.claudeAccounts} container={props.dialogContainer}
+      {supportsPlatformAccounts(owner.platformId) && props.dialogContainer ? <PlatformAccountPicker
+        platformId={owner.platformId}
+        accountId={props.accountIds[owner.platformId] ?? DEFAULT_PLATFORM_ACCOUNT_ID}
+        accounts={props.platformAccounts[owner.platformId] ?? []}
+        container={props.dialogContainer}
         disabled={props.taskRunning || working || sending || stopping || !!editingId || compaction.blocked || !!outboundQueue?.pending}
-        onSelect={props.onClaudeAccountSelect} onAdd={props.onClaudeAccountAdd} onRemove={props.onClaudeAccountRemove} /> : null}
+        onSelect={props.onAccountSelect} onAdd={props.onAccountAdd} onRemove={props.onAccountRemove} /> : null}
       <button type="button" className="focus-chat__new-chat" aria-label="新建对话" title="新建对话"
         disabled={props.newChatDisabled || working || sending || stopping || !!editingId || settingPending !== null || compaction.blocked} onClick={startNewChat}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
@@ -1397,8 +1401,13 @@ function FocusChatView(props: Props): JSX.Element {
       {error ? <div className="focus-chat__error" role="alert">{error}<button type="button" onClick={props.onOriginal}>查看原始视图</button></div> : null}
       <FocusCompaction owner={owner} visible={visible} state={compaction.state} pending={compaction.pending}
         startingPlatform={compaction.startingPlatform}
-        generationAccountLabel={props.claudeAccounts.find(account => account.id ===
-          (compaction.startingAccountId ?? compaction.state?.generationAccountId))?.label}
+        generationAccountLabel={(() => {
+          const genPlatform = compaction.startingPlatform ?? compaction.state?.generationPlatformId
+          const genAccountId = compaction.startingAccountId ?? compaction.state?.generationAccountId
+          return genPlatform && genAccountId && supportsPlatformAccounts(genPlatform)
+            ? props.platformAccounts[genPlatform]?.find(account => account.id === genAccountId)?.label
+            : undefined
+        })()}
         error={compaction.error} act={compaction.act} />
       {visible && handoffPickerOwner === ownerKey && props.dialogContainer ? <Dialog.Root open onOpenChange={open => { if (!open) setHandoffPickerOwner('') }}>
         <Dialog.Portal container={props.dialogContainer}>
@@ -1407,25 +1416,37 @@ function FocusChatView(props: Props): JSX.Element {
             <div className="modal__box focus-compaction__picker">
               <Dialog.Title className="modal__head">选择生成平台</Dialog.Title>
               <div className="modal__body">
-                <Dialog.Description>会话快照将发送给所选平台。选择 Claude 时，可以指定生成账号。</Dialog.Description>
+                <Dialog.Description>会话快照将发送给所选平台。选择支持多账号的平台时，可以指定生成账号。</Dialog.Description>
                 <div className="focus-compaction__platforms">
                   {CHAT_PLATFORMS.filter(platform => supportsCompaction(platform.id)).map(platform =>
                     <button key={platform.id} type="button" disabled={!!compactionDisabled('task_handoff')}
-                      aria-pressed={platform.id === 'claude' ? handoffClaudeAccount !== null : undefined}
+                      aria-pressed={supportsPlatformAccounts(platform.id) ? handoffAccount?.platformId === platform.id : undefined}
                       onClick={() => {
-                        if (platform.id === 'claude') { setHandoffClaudeAccount(props.claudeAccountId); return }
+                        if (supportsPlatformAccounts(platform.id)) {
+                          setHandoffAccount({ platformId: platform.id, accountId: props.accountIds[platform.id] ?? DEFAULT_PLATFORM_ACCOUNT_ID })
+                          return
+                        }
                         setHandoffPickerOwner('')
                         void startCompaction(platform.id)
                       }}>
                       <img alt="" src={FOCUS_ICONS[platform.id]} />{platform.label}
                     </button>)}
                 </div>
-                {handoffClaudeAccount !== null ? <div className="focus-compaction__account">
-                  <label>Claude 生成账号<select value={handoffClaudeAccount} onChange={event => setHandoffClaudeAccount(event.target.value)}>
-                    {props.claudeAccounts.map(account => <option key={account.id} value={account.id}>{account.label}</option>)}
-                  </select></label>
-                  <button type="button" disabled={!!compactionDisabled('task_handoff') || !props.claudeAccounts.some(account => account.id === handoffClaudeAccount)}
-                    onClick={() => { setHandoffPickerOwner(''); void startCompaction('claude', handoffClaudeAccount) }}>
+                {handoffAccount ? <div className="focus-compaction__account">
+                  <label>{ACCOUNT_PLATFORMS[handoffAccount.platformId].label} 生成账号
+                    <select value={handoffAccount.accountId}
+                      onChange={event => setHandoffAccount(current => current ? { ...current, accountId: event.target.value } : null)}>
+                      {(props.platformAccounts[handoffAccount.platformId] ?? []).map(account =>
+                        <option key={account.id} value={account.id}>{account.label}</option>)}
+                    </select>
+                  </label>
+                  <button type="button" disabled={!!compactionDisabled('task_handoff') ||
+                    !(props.platformAccounts[handoffAccount.platformId] ?? []).some(account => account.id === handoffAccount.accountId)}
+                    onClick={() => {
+                      const selected = handoffAccount
+                      setHandoffPickerOwner('')
+                      void startCompaction(selected.platformId, selected.accountId)
+                    }}>
                     生成交接文档
                   </button>
                 </div> : null}

@@ -63,7 +63,11 @@ function load(path) {
 }
 
 const sharedAccounts = load(join(root, 'src/shared/claude-accounts.ts'))
+const sharedPlatformAccounts = load(join(root, 'src/shared/platform-accounts.ts'))
+const sharedFocusChat = load(join(root, 'src/shared/focus-chat.ts'))
+const sharedTools = load(join(root, 'src/shared/conversation-tools.ts'))
 const mainAccounts = load(join(root, 'src/main/claude-accounts.ts'))
+const platformAccounts = load(join(root, 'src/main/platform-accounts.ts'))
 const { ConversationTools } = load(join(root, 'src/main/conversation-tools.ts'))
 const compaction = load(join(root, 'src/main/conversation-compaction.ts'))
 const { ScheduledTaskStore } = load(join(root, 'src/main/scheduled-task-store.ts'))
@@ -197,4 +201,103 @@ test('ScheduledTasks.removeClaudeAccount deletes only scheduled tasks owned by t
   assert.equal(store.tasks('s1')[0].owner.conversationId, 'chat-3')
   assert.equal(store.tasks('s2').length, 1)
   assert.ok(changed.includes('s1'))
+})
+
+test('Gemini accounts are stored, restored, cleared, and isolated independently from Claude', async () => {
+  const store = memoryStore()
+  const geminiWork = platformAccounts.newPlatformAccount('Gemini 工作号')
+  const geminiPersonal = platformAccounts.newPlatformAccount('Gemini 个人号')
+  const claudeWork = platformAccounts.newPlatformAccount('Claude 工作号')
+  platformAccounts.savePlatformAccount(store, 'gemini', geminiWork)
+  platformAccounts.savePlatformAccount(store, 'gemini', geminiPersonal)
+  platformAccounts.savePlatformAccount(store, 'claude', claudeWork)
+
+  assert.deepEqual(platformAccounts.listPlatformAccounts(store, 'gemini').map(item => item.id),
+    [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, geminiWork.id, geminiPersonal.id])
+  assert.deepEqual(platformAccounts.listPlatformAccounts(store, 'claude').map(item => item.id),
+    [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, claudeWork.id])
+
+  assert.throws(() => platformAccounts.removePlatformAccount(store, 'gemini', sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID), /默认账号不能删除/)
+  assert.throws(() => platformAccounts.removePlatformAccount(store, 'gemini', claudeWork.id), /Gemini 账号不可用/)
+
+  const remaining = platformAccounts.removePlatformAccount(store, 'gemini', geminiWork.id)
+  assert.deepEqual(remaining.map(item => item.id), [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID, geminiPersonal.id])
+
+  const restored = platformAccounts.restorePlatformWorkspace(
+    'gemini',
+    JSON.stringify({
+      accountId: geminiWork.id,
+      locations: {
+        [geminiWork.id]: 'https://gemini.google.com/app/1111222233334444',
+        [geminiPersonal.id]: 'https://gemini.google.com/app/aaaabbbbccccdddd',
+        [sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID]: 'https://accounts.google.com/v3/signin'
+      }
+    }),
+    remaining
+  )
+  assert.equal(restored.accountId, sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID)
+  assert.equal(restored.locations.has(geminiWork.id), false)
+  assert.equal(restored.locations.get(geminiPersonal.id), 'https://gemini.google.com/app/aaaabbbbccccdddd')
+  assert.equal(restored.locations.has(sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID), false)
+
+  partitionCalls.clear()
+  await platformAccounts.clearPlatformAccountPartition('gemini', sharedPlatformAccounts.DEFAULT_PLATFORM_ACCOUNT_ID)
+  await platformAccounts.clearPlatformAccountPartition('gemini', geminiPersonal.id)
+  assert.deepEqual(partitionCalls.get(`persist:gemini-${geminiPersonal.id}`), {
+    closeAllConnections: 1,
+    clearStorageData: 1,
+    clearCache: 1,
+    clearAuthCache: 1
+  })
+})
+
+test('Gemini account scopes isolate drafts, owner keys, saved compaction checks, and scheduled tasks', () => {
+  const store = memoryStore()
+  const tools = new ConversationTools('session-1', store)
+  const geminiA = '33333333-3333-4333-8333-333333333333'
+  const geminiB = '44444444-4444-4444-8444-444444444444'
+
+  tools.setAccountScope('gemini', geminiA)
+  tools.update('gemini', null, { fileReadingEnabled: false })
+  tools.setAccountScope('gemini', geminiB)
+  assert.equal(tools.read('gemini', null).fileReadingEnabled, true)
+  tools.update('gemini', null, { backgroundTasksEnabled: false })
+  tools.clearPlatformAccountDraft('gemini', geminiA)
+  tools.setAccountScope('gemini', geminiA)
+  assert.equal(tools.read('gemini', null).fileReadingEnabled, true)
+  tools.setAccountScope('gemini', geminiB)
+  assert.equal(tools.read('gemini', null).backgroundTasksEnabled, false)
+
+  const ownerDefault = { sessionId: 'session-1', platformId: 'gemini', conversationId: null }
+  const ownerA = { sessionId: 'session-1', platformId: 'gemini', conversationId: null, accountId: geminiA }
+  assert.notEqual(sharedFocusChat.focusOwnerKey(ownerDefault), sharedFocusChat.focusOwnerKey(ownerA))
+  assert.equal(sharedTools.sameConversationToolsOwner(ownerDefault, ownerA), false)
+
+  const key = compaction.compactionStorageKey('session-1')
+  store.setSetting(key, JSON.stringify({
+    version: 1,
+    state: { phase: 'paused', generationPlatformId: 'gemini', generationAccountId: geminiA }
+  }))
+  assert.equal(compaction.savedCompactionUsesAccount(store, 'session-1', undefined, 'gemini', geminiA), true)
+  assert.equal(compaction.savedCompactionUsesAccount(store, 'session-1', undefined, 'claude', geminiA), false)
+
+  const db = new DatabaseSync(':memory:')
+  const taskStore = new ScheduledTaskStore(db)
+  const scheduler = new ScheduledTasks(taskStore, {
+    now: () => 1_700_000_000_000,
+    ready: () => null,
+    changed: () => {},
+    schedule: () => ({ unref() {} }),
+    cancel: () => {}
+  })
+  const target = { machineId: 'm1', transport: 'local', key: 'm1', cwd: 'C:\\proj', label: '本机' }
+  const req = { type: 'scheduled_task', schedule: { kind: 'interval', minutes: 30 }, prompt: '检查状态' }
+  scheduler.create({ sessionId: 's1', platformId: 'gemini', conversationId: '1111111111111111', accountId: geminiA }, target, req, 'g-1')
+  scheduler.create({ sessionId: 's1', platformId: 'gemini', conversationId: '2222222222222222', accountId: geminiB }, target, req, 'g-2')
+  scheduler.create({ sessionId: 's1', platformId: 'gemini', conversationId: '3333333333333333' }, target, req, 'g-3')
+
+  assert.equal(taskStore.platformAccountTasks('gemini', geminiA).length, 1)
+  scheduler.removePlatformAccount('gemini', geminiA)
+  assert.equal(taskStore.platformAccountTasks('gemini', geminiA).length, 0)
+  assert.equal(taskStore.tasks('s1').length, 2)
 })

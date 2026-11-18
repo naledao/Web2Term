@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { ConversationCompaction, compactionStorageKey, savedCompactionUsesClaudeAccount } from './conversation-compaction'
+import { ConversationCompaction, compactionStorageKey, savedCompactionUsesAccount } from './conversation-compaction'
 import type { StoredCompaction } from './conversation-compaction'
 import { CompactionPage } from './compaction-page'
-import { applyChatPartitionProxy, claudeConversationLocation, claudePlatformForAccount, listClaudeAccounts, restoreClaudeWorkspace, saveClaudeAccount } from './claude-accounts'
-import { DEFAULT_CLAUDE_ACCOUNT_ID, isClaudeAccountId } from '../shared/claude-accounts'
-import type { ClaudeAccount } from '../shared/claude-accounts'
+import { applyChatPartitionProxy, listPlatformAccounts, platformConversationLocation, platformForAccount, restorePlatformWorkspace, savePlatformAccount } from './platform-accounts'
+import { blockGeminiWebNotifications } from './embed-permissions'
+import { ACCOUNT_PLATFORMS, ACCOUNT_PLATFORM_IDS, DEFAULT_PLATFORM_ACCOUNT_ID, isPlatformAccountId, supportsPlatformAccounts } from '../shared/platform-accounts'
+import type { AccountPlatformId, PlatformAccount } from '../shared/platform-accounts'
 import { ConversationContinuity } from './conversation-continuity'
 import type { CompactionAction, CompactionRequest, CompactionState } from '../shared/conversation-compaction'
 import { supportsCompaction } from '../shared/conversation-compaction'
@@ -56,7 +57,7 @@ import type { FocusFileLinkRequest, FocusFilePreviewRequest, FocusFilePreviewHan
 import type { CapturedFocusFile } from './focus-file-preview'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
 import type { FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
-import { validFocusModelSettingsRequest } from '../shared/focus-chat'
+import { focusOwnerAccountId, validFocusModelSettingsRequest } from '../shared/focus-chat'
 import { focusPromptInjectionState, estimateFocusConversation, estimateContextText } from '../shared/focus-token-usage'
 import { validFocusToolSkills, focusSkillUnavailable, focusSkillMessage, focusSkillPrefix } from '../shared/focus-skills'
 import type { ContextUsageEntry } from '../shared/context-usage'
@@ -279,6 +280,7 @@ export interface SessionRuntimeOptions {
   initialUrl?: string
   initialConversationId?: string | null
   initialClaudeWorkspace?: string
+  initialGeminiWorkspace?: string
   initialPaused?: boolean
   initialPromptInjectionEnabled?: boolean
   initialLocalCwd?: string
@@ -376,16 +378,29 @@ export class SessionRuntime {
   private readonly continuity: ConversationContinuity
   private pendingCompaction: { conversationId: string; url: string } | null = null
   private readonly compactions = new Map<string, ConversationCompaction>()
-  private claudeAccountId: string
-  private readonly claudeLocations: Map<string, string>
-  private switchingClaudeAccount = false
+  private readonly accountWorkspaces = new Map<AccountPlatformId, { accountId: string; locations: Map<string, string> }>()
+  private switchingAccountPlatform: AccountPlatformId | null = null
 
-  private get claudeAccountScope(): string | undefined {
-    return this.claudeAccountId === DEFAULT_CLAUDE_ACCOUNT_ID ? undefined : this.claudeAccountId
+  private accountWorkspace(platformId: AccountPlatformId): { accountId: string; locations: Map<string, string> } {
+    return this.accountWorkspaces.get(platformId)!
+  }
+
+  private accountIdFor(platformId: AccountPlatformId): string {
+    return this.accountWorkspace(platformId).accountId
+  }
+
+  private accountLocations(platformId: AccountPlatformId): Map<string, string> {
+    return this.accountWorkspace(platformId).locations
+  }
+
+  private accountScope(platformId: string): string | undefined {
+    if (!supportsPlatformAccounts(platformId)) return undefined
+    const accountId = this.accountIdFor(platformId)
+    return accountId === DEFAULT_PLATFORM_ACCOUNT_ID ? undefined : accountId
   }
 
   private get compactionScope(): string {
-    return this.activePlatformId === 'claude' ? this.claudeAccountId : DEFAULT_CLAUDE_ACCOUNT_ID
+    return supportsPlatformAccounts(this.activePlatformId) ? this.accountIdFor(this.activePlatformId) : DEFAULT_PLATFORM_ACCOUNT_ID
   }
 
   private get compaction(): ConversationCompaction | undefined {
@@ -597,13 +612,15 @@ export class SessionRuntime {
     this.id = options.id ?? randomUUID()
     this.continuity = new ConversationContinuity(this.id, options.store)
     this.conversationTools = new ConversationTools(this.id, options.store)
-    const claude = restoreClaudeWorkspace(options.initialClaudeWorkspace, listClaudeAccounts(options.store))
-    this.claudeAccountId = claude.accountId
-    this.claudeLocations = claude.locations
-    this.conversationTools.claudeAccountId = this.claudeAccountScope
-    if (!options.initialClaudeWorkspace && options.platform.id === 'claude' && options.initialUrl) {
-      const legacyLocation = claudeConversationLocation(options.initialUrl)
-      if (legacyLocation) this.claudeLocations.set(this.claudeAccountId, legacyLocation.url)
+    for (const platformId of ACCOUNT_PLATFORM_IDS) {
+      const raw = platformId === 'claude' ? options.initialClaudeWorkspace : options.initialGeminiWorkspace
+      const workspace = restorePlatformWorkspace(platformId, raw, listPlatformAccounts(options.store, platformId))
+      if (!raw && options.platform.id === platformId && options.initialUrl) {
+        const legacyLocation = platformConversationLocation(platformId, options.initialUrl)
+        if (legacyLocation) workspace.locations.set(workspace.accountId, legacyLocation.url)
+      }
+      this.accountWorkspaces.set(platformId, workspace)
+      this.conversationTools.setAccountScope(platformId, this.accountScope(platformId))
     }
     this.computerUseTool = new ComputerUseTool(() => this.refreshComputerUseCapabilities(), options.desktopCoordinator)
     this.focusChat = new FocusChat(this.id, options.store)
@@ -725,8 +742,8 @@ export class SessionRuntime {
        * sites nobody is looking at, which also means two sets of background beacons.
        */
       const isStarting = platform.id === options.platform.id
-      if (platform.id === 'claude') {
-        this.embeds.set(platform.id, this.claudeEmbedEntry(this.claudeAccountId))
+      if (supportsPlatformAccounts(platform.id)) {
+        this.embeds.set(platform.id, this.accountEmbedEntry(platform.id, this.accountIdFor(platform.id)))
         continue
       }
       this.embeds.set(platform.id, {
@@ -1051,11 +1068,11 @@ export class SessionRuntime {
          *
          * A persisted URL is a promise that reopening it is useful. A redirect dead end is not.
          */
-        if (platform.id === 'claude') {
-          const location = claudeConversationLocation(state.url)
+        if (supportsPlatformAccounts(platform.id)) {
+          const location = platformConversationLocation(platform.id, state.url)
           if (location) {
             entry.url = location.url
-            this.claudeLocations.set(this.claudeAccountId, location.url)
+            this.accountLocations(platform.id).set(this.accountIdFor(platform.id), location.url)
           }
         } else if (state.url !== '' && isRestorableUrl(state.url)) entry.url = state.url
 
@@ -1387,6 +1404,7 @@ export class SessionRuntime {
     const entry = this.embeds.get(platformId) as PlatformEmbed
     if (entry.embed) return entry
 
+    if (platformId === 'gemini') blockGeminiWebNotifications(entry.platform.partition)
     entry.embed = new ChatGptEmbed(
       entry.platform,
       this.embedHandlers(entry),
@@ -1541,9 +1559,9 @@ export class SessionRuntime {
     return true
   }
 
-  private claudeEmbedEntry(accountId: string): PlatformEmbed {
-    const platform = claudePlatformForAccount(accountId)
-    const location = claudeConversationLocation(this.claudeLocations.get(accountId) ?? '')
+  private accountEmbedEntry(platformId: AccountPlatformId, accountId: string): PlatformEmbed {
+    const platform = platformForAccount(platformId, accountId)
+    const location = platformConversationLocation(platformId, this.accountLocations(platformId).get(accountId) ?? '')
     return { platform, embed: null, ...(location ?? { url: platform.homeUrl, conversationId: null }) }
   }
 
@@ -1554,9 +1572,10 @@ export class SessionRuntime {
       Boolean(this.scheduledSendAbort) || [...this.pageQueues.values()].some(queue => queue.state().pending > 0)
   }
 
-  private checkClaudeAccountSwitch(owner: FocusOwner): void {
-    if (!this.ownsClaudeFocus(owner)) throw new Error('当前 Claude 对话已切换。')
-    if (this.hasActiveRuntimeWork() || this.taskCoordinator.current('claude') ||
+  private checkAccountSwitch(owner: FocusOwner, platformId: AccountPlatformId): void {
+    const label = ACCOUNT_PLATFORMS[platformId].label
+    if (!this.ownsAccountFocus(owner, platformId)) throw new Error(`当前 ${label} 对话已切换。`)
+    if (this.hasActiveRuntimeWork() || this.taskCoordinator.current(platformId) ||
         [...this.compactions.values()].some(task => task.busy || task.inProgress) ||
         !!owner.conversationId && this.backgroundTasks.getState().tasks.some(task => task.conversationId === owner.conversationId &&
           ['checking', 'running'].includes(task.status))) {
@@ -1565,71 +1584,86 @@ export class SessionRuntime {
     if (this.aiOutboundQueue.state().pending > 0) throw new Error('请先处理发送队列中的消息，再切换账号。')
   }
 
-  ownsClaudeFocus(owner: FocusOwner): boolean {
-    return this.active && owner.platformId === 'claude' && this.ownsFocus(owner)
+  ownsAccountFocus(owner: FocusOwner, platformId?: AccountPlatformId): boolean {
+    if (!this.active || !supportsPlatformAccounts(owner.platformId)) return false
+    if (platformId && owner.platformId !== platformId) return false
+    return this.ownsFocus(owner)
   }
 
-  assertClaudeAccountRemovableSync(accountId: string, accounts: ClaudeAccount[]): void {
+  assertAccountRemovableSync(platformId: AccountPlatformId, accountId: string): void {
+    const label = ACCOUNT_PLATFORMS[platformId].label
     for (const [scope, compaction] of this.compactions) {
-      if (!compaction.usesClaudeAccount(accountId)) continue
+      if (!compaction.usesAccount(platformId, accountId)) continue
       if (compaction.busy || compaction.inProgress) {
-        throw new Error('该 Claude 账号正在执行会话压缩或生成交接文档，请等待完成或取消任务后再删除。')
+        throw new Error(`该 ${label} 账号正在执行会话压缩或生成交接文档，请等待完成或取消任务后再删除。`)
       }
       if (scope !== accountId && compaction.resumable) {
-        throw new Error('有尚未完成或待处理的任务交接正在使用该 Claude 账号，请先完成或取消该任务后再删除。')
+        throw new Error(`有尚未完成或待处理的任务交接正在使用该 ${label} 账号，请先完成或取消该任务后再删除。`)
       }
     }
-    for (const account of accounts) {
-      if (account.id === accountId || this.compactions.has(account.id)) continue
-      const scopeAccountId = account.id === DEFAULT_CLAUDE_ACCOUNT_ID ? undefined : account.id
-      if (savedCompactionUsesClaudeAccount(this.options.store, this.id, scopeAccountId, accountId)) {
-        throw new Error('有尚未完成或待处理的任务交接正在使用该 Claude 账号，请先完成或取消该任务后再删除。')
+    const savedScopes = new Set<string | undefined>([undefined])
+    for (const id of ACCOUNT_PLATFORM_IDS) {
+      for (const account of listPlatformAccounts(this.options.store, id)) {
+        if (account.id !== DEFAULT_PLATFORM_ACCOUNT_ID) savedScopes.add(account.id)
       }
     }
-    if (this.aiOutboundQueue.stateFor({ sessionId: this.id, platformId: 'claude', conversationId: null, claudeAccountId: accountId }).pending > 0) {
-      throw new Error('该 Claude 账号的发送队列中仍有待处理消息，请先处理后再删除。')
+    for (const scopeAccountId of savedScopes) {
+      const mapKey = scopeAccountId ?? DEFAULT_PLATFORM_ACCOUNT_ID
+      if (mapKey === accountId || this.compactions.has(mapKey)) continue
+      if (savedCompactionUsesAccount(this.options.store, this.id, scopeAccountId, platformId, accountId)) {
+        throw new Error(`有尚未完成或待处理的任务交接正在使用该 ${label} 账号，请先完成或取消该任务后再删除。`)
+      }
     }
-    if (this.claudeAccountId !== accountId) return
-    if (this.switchingClaudeAccount) throw new Error('正在切换 Claude 账号，请稍后再试。')
-    if (this.taskCoordinator.current('claude')) {
-      throw new Error('该 Claude 账号仍有任务正在运行，请等待完成或结束任务后再删除。')
+    if (this.aiOutboundQueue.stateFor({ sessionId: this.id, platformId, conversationId: null, accountId }).pending > 0) {
+      throw new Error(`该 ${label} 账号的发送队列中仍有待处理消息，请先处理后再删除。`)
     }
-    const claudeEntry = this.embeds.get('claude')
-    const claudeStatus = claudeEntry?.embed?.getInterceptorStatus()
-    if (claudeStatus?.pendingQuestion || (claudeStatus?.taskStartedAt !== null && claudeStatus?.taskFinishedAt === null)) {
-      throw new Error('该 Claude 账号有任务正在运行，请等待完成或结束任务后再删除。')
+    if (this.accountIdFor(platformId) !== accountId) return
+    if (this.switchingAccountPlatform === platformId) throw new Error(`正在切换 ${label} 账号，请稍后再试。`)
+    if (this.taskCoordinator.current(platformId)) {
+      throw new Error(`该 ${label} 账号仍有任务正在运行，请等待完成或结束任务后再删除。`)
     }
-    if (claudeEntry?.conversationId && this.backgroundTasks.getState().tasks.some(task =>
-      task.conversationId === claudeEntry.conversationId && ['checking', 'running'].includes(task.status))) {
-      throw new Error('该 Claude 账号仍有后台命令正在运行，请等待完成或结束后再删除。')
+    const entry = this.embeds.get(platformId)
+    const status = entry?.embed?.getInterceptorStatus()
+    if (status?.pendingQuestion || (status?.taskStartedAt !== null && status?.taskFinishedAt === null)) {
+      throw new Error(`该 ${label} 账号有任务正在运行，请等待完成或结束任务后再删除。`)
     }
-    if (this.activePlatformId === 'claude' && this.hasActiveRuntimeWork()) {
-      throw new Error('该 Claude 账号有任务或操作正在运行，请等待完成或结束任务后再删除。')
+    if (entry?.conversationId && this.backgroundTasks.getState().tasks.some(task =>
+      task.conversationId === entry.conversationId && ['checking', 'running'].includes(task.status))) {
+      throw new Error(`该 ${label} 账号仍有后台命令正在运行，请等待完成或结束后再删除。`)
+    }
+    if (this.activePlatformId === platformId && this.hasActiveRuntimeWork()) {
+      throw new Error(`该 ${label} 账号有任务或操作正在运行，请等待完成或结束任务后再删除。`)
     }
   }
 
-  async assertClaudeAccountPageIdle(accountId: string): Promise<void> {
-    if (this.claudeAccountId !== accountId) return
-    const embed = this.embeds.get('claude')?.embed
+  async assertAccountPageIdle(platformId: AccountPlatformId, accountId: string): Promise<void> {
+    if (this.accountIdFor(platformId) !== accountId) return
+    const embed = this.embeds.get(platformId)?.embed
     if (!embed) return
+    const label = ACCOUNT_PLATFORMS[platformId].label
     const [page, sideBusy] = await Promise.all([embed.readFocusSnapshot(), embed.questionChatGenerating()])
     if (page?.generating === 'active' || page?.waiting || sideBusy) {
-      throw new Error('该 Claude 账号仍在回答，请等待完成或停止生成后再删除。')
+      throw new Error(`该 ${label} 账号仍在回答，请等待完成或停止生成后再删除。`)
     }
   }
 
-  private activateClaudeAccount(accountId: string, activeOnClaude: boolean, previousEmbed: ChatGptEmbed | null | undefined): void {
-    if (activeOnClaude) this.compaction?.hide()
-    this.focusChat.resetContext('claude')
-    this.pendingConversationMessages.delete('claude')
-    this.pendingContextUsage.delete('claude')
-    this.lastSubmissions.delete('claude')
-    this.claudeAccountId = accountId
-    this.conversationTools.claudeAccountId = this.claudeAccountScope
-    const next = this.claudeEmbedEntry(accountId)
-    this.embeds.set('claude', next)
+  private activateAccount(
+    platformId: AccountPlatformId,
+    accountId: string,
+    activeOnPlatform: boolean,
+    previousEmbed: ChatGptEmbed | null | undefined
+  ): void {
+    if (activeOnPlatform) this.compaction?.hide()
+    this.focusChat.resetContext(platformId)
+    this.pendingConversationMessages.delete(platformId)
+    this.pendingContextUsage.delete(platformId)
+    this.lastSubmissions.delete(platformId)
+    this.accountWorkspace(platformId).accountId = accountId
+    this.conversationTools.setAccountScope(platformId, this.accountScope(platformId))
+    const next = this.accountEmbedEntry(platformId, accountId)
+    this.embeds.set(platformId, next)
     if (this.window) previousEmbed?.destroy(this.window)
-    if (activeOnClaude) {
+    if (activeOnPlatform) {
       this.pendingCompaction = null
       this.remoteRipgrepSend?.controller.abort()
       this.focusUiRecoveredTurn = null
@@ -1638,10 +1672,10 @@ export class SessionRuntime {
       this.pendingGoal = ''
       this.deferredCommands.clear()
       this.lastSummaryTaskRunning = false
-      this.focusChat.context('claude', next.conversationId)
-      const embed = this.ensureEmbed('claude').embed!
+      this.focusChat.context(platformId, next.conversationId)
+      const embed = this.ensureEmbed(platformId).embed!
       this.applyVisibility()
-      this.syncAutonomousTask('claude', next.conversationId)
+      this.syncAutonomousTask(platformId, next.conversationId)
       this.refreshComputerUseCapabilities()
       this.send(IpcChannels.embedState, this.getEmbedState())
       this.send(IpcChannels.interceptorEvent, embed.getInterceptorStatus())
@@ -1650,43 +1684,48 @@ export class SessionRuntime {
     this.options.onSummaryChanged()
   }
 
-  releaseClaudeAccount(accountId: string): void {
-    const hadLocation = this.claudeLocations.delete(accountId)
-    this.conversationTools.clearClaudeAccountDraft(accountId)
+  releaseAccount(platformId: AccountPlatformId, accountId: string): void {
+    const hadLocation = this.accountLocations(platformId).delete(accountId)
+    this.conversationTools.clearPlatformAccountDraft(platformId, accountId)
     const accountCompaction = this.compactions.get(accountId)
     if (accountCompaction) {
       accountCompaction.dispose()
       this.compactions.delete(accountId)
     }
     this.options.store.setSetting(compactionStorageKey(this.id, accountId), '')
-    if (this.claudeAccountId !== accountId) {
+    if (this.accountIdFor(platformId) !== accountId) {
       if (hadLocation) this.options.onSummaryChanged()
       return
     }
-    const previous = this.embeds.get('claude')
-    this.activateClaudeAccount(DEFAULT_CLAUDE_ACCOUNT_ID, this.activePlatformId === 'claude', previous?.embed)
+    const previous = this.embeds.get(platformId)
+    this.activateAccount(platformId, DEFAULT_PLATFORM_ACCOUNT_ID, this.activePlatformId === platformId, previous?.embed)
   }
 
-  async switchClaudeAccount(owner: FocusOwner, account: ClaudeAccount, adding = false): Promise<void> {
-    if (this.switchingClaudeAccount) throw new Error('正在切换 Claude 账号。')
-    this.checkClaudeAccountSwitch(owner)
-    if (account.id === this.claudeAccountId) return
-    this.switchingClaudeAccount = true
+  async switchAccount(owner: FocusOwner, account: PlatformAccount, adding = false): Promise<void> {
+    if (!supportsPlatformAccounts(owner.platformId)) throw new Error('当前平台不支持切换账号。')
+    const platformId = owner.platformId
+    const label = ACCOUNT_PLATFORMS[platformId].label
+    if (this.switchingAccountPlatform) throw new Error(`正在切换 ${label} 账号。`)
+    this.checkAccountSwitch(owner, platformId)
+    if (account.id === this.accountIdFor(platformId)) return
+    this.switchingAccountPlatform = platformId
     try {
       if (adding) {
-        await applyChatPartitionProxy(claudePlatformForAccount(account.id).partition, this.options.settings().embedProxy.claude ?? '')
+        const partition = platformForAccount(platformId, account.id).partition
+        await applyChatPartitionProxy(partition, this.options.settings().embedProxy[platformId] ?? '')
+        if (platformId === 'gemini') blockGeminiWebNotifications(partition)
       }
       const previous = this.activeEmbed()
       const [page, sideBusy] = await Promise.all([
         previous.embed?.readFocusSnapshot(), previous.embed?.questionChatGenerating()
       ])
-      this.checkClaudeAccountSwitch(owner)
-      if (this.activeEmbed() !== previous) throw new Error('当前 Claude 对话已切换。')
-      if (page?.generating === 'active' || page?.waiting || sideBusy) throw new Error('Claude 仍在回答，请等待完成或停止生成。')
-      if (page?.nativeDraft) throw new Error('Claude 原始页面有草稿，请先处理草稿再切换账号。')
-      if (adding) saveClaudeAccount(this.options.store, account)
-      this.activateClaudeAccount(account.id, true, previous.embed)
-    } finally { this.switchingClaudeAccount = false }
+      this.checkAccountSwitch(owner, platformId)
+      if (this.activeEmbed() !== previous) throw new Error(`当前 ${label} 对话已切换。`)
+      if (page?.generating === 'active' || page?.waiting || sideBusy) throw new Error(`${label} 仍在回答，请等待完成或停止生成。`)
+      if (page?.nativeDraft) throw new Error(`${label} 原始页面有草稿，请先处理草稿再切换账号。`)
+      if (adding) savePlatformAccount(this.options.store, platformId, account)
+      this.activateAccount(platformId, account.id, true, previous.embed)
+    } finally { this.switchingAccountPlatform = null }
   }
 
   /** Which platform this session is currently showing. */
@@ -1746,6 +1785,7 @@ export class SessionRuntime {
     conversationId: string | null
     platformId: string
     claudeWorkspace?: string
+    geminiWorkspace?: string
     paused: boolean
     promptInjectionEnabled: boolean
     localCwd: string
@@ -1761,6 +1801,13 @@ export class SessionRuntime {
     const terminal = this.runner.getTerminalState()
     const sshState = this.ssh.getState()
     const active = this.activeEmbed()
+    const serializeWorkspace = (platformId: AccountPlatformId): string | undefined => {
+      const locations = this.accountLocations(platformId)
+      const scope = this.accountScope(platformId)
+      return locations.size || scope
+        ? JSON.stringify({ accountId: this.accountIdFor(platformId), locations: Object.fromEntries(locations) })
+        : undefined
+    }
     return {
       id: this.id,
       projectId: this.projectId,
@@ -1774,8 +1821,8 @@ export class SessionRuntime {
       url: active.url,
       conversationId: active.conversationId,
       platformId: active.platform.id,
-      claudeWorkspace: this.claudeLocations.size || this.claudeAccountScope
-        ? JSON.stringify({ accountId: this.claudeAccountId, locations: Object.fromEntries(this.claudeLocations) }) : undefined,
+      claudeWorkspace: serializeWorkspace('claude'),
+      geminiWorkspace: serializeWorkspace('gemini'),
       paused: automation.paused,
       promptInjectionEnabled: this.promptInjectionEnabled,
       localCwd: this.web2term ? '' : terminal.cwd,
@@ -1876,12 +1923,16 @@ export class SessionRuntime {
   private ownsFocus(owner: FocusOwner): boolean {
     return !this.disposed && owner.sessionId === this.id && supportsFocusView(owner.platformId) &&
       this.activePlatformId === owner.platformId &&
-      owner.claudeAccountId === (owner.platformId === 'claude' ? this.claudeAccountScope : undefined) &&
+      focusOwnerAccountId(owner) === this.accountScope(owner.platformId) &&
       this.embed.getState().conversationId === owner.conversationId
   }
 
   private decorateEmbedState(state: EmbedState): EmbedState {
-    return { ...this.continuity.decorate(state, this.activePlatformId), claudeAccountId: this.claudeAccountId }
+    return {
+      ...this.continuity.decorate(state, this.activePlatformId),
+      claudeAccountId: this.accountIdFor('claude'),
+      accountIds: { claude: this.accountIdFor('claude'), gemini: this.accountIdFor('gemini') }
+    }
   }
 
   getEmbedState(): EmbedState {
@@ -1896,7 +1947,7 @@ export class SessionRuntime {
     const owner = job.state.owner, target = job.handoffUrl && selectionQuestionConversation(owner.platformId, job.handoffUrl)
     const entry = this.activeEmbed()
     if (this.disposed || owner.sessionId !== this.id || owner.platformId !== this.activePlatformId || !target ||
-        owner.claudeAccountId !== (owner.platformId === 'claude' ? this.claudeAccountScope : undefined) ||
+        focusOwnerAccountId(owner) !== this.accountScope(owner.platformId) ||
         entry.conversationId !== owner.conversationId && entry.conversationId !== target.id) throw new Error('来源会话已变化，暂未切换压缩上下文。')
     if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork()) throw new Error('请等待当前操作结束后继续承接压缩上下文。')
     this.options.store.upsert({ id: target.id, url: job.handoffUrl!, title: this.customTitle || job.seed.session.title })
@@ -1909,7 +1960,7 @@ export class SessionRuntime {
     this.customTitle = this.customTitle || job.seed.session.title
     entry.conversationId = target.id
     entry.url = job.handoffUrl!
-    if (owner.platformId === 'claude') this.claudeLocations.set(this.claudeAccountId, entry.url)
+    if (supportsPlatformAccounts(owner.platformId)) this.accountLocations(owner.platformId).set(this.accountIdFor(owner.platformId), entry.url)
     this.focusChat.context(owner.platformId, target.id)
     this.pendingCompaction = { conversationId: target.id, url: job.handoffUrl! }
     // Persist C before navigation so a restart cannot reopen A after adoption.
@@ -1922,22 +1973,24 @@ export class SessionRuntime {
   private compactionService(): ConversationCompaction {
     if (this.compaction) return this.compaction
     const scope = this.compactionScope
+    const scopeAccountId = scope === DEFAULT_PLATFORM_ACCOUNT_ID ? undefined : scope
     const service = new ConversationCompaction({
-      sessionId: this.id, claudeAccountId: scope === DEFAULT_CLAUDE_ACCOUNT_ID ? undefined : scope,
+      sessionId: this.id, accountId: scopeAccountId, claudeAccountId: scopeAccountId,
       directory: join(app.getPath('userData'), 'exports', 'compactions'), store: this.options.store,
       // A compaction owns isolated pages, so selecting another workspace or
       // platform only hides its optional UI; it does not revoke the upload.
       canWork: owner => !this.disposed && owner.sessionId === this.id && !!owner.conversationId &&
-        (owner.platformId !== 'claude' || owner.claudeAccountId === this.claudeAccountScope) &&
+        (!supportsPlatformAccounts(owner.platformId) || focusOwnerAccountId(owner) === this.accountScope(owner.platformId)) &&
         this.embeds.get(owner.platformId)?.embed?.getState().conversationId === owner.conversationId,
       canAdopt: owner => this.ownsFocus(owner) && !this.focusSending && !this.focusRevision && !this.runner.hasInFlightWork(),
       makePage: (platformId, url, onUrl, accountId) => {
         if (!this.window || this.window.isDestroyed()) throw new Error('应用窗口不可用。')
-        const id = accountId ?? DEFAULT_CLAUDE_ACCOUNT_ID
-        const platform = platformId === 'claude'
-          ? listClaudeAccounts(this.options.store).some(account => account.id === id) && claudePlatformForAccount(id)
+        const id = accountId ?? DEFAULT_PLATFORM_ACCOUNT_ID
+        const platform = supportsPlatformAccounts(platformId)
+          ? listPlatformAccounts(this.options.store, platformId).some(account => account.id === id) && platformForAccount(platformId, id)
           : this.embeds.get(platformId)?.platform
         if (!platform) throw new Error('生成平台不可用。')
+        if (platformId === 'gemini') blockGeminiWebNotifications(platform.partition)
         return new CompactionPage(this.window, platform, this.options.settings().theme, url, onUrl,
           prepareChatBrowserIdentity(platform.partition), this.lastBounds ?? undefined)
       },
@@ -1960,10 +2013,16 @@ export class SessionRuntime {
     if (generationPlatformId !== undefined &&
         (typeof generationPlatformId !== 'string' || !supportsCompaction(generationPlatformId))) throw new Error('请选择有效的生成平台。')
     if (!this.active || !this.ownsFocus(owner) || !owner.conversationId) throw new Error('请先打开已有会话。')
-    if (generationAccountId !== undefined && (generationPlatformId !== 'claude' || !isClaudeAccountId(generationAccountId) ||
-        !listClaudeAccounts(this.options.store).some(account => account.id === generationAccountId))) throw new Error('请选择有效的 Claude 账号。')
-    const accountId = generationPlatformId === 'claude'
-      ? typeof generationAccountId === 'string' ? generationAccountId : this.claudeAccountId : undefined
+    if (generationAccountId !== undefined && (!generationPlatformId || !supportsPlatformAccounts(generationPlatformId) ||
+        !isPlatformAccountId(generationAccountId) ||
+        !listPlatformAccounts(this.options.store, generationPlatformId).some(account => account.id === generationAccountId))) {
+      const label = generationPlatformId && supportsPlatformAccounts(generationPlatformId)
+        ? ACCOUNT_PLATFORMS[generationPlatformId].label : '目标'
+      throw new Error(`请选择有效的 ${label} 账号。`)
+    }
+    const accountId = generationPlatformId && supportsPlatformAccounts(generationPlatformId)
+      ? typeof generationAccountId === 'string' ? generationAccountId : this.accountIdFor(generationPlatformId)
+      : undefined
     const exporting = generationPlatformId !== undefined
     return this.compactionService().start(owner, async () => {
       if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork() || this.backgroundTaskResults.isSending ||
@@ -2305,14 +2364,17 @@ export class SessionRuntime {
    */
   private queueSend<T extends string>(request: QueuedSend<T>, queue: AiOutboundQueue = this.aiOutboundQueue): AiOutboundTicket<T> {
     const uncertain = (outcome: T | undefined): outcome is T => outcome === 'unknown' || outcome === 'stuck'
+    const scope = this.accountScope(request.owner.platformId)
     return queue.enqueue<T>({
       retryable: outcome => outcome === 'busy' || outcome === 'no-composer',
       blockOnFailure: uncertain,
       aborted: outcome => uncertain(outcome) ? outcome : request.cancelled(),
       failed: () => 'unknown' as unknown as T,
       ...request,
-      owner: { ...request.owner, ...(request.owner.platformId === 'claude' && this.claudeAccountScope
-        ? { claudeAccountId: this.claudeAccountScope } : {}) }
+      owner: {
+        ...request.owner,
+        ...(scope ? { accountId: scope, ...(request.owner.platformId === 'claude' ? { claudeAccountId: scope } : {}) } : {})
+      }
     })
   }
 
@@ -2592,7 +2654,10 @@ export class SessionRuntime {
     try {
       const result = await embed.updateFocusModelSettings(request, randomUUID(), () => current() && !this.stoppingTask && !this.runner.hasInFlightWork())
       const resolved: FocusModelSettingsResult = current() ? result : { outcome: 'cancelled', settings: null }
-      writeFocusDiagnostic(request, { event: 'model-setting-outcome', setting: request.kind, outcome: resolved.outcome, reason: resolved.reason })
+      writeFocusDiagnostic(request, {
+        event: 'model-setting-outcome', setting: request.kind, outcome: resolved.outcome, reason: resolved.reason,
+        ...(resolved.diagnostic ?? {})
+      })
       return resolved
     } finally { this.focusSending = false }
   }
@@ -3508,8 +3573,11 @@ export class SessionRuntime {
   }
 
   private toolsOwner(): ConversationToolsOwner {
-    return { sessionId: this.id, platformId: this.activePlatformId, conversationId: this.activeEmbed().conversationId,
-      ...(this.activePlatformId === 'claude' && this.claudeAccountScope ? { claudeAccountId: this.claudeAccountScope } : {}) }
+    const scope = this.accountScope(this.activePlatformId)
+    return {
+      sessionId: this.id, platformId: this.activePlatformId, conversationId: this.activeEmbed().conversationId,
+      ...(scope ? { accountId: scope, ...(this.activePlatformId === 'claude' ? { claudeAccountId: scope } : {}) } : {})
+    }
   }
 
   private scheduledTarget(): ScheduledTaskTarget {
@@ -3531,7 +3599,7 @@ export class SessionRuntime {
   private scheduledOwnerCurrent(task: ScheduledTask): boolean {
     if (this.disposed || (!this.active && !this.canRunConversationInBackground(task.owner.platformId)) || task.owner.sessionId !== this.id || this.activePlatformId !== task.owner.platformId ||
       this.embed.getState().conversationId !== task.owner.conversationId || this.stoppingTask ||
-      (task.owner.platformId === 'claude' && task.owner.claudeAccountId !== this.claudeAccountScope) ||
+      (supportsPlatformAccounts(task.owner.platformId) && focusOwnerAccountId(task.owner) !== this.accountScope(task.owner.platformId)) ||
       this.runner.getAutomation().paused || this.options.desktopCoordinator?.getState().humanControl ||
       taskPausedByInput(this.taskCoordinator.latest(task.owner.platformId)) || !this.toolPreferences(task.owner.platformId).scheduledTasksEnabled) return false
     const latest = this.options.scheduledTasks?.store.get(task.id)

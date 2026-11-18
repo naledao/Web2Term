@@ -108,8 +108,8 @@ import type {
   DiagnosticLogsExportResult
 } from '../shared/types'
 import { embedAuthState, importCookieSet, importSessionToken, previewSessionImport } from './session-import'
-import { applyChatPartitionProxy, claudePlatformForAccount, clearClaudeAccountPartition, listClaudeAccounts, newClaudeAccount, removeClaudeAccount } from './claude-accounts'
-import { DEFAULT_CLAUDE_ACCOUNT_ID, isClaudeAccountId } from '../shared/claude-accounts'
+import { applyChatPartitionProxy, clearPlatformAccountPartition, listPlatformAccounts, newPlatformAccount, platformForAccount, removePlatformAccount } from './platform-accounts'
+import { ACCOUNT_PLATFORMS, DEFAULT_PLATFORM_ACCOUNT_ID, isPlatformAccountId, supportsPlatformAccounts } from '../shared/platform-accounts'
 import { ConversationStore } from './db'
 import { readStartupTheme } from './startup-theme'
 import { workspaceProjectDraft, workspaceSessionOptions } from './workspace-projects'
@@ -799,8 +799,9 @@ function readEmbedProxies(store: {
 async function applyEmbedProxy(proxies: Record<string, string>): Promise<void> {
   for (const platform of CHAT_PLATFORMS) {
     const proxy = proxies[platform.id] ?? ''
-    const partitions = platform.id === 'claude' && store
-      ? listClaudeAccounts(store).map(account => claudePlatformForAccount(account.id).partition) : [platform.partition]
+    const platformId = platform.id
+    const partitions = supportsPlatformAccounts(platformId) && store
+      ? listPlatformAccounts(store, platformId).map(account => platformForAccount(platformId, account.id).partition) : [platform.partition]
     for (const partition of partitions) {
       try { await applyChatPartitionProxy(partition, proxy) }
       catch (error) { console.warn(`[settings] failed to apply embed proxy to ${platform.id}:`, (error as Error).message) }
@@ -1071,6 +1072,7 @@ function createSession(
     initialUrl: restored?.url || undefined,
     initialConversationId: restored?.conversationId ?? null,
     initialClaudeWorkspace: restored?.claudeWorkspace,
+    initialGeminiWorkspace: restored?.geminiWorkspace,
     initialPaused: restored?.paused ?? false,
     initialPromptInjectionEnabled: restored?.promptInjectionEnabled ?? true,
     initialLocalCwd: restored?.localCwd ?? creation?.localCwd ?? '',
@@ -1551,12 +1553,15 @@ function registerIpcHandlers(): void {
   }
   const focusRuntime = (event: IpcMainInvokeEvent, owner: unknown): SessionRuntime | null => {
     if (!owner || typeof owner !== 'object') return null
-    const value = owner as { sessionId?: unknown; platformId?: unknown; conversationId?: unknown; claudeAccountId?: unknown }
+    const value = owner as { sessionId?: unknown; platformId?: unknown; conversationId?: unknown; accountId?: unknown; claudeAccountId?: unknown }
     if (typeof value.sessionId !== 'string' || value.sessionId.length > 128 ||
       typeof value.platformId !== 'string' || !supportsFocusView(value.platformId) ||
-      (value.conversationId !== null && (typeof value.conversationId !== 'string' || value.conversationId.length > 512)) ||
-      (value.claudeAccountId !== undefined && (value.platformId !== 'claude' ||
-        value.claudeAccountId === DEFAULT_CLAUDE_ACCOUNT_ID || !isClaudeAccountId(value.claudeAccountId)))) return null
+      (value.conversationId !== null && (typeof value.conversationId !== 'string' || value.conversationId.length > 512))) return null
+    if (value.claudeAccountId !== undefined && (value.platformId !== 'claude' ||
+      value.claudeAccountId === DEFAULT_PLATFORM_ACCOUNT_ID || !isPlatformAccountId(value.claudeAccountId))) return null
+    if (value.accountId !== undefined && (!supportsPlatformAccounts(value.platformId) ||
+      value.accountId === DEFAULT_PLATFORM_ACCOUNT_ID || !isPlatformAccountId(value.accountId))) return null
+    if (value.accountId !== undefined && value.claudeAccountId !== undefined && value.accountId !== value.claudeAccountId) return null
     return questionRuntime(event, value.sessionId)
   }
   ipcMain.handle(IpcChannels.focusChatGet, (event, owner, cursor) => {
@@ -1566,48 +1571,53 @@ function registerIpcHandlers(): void {
       ? runtime.getFocusChat(owner, cursor) : runtime.getFocusChat(owner)
   })
   ipcMain.handle(IpcChannels.compactionGet, (event, owner) => focusRuntime(event, owner)?.getCompaction(owner) ?? null)
-  let claudeAccountOperation: Promise<unknown> = Promise.resolve()
-  const serializeClaudeAccountOperation = <T>(task: () => Promise<T>): Promise<T> => {
-    const run = claudeAccountOperation.then(task, task)
-    claudeAccountOperation = run.catch(() => {})
+  let accountOperation: Promise<unknown> = Promise.resolve()
+  const serializeAccountOperation = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = accountOperation.then(task, task)
+    accountOperation = run.catch(() => {})
     return run
   }
-  ipcMain.handle(IpcChannels.claudeAccountsList, event =>
-    store && fromManager(event) && event.senderFrame === event.sender.mainFrame ? listClaudeAccounts(store) : [])
-  ipcMain.handle(IpcChannels.claudeAccountAdd, (event, owner, label) => serializeClaudeAccountOperation(async () => {
+  ipcMain.handle(IpcChannels.platformAccountsList, (event, platformId: unknown) =>
+    typeof platformId === 'string' && supportsPlatformAccounts(platformId) && store && fromManager(event) && event.senderFrame === event.sender.mainFrame
+      ? listPlatformAccounts(store, platformId) : [])
+  ipcMain.handle(IpcChannels.platformAccountAdd, (event, owner: FocusOwner, label: unknown) => serializeAccountOperation(async () => {
     const runtime = focusRuntime(event, owner)
-    if (!runtime || owner.platformId !== 'claude') throw new Error('请先打开 Claude 专注视图。')
-    const account = newClaudeAccount(label)
-    await runtime.switchClaudeAccount(owner, account, true)
+    if (!runtime || !supportsPlatformAccounts(owner.platformId)) throw new Error('请先打开支持多账号的专注视图。')
+    const account = newPlatformAccount(label)
+    await runtime.switchAccount(owner, account, true)
     return account
   }))
-  ipcMain.handle(IpcChannels.claudeAccountSwitch, (event, owner, accountId) => serializeClaudeAccountOperation(async () => {
+  ipcMain.handle(IpcChannels.platformAccountSwitch, (event, owner: FocusOwner, accountId: unknown) => serializeAccountOperation(async () => {
     const runtime = focusRuntime(event, owner)
-    if (!runtime || owner.platformId !== 'claude' || !store) throw new Error('请先打开 Claude 专注视图。')
-    const account = listClaudeAccounts(store).find(item => item.id === accountId)
-    if (!account) throw new Error('Claude 账号不可用。')
-    await runtime.switchClaudeAccount(owner, account)
+    if (!runtime || !supportsPlatformAccounts(owner.platformId) || !store) throw new Error('请先打开支持多账号的专注视图。')
+    const platformId = owner.platformId
+    const account = listPlatformAccounts(store, platformId).find(item => item.id === accountId)
+    if (!account) throw new Error(`${ACCOUNT_PLATFORMS[platformId].label} 账号不可用。`)
+    await runtime.switchAccount(owner, account)
   }))
-  ipcMain.handle(IpcChannels.claudeAccountRemove, (event, owner, accountId) => serializeClaudeAccountOperation(async () => {
+  ipcMain.handle(IpcChannels.platformAccountRemove, (event, owner, accountId) => serializeAccountOperation(async () => {
+    const platformId = owner && typeof owner === 'object' ? (owner as { platformId?: unknown }).platformId : undefined
+    if (typeof platformId !== 'string' || !supportsPlatformAccounts(platformId)) throw new Error('当前平台不支持删除账号。')
+    const label = ACCOUNT_PLATFORMS[platformId].label
     const checkRemovable = (): void => {
       const caller = focusRuntime(event, owner)
-      if (!caller || owner.platformId !== 'claude' || !store) throw new Error('请先打开 Claude 专注视图。')
-      if (!caller.ownsClaudeFocus(owner)) throw new Error('当前 Claude 对话已切换。')
-      if (accountId === DEFAULT_CLAUDE_ACCOUNT_ID) throw new Error('默认账号不能删除。')
-      if (!isClaudeAccountId(accountId)) throw new Error('Claude 账号不可用。')
-      const accounts = listClaudeAccounts(store)
-      if (!accounts.some(item => item.id === accountId)) throw new Error('Claude 账号不可用。')
-      if (scheduledTasks?.hasSendingClaudeAccount(accountId)) throw new Error('该 Claude 账号有定时任务正在投递，请稍后再试。')
-      for (const item of runtimes.values()) item.assertClaudeAccountRemovableSync(accountId, accounts)
+      if (!caller || !store) throw new Error(`请先打开 ${label} 专注视图。`)
+      if (!caller.ownsAccountFocus(owner, platformId)) throw new Error(`当前 ${label} 对话已切换。`)
+      if (accountId === DEFAULT_PLATFORM_ACCOUNT_ID) throw new Error('默认账号不能删除。')
+      if (!isPlatformAccountId(accountId)) throw new Error(`${label} 账号不可用。`)
+      const accounts = listPlatformAccounts(store, platformId)
+      if (!accounts.some(item => item.id === accountId)) throw new Error(`${label} 账号不可用。`)
+      if (scheduledTasks?.hasSendingPlatformAccount(platformId, accountId)) throw new Error(`该 ${label} 账号有定时任务正在投递，请稍后再试。`)
+      for (const item of runtimes.values()) item.assertAccountRemovableSync(platformId, accountId)
     }
     checkRemovable()
-    await Promise.all([...runtimes.values()].map(item => item.assertClaudeAccountPageIdle(accountId)))
+    await Promise.all([...runtimes.values()].map(item => item.assertAccountPageIdle(platformId, accountId)))
     checkRemovable()
-    const remaining = removeClaudeAccount(store!, accountId)
-    scheduledTasks?.removeClaudeAccount(accountId)
-    for (const item of runtimes.values()) item.releaseClaudeAccount(accountId)
-    try { await clearClaudeAccountPartition(accountId) }
-    catch (error) { console.warn('[claude-accounts] failed to clear partition:', error instanceof Error ? error.message : String(error)) }
+    const remaining = removePlatformAccount(store!, platformId, accountId)
+    scheduledTasks?.removePlatformAccount(platformId, accountId)
+    for (const item of runtimes.values()) item.releaseAccount(platformId, accountId)
+    try { await clearPlatformAccountPartition(platformId, accountId) }
+    catch (error) { console.warn(`[${platformId}-accounts] failed to clear partition:`, error instanceof Error ? error.message : String(error)) }
     return remaining
   }))
   ipcMain.handle(IpcChannels.compactionStart, (event, owner, generationPlatformId, generationAccountId) => {
@@ -2437,6 +2447,9 @@ async function initializeApplication(): Promise<void> {
 
     const conversationStore = new ConversationStore(join(app.getPath('userData'), 'conversations.db'))
     store = conversationStore
+    for (const account of listPlatformAccounts(conversationStore, 'gemini')) {
+      blockGeminiWebNotifications(platformForAccount('gemini', account.id).partition)
+    }
     qqMail = new QqMailService(conversationStore, {
       encryptionAvailable: () => safeStorage.isEncryptionAvailable()
         && (process.platform !== 'linux' || safeStorage.getSelectedStorageBackend() !== 'basic_text'),
