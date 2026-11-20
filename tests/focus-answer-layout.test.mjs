@@ -17,28 +17,34 @@ function findRenderer(node = file, name = 'renderTurn') {
 }
 const renderer = findRenderer()
 assert.ok(renderer, 'Missing actual focus turn renderer')
-const compiled = ts.transpileModule('const renderToolCall = ' + findRenderer(file, 'renderToolCall').getText(file) + ';\nexport const renderTurn = ' + renderer.getText(file), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-  fileName: 'render-turn.tsx'
-}).outputText
+const compiled = ts.transpileModule(
+  'const renderToolCall = ' + findRenderer(file, 'renderToolCall').getText(file) +
+  ';\nconst renderReasoning = ' + findRenderer(file, 'renderReasoning').getText(file) +
+  ';\nexport const renderTurn = ' + renderer.getText(file),
+  {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+    fileName: 'render-turn.tsx'
+  }
+).outputText
 const Markdown = ({ text }) => React.createElement('p', null, text)
-const ProcessScroll = ({ children }) => React.createElement('div', null, children)
-const FocusDetails = ({ children, summary, className }) => React.createElement('details', { className, open: true },
+const ProcessScroll = ({ children, scrollKey }) => React.createElement('div', { 'data-scroll-key': scrollKey }, children)
+const FocusDetails = ({ children, summary, className, stateKey }) => React.createElement('details', { className, open: true, 'data-state-key': stateKey },
   React.createElement('summary', null, summary), children())
-const historyExports = {}
-new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-history.ts', import.meta.url), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
-}).outputText).runInNewContext({ exports: historyExports, require: () => ({}) })
 const focusExports = {}
 new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-chat.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText).runInNewContext({ exports: focusExports })
+const historyExports = {}
+new Script(ts.transpileModule(readFileSync(new URL('../src/shared/focus-history.ts', import.meta.url), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText).runInNewContext({ exports: historyExports, require: name => name === './focus-chat' ? focusExports : {} })
 
 function fixture({ records = [], richAnswers = new Map() } = {}) {
   const exports = {}, copies = []
   new Script(compiled).runInNewContext({
     exports, require: createRequire(import.meta.url), Markdown, ProcessScroll, FocusDetails,
-    groupFocusExecutions: historyExports.groupFocusExecutions, ownerKey: 'test-owner', EMPTY_RECORDS: [], EMPTY_TOOL_CALLS: [], sendFailure: null, lastTurn: null,
+    buildFocusTurnTimeline: historyExports.buildFocusTurnTimeline, owner: { platformId: 'deepseek' },
+    ownerKey: 'test-owner', viewOwnerKey: 'test-owner', EMPTY_RECORDS: [], sendFailure: null, lastTurn: null,
     OutputText: ({ text, className }) => React.createElement('pre', { className }, text),
     ProcessHint: () => null, richAnswers, recordsById: new Map(records.map(record => [record.messageId, record])),
     cleanFocusAnswer: focusExports.cleanFocusAnswer,
@@ -206,4 +212,66 @@ test('an authoritative empty answer stays empty while prose with ordinary code e
   const current = turn([segment(0, ''), segment(1, example)])
   const f = fixture({ richAnswers: new Map([['reply-0', '意外的富内容回填']]) })
   assert.deepEqual(answerTexts(f.render(current)), [example])
+})
+
+test('continuing within the same task after visible text starts a new process box below that text', () => {
+  const refusal = '我只是一个语言模型，不具备这方面的信息或能力，因此没法帮到你。'
+  const current = {
+    ...turn([segment(0, ''), segment(1, ''), segment(2, refusal)]),
+    status: 'working',
+    executionIds: ['cmd-0', 'cmd-1'],
+    executionCycles: { 'cmd-0': 0, 'cmd-1': 1 },
+    deliveries: { 'cmd-0': 'sent', 'cmd-1': 'sent' }
+  }
+  const records = [
+    { messageId: 'cmd-0', status: 'done' },
+    { messageId: 'cmd-1', status: 'done' },
+    { messageId: 'cmd-3', status: 'running' }
+  ]
+  const f = fixture({ records })
+  const waitingTree = f.render(current)
+  const waitingHtml = renderToStaticMarkup(waitingTree)
+  const waitingProcesses = elements(waitingTree).filter(({ node }) => node.props.className === 'focus-process')
+  assert.equal(waitingProcesses.length, 2)
+  assert.equal(waitingProcesses[0].node.props['data-state-key'], 'process:turn-1')
+  assert.equal(waitingProcesses[1].node.props['data-state-key'], 'process:turn-1:1')
+  assert.ok(waitingHtml.indexOf('cmd-0') < waitingHtml.indexOf(refusal))
+  assert.ok(waitingHtml.indexOf(refusal) < waitingHtml.indexOf('data-state-key="process:turn-1:1"'))
+  assert.match(waitingHtml.slice(0, waitingHtml.indexOf(refusal)), /已回复/)
+  assert.match(waitingHtml.slice(waitingHtml.indexOf(refusal)), /正在处理/)
+
+  current.segments.push({ ...segment(3, ''), parts: [{ kind: 'reasoning', text: '继续排查接口' }] })
+  current.executionIds.push('cmd-3')
+  current.executionCycles['cmd-3'] = 3
+  current.deliveries['cmd-3'] = 'pending'
+  current.segments.push({ ...segment(4, '已定位并完成修改。') })
+  current.status = 'answered'
+  records[2].status = 'done'
+  current.deliveries['cmd-3'] = 'sent'
+
+  const doneTree = f.render(current)
+  const doneHtml = renderToStaticMarkup(doneTree)
+  const doneProcesses = elements(doneTree).filter(({ node }) => node.props.className === 'focus-process')
+  assert.equal(doneProcesses.length, 2)
+  assert.deepEqual(answerTexts(doneTree), [refusal, '已定位并完成修改。'])
+  assert.ok(doneHtml.indexOf('cmd-1') < doneHtml.indexOf(refusal))
+  assert.ok(doneHtml.indexOf(refusal) < doneHtml.indexOf('继续排查接口'))
+  assert.ok(doneHtml.indexOf('继续排查接口') < doneHtml.indexOf('cmd-3'))
+  assert.ok(doneHtml.indexOf('cmd-3') < doneHtml.indexOf('已定位并完成修改。'))
+  assert.ok(!elements(doneProcesses[0].node).some(({ node }) => node.props['data-execution'] === 'cmd-3'))
+  assert.ok(elements(doneProcesses[1].node).some(({ node }) => node.props['data-execution'] === 'cmd-3'))
+})
+
+test('parse failures after earlier prose stay in their later process box', () => {
+  const current = {
+    ...turn([segment(0, '先说明一下现状。')]),
+    status: 'blocked',
+    notice: 'parse-failed',
+    parseFailures: [{ messageId: 'bad-2', text: '{"command":broken}', code: 'invalid-json', createdAt: 100, cycle: 1 }]
+  }
+  const tree = fixture().render(current)
+  const processes = elements(tree).filter(({ node }) => node.props.className === 'focus-process')
+  assert.equal(processes.length, 2)
+  const html = renderToStaticMarkup(tree)
+  assert.ok(html.indexOf('先说明一下现状。') < html.indexOf('指令格式错误'))
 })

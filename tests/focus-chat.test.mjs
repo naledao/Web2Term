@@ -630,3 +630,22 @@ test('fallback plain-text settle upgrades to formatted Markdown once snapshot or
   assert.equal(reloadedTurn.segments[0].answer, '**恢复后的 Markdown**')
   assert.equal(reloadedTurn.segments[0].fallback, undefined)
 })
+
+test('rawSent settles the leaving segment, records parse-failure cycles, and rejects stale segment ids across cycles', () => {
+  const { chat } = fixture()
+  chat.begin('gemini', 'chat-1', '查看项目结构')
+  const firstToken = chat.token('gemini')
+  chat.snapshot('gemini', firstToken, page('refusal-msg', '我只是一个语言模型'))
+  assert.equal(onlyTurn(chat).segments[0].settled, false)
+
+  chat.rawSent('gemini')
+  assert.equal(onlyTurn(chat).segments[0].settled, true)
+  assert.equal(onlyTurn(chat).status, 'working')
+
+  const nextToken = chat.token('gemini')
+  chat.snapshot('gemini', nextToken, page('refusal-msg', '旧节点不应回流到下一轮'))
+  assert.equal(onlyTurn(chat).segments.length, 1)
+
+  chat.parseFailed('gemini', { messageId: 'bad-cycle-1', text: '{"command":', parseErrorCode: 'invalid-json' })
+  assert.equal(onlyTurn(chat).parseFailures[0].cycle, 1)
+})

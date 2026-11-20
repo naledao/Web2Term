@@ -31,7 +31,7 @@ import FocusCodeBlock, { FocusCodeThemeContext } from './FocusCodeBlock'
 import FocusTokenUsage from './FocusTokenUsage'
 import FocusExecutionOutput from './FocusExecutionOutput'
 import OutputText from './OutputText'
-import { groupFocusExecutions, mergeFocusChatUpdate } from '@shared/focus-history'
+import { buildFocusTurnTimeline, mergeFocusChatUpdate } from '@shared/focus-history'
 import { estimateFocusConversation } from '@shared/focus-token-usage'
 import FocusModelSettings from './FocusModelSettings'
 import { parseFocusLayout } from '@shared/focus-layout'
@@ -167,7 +167,6 @@ function FocusDetails({ ownerKey, stateKey, defaultOpen = false, className, summ
 }
 const EMPTY_TURNS: FocusTurn[] = []
 const EMPTY_RECORDS: ExecutionRecord[] = []
-const EMPTY_TOOL_CALLS: FocusToolCall[] = []
 interface DraftFile { id: string; file: File }
 // Keep unsent files across view switches in memory, never in localStorage.
 const fileDrafts = new Map<string, DraftFile[]>()
@@ -1286,33 +1285,14 @@ function FocusChatView(props: Props): JSX.Element {
     const turnWorking = !turn.archived && turn.status === 'working'
     const sendBlocked = !!sendFailure && turn === lastTurn
     // Only explicit turn ownership belongs in this process. Unlinked history stays in the terminal.
-    const { executions, byCycle, unassigned, toolsByCycle, unassignedTools } = groupFocusExecutions(turn, recordsById)
-    const executionIds = new Set(turn.executionIds)
-    const toolSources = new Set((turn.toolCalls ?? []).map(call => call.sourceMessageId))
+    const blocks = buildFocusTurnTimeline(turn, recordsById, owner.platformId, richAnswers, { sendBlocked })
     const deliveryOf = (record: ExecutionRecord): FocusDelivery | undefined => focusDelivery(record, turn.deliveries[record.messageId])
-    const running = !turn.archived && executions.some(record => record.status === 'running')
-    const toolRunning = turnWorking && turn.toolCalls?.some(call => call.status === 'running')
-    const pending = !turn.archived && executions.some(record => ['pending', 'blocked'].includes(record.status))
-    const deliveryPending = turnWorking && (executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending') ||
-      turn.toolCalls?.some(call => call.status === 'done' && call.delivery === 'pending'))
-    // A new tool/result cycle must not move earlier prose into the process panel.
-    const segments = turn.segments.map(segment => {
-      const rawAnswer = (!turn.archived && segment.sourceMessageId ? richAnswers.get(segment.sourceMessageId) : '') || segment.answer
-      const parts = focusReplyParts(segment.answer, owner.platformId, segment.parts)
-      return { ...segment, rawAnswer, parts: rawAnswer === segment.answer ? parts : focusReplyParts(rawAnswer, owner.platformId, parts) }
-    })
-    const answers = segments.flatMap(segment => {
-      // Empty command answers are intentional. Rich content may enrich actual
-      // prose, but must never recreate a protocol response as an answer bubble.
-      if (!segment.answer.trim() ||
-        (segment.sourceMessageId && (executionIds.has(segment.sourceMessageId) || toolSources.has(segment.sourceMessageId)))) return []
-      // Older versions saved raw question JSON; normalize it at display time too.
-      const text = cleanFocusAnswer(segment.rawAnswer, owner.platformId)
-      return text.trim() ? [{ cycle: segment.cycle, sourceMessageId: segment.sourceMessageId, text }] : []
-    })
-    const hasProcess = segments.some(segment => segment.parts.length > 0) || executions.length > 0 || !!turn.toolCalls?.length || !!turn.parseFailures?.length
-    const label = sendBlocked ? '消息发送失败 · 等待重试' : turn.commandRecovery && !turn.archived ? (turnWorking ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : toolRunning ? '正在调用工具…' : deliveryPending ? '正在回传执行结果…' :
-      turn.status === 'stopped' ? '已停止 · 已有内容保留' : turnWorking ? '正在处理…' : '已回复'
+    const answers = blocks.flatMap(block => block.answer ? [block.answer] : [])
+    const renderParseFailure = (failure: NonNullable<FocusTurn['parseFailures']>[number]): JSX.Element => (
+      <details className="focus-execution" key={'parse:' + failure.messageId}>
+        <summary>指令格式错误 · 未执行</summary><pre>{failure.text}</pre>
+      </details>
+    )
     const userMessage = turn.userMessageId ? messagesById.get(turn.userMessageId) : null
     return <article className="focus-turn" data-message-id={turn.id} key={turn.id}>
       <div className={'focus-user' + (turn.userMessageId && editingId === turn.userMessageId ? ' focus-user--editing' : '')}>
@@ -1322,35 +1302,52 @@ function FocusChatView(props: Props): JSX.Element {
         </>, turn.archived, turn.userSkills)}</div>
       <div className="focus-assistant">
         <div className="focus-assistant__head">{modelIcon ? <img src={modelIcon} alt="" /> : null}<span>{modelLabel}</span></div>
-        <FocusDetails className="focus-process" ownerKey={viewOwnerKey} stateKey={'process:' + turn.id} defaultOpen summary={<><span className={turnWorking && !sendBlocked ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{sendBlocked ? '!' : turnWorking ? '' : turn.status === 'blocked' ? '!' : turn.status === 'stopped' ? '○' : '✓'}</span>{label}{hasProcess ? <ProcessHint /> : null}</>}>{() =>
-          <ProcessScroll scrollKey={viewOwnerKey + ':turn:' + turn.id} follow={turnWorking && !sendBlocked}>
-          {segments.map(segment => {
-            const segmentExecutions = byCycle.get(segment.cycle) ?? EMPTY_RECORDS
-            const segmentTools = toolsByCycle.get(segment.cycle) ?? EMPTY_TOOL_CALLS
-            // Empty cycles have margins and padding too; they must not push the placeholder down.
-            if (!segment.parts.length && !segmentExecutions.length && !segmentTools.length) return null
-            return <div className="focus-process__cycle" key={segment.cycle}>
-              {segment.parts.map((part, index) => part.kind === 'reasoning' ? renderReasoning(part.text, turn.id + ':' + segment.cycle + ':' + index) :
-                <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
-              {segmentExecutions.map(record => renderExecution(record, deliveryOf(record), !turn.archived))}
-              {segmentTools.map(renderToolCall)}
+        {blocks.flatMap((block, blockIndex) => {
+          const isLastBlock = blockIndex === blocks.length - 1
+          const { process: proc, answer } = block
+          const blockWorking = isLastBlock && turnWorking
+          const blockSendBlocked = isLastBlock && sendBlocked
+          const blockRecovery = isLastBlock && !turn.archived ? turn.commandRecovery : undefined
+          const running = !turn.archived && proc.executions.some(record => record.status === 'running')
+          const toolRunning = blockWorking && proc.toolCalls.some(call => call.status === 'running')
+          const pending = !turn.archived && proc.executions.some(record => ['pending', 'blocked'].includes(record.status))
+          const deliveryPending = blockWorking && (proc.executions.some(record => record.status === 'done' && deliveryOf(record) === 'pending') ||
+            proc.toolCalls.some(call => call.status === 'done' && call.delivery === 'pending'))
+          const label = blockSendBlocked ? '消息发送失败 · 等待重试' : blockRecovery ? (blockWorking ? '正在修正指令…' : '指令未执行 · 等待处理') : pending ? '等待你确认下一步' : running ? '正在执行命令…' : toolRunning ? '正在调用工具…' : deliveryPending ? '正在回传执行结果…' :
+            isLastBlock && turn.status === 'stopped' ? '已停止 · 已有内容保留' : blockWorking ? '正在处理…' : '已回复'
+          const statusIcon = blockSendBlocked ? '!' : blockWorking ? '' : isLastBlock && turn.status === 'blocked' ? '!' : isLastBlock && turn.status === 'stopped' ? '○' : '✓'
+          const suffix = blockIndex === 0 ? '' : ':' + blockIndex
+          const items: JSX.Element[] = [
+            <FocusDetails className="focus-process" key={'process:' + blockIndex} ownerKey={viewOwnerKey} stateKey={'process:' + turn.id + suffix} defaultOpen
+              summary={<><span className={blockWorking && !blockSendBlocked ? 'focus-chat__pulse' : 'focus-chat__status'} aria-hidden="true">{statusIcon}</span>{label}{proc.hasProcess ? <ProcessHint /> : null}</>}>{() =>
+              <ProcessScroll scrollKey={viewOwnerKey + ':turn:' + turn.id + suffix} follow={blockWorking && !blockSendBlocked}>
+                {proc.cycles.map(cycle => <div className="focus-process__cycle" key={cycle.cycle}>
+                  {cycle.parts.map((part, index) => part.kind === 'reasoning' ? renderReasoning(part.text, turn.id + ':' + cycle.cycle + ':' + index) :
+                    <div className="focus-search" key={index}><span>检索资料</span>{part.url ? <a href={part.url} target="_blank" rel="noreferrer">{part.text}</a> : part.text}</div>)}
+                  {cycle.executions.map(record => renderExecution(record, deliveryOf(record), !turn.archived))}
+                  {cycle.toolCalls.map(renderToolCall)}
+                  {cycle.parseFailures.map(renderParseFailure)}
+                </div>)}
+                {proc.unassignedExecutions.map(record => renderExecution(record, deliveryOf(record), !turn.archived))}
+                {proc.unassignedTools.map(renderToolCall)}
+                {proc.unassignedFailures.map(renderParseFailure)}
+                {!proc.hasProcess ? <p className="focus-chat__muted focus-process__empty">{blockSendBlocked ? '消息尚未发送成功。' : blockWorking ? '正在思考…' : '本轮没有额外执行步骤。'}</p> : null}
+              </ProcessScroll>
+            }</FocusDetails>
+          ]
+          if (isLastBlock && turn.notice === 'parse-failed') items.push(
+            <div className="focus-chat__error" key={'notice:' + blockIndex} role="alert">
+              {turn.commandRecovery?.message || '指令格式无效，本条请求未执行。'}
+              {!turn.archived && turn.commandRecovery && ['blocked', 'failed'].includes(turn.commandRecovery.status) && turn === lastTurn
+                ? <button type="button" disabled={!!actionId} onClick={() => void retryFormat(turn.commandRecovery!.token)}>重试修正</button> : null}
+              {!turn.archived ? <button type="button" onClick={props.onOpenTerminal}>查看执行控制</button> : null}
             </div>
-          })}
-          {unassigned.map(record => renderExecution(record, deliveryOf(record), !turn.archived))}
-          {unassignedTools.map(renderToolCall)}
-          {turn.parseFailures?.map(failure => <details className="focus-execution" key={'parse:' + failure.messageId}>
-            <summary>指令格式错误 · 未执行</summary><pre>{failure.text}</pre>
-          </details>)}
-          {!hasProcess ? <p className="focus-chat__muted focus-process__empty">{sendBlocked ? '消息尚未发送成功。' : turnWorking ? '正在思考…' : '本轮没有额外执行步骤。'}</p> : null}
-          </ProcessScroll>
-        }</FocusDetails>
-        {turn.notice === 'parse-failed' ? <div className="focus-chat__error" role="alert">
-          {turn.commandRecovery?.message || '指令格式无效，本条请求未执行。'}
-          {!turn.archived && turn.commandRecovery && ['blocked', 'failed'].includes(turn.commandRecovery.status) && turn === lastTurn
-            ? <button type="button" disabled={!!actionId} onClick={() => void retryFormat(turn.commandRecovery!.token)}>重试修正</button> : null}
-          {!turn.archived ? <button type="button" onClick={props.onOpenTerminal}>查看执行控制</button> : null}
-        </div> : null}
-        {answers.map(answer => <div className="focus-answer" key={answer.cycle} data-question-answer={turn.archived ? undefined : answer.sourceMessageId ?? ''}><Markdown text={answer.text} theme={theme} platformId={owner.platformId} onOriginal={props.onOriginal} /></div>)}
+          )
+          if (answer) items.push(
+            <div className="focus-answer" key={'answer:' + answer.cycle} data-question-answer={turn.archived ? undefined : answer.sourceMessageId ?? ''}><Markdown text={answer.text} theme={theme} platformId={owner.platformId} onOriginal={props.onOriginal} /></div>
+          )
+          return items
+        })}
         {answers.length > 0 && !turnWorking ? <div className="focus-chat__actions"><button type="button" onClick={() => void copy(turn.id, answers.map(answer => answer.text).join('\n\n'))}>{copiedId === turn.id ? '已复制' : '复制回答'}</button></div> : null}
       </div>
     </article>

@@ -1203,7 +1203,8 @@ export class ConversationStore {
           turn.hiddenMessageIds.some(id => typeof id !== 'string' || id.length > 512))) return []
         if (turn.parseFailures !== undefined && (!Array.isArray(turn.parseFailures) || turn.parseFailures.length > 10 ||
           turn.parseFailures.some(item => !item || typeof item.messageId !== 'string' || typeof item.text !== 'string' ||
-            item.text.length > 20000 || typeof item.code !== 'string' || !Number.isFinite(item.createdAt)))) return []
+            item.text.length > 20000 || typeof item.code !== 'string' || !Number.isFinite(item.createdAt) ||
+            (item.cycle !== undefined && (!Number.isInteger(item.cycle) || item.cycle < 0))))) return []
         if (turn.commandRecovery && (typeof turn.commandRecovery.messageId !== 'string' || typeof turn.commandRecovery.message !== 'string' ||
           !Number.isSafeInteger(turn.commandRecovery.token) || !Number.isSafeInteger(turn.commandRecovery.generation) ||
           !['pending', 'sent', 'blocked', 'failed', 'uncertain'].includes(turn.commandRecovery.status))) return []

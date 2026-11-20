@@ -110,7 +110,7 @@ export class FocusChat {
       const failures = current.turn.parseFailures ??= []
       if (!failures.some(item => item.messageId === failure.messageId)) failures.push({
         messageId: failure.messageId, text: (failure.text ?? '').slice(0, 20000),
-        code: failure.parseErrorCode ?? 'invalid-json', createdAt: Date.now()
+        code: failure.parseErrorCode ?? 'invalid-json', createdAt: Date.now(), cycle: current.entry.cycle
       })
       current.turn.parseFailures = failures.slice(-10)
     }
@@ -179,9 +179,9 @@ export class FocusChat {
     const current = this.current(platformId)
     if (!current || !page.reply || current.turn.status === 'stopped') return undefined
     const { entry, turn } = current
-    // An answer already owned by an earlier turn is history the page re-rendered, never this turn's reply.
-    if (page.reply.sourceMessageId && entry.turns.some(other => other !== turn &&
-      other.segments.some(item => item.sourceMessageId === page.reply!.sourceMessageId))) return undefined
+    // An answer already owned by an earlier turn or earlier cycle is history the page re-rendered, never this cycle's reply.
+    if (page.reply.sourceMessageId && entry.turns.some(other =>
+      other.segments.some(item => (other !== turn || item.cycle !== entry.cycle) && item.sourceMessageId === page.reply!.sourceMessageId))) return undefined
     const segment = this.segment(entry, turn)
     const parts = focusReplyParts(page.reply.answer, platformId, page.reply.parts)
     // A settled Markdown read is authoritative; a late streaming sample cannot replace it.
@@ -287,6 +287,8 @@ export class FocusChat {
   rawSent(platformId: string): void {
     const current = this.live(platformId)
     if (!current || current.turn.status === 'stopped') return
+    const leaving = current.turn.segments.find(item => item.cycle === current.entry.cycle)
+    if (leaving && !leaving.settled) leaving.settled = true
     current.entry.cycle++
     current.turn.status = 'working'
     current.turn.updatedAt = Date.now()

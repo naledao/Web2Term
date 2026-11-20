@@ -165,7 +165,7 @@ export interface FocusTurn {
   notice?: 'parse-failed'
   commandRecovery?: CommandRecoveryState
   /** Unexecuted protocol requests; never added to the shell execution queue. */
-  parseFailures?: { messageId: string; text: string; code: string; createdAt: number }[]
+  parseFailures?: { messageId: string; text: string; code: string; createdAt: number; cycle?: number }[]
 }
 export interface FocusOwner {
   sessionId: string
