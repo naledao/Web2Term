@@ -967,3 +967,38 @@ test('native draft-card scope and card-linked filename tooltips remain supported
   app.cards.childNodes[0].remove()
   assert.equal(app.status().namesSeen, false, 'an unreferenced tooltip must not stand in for a removed card')
 })
+
+test('fileChooserDiagnostics inspects open gem-menu items and menu triggers while redacting unsafe text', () => {
+  const secretFiles = [{ fileName: 'secret-notes.md', mimeType: 'text/markdown', sizeBytes: 120 }]
+  const app = fixture(secretFiles, platformExports.GEMINI_PAGE, 'div', '', '/app')
+  app.controller.releaseFileSend(token)
+  const trigger = element('button', { 'aria-label': '上传和工具', 'aria-haspopup': 'menu', 'aria-expanded': 'true' })
+  const fieldset = element('fieldset', { class: 'input-area-fieldset' }, [app.composer, trigger, app.send])
+  const safeItem = element('gem-menu-item', { role: 'menuitem', 'data-test-id': 'synthetic-gem-uploader' }, [
+    element('mat-icon', { fonticon: 'upload_file', 'aria-hidden': 'true' }),
+    element('span', { class: 'label' }, '上传文件')
+  ])
+  const unsafeItem = element('gem-menu-item', { role: 'menuitem' }, [
+    element('span', { class: 'label' }, 'secret-notes.md'),
+    element('span', {}, 'https://example.test/private')
+  ])
+  const gemMenu = element('gem-menu', { role: 'menu', 'data-test-id': 'upload-menu' }, [safeItem, unsafeItem])
+  const overlay = element('div', { class: 'cdk-overlay-pane' }, [gemMenu])
+  app.body.replaceChildren(fieldset, overlay)
+  assert.equal(app.controller.beginFileSend(`${token}-gemini-diag`, secretFiles), 'ok')
+  const diag = app.controller.fileChooserDiagnostics()
+  assert.equal(diag.rootFound, true)
+  assert.equal(diag.menuCount, 1)
+  assert.equal(diag.localEntryCount, 0)
+  assert.equal(diag.captionEntryCount, 0)
+  assert.equal(diag.menuButtons.length, 1)
+  assert.equal(diag.menuButtons[0].ariaExpanded, 'true')
+  assert.equal(diag.chooserMenus.length, 1)
+  assert.equal(diag.chooserMenus[0].tag, 'gem-menu')
+  assert.equal(diag.chooserMenus[0].items[0].tag, 'gem-menu-item')
+  assert.equal(diag.chooserMenus[0].items[0].dataTestId, 'synthetic-gem-uploader')
+  assert.deepEqual(diag.chooserMenus[0].items[0].icons, ['upload_file'])
+  assert.equal(diag.chooserMenus[0].items[0].primaryLabel, '上传文件')
+  assert.equal(diag.chooserMenus[0].items[1].primaryLabel.startsWith('[file:'), true)
+  assert.equal(diag.chooserMenus[0].items[1].text.startsWith('[len:'), true)
+})

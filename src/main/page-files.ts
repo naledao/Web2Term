@@ -11,7 +11,134 @@ import { isQuestionChatHome, selectionQuestionConversation } from '../shared/dee
 
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 const diagnosticLogPaths = new Map<FileReadingPlatform['id'], string>()
-type NativeChooserClick = { status: 'activated' | 'waiting'; kind: string; x: number; y: number }
+type NativeChooserClick = { status: 'activated' | 'waiting'; kind: string; x: number; y: number; target?: Record<string, unknown> }
+
+const safeDiagToken = (value: unknown): string | undefined =>
+  typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,80}$/.test(value) ? value : undefined
+
+const safeDiagText = (value: unknown, max = 64): string | undefined => {
+  if (typeof value !== 'string' || !value) return undefined
+  const text = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!text) return undefined
+  if (text.length > max || /https?:\/\/|file:\/\/|@|[a-zA-Z]:[\\/]|\\|(?:^|\s)\/[^\s/]+\//.test(text)) return `[len:${text.length}]`
+  return text
+}
+
+const safeDiagBox = (raw: unknown): Record<string, number> | undefined => {
+  if (!raw || typeof raw !== 'object') return undefined
+  const box = raw as Record<string, unknown>
+  if (!['x', 'y', 'width', 'height'].every((key) => typeof box[key] === 'number' && Number.isFinite(box[key]))) return undefined
+  return { x: Math.round(box.x as number), y: Math.round(box.y as number), width: Math.round(box.width as number), height: Math.round(box.height as number) }
+}
+
+const safeClickTarget = (raw: unknown): Record<string, string> | undefined => {
+  if (!raw || typeof raw !== 'object') return undefined
+  const target = raw as Record<string, unknown>
+  const safe: Record<string, string> = {}
+  for (const key of ['tag', 'dataTestId', 'ariaExpanded', 'ariaHaspopup']) {
+    const token = safeDiagToken(target[key])
+    if (token) safe[key] = token
+  }
+  return Object.keys(safe).length ? safe : undefined
+}
+
+const CHOOSER_KEYWORDS = ['文件', '上传', '图片', '照片', '本地', '电脑', '设备', '附件', '云端硬盘', '代码', '文档', '表格',
+  'file', 'upload', 'image', 'photo', 'local', 'computer', 'device', 'attach', 'drive', 'code', 'document']
+
+function sanitizeChooserDiagnostics(snapshot: Record<string, unknown>, result: Record<string, unknown>): void {
+  if (['visible', 'hidden', 'prerender'].includes(String(snapshot.visibilityState))) result.visibilityState = snapshot.visibilityState
+  if (snapshot.viewport && typeof snapshot.viewport === 'object') {
+    const vp = snapshot.viewport as Record<string, unknown>
+    if (typeof vp.width === 'number' && Number.isFinite(vp.width) && typeof vp.height === 'number' && Number.isFinite(vp.height)) {
+      result.viewport = { width: Math.round(vp.width), height: Math.round(vp.height) }
+    }
+  }
+  if (snapshot.chooserSteps && typeof snapshot.chooserSteps === 'object') {
+    const steps = snapshot.chooserSteps as Record<string, unknown>
+    result.chooserSteps = { menu: !!steps.menu, caption: !!steps.caption, native: !!steps.native }
+  }
+  const sanitizeTokens = (raw: unknown, limit: number): string[] =>
+    Array.isArray(raw) ? raw.map((item) => safeDiagToken(item)).filter((item): item is string => !!item).slice(0, limit) : []
+  if (Array.isArray(snapshot.menuButtons)) {
+    result.menuButtons = snapshot.menuButtons.slice(0, 6).map((raw) => {
+      const button = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+      const safe: Record<string, unknown> = {}
+      for (const key of ['tag', 'dataTestId', 'ariaHaspopup', 'ariaExpanded', 'hitTag']) {
+        const token = safeDiagToken(button[key])
+        if (token) safe[key] = token
+      }
+      for (const key of ['visible', 'disabled', 'inRoot', 'ariaControlsPresent', 'hitMatched']) {
+        if (typeof button[key] === 'boolean') safe[key] = button[key]
+      }
+      const ariaLabel = safeDiagText(button.ariaLabel, 48)
+      if (ariaLabel) safe.ariaLabel = ariaLabel
+      const icons = sanitizeTokens(button.icons, 4)
+      if (icons.length) safe.icons = icons
+      const rect = safeDiagBox(button.rect)
+      if (rect) safe.rect = rect
+      return safe
+    })
+  }
+  if (Array.isArray(snapshot.chooserMenus)) {
+    result.chooserMenus = snapshot.chooserMenus.slice(0, 4).map((raw) => {
+      const menu = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+      const safe: Record<string, unknown> = {}
+      for (const key of ['tag', 'role', 'dataTestId']) {
+        const token = safeDiagToken(menu[key])
+        if (token) safe[key] = token
+      }
+      if (typeof menu.childCount === 'number' && Number.isFinite(menu.childCount)) safe.childCount = menu.childCount
+      const classes = sanitizeTokens(menu.classes, 8)
+      if (classes.length) safe.classes = classes
+      const rect = safeDiagBox(menu.rect)
+      if (rect) safe.rect = rect
+      if (Array.isArray(menu.items)) {
+        safe.items = menu.items.slice(0, 20).map((rawItem) => {
+          const item = (rawItem && typeof rawItem === 'object' ? rawItem : {}) as Record<string, unknown>
+          const row: Record<string, unknown> = {}
+          for (const key of ['tag', 'role', 'dataTestId', 'ariaHaspopup', 'ariaExpanded', 'ariaChecked', 'hitTag']) {
+            const token = safeDiagToken(item[key])
+            if (token) row[key] = token
+          }
+          for (const key of ['visible', 'disabled', 'hasButtonChild', 'hasFileInput', 'hitMatched']) {
+            if (typeof item[key] === 'boolean') row[key] = item[key]
+          }
+          if (typeof item.textLength === 'number' && Number.isFinite(item.textLength)) row.textLength = item.textLength
+          const classes = sanitizeTokens(item.classes, 6)
+          if (classes.length) row.classes = classes
+          const icons = sanitizeTokens(item.icons, 4)
+          if (icons.length) row.icons = icons
+          for (const [key, limit] of [['ariaLabel', 48], ['primaryLabel', 48], ['text', 64]] as const) {
+            const text = safeDiagText(item[key], limit)
+            if (text) row[key] = text
+          }
+          if (Array.isArray(item.keywords)) {
+            const keywords = item.keywords.filter((word) => CHOOSER_KEYWORDS.includes(String(word))).map(String).slice(0, 12)
+            if (keywords.length) row.keywords = keywords
+          }
+          const itemRect = safeDiagBox(item.rect)
+          if (itemRect) row.rect = itemRect
+          return row
+        })
+      }
+      return safe
+    })
+  }
+  if (Array.isArray(snapshot.chooserFileInputs)) {
+    result.chooserFileInputs = snapshot.chooserFileInputs.slice(0, 8).map((raw) => {
+      const input = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+      const safe: Record<string, unknown> = { accept: String(input.accept ?? '').slice(0, 120) }
+      for (const key of ['multiple', 'disabled', 'visible', 'connected', 'inMenu', 'inRoot']) {
+        if (typeof input[key] === 'boolean') safe[key] = input[key]
+      }
+      for (const key of ['parentTag', 'parentDataTestId']) {
+        const token = safeDiagToken(input[key])
+        if (token) safe[key] = token
+      }
+      return safe
+    })
+  }
+}
 
 /** Append only upload diagnostics, never the message payload or file bytes. */
 function writeDiagnostic(platformId: FileReadingPlatform['id'], token: string, event: string, details: Record<string, unknown>): void {
@@ -32,9 +159,10 @@ function diagnosticSnapshot(value: unknown): Record<string, unknown> {
   const snapshot = value as Record<string, unknown>
   const result: Record<string, unknown> = {}
   for (const key of ['status', 'rootFound', 'rootIsForm', 'images', 'imagesExpected', 'cards', 'namesSeen', 'nameSourceCount', 'missingNameCount', 'uploading', 'error', 'inputFiles', 'composerFound', 'sendFound', 'sendDisabled', 'draftEmpty', 'stopFound', 'draftCleared', 'newTurnSeen', 'turnFilesSeen', 'captionSeen', 'captionPrefixSeen', 'turnTextLength', 'captionLength', 'edited',
-    'turnIdPresent', 'turnIdKnown', 'turnVisible', 'hiddenUserTurnCount', 'newTurnCount', 'baselineTurnIdCount', 'turnPosition', 'baselinePosition', 'turnKeyPresent', 'turnKeyKnown', 'baselineKeyCount', 'userTurnCount', 'baselinePositionAvailable', 'menuCount', 'localEntryCount', 'captionEntryCount', 'entryAmbiguous', 'entryClicked']) {
+    'turnIdPresent', 'turnIdKnown', 'turnVisible', 'hiddenUserTurnCount', 'newTurnCount', 'baselineTurnIdCount', 'turnPosition', 'baselinePosition', 'turnKeyPresent', 'turnKeyKnown', 'baselineKeyCount', 'userTurnCount', 'baselinePositionAvailable', 'menuCount', 'localEntryCount', 'captionEntryCount', 'entryAmbiguous', 'entryClicked', 'localSelectorAllCount', 'hasFocus', 'composerEmpty']) {
     if (typeof snapshot[key] === 'boolean' || typeof snapshot[key] === 'number' || (key === 'status' && typeof snapshot[key] === 'string')) result[key] = snapshot[key]
   }
+  sanitizeChooserDiagnostics(snapshot, result)
   if (['none', 'fallback', 'id', 'other'].includes(String(snapshot.turnKeyShape))) result.turnKeyShape = snapshot.turnKeyShape
   if (['', 'files-not-selected', 'attachment-root-missing', 'attachment-names-missing', 'upload-in-progress', 'send-button-missing', 'send-button-disabled', 'still-generating'].includes(String(snapshot.readyBlockReason))) {
     result.readyBlockReason = snapshot.readyBlockReason
@@ -194,6 +322,7 @@ export async function sendPageFiles(
     if (!current() || signal.aborted || contents.isDestroyed()) throw new Error('cancelled')
     return contents.executeJavaScript(`window.__cmdTerminalInterceptor?.${method}(${args.map((arg) => JSON.stringify(arg)).join(',')})`, method === 'openFileChooser')
   }
+  let lastFlattenedSignature = ''
   const command = async (method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> => {
     let timer: NodeJS.Timeout | undefined
     try {
@@ -204,6 +333,9 @@ export async function sendPageFiles(
       ])
       log('cdp-done', { method })
       return result
+    } catch (error) {
+      log('cdp-error', { method, message: (error as Error)?.message?.slice(0, 200) || 'cdp-error' })
+      throw error
     } finally { if (timer) clearTimeout(timer) }
   }
   const onDetach = (): void => { detached = true; log('debugger-detached') }
@@ -235,7 +367,10 @@ export async function sendPageFiles(
     }
   }
   const dispatchNativeChooserClick = async (value: NativeChooserClick): Promise<boolean> => {
-    if (contents.isDestroyed() || ![value.x, value.y].every((coordinate) => Number.isFinite(coordinate) && coordinate >= 0 && coordinate <= 100000)) return false
+    if (contents.isDestroyed() || ![value.x, value.y].every((coordinate) => Number.isFinite(coordinate) && coordinate >= 0 && coordinate <= 100000)) {
+      log('chooser-native-click-blocked', { reason: contents.isDestroyed() ? 'destroyed' : 'invalid-coords', background: !!options.background })
+      return false
+    }
     if (options.background) {
       // Target the background page through its existing debugger session. CDP
       // takes viewport CSS pixels and needs no top-level window activation.
@@ -251,7 +386,10 @@ export async function sendPageFiles(
       return true
     }
     const zoom = contents.getZoomFactor()
-    if (!Number.isFinite(zoom) || zoom <= 0 || value.x * zoom > 100000 || value.y * zoom > 100000) return false
+    if (!Number.isFinite(zoom) || zoom <= 0 || value.x * zoom > 100000 || value.y * zoom > 100000) {
+      log('chooser-native-click-blocked', { reason: 'invalid-zoom', background: false })
+      return false
+    }
     const position = { x: Math.round(value.x * zoom), y: Math.round(value.y * zoom) }
     try {
       // Electron drops sendInputEvent when its BrowserWindow/webContents is not
@@ -261,26 +399,42 @@ export async function sendPageFiles(
       const ownerWindow = BrowserWindow.fromWebContents(contents)
       if (ownerWindow && !ownerWindow.isFocused()) ownerWindow.focus()
       if (!contents.isFocused()) contents.focus()
-      if (!contents.isFocused()) return false
+      if (!contents.isFocused()) {
+        log('chooser-native-click-blocked', { reason: 'not-focused', ownerFocused: ownerWindow?.isFocused() ?? null, background: false })
+        return false
+      }
       contents.sendInputEvent({ type: 'mouseMove', ...position })
       contents.sendInputEvent({ type: 'mouseDown', ...position, button: 'left', clickCount: 1 })
       contents.sendInputEvent({ type: 'mouseUp', ...position, button: 'left', clickCount: 1 })
       return true
-    } catch { return false }
+    } catch (error) {
+      log('chooser-native-click-blocked', { reason: 'exception', message: (error as Error)?.message?.slice(0, 120) || 'error', background: false })
+      return false
+    }
   }
   const flattenedChooserInput = async (): Promise<{ backendNodeId: number | null; nodeId: number | null } | null> => {
     try {
       const flattened = await command('DOM.getFlattenedDocument', { depth: -1, pierce: true })
       const nodes = Array.isArray(flattened.nodes) ? flattened.nodes as Array<Record<string, unknown>> : []
-      const fileInputs = nodes.filter((node) => {
-        if (String(node.nodeName ?? '').toUpperCase() !== 'INPUT') return false
+      const parsedInputs = nodes.flatMap((node) => {
+        if (String(node.nodeName ?? '').toUpperCase() !== 'INPUT') return []
         const attrs = Array.isArray(node.attributes) ? node.attributes as unknown[] : []
         const values = new Map<string, string>()
         for (let index = 0; index + 1 < attrs.length; index += 2) values.set(String(attrs[index]).toLowerCase(), String(attrs[index + 1]))
-        return values.get('type')?.toLowerCase() === 'file' && !values.has('disabled') &&
-          (attachments.length === 1 || values.has('multiple'))
+        if (values.get('type')?.toLowerCase() !== 'file') return []
+        const disabled = values.has('disabled')
+        const multiple = values.has('multiple')
+        return [{ node, disabled, multiple, accept: String(values.get('accept') ?? '').slice(0, 100),
+          compatible: !disabled && (attachments.length === 1 || multiple) }]
       })
-      const candidate = fileInputs.at(-1)
+      const probe = {
+        totalNodes: nodes.length, allFileInputs: parsedInputs.length,
+        compatibleFileInputs: parsedInputs.filter((item) => item.compatible).length,
+        inputs: parsedInputs.slice(0, 6).map(({ accept, multiple, disabled, compatible }) => ({ accept, multiple, disabled, compatible }))
+      }
+      const probeSignature = JSON.stringify(probe)
+      if (probeSignature !== lastFlattenedSignature) { lastFlattenedSignature = probeSignature; log('flattened-input-probe', probe) }
+      const candidate = parsedInputs.filter((item) => item.compatible).at(-1)?.node
       if (!candidate) return null
       return {
         backendNodeId: typeof candidate.backendNodeId === 'number' && candidate.backendNodeId > 0 ? candidate.backendNodeId : null,
@@ -342,12 +496,16 @@ export async function sendPageFiles(
         await command('Page.enable')
         chooserIntercepted = true
         await command('Page.setInterceptFileChooserDialog', { enabled: true })
-        const chooserDeadline = Date.now() + 8000
+        const chooserStartedAt = Date.now()
+        const chooserDeadline = chooserStartedAt + 8000
         let entryActivated = false
         let lastNativeClickAt = 0
         let lastInputProbeAt = 0
         let chooserClickAttempts = 0
         let lastEntryState = ''
+        let chooserProgressAttempt = -1
+        let lastChooserProgressAt = 0
+        let lastChooserProgressSignature = ''
         while (!chooser && Date.now() < chooserDeadline) {
           if (!current() || signal.aborted) return finish('cancelled', 'context-changed')
           if (detached) return finish('upload-failed', 'debugger-detached')
@@ -368,7 +526,12 @@ export async function sendPageFiles(
                 }
                 chooserClickAttempts += 1
                 lastNativeClickAt = Date.now()
-                log('chooser-native-click', { kind: nativeClick.kind, attempt: chooserClickAttempts })
+                const target = safeClickTarget(nativeClick.target)
+                log('chooser-native-click', {
+                  kind: nativeClick.kind, attempt: chooserClickAttempts,
+                  x: Math.round(nativeClick.x), y: Math.round(nativeClick.y),
+                  background: !!options.background, ...(target ? { target } : {})
+                })
                 if (nativeClick.status === 'activated') {
                   entryActivated = true
                 }
@@ -392,6 +555,21 @@ export async function sendPageFiles(
             }
           }
           if (chooser) break
+          const now = Date.now()
+          const postClickReady = lastNativeClickAt > 0 && now - lastNativeClickAt >= 400 && chooserProgressAttempt !== chooserClickAttempts
+          const periodicReady = now - chooserStartedAt >= 500 && (!lastChooserProgressAt || now - lastChooserProgressAt >= 2500)
+          if (postClickReady || periodicReady) {
+            chooserProgressAttempt = chooserClickAttempts
+            lastChooserProgressAt = now
+            try {
+              const progress = diagnosticSnapshot(await call('fileChooserDiagnostics'))
+              const progressSignature = JSON.stringify(progress)
+              if (progressSignature !== lastChooserProgressSignature) {
+                lastChooserProgressSignature = progressSignature
+                log('chooser-progress', progress)
+              }
+            } catch { log('chooser-progress-unavailable') }
+          }
           if (lastNativeClickAt && Date.now() - lastNativeClickAt >= 900) {
             try {
               const reset = await call('resetFileChooserAttempt', token)

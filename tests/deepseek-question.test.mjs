@@ -516,7 +516,8 @@ test('unsupported Markdown, a changed chat and a failed snapshot never trigger a
 })
 
 function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synthetic', allow = true, captionAccepted = true, changeBeforeSubmit = false, platformId = 'deepseek',
-  confirmationUrls = [], confirmationStatuses = [], chooserStates = [true], nativeChooser = false, background = false, allowPendingConversation = false } = {}) {
+  confirmationUrls = [], confirmationStatuses = [], chooserStates = [true], nativeChooser = false, background = false, allowPendingConversation = false,
+  flattenedError = '', chooserDiagnostics = null, clickTarget = undefined } = {}) {
   let now = 10000, submitted = false, confirmationReads = 0, chooserReads = 0
   let chooserState
   let url = fixtureHomes[platformId]
@@ -530,6 +531,7 @@ function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synth
   const openChooser = () => debuggerApi.emit('message', {}, 'Page.fileChooserOpened', { backendNodeId: 7, mode: 'selectMultiple' })
   debuggerApi.sendCommand = async (method, params) => {
     commands.push({ method, params })
+    if (method === 'DOM.getFlattenedDocument' && flattenedError) throw new Error(flattenedError)
     if (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased' && chooserState === true) openChooser()
     return method === 'DOM.getDocument' ? { root: { nodeId: 1 } } : method === 'DOM.querySelector' ? { nodeId: 2 } : {}
   }
@@ -543,9 +545,10 @@ function uploadFixture({ nextUrl = 'https://chat.deepseek.com/a/chat/s/new-synth
       const state = chooserState = chooserStates[Math.min(chooserReads++, chooserStates.length - 1)]
       if (state === true && !background) openChooser()
       return nativeChooser && (state === true || state === 'waiting')
-        ? { status: state === true ? 'activated' : 'waiting', kind: state === true ? 'native' : 'menu', x: 10, y: 20 } : state
+        ? { status: state === true ? 'activated' : 'waiting', kind: state === true ? 'native' : 'menu', x: 10, y: 20, ...(clickTarget ? { target: clickTarget } : {}) } : state
     }
-    if (method === 'fileChooserDiagnostics') return { rootFound: true, menuCount: 0, localEntryCount: 0 }
+    if (method === 'resetFileChooserAttempt') return true
+    if (method === 'fileChooserDiagnostics') return chooserDiagnostics ?? { rootFound: true, menuCount: 0, localEntryCount: 0 }
     if (method === 'refreshFileInput' || method === 'fileSelectionApplied' || method === 'releaseFileSend') return true
     if (method === 'prepareFileSendCaption') {
       if (changeBeforeSubmit) url = nextUrl
@@ -1019,4 +1022,31 @@ test('Gemini readiness prefers its measured composer over extra generic editable
   preferred = [editor, extra]
   document.activeElement = { closest: selector => selector === primary ? extra : null }
   assert.equal(window.__questionChatReady(page).composer, true, 'the native focus owner resolves the editor as it does in the sending bridge')
+})
+
+test('Gemini chooser timeouts log CDP errors, click targets, mid-loop menu snapshots and sanitized diagnostics', async () => {
+  const fixture = uploadFixture({
+    platformId: 'gemini', nativeChooser: true, chooserStates: ['waiting'], background: true,
+    flattenedError: 'DOM agent is not enabled',
+    clickTarget: { tag: 'button', ariaExpanded: 'false', ariaHaspopup: 'menu' },
+    chooserDiagnostics: {
+      rootFound: true, menuCount: 1, localEntryCount: 0, captionEntryCount: 0,
+      visibilityState: 'hidden', hasFocus: false, viewport: { width: 1280, height: 800 },
+      chooserMenus: [{
+        tag: 'gem-menu', role: 'menu', classes: ['open'], childCount: 2,
+        items: [
+          { tag: 'gem-menu-item', role: 'menuitem', dataTestId: 'synthetic-upload', icons: ['upload_file'], primaryLabel: '上传文件', text: '上传文件', textLength: 4 },
+          { tag: 'gem-menu-item', role: 'menuitem', text: 'https://evil.test/secret', textLength: 24 }
+        ]
+      }]
+    }
+  })
+  assert.equal(await fixture.send(), 'upload-failed')
+  const events = fixture.logs.map(line => JSON.parse(line.slice(line.indexOf(' ') + 1)))
+  assert.ok(events.some(entry => entry.event === 'cdp-error' && entry.method === 'DOM.getFlattenedDocument' && entry.message.includes('DOM agent')))
+  assert.ok(events.some(entry => entry.event === 'chooser-native-click' && entry.background === true && entry.target?.tag === 'button'))
+  assert.ok(events.some(entry => entry.event === 'chooser-progress' && entry.chooserMenus?.[0]?.items?.[0]?.dataTestId === 'synthetic-upload'))
+  const finalDiag = events.find(entry => entry.event === 'chooser-diagnostics')
+  assert.equal(finalDiag?.chooserMenus?.[0]?.items?.[0]?.primaryLabel, '上传文件')
+  assert.equal(finalDiag?.chooserMenus?.[0]?.items?.[1]?.text, '[len:24]')
 })

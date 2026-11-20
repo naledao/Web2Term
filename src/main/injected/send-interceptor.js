@@ -6377,7 +6377,15 @@
         fileSend.chooserSteps[kind] = true
         fileSend.chooserControls.add(node)
         fileSend.lastChooserClick = { kind, node }
-        return { status: result, kind, x, y }
+        return {
+          status: result, kind, x, y,
+          target: {
+            tag: node.tagName.toLowerCase(),
+            dataTestId: node.getAttribute('data-test-id') || node.getAttribute('data-testid') || '',
+            ariaExpanded: node.getAttribute('aria-expanded') || '',
+            ariaHaspopup: node.getAttribute('aria-haspopup') || ''
+          }
+        }
       }
       const local = [...document.querySelectorAll(PAGE.fileLocalUploadSelector)].filter(visibleControl)
       if (local.length === 1 && !fileSend.chooserSteps.native && unused(local[0])) return clickOnce('native', local[0], 'activated')
@@ -6415,6 +6423,7 @@
     },
     fileChooserDiagnostics() {
       const root = attachmentRoot()
+      const composer = getComposer()
       const visibleControl = (node) => node.getClientRects().length > 0 && !node.closest?.('[aria-hidden="true"]') && !controlDisabled(node)
       const menus = [...document.querySelectorAll('[role="menu"]')].filter(visibleControl)
       const native = PAGE.fileLocalUploadSelector ? [...document.querySelectorAll(PAGE.fileLocalUploadSelector)].filter(visibleControl) : []
@@ -6425,9 +6434,111 @@
         return (PAGE.fileLocalUploadLabels || []).includes(collapse(node.getAttribute('aria-label') || '')) ||
           (PAGE.fileLocalUploadLabels || []).includes(collapse(clone.textContent || ''))
       })
-      return { rootFound: !!root, menuCount: menus.length, localEntryCount: native.length, captionEntryCount: captions.length,
+      const safeToken = (raw) => (typeof raw === 'string' && /^[a-zA-Z0-9_.:-]{1,80}$/.test(raw) ? raw : '')
+      const safeClasses = (node) => (node.getAttribute('class') || '').trim().split(/\s+/).filter((name) => /^[a-zA-Z0-9_-]{1,48}$/.test(name)).slice(0, 8)
+      const activeNames = (fileSend?.files || []).map((file) => String(file?.fileName || '').toLowerCase()).filter(Boolean)
+      const safeUiText = (raw, limit = 64) => {
+        const text = collapse(raw || '')
+        if (!text) return ''
+        if (text.length > limit || /https?:\/\/|file:\/\/|@|[a-zA-Z]:[\\/]|\\|(?:^|\s)\/[^\s/]+\//.test(text)) return `[len:${text.length}]`
+        const lower = text.toLowerCase()
+        if (activeNames.some((name) => name && lower.includes(name))) return `[file:${text.length}]`
+        return text
+      }
+      const rectOf = (node) => {
+        const rect = node.getBoundingClientRect?.()
+        if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.top) || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)) return null
+        return { raw: rect, box: { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) } }
+      }
+      const hitOf = (node, measured) => {
+        if (!measured || measured.raw.width <= 0 || measured.raw.height <= 0 || typeof document.elementFromPoint !== 'function') return { hitMatched: null, hitTag: '' }
+        const hit = document.elementFromPoint(measured.raw.left + measured.raw.width / 2, measured.raw.top + measured.raw.height / 2)
+        return { hitMatched: !!hit && (hit === node || !!node.contains?.(hit)), hitTag: hit?.tagName?.toLowerCase?.() || '' }
+      }
+      const iconsOf = (node) => [...node.querySelectorAll('mat-icon, gem-icon')].slice(0, 4).map((icon) =>
+        safeToken(icon.getAttribute('fonticon') || icon.getAttribute('data-mat-icon-name') || icon.getAttribute('svgicon') || '')).filter(Boolean)
+      const keywordsOf = (raw) => {
+        const lower = String(raw || '').toLowerCase()
+        return ['文件', '上传', '图片', '照片', '本地', '电脑', '设备', '附件', '云端硬盘', '代码', '文档', '表格',
+          'file', 'upload', 'image', 'photo', 'local', 'computer', 'device', 'attach', 'drive', 'code', 'document'].filter((word) => lower.includes(word))
+      }
+      const triggerNodes = [...new Set([
+        ...(PAGE.fileUploadMenuSelectors || []).flatMap((selector) => [...(root || document).querySelectorAll(selector)]),
+        ...(root ? [...root.querySelectorAll('button[aria-haspopup="menu"], [role="button"][aria-haspopup="menu"]')] : [])
+      ])].slice(0, 6)
+      const menuButtons = triggerNodes.map((node) => {
+        const measured = rectOf(node)
+        const hit = hitOf(node, measured)
+        return {
+          tag: node.tagName.toLowerCase(), visible: isVisibleElement(node), disabled: controlDisabled(node),
+          inRoot: !!(root && root.contains(node)),
+          dataTestId: safeToken(node.getAttribute('data-test-id') || node.getAttribute('data-testid') || ''),
+          ariaHaspopup: safeToken(node.getAttribute('aria-haspopup') || ''),
+          ariaExpanded: safeToken(node.getAttribute('aria-expanded') || ''),
+          ariaControlsPresent: !!node.getAttribute('aria-controls'),
+          ariaLabel: safeUiText(node.getAttribute('aria-label'), 48),
+          icons: iconsOf(node), rect: measured?.box || null, ...hit
+        }
+      })
+      const popupCandidates = [...document.querySelectorAll('[role="menu"], gem-menu, .mat-mdc-menu-panel, .cdk-overlay-pane')].filter((node) =>
+        isVisibleElement(node) && !attachmentHasMessages(node) && !node.querySelector('[contenteditable="true"], textarea'))
+      const itemSelector = CONTROL_SELECTOR + ',[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],gem-menu-item,a,label'
+      const chooserMenus = popupCandidates.filter((node, _index, all) =>
+        !all.some((other) => other !== node && node.contains(other) && !other.matches('.cdk-overlay-pane'))
+      ).slice(0, 4).map((menu) => {
+        const measured = rectOf(menu)
+        const matchedItems = [...menu.querySelectorAll(itemSelector)]
+        const items = (matchedItems.length ? matchedItems : [...(menu.childNodes || [])].filter((child) => child.nodeType === 1)).slice(0, 20).map((item) => {
+          const clone = item.cloneNode(true)
+          clone.querySelectorAll('svg, mat-icon, gem-icon, [aria-hidden="true"]').forEach((icon) => icon.remove())
+          const rawText = collapse(clone.textContent || '')
+          const labelNode = clone.querySelector('.label, [class*="label"], [class*="title"]')
+          const itemRect = rectOf(item)
+          const hit = hitOf(item, itemRect)
+          return {
+            tag: item.tagName.toLowerCase(), role: safeToken(item.getAttribute('role') || ''),
+            dataTestId: safeToken(item.getAttribute('data-test-id') || item.getAttribute('data-testid') || ''),
+            classes: safeClasses(item), visible: isVisibleElement(item), disabled: controlDisabled(item),
+            ariaHaspopup: safeToken(item.getAttribute('aria-haspopup') || ''),
+            ariaExpanded: safeToken(item.getAttribute('aria-expanded') || ''),
+            ariaChecked: safeToken(item.getAttribute('aria-checked') || ''),
+            icons: iconsOf(item), ariaLabel: safeUiText(item.getAttribute('aria-label'), 48),
+            primaryLabel: safeUiText(labelNode?.textContent || '', 48),
+            text: safeUiText(rawText, 64), textLength: rawText.length,
+            keywords: keywordsOf(rawText + ' ' + (item.getAttribute('aria-label') || '')),
+            hasButtonChild: !!item.querySelector('button, [role="button"]'),
+            hasFileInput: !!item.querySelector('input[type="file"]'),
+            rect: itemRect?.box || null, ...hit
+          }
+        })
+        return {
+          tag: menu.tagName.toLowerCase(), role: safeToken(menu.getAttribute('role') || ''),
+          dataTestId: safeToken(menu.getAttribute('data-test-id') || menu.getAttribute('data-testid') || ''),
+          classes: safeClasses(menu), rect: measured?.box || null,
+          childCount: [...(menu.childNodes || [])].filter((child) => child.nodeType === 1).length, items
+        }
+      })
+      const chooserFileInputs = [...document.querySelectorAll('input[type="file"]')].slice(0, 8).map((input) => ({
+        accept: String(input.accept || '').slice(0, 120), multiple: !!input.multiple, disabled: !!input.disabled,
+        visible: isVisibleElement(input), connected: input.isConnected !== false,
+        inMenu: !!input.closest?.('[role="menu"], gem-menu, .cdk-overlay-pane'),
+        inRoot: !!(root && root.contains(input)),
+        parentTag: input.parentElement?.tagName?.toLowerCase?.() || '',
+        parentDataTestId: safeToken(input.parentElement?.getAttribute?.('data-test-id') || input.parentElement?.getAttribute?.('data-testid') || '')
+      }))
+      return {
+        rootFound: !!root, menuCount: menus.length, localEntryCount: native.length, captionEntryCount: captions.length,
         entryAmbiguous: native.length > 1 || captions.length > 1,
-        entryClicked: !!(fileSend?.chooserSteps.caption || fileSend?.chooserSteps.native) }
+        entryClicked: !!(fileSend?.chooserSteps.caption || fileSend?.chooserSteps.native),
+        localSelectorAllCount: PAGE.fileLocalUploadSelector ? document.querySelectorAll(PAGE.fileLocalUploadSelector).length : 0,
+        visibilityState: typeof document.visibilityState === 'string' ? document.visibilityState : '',
+        hasFocus: typeof document.hasFocus === 'function' ? document.hasFocus() : null,
+        viewport: Number.isFinite(window.innerWidth) && Number.isFinite(window.innerHeight)
+          ? { width: Math.round(window.innerWidth), height: Math.round(window.innerHeight) } : null,
+        composerFound: !!composer, composerEmpty: composer ? composerMatches(composer, '') : null, stopFound: !!findStopButton(),
+        chooserSteps: { menu: !!fileSend?.chooserSteps.menu, caption: !!fileSend?.chooserSteps.caption, native: !!fileSend?.chooserSteps.native },
+        menuButtons, chooserMenus, chooserFileInputs
+      }
     },
     fileSelectionApplied(token) {
       if (fileSend?.token === token) fileSend.selected = true
