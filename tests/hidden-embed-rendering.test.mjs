@@ -12,19 +12,23 @@ new Script(compile(readFileSync(new URL('../src/shared/focus-chat.ts', import.me
 const source = readFileSync(new URL('../src/main/embed.ts', import.meta.url), 'utf8')
 const ast = ts.createSourceFile('embed.ts', source, ts.ScriptTarget.Latest, true)
 const declaration = ast.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'ChatGptEmbed')
-const methods = ['applyBounds', 'setBounds', 'setVisible', 'keepRenderingWhileHidden', 'readFocusSnapshot']
+const methods = ['applyBounds', 'setBounds', 'setVisible', 'keepRenderingWhileHidden', 'readFocusSnapshot',
+  'idleBackgroundThrottled', 'backgroundThrottleBlockReason', 'readBackgroundIdle', 'isIdleBackgroundThrottled',
+  'setIdleBackgroundThrottling', 'startThrottleProbe', 'stopThrottleProbe']
 const code = compile('export class Embed {\n' +
   declaration.members.filter(node => methods.includes(node.name?.getText(ast))).map(node => node.getText(ast)).join('\n') + '}')
 
 function fixture() {
   let destroyed = false, url = 'https://chat.deepseek.com/a/chat/s/chat-a'
-  const calls = [], state = { nativeVisible: true, painting: true, viewport: null }
+  const calls = [], state = { nativeVisible: true, painting: true, viewport: null, throttled: false }
   const raw = { path: '/a/chat/s/chat-a', ready: true, nativeDraft: false, waiting: true, generating: 'idle', reply: null }
-  const contents = { isDestroyed: () => destroyed, getURL: () => url, executeJavaScript: async script => {
+  const contents = { isDestroyed: () => destroyed, isCrashed: () => false, getURL: () => url, executeJavaScript: async script => {
     assert.equal(script, 'window.__cmdTerminalInterceptor?.focusSnapshot() ?? null')
     return raw
-  }, setBackgroundThrottling(value) { calls.push(['throttle', value]); if (!value) state.painting = true } }
+  }, getBackgroundThrottling: () => state.throttled, isLoadingMainFrame: () => false,
+  setBackgroundThrottling(value) { calls.push(['throttle', value]); state.throttled = value; if (!value) state.painting = true } }
   const view = { webContents: contents,
+    getVisible: () => state.nativeVisible,
     setBounds(bounds) { calls.push(['bounds']); state.viewport = { ...bounds } },
     setVisible(visible) { calls.push(['visible', visible]); state.nativeVisible = visible; state.painting = visible },
     focus() { assert.fail('Rendering keepalive must never focus a native view') } }
@@ -33,7 +37,7 @@ function fixture() {
   const embed = Object.assign(new exports.Embed(), { view, visible: false, bounds: { x: 10.4, y: 20.6, width: 1200.2, height: 800.3 },
     liveContents: () => destroyed ? null : contents, focusPage: () => destroyed ? null : contents,
     dismissSelectionQuestion() { calls.push(['dismiss-selection']) } })
-  return { embed, calls, state, raw, destroy() { destroyed = true }, navigate(value) { url = value } }
+  return { embed, calls, state, raw, contents, destroy() { destroyed = true }, navigate(value) { url = value } }
 }
 
 test('the declared and locked Electron baseline includes the renderer visibility synchronization fix', () => {
@@ -69,6 +73,45 @@ test('switching from original to focus reasserts painting without showing or foc
   assert.equal(f.state.nativeVisible, false)
   assert.equal(f.state.painting, true)
   assert.deepEqual(f.calls.slice(-3), [['bounds'], ['visible', false], ['throttle', false]])
+})
+
+test('the diagnostic releases throttling before the view is revealed', () => {
+  const f = fixture()
+  Object.assign(f.embed, { platform: { id: 'chatgpt' }, firstLoadDone: true, botCheckSince: null })
+  f.embed.applyBounds()
+  f.calls.length = 0
+  const release = f.embed.startThrottleProbe(f.contents, reason => f.calls.push(['interrupted', reason]))
+  assert.ok(release)
+  assert.equal(f.state.throttled, true)
+  f.embed.setVisible(true)
+  release()
+  assert.equal(f.state.throttled, false)
+  assert.deepEqual(f.calls, [['throttle', true], ['throttle', false], ['interrupted', 'view-visible'], ['bounds'], ['visible', true]])
+})
+
+test('an idle hidden ChatGPT view stays throttled during layout and resumes before reveal', () => {
+  const f = fixture()
+  Object.assign(f.embed, { platform: { id: 'chatgpt' }, firstLoadDone: true, botCheckSince: null })
+  f.embed.applyBounds()
+  f.calls.length = 0
+  f.embed.setIdleBackgroundThrottling(true)
+  f.embed.setBounds({ x: 12, y: 23, width: 900, height: 700 })
+  assert.equal(f.embed.isIdleBackgroundThrottled(), true)
+  assert.deepEqual(f.calls, [['throttle', true], ['bounds'], ['visible', false]])
+  f.embed.setVisible(true)
+  assert.equal(f.embed.isIdleBackgroundThrottled(), false)
+  assert.deepEqual(f.calls.slice(-3), [['throttle', false], ['bounds'], ['visible', true]])
+})
+
+test('an idle result from before a same-URL reload cannot throttle the new document', async () => {
+  const f = fixture()
+  f.embed.computerPageEpoch = 'before'
+  let resolve
+  f.contents.executeJavaScript = () => new Promise(done => { resolve = done })
+  const idle = f.embed.readBackgroundIdle(f.contents)
+  f.embed.computerPageEpoch = 'after'
+  resolve({ idle: true })
+  assert.equal(await idle, false)
 })
 
 test('a temporarily zero-sized slot preserves its last real viewport and recovers again on layout', () => {
@@ -115,6 +158,80 @@ test('invalid snapshots and destroyed pages cannot trigger repair or cross a nav
   f.embed.applyBounds()
   assert.equal(await f.embed.readFocusSnapshot(), null)
   assert.deepEqual(f.calls, [])
+})
+
+const runtimeSource = readFileSync(new URL('../src/main/session-runtime.ts', import.meta.url), 'utf8')
+const runtimeAst = ts.createSourceFile('session-runtime.ts', runtimeSource, ts.ScriptTarget.Latest, true)
+const runtimeClass = runtimeAst.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'SessionRuntime')
+const runtimeMethod = name => runtimeClass.members.find(node => node.name?.getText(runtimeAst) === name).getText(runtimeAst)
+const throttleRuntimeCode = compile('export class Runtime {' +
+  ['updateChatGptBackgroundRendering', 'chatGptThrottleBlockReason'].map(runtimeMethod).join('\n') + '}')
+
+function backgroundFixture() {
+  const f = fixture()
+  Object.assign(f.embed, { platform: { id: 'chatgpt' }, firstLoadDone: true, botCheckSince: null,
+    contents: () => f.contents,
+    getInterceptorStatus: () => ({ installed: true, pendingQuestion: null, taskStartedAt: null, taskFinishedAt: null }) })
+  f.embed.applyBounds()
+  const state = { pending: 0, tasks: [], pageIdle: true }
+  f.embed.readBackgroundIdle = async () => state.pageIdle
+  const exports = {}, timers = new Set()
+  new Script(throttleRuntimeCode).runInNewContext({ exports, setTimeout(run) {
+    const timer = { run, unref() {} }
+    timers.add(timer)
+    return timer
+  }, clearTimeout(timer) { timers.delete(timer) } })
+  const runtime = Object.assign(new exports.Runtime(), { active: false, disposed: false, compactions: new Map(),
+    embeds: new Map([['chatgpt', { embed: f.embed, conversationId: 'chat' }]]),
+    taskCoordinator: { current: () => null }, aiOutboundQueue: { state: () => ({ pending: state.pending }) },
+    hasActiveRuntimeWork: () => false, backgroundTasks: { getState: () => ({ tasks: state.tasks }) } })
+  return { runtime, embed: f.embed, state, timers, runCheck() {
+    const [timer] = timers
+    assert.ok(timer)
+    timers.delete(timer)
+    return timer.run()
+  } }
+}
+
+test('native generation stays unthrottled and queued sends and background tasks wake an idle page', async () => {
+  const f = backgroundFixture()
+  f.state.pageIdle = false
+  f.runtime.updateChatGptBackgroundRendering()
+  await f.runCheck()
+  assert.equal(f.embed.isIdleBackgroundThrottled(), false)
+  f.state.pageIdle = true
+  await f.runCheck()
+  assert.equal(f.embed.isIdleBackgroundThrottled(), true)
+  assert.equal(f.timers.size, 0)
+
+  f.state.pending = 1
+  f.runtime.updateChatGptBackgroundRendering()
+  assert.equal(f.embed.isIdleBackgroundThrottled(), false)
+  f.state.pending = 0
+  await f.runCheck()
+  assert.equal(f.embed.isIdleBackgroundThrottled(), true)
+
+  f.state.tasks = [{ conversationId: 'chat', status: 'checking' }]
+  f.runtime.updateChatGptBackgroundRendering()
+  assert.equal(f.embed.isIdleBackgroundThrottled(), false)
+  await f.runCheck()
+  assert.equal(f.embed.isIdleBackgroundThrottled(), false)
+})
+
+test('reselecting a workspace invalidates an in-flight idle result even after another handover', async () => {
+  const f = backgroundFixture()
+  let settleIdle
+  f.embed.readBackgroundIdle = () => new Promise(resolve => { settleIdle = resolve })
+  f.runtime.updateChatGptBackgroundRendering()
+  const check = f.runCheck()
+  f.runtime.active = true
+  f.runtime.updateChatGptBackgroundRendering()
+  f.runtime.active = false
+  f.runtime.updateChatGptBackgroundRendering()
+  settleIdle(true)
+  await check
+  assert.equal(f.embed.isIdleBackgroundThrottled(), false)
+  assert.equal(f.timers.size, 1)
 })
 
 // Exercise the real lazy-platform creation method and the real attach navigation
@@ -164,12 +281,8 @@ function lazyPlatformFixture(windowReady = true) {
     setPromptParts() {}
     setTheme() {}
   }
-  const runtimeSource = readFileSync(new URL('../src/main/session-runtime.ts', import.meta.url), 'utf8')
-  const runtimeAst = ts.createSourceFile('session-runtime.ts', runtimeSource, ts.ScriptTarget.Latest, true)
-  const runtimeClass = runtimeAst.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'SessionRuntime')
-  const ensure = runtimeClass.members.find(node => node.name?.getText(runtimeAst) === 'ensureEmbed')
   const exports = {}
-  new Script(compile('export class Runtime {' + ensure.getText(runtimeAst) + '}')).runInNewContext({ exports,
+  new Script(compile('export class Runtime {' + runtimeMethod('ensureEmbed') + '}')).runInNewContext({ exports,
     ChatGptEmbed: LazyEmbed, computerUseSendBlock: () => null, buildTerminalPromptParts: () => ({ prefix: 'synthetic' }) })
   const bounds = { x: 261, y: 127, width: 1248, height: 785 }
   const runtime = Object.assign(new exports.Runtime(), { embeds: new Map([

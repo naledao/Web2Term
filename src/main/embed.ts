@@ -511,6 +511,8 @@ export interface EmbedHandlers {
 export class ChatGptEmbed {
   private view: WebContentsView | null = null
   private hiddenViewProbe: { active(waiting?: boolean): void; note(reason: string): void; stop(): void } | null = null
+  private idleBackgroundThrottled = false
+  private interruptThrottleProbe?: (reason: string) => void
   private selectionQuestion: SelectionQuestion | null = null
   private bounds: EmbedBounds = { x: 0, y: 0, width: 0, height: 0 }
   private visible = true
@@ -755,8 +757,10 @@ export class ChatGptEmbed {
       )
     }
     contents.on('did-start-navigation', (details) => {
-      if (details.isMainFrame && !details.isSameDocument) this.invalidateComputerDocument()
-      if (details.isMainFrame) followGoogleAuthIdentity(details.url, details.isSameDocument, 'navigation')
+      if (!details.isMainFrame) return
+      this.setIdleBackgroundThrottling(false)
+      if (!details.isSameDocument) this.invalidateComputerDocument()
+      followGoogleAuthIdentity(details.url, details.isSameDocument, 'navigation')
     })
     contents.on('did-redirect-navigation', (details) => {
       if (details.isMainFrame) followGoogleAuthIdentity(details.url, false, 'redirect')
@@ -1241,6 +1245,66 @@ export class ChatGptEmbed {
     return this.liveContents()
   }
 
+  backgroundThrottleBlockReason(contents: Electron.WebContents): string | null {
+    const view = this.view
+    if (this.platform.id !== 'chatgpt' || view?.webContents !== contents) return 'view-replaced'
+    if (contents.isDestroyed() || contents.isCrashed()) return 'view-closed'
+    if (this.visible || view.getVisible()) return 'view-visible'
+    if (this.botCheckSince !== null) return 'bot-check'
+    if (!this.firstLoadDone || contents.isLoadingMainFrame()) return 'main-frame-loading'
+    return null
+  }
+
+  async readBackgroundIdle(contents: Electron.WebContents): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      if (this.focusPage() !== contents) return false
+      const url = contents.getURL()
+      const epoch = this.computerPageEpoch
+      const state = await Promise.race([
+        contents.executeJavaScript('window.__cmdTerminalInterceptor?.rendererThrottleProbeState?.() ?? null'),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 1600) })
+      ]) as { idle?: unknown } | null
+      return state?.idle === true && !contents.isDestroyed() && contents.getURL() === url &&
+        this.computerPageEpoch === epoch && this.focusPage() === contents
+    } catch { return false }
+    finally { clearTimeout(timer) }
+  }
+
+  isIdleBackgroundThrottled(): boolean { return this.idleBackgroundThrottled }
+
+  setIdleBackgroundThrottling(enabled: boolean): void {
+    if (this.idleBackgroundThrottled === enabled) return
+    const contents = this.liveContents()
+    if (!contents || (enabled && this.backgroundThrottleBlockReason(contents))) return
+    try {
+      contents.setBackgroundThrottling(enabled)
+      this.idleBackgroundThrottled = enabled
+    } catch { /* A closing view can reject the change. */ }
+  }
+
+  startThrottleProbe(contents: Electron.WebContents, onInterrupted: (reason: string) => void): (() => void) | null {
+    if (this.interruptThrottleProbe || this.backgroundThrottleBlockReason(contents)) return null
+    const previous = contents.getBackgroundThrottling()
+    if (previous) return null
+    const release = (): void => {
+      if (this.interruptThrottleProbe !== interrupt) return
+      this.interruptThrottleProbe = undefined
+      if (!contents.isDestroyed()) contents.setBackgroundThrottling(previous)
+    }
+    const interrupt = (reason: string): void => {
+      try { release() } catch { onInterrupted('restore-unavailable'); return }
+      onInterrupted(reason)
+    }
+    contents.setBackgroundThrottling(true)
+    this.interruptThrottleProbe = interrupt
+    return release
+  }
+
+  stopThrottleProbe(reason: string): void {
+    this.interruptThrottleProbe?.(reason)
+  }
+
   /** Keep the injected script's baseline policy in sync with the execution mode. */
   setBaselinePolicy(armOnInstall: boolean): void {
     this.armBaselineOnInstall = armOnInstall
@@ -1393,10 +1457,14 @@ export class ChatGptEmbed {
     })
 
     try {
+      const diagnosticSource = !app.isPackaged && process.env.WEB2TERM_RENDERER_DIAG === '1'
+        ? '\n//# sourceURL=web2term-diagnostics://injected/chat-interceptor.js'
+        : ''
       await contents.executeJavaScript(
         `window.__computerUseProtocol = (${createComputerUseProtocol.toString()})();\n${interceptorSource}\n;` +
           `window.__cmdTerminalInterceptor && window.__cmdTerminalInterceptor.configure(${config});\n` +
-          `${responsePreferenceSource}\n;window.__cmdTerminalResponsePreference.configure(${JSON.stringify(this.platform.page.responsePreference ?? null)});true`
+          `${responsePreferenceSource}\n;window.__cmdTerminalResponsePreference.configure(${JSON.stringify(this.platform.page.responsePreference ?? null)});true` +
+          diagnosticSource
       )
     } catch (error) {
       // A navigation during injection is normal; did-finish-load will retry.
@@ -2259,6 +2327,7 @@ export class ChatGptEmbed {
 
   /** Remove the view from the window and release its web contents. */
   destroy(parent: BrowserWindow): void {
+    this.stopThrottleProbe('view-closing')
     // Stop watching for a bot check before the page goes away: the timer holds the contents, and
     // a tick after teardown would read a destroyed webContents.
     this.endBotCheckWait()
@@ -2975,20 +3044,26 @@ export class ChatGptEmbed {
    * and native hiding. No native show, focus, page visibility override or repeated send.
    */
   private keepRenderingWhileHidden(): void {
+    this.stopThrottleProbe('keep-rendering-reapplied')
     const contents = this.liveContents()
     if (!contents) return
-    try { contents.setBackgroundThrottling(false) } catch { /* a closing page needs nothing */ }
+    try {
+      contents.setBackgroundThrottling(false)
+      this.idleBackgroundThrottled = false
+    } catch { /* A closing page needs nothing. */ }
   }
 
   private applyBounds(): void {
+    this.stopThrottleProbe(this.visible ? 'view-visible' : 'view-layout-changed')
     const view = this.view
     if (!view || view.webContents.isDestroyed()) return
 
+    if (this.visible) this.setIdleBackgroundThrottling(false)
     const { x, y, width, height } = this.bounds
     // A zero-sized or hidden slot must not keep a native rectangle on screen.
     if (width < 1 || height < 1) {
       view.setVisible(false)
-      this.keepRenderingWhileHidden()
+      if (!this.idleBackgroundThrottled) this.keepRenderingWhileHidden()
       this.hiddenViewProbe?.note('zero-slot')
       return
     }
@@ -3003,7 +3078,7 @@ export class ChatGptEmbed {
     view.setVisible(this.visible)
     // Native hiding/relayout can happen after dom-ready and navigation hooks.
     // Reassert hidden-but-painting AFTER hiding, with the real viewport already applied.
-    if (!this.visible) this.keepRenderingWhileHidden()
+    if (!this.visible && !this.idleBackgroundThrottled) this.keepRenderingWhileHidden()
     this.hiddenViewProbe?.note(this.visible ? 'shown' : 'hidden')
   }
 

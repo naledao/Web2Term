@@ -7896,6 +7896,10 @@
       }
       return !collapse(readComposer(element))
     },
+    rendererThrottleProbeState() {
+      return { visibility: document.visibilityState, idle: !!getComposer() && !focusEditing && !focusModeChanging && !fileSend &&
+        !state.programmatic && !state.awaitingReplySince && !state.pendingQuestion && focusGenerationState() === 'idle' }
+    },
     focusSnapshot() {
       // Every page-specific read below comes from the platform's measured focus rules.
       const rules = PAGE.focus || { reasoningSelectors: [] }

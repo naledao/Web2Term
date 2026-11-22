@@ -4,6 +4,86 @@ Small, throwaway probes for problems that only reproduce against live third-part
 pages inside the user's real session. Per `AGENTS.md`, **the user runs and drives
 them; the agent reads the log file.**
 
+## renderer-memory-probe.cjs
+
+用于定位 Web2Term 渲染进程的内存持续上涨和 CPU 高占用。先正常退出现有 Web2Term 实例，再在项目根目录的 PowerShell 中运行：
+
+```powershell
+$env:WEB2TERM_RENDERER_DIAG = '1'
+npm run dev
+```
+
+让应用照常恢复会话，保持出现高占用时的操作方式。占用升高后保留现场约 30 秒，并告诉智能体“探针跑好了”。未复现时让它采满 5 分钟，日志也可用于对照。采集结束后，在启动用的 PowerShell 中执行 `Remove-Item Env:WEB2TERM_RENDERER_DIAG` 可恢复普通启动。
+
+日志同步追加到 `%TEMP%\gpt-login-diag\renderer-memory-<UTC 时间>-<主进程 PID>.log`，启动时会打印路径。按 `tick`、`pid` 和进程创建时间对照：
+
+- `PROCESSES` 每 8 秒记录 Electron 进程的 CPU、工作集和 Windows 私有提交量，以及主页面或跨进程子框架的视图 ID 和站点类别。一个渲染进程可能对应多个视图。
+- `TARGET-MEMORY` 记录最多两个高占用渲染进程的 JavaScript 堆、DOM 节点和监听器计数。指标来自所采样的渲染目标，同进程多个视图不能据此拆分用量。`null` 表示该项暂未取到。
+- `CPU-PROFILE` 记录高 CPU 渲染目标的 2.5 秒 JavaScript 调用栈摘要。`web2term-interceptor` 标记 Web2Term 的聊天注入脚本，其他脚本按来源类别、脚本 ID 和行号记录。堆和 DOM 平稳时，仍需结合进程提交量和 CPU 看是否有原生侧开销。
+- `ALLOCATION-START` 与 `ALLOCATION-PROFILE` 自动对最多两个高占用的 ChatGPT 主页面做 15 秒 V8 堆分配采样。日志保留采样结束时仍存活的分配栈摘要、已知静态脚本文件名和行列号，以及采样前后的 Chromium DOM 总计数和当前文档树节点数。当前文档树计数最多走访 10 万节点，不含 iframe 子文档和 shadow tree，不能把两项计数相减当作脱离节点数。
+- `TARGET-UNAVAILABLE` 表示视图关闭、DevTools 正在使用、子框架匹配不到或采样失效。`RENDERER-GONE` 记录渲染退出原因。
+
+探针只在手动开启的开发版中工作，对应用现有的页面短暂附加本地调试器。请把 DevTools 保持关闭，以便采样。复现时只需照常启动一次。普通采样不另开网页、不发送消息、不强制垃圾回收，也不读取聊天、页面源码、Cookie 或存储。日志只保留站点类别、计数和经筛选的调用栈，不包含完整 URL。日志最多 2 MiB，采样到期自动停止。
+
+### 自动采集 DOM 保留引用链
+
+先退出当前 Web2Term，再在项目根目录的 PowerShell 中启动一次。让原会话照常恢复，保持 DevTools 关闭，采集期间无需切换会话或发消息。
+
+```powershell
+$env:WEB2TERM_RENDERER_DIAG = '1'
+$env:WEB2TERM_RENDERER_DIAG_RETAINERS = '1'
+npm run dev
+```
+
+探针选中一个正在增长的 ChatGPT 渲染进程，串行采集同一文档的两份堆快照。两份快照之间留出 30 秒观察窗口，并采集 CPU 和 JavaScript 分配栈。快照采集会触发垃圾回收，页面可能短暂停顿。工作线程分块解析，只保留引用图和符合白名单的结构标签。原始快照不落盘，日志不含会话 URL、DOM 属性或字符串值。系统可用内存不足、引用图的预测内存超出预算或分块处理跟不上时，日志会记录停止原因和已接收的数据量。
+
+- `RETAINERS-SNAPSHOT` 记录采集后的 DOM 计数、堆图里的节点分类，以及从存活节点采样的候选保留引用链。`window` 表示可追到其中一个 Window，`gc-root` 表示路径追到堆图根。路径按样本聚合，表示可达引用，未计算支配树或整棵子树的保留大小。
+- `RETAINERS-COMPARISON` 汇总两次回收后仍存在的不同类别对象数量变化。`RETAINERS-SCRIPTS` 将快照和热点里的脚本 ID 对应到内容哈希和能安全识别的静态资源名。
+- `RETAINERS-UNAVAILABLE` 记录本轮在哪个阶段停止。快照数字表出错时会记录表、行或列；若基线解析失败且页面仍在，探针还会在同一轮采集热点和脚本哈希。收到 `RETAINERS-COMPARISON` 或者采集结束后，告诉智能体读取同一日志即可，无需手动导出。
+
+退出后可在启动用的 PowerShell 执行 `Remove-Item Env:WEB2TERM_RENDERER_DIAG_RETAINERS` 恢复普通采样。再移除 `WEB2TERM_RENDERER_DIAG` 可恢复普通启动。
+
+### 自动追踪短命 DOM 对象的触发链
+
+从托盘退出当前 Web2Term，在项目根目录的 PowerShell 中只启动一次。让原会话自然恢复，保持 DevTools 关闭，无需切换会话或发消息。
+
+```powershell
+$env:WEB2TERM_RENDERER_DIAG = '1'
+$env:WEB2TERM_RENDERER_DIAG_TIMELINE = '1'
+npm run dev
+```
+
+这个模式优先于保留引用链模式，即使上次的环境变量仍在也无需修改。探针等到选中一个高占用的 ChatGPT 渲染器后，按进程开启有界的 Chromium 环形录制，同时采集约 10 秒的 DOM 计数、CPU 热点及包含大小两类 GC 已回收对象的 V8 分配栈。DOM 采样结束时即开始停止录制，避免在等待其他分析数据时占用缓冲区。没有发现目标时，约 90 秒后自动停止。
+
+- `PERF-TIMELINE` 只保留目标 PID 的渲染主线程摘要，将 DOM 上涨窗口与定时器、动画帧和其他重复回调对齐。优先使用 Chromium 自带单调时间戳，保留的页面标记可用于校验或还原时间。摘要还会记录实际覆盖时长。有匹配的注册事件时记录相应栈。录制缓冲区可能覆盖较早的注册事件。
+- `PERF-ASYNC` 汇总主线程高耗时函数在 DOM 上涨前后的执行次数、外层事件、已配对和未配对的次数，以及可定位的调度栈。配对使用 Chromium 的 V8 任务关联、浏览器事件的注册 ID 或原生任务的入队关联，支持同一渲染进程内跨线程查找。`nativeTasks` 记录 Chromium 源文件名、函数名、入队关联和回调是否落在 `MessagePort::Accept` 内。外层事件表示时间线中的嵌套关系。调度落在同一函数的较早一次执行内部时，会计入 `scheduledInsideSameFunction`。
+- `PERF-CALLBACK-STACKS` 在无断点录制与脚本定位结束后补采。最耗时的 ChatGPT 回调在 DOM 上涨区间重复出现且仍缺调用方时，探针在本次实际加载的脚本上设断点，最多记录三次同步栈和异步父栈，命中后自动继续。断点等待窗口为 2.5 秒，结束后会清除断点并解除调试器。日志仅保留脚本位置和筛选后的栈。补采的暂停时间与前一阶段的性能数据独立。
+- `PERF-PROFILES` 记录 DOM 计数、CPU 和分配栈。分配采样衡量 V8 JavaScript 对象。浏览器原生 DOM 对象的归因需要和时间线、函数摘要一起核对。
+- `PERF-DONE` 的 `profileWindowAligned` 表示时间线通过采样时钟或标记对齐了 CDP 采样窗口。使用 `trace-counters` 时，回调和 DOM 增长区间都来自 Chromium 录制窗口本身。
+- `PERF-SCRIPTS` 保留热点脚本的哈希，以及从少量已识别静态脚本中提取的函数位置和已知 DOM API 或调度 API。源代码仅在内存中交给本机解析器，日志不含代码片段。静态函数内的调用只是代码线索，时间线和运行栈用于核对实际触发。
+
+Electron 会在当前用户的临时目录短暂写出 Chromium 追踪文件，探针在本机分析后删除。日志不输出原始事件、截图、完整 URL 或会话内容。终端出现 `performance capture recorded` 或 `performance capture stopped` 后，告诉智能体读取 `renderer-memory-*.log` 即可。
+
+退出后移除 `WEB2TERM_RENDERER_DIAG_TIMELINE` 可使用其他采样模式。
+
+### 对照隐藏 ChatGPT 页面的后台节流
+
+从托盘退出 Web2Term，在项目目录启动一次。让历史会话自然恢复，保持 DevTools 关闭，等对照结束再切换会话。
+
+```powershell
+$env:WEB2TERM_RENDERER_DIAG = '1'
+$env:WEB2TERM_RENDERER_DIAG_THROTTLE = '1'
+npm run dev
+```
+
+这个模式优先于时间线和引用链模式。探针选取一个高 CPU、独占其渲染进程的隐藏 ChatGPT 视图，并核对应用任务、发送队列和网页生成状态。它依次采集现有策略、临时打开节流、恢复现有策略，每段约 10 秒。视图重新显示、导航、关闭或开始工作时，对照会中断并恢复设置。恢复成功后，探针可以等该视图重新空闲，或换另一个符合条件的视图重试。启动后三分钟内最多开始四次尝试，已经开始的对照可以继续采完。
+
+- `THROTTLE-TARGET` 记录被选中的 PID 和视图 ID。`THROTTLE-PHASE` 记录每段的 CPU、私有提交量、DOM 计数和网页可见性。
+- `THROTTLE-BLOCKED` 记录高 CPU 视图暂时不符合条件的原因。`THROTTLE-RETRY` 记录中断的尝试、所在阶段和原因。重试用尽、等待到期或恢复失败时记录 `THROTTLE-UNAVAILABLE`。
+- `THROTTLE-DONE` 记录 Chromium 原生帧任务频率、基准窗口最重回调的执行频率，以及各窗口的内存变化。帧数来自时间线，采样标记对齐后才参与比较。`frameRateRatio` 是节流窗口相对基准窗口的帧频比值。
+
+终端出现 `background throttling comparison finished` 或 `background throttling comparison stopped` 后，告诉智能体读取原日志即可。退出后可执行 `Remove-Item Env:WEB2TERM_RENDERER_DIAG_THROTTLE` 恢复上一次诊断模式。
+
 ## deepseek-composer-modes-probe.cjs
 
 User-run, read-only discovery of the 深度思考 / 智能搜索 composer switches.

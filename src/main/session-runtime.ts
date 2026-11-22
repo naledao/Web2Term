@@ -418,6 +418,7 @@ export class SessionRuntime {
   readonly runner: CommandRunner
   readonly ssh: SshManager
   readonly backgroundTasks = new BackgroundTasks(state => {
+    this.refreshChatGptBackgroundRendering?.()
     this.send(IpcChannels.backgroundTasksChanged, state)
     this.taskBackgroundWait?.reconcile()
     if (this.taskCoordinator) {
@@ -508,6 +509,12 @@ export class SessionRuntime {
   private unsubscribeWindowsHelper: (() => void) | null = null
   private unregisterComputerUseTools: (() => void) | null = null
   private active = false
+  private chatGptIdleTimer?: ReturnType<typeof setTimeout>
+  private chatGptIdleCheck?: { invalidated: boolean }
+  // The developer A/B measures the original policy and temporarily controls the same setting.
+  private readonly refreshChatGptBackgroundRendering = !app.isPackaged &&
+    process.env.WEB2TERM_RENDERER_DIAG === '1' && process.env.WEB2TERM_RENDERER_DIAG_THROTTLE === '1'
+    ? undefined : () => this.updateChatGptBackgroundRendering()
   private lastSummaryTaskRunning = false
   private embedVisible = true
   /** Orders hide requests, so a late snapshot never hides a page that was shown again meanwhile. */
@@ -634,6 +641,7 @@ export class SessionRuntime {
     this.computerUseTool = new ComputerUseTool(() => this.refreshComputerUseCapabilities(), options.desktopCoordinator)
     this.focusChat = new FocusChat(this.id, options.store)
     this.taskCoordinator = new TaskCoordinator(this.id, options.store, (state, completedNow) => {
+      this.refreshChatGptBackgroundRendering?.()
       this.recordFocusComputer(state)
       if (state.task) this.computerOverlayLifetime.update(state.task)
       this.taskProgression?.reconcile()
@@ -835,7 +843,10 @@ export class SessionRuntime {
       terminalTransport: () => this.web2term?.transport,
       onRemoteLine: (line) => { if (!this.web2term) this.ssh.pushModelLine(line) },
       onRemoteOutput: (chunk) => { if (!this.web2term) this.ssh.pushModelOutput(chunk) },
-      onExecutionChanged: (records) => this.send(IpcChannels.executionChanged, records),
+      onExecutionChanged: (records) => {
+        this.refreshChatGptBackgroundRendering?.()
+        this.send(IpcChannels.executionChanged, records)
+      },
       captureBackgroundTasks: (record, shell) => {
         if (!this.conversationTools.read(this.activePlatformId, record.conversationId).backgroundTasksEnabled) return () => 0
         const target = this.backgroundTaskTarget(shell)
@@ -964,6 +975,7 @@ export class SessionRuntime {
         }
       }
     }
+    if (this.refreshChatGptBackgroundRendering) this.aiOutboundQueue.onChanged(this.refreshChatGptBackgroundRendering)
     this.restoreBackgroundTasks()
     this.unsubscribeWindowsHelper = options.windowsHelper?.subscribe(() => this.refreshComputerUseCapabilities()) ?? null
     this.unregisterComputerUseTools = options.registerComputerUseTools?.(this.computerUseTool) ?? null
@@ -1056,6 +1068,7 @@ export class SessionRuntime {
       },
       onState: (state) => {
         if (!isCurrent()) return
+        if (platform.id === 'chatgpt') this.refreshChatGptBackgroundRendering?.()
         if (isActive() && this.pendingCompaction && state.conversationId !== this.pendingCompaction.conversationId) {
           if (isActive()) this.send(IpcChannels.embedState, this.getEmbedState())
           return
@@ -1121,6 +1134,7 @@ export class SessionRuntime {
         this.options.onSummaryChanged()
       },
       onReady: () => {
+        if (isCurrent() && platform.id === 'chatgpt') this.refreshChatGptBackgroundRendering?.()
         /*
          * Same rule as the state push above: only the visible view decides that startup
          * is over. A background platform finishing its load says nothing about the page
@@ -1275,6 +1289,7 @@ export class SessionRuntime {
       },
       onInterceptor: (status) => {
         if (!isCurrent()) return
+        this.refreshChatGptBackgroundRendering?.()
         if (isActive() && (!status.enabled || !status.promptInjectionEnabled)) this.remoteRipgrepSend?.controller.abort()
         this.mailNotifications?.reconcile()
         this.toolPromptReads?.reconcile(); this.scheduledTaskTools?.reconcile()
@@ -1487,6 +1502,7 @@ export class SessionRuntime {
       if (this.active) this.interruptTaskControl(this.activePlatformId)
     }
     this.active = active
+    this.refreshChatGptBackgroundRendering?.()
     this.syncWindowsHelperDemand()
     this.taskProgression?.reconcile()
     if (active) { this.flushTaskTools(); void this.taskProgression?.wake() }
@@ -1579,6 +1595,69 @@ export class SessionRuntime {
       Boolean(this.embed.getInterceptorStatus().pendingQuestion) || this.backgroundTaskResults.isSending ||
       this.mailNotifications.busy || this.toolPromptReads.busy || this.scheduledTaskTools.busy ||
       Boolean(this.scheduledSendAbort) || [...this.pageQueues.values()].some(queue => queue.state().pending > 0)
+  }
+
+  private chatGptThrottleBlockReason(entry: PlatformEmbed, contents: Electron.WebContents): string | null {
+    const embed = entry.embed
+    if (this.disposed || this.embeds.get('chatgpt') !== entry || !embed || embed.contents() !== contents) return 'workspace-or-view-replaced'
+    if (this.active) return 'workspace-active'
+    const viewReason = embed.backgroundThrottleBlockReason(contents)
+    if (viewReason) return viewReason
+    const status = embed.getInterceptorStatus()
+    if (!status.installed) return 'interceptor-unavailable'
+    if (status.pendingQuestion) return 'question-pending'
+    if (status.taskStartedAt !== null && status.taskFinishedAt === null) return 'interceptor-task-active'
+    if (this.taskCoordinator.current('chatgpt')) return 'conversation-task-active'
+    if (this.aiOutboundQueue.state().pending > 0) return 'send-queue-pending'
+    if (this.hasActiveRuntimeWork()) return 'workspace-work-active'
+    if ([...this.compactions.values()].some(task => task.busy || task.inProgress)) return 'compaction-active'
+    if (this.backgroundTasks.getState().tasks.some(task => task.conversationId === entry.conversationId &&
+      ['checking', 'running'].includes(task.status))) return 'background-task-active'
+    return null
+  }
+
+  private updateChatGptBackgroundRendering(): void {
+    const entry = this.embeds.get('chatgpt')
+    const embed = entry?.embed
+    const contents = embed?.contents()
+    if (!entry || !embed || !contents || this.active || this.disposed) {
+      clearTimeout(this.chatGptIdleTimer)
+      this.chatGptIdleTimer = undefined
+      if (this.chatGptIdleCheck) this.chatGptIdleCheck.invalidated = true
+      embed?.setIdleBackgroundThrottling(false)
+      return
+    }
+
+    if ((embed.isIdleBackgroundThrottled() || this.chatGptIdleCheck) && this.chatGptThrottleBlockReason(entry, contents)) {
+      if (this.chatGptIdleCheck) this.chatGptIdleCheck.invalidated = true
+      embed.setIdleBackgroundThrottling(false)
+    }
+    if (embed.isIdleBackgroundThrottled() || this.chatGptIdleTimer || this.chatGptIdleCheck) return
+
+    // A native reply can finish without a task event. Recheck an inactive page until it
+    // settles, then stop polling it. Queue and task changes can wake it synchronously.
+    this.chatGptIdleTimer = setTimeout(async () => {
+      this.chatGptIdleTimer = undefined
+      if (!this.chatGptThrottleBlockReason(entry, contents)) {
+        const check = this.chatGptIdleCheck = { invalidated: false }
+        try {
+          if (await embed.readBackgroundIdle(contents) && !check.invalidated && !this.chatGptThrottleBlockReason(entry, contents)) {
+            embed.setIdleBackgroundThrottling(true)
+          }
+        } finally { this.chatGptIdleCheck = undefined }
+      }
+      this.updateChatGptBackgroundRendering()
+    }, 2000)
+    this.chatGptIdleTimer.unref()
+  }
+
+  throttleProbeTarget(contents: Electron.WebContents) {
+    const entry = this.embeds.get('chatgpt')
+    const embed = entry?.embed
+    if (!entry || !embed || embed.contents() !== contents) return null
+    const blockReason = () => this.chatGptThrottleBlockReason(entry, contents)
+    return { blockReason, apply: (onInterrupted: (reason: string) => void) =>
+      blockReason() ? null : embed.startThrottleProbe(contents, onInterrupted) }
   }
 
   private checkAccountSwitch(owner: FocusOwner, platformId: AccountPlatformId): void {
@@ -2434,6 +2513,7 @@ export class SessionRuntime {
    * outcome when the caller aborts mid-send, and treat a throw as 'unknown'. A request overrides any of them.
    */
   private queueSend<T extends string>(request: QueuedSend<T>, queue: AiOutboundQueue = this.aiOutboundQueue): AiOutboundTicket<T> {
+    if (request.owner.platformId === 'chatgpt') this.embeds.get('chatgpt')?.embed?.stopThrottleProbe('send-queued')
     const uncertain = (outcome: T | undefined): outcome is T => outcome === 'unknown' || outcome === 'stuck'
     const scope = this.accountScope(request.owner.platformId)
     return queue.enqueue<T>({
@@ -2457,6 +2537,7 @@ export class SessionRuntime {
     if (existing) return existing
     const queue = new AiOutboundQueue()
     this.pageQueues.set(id, queue)
+    if (this.refreshChatGptBackgroundRendering) queue.onChanged(this.refreshChatGptBackgroundRendering)
     contents.once('destroyed', () => {
       queue.dispose()
       if (this.pageQueues.get(id) === queue) this.pageQueues.delete(id)
@@ -5025,6 +5106,7 @@ export class SessionRuntime {
     for (const queue of this.pageQueues.values()) queue.dispose()
     this.pageQueues.clear()
     this.disposed = true
+    this.refreshChatGptBackgroundRendering?.()
     this.remoteRipgrep.observe(null)
     this.options.desktopCoordinator?.releaseSession(this.id)
     this.unregisterComputerUseTools?.(); this.unregisterComputerUseTools = null

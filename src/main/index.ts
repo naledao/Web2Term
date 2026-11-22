@@ -15,6 +15,7 @@ import type { BackgroundTasksState, BackgroundTaskStopResult } from '../shared/b
 import { join, posix } from 'node:path'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, shell, Tray } from 'electron'
 import { APP_NAME, configureAppIdentity } from './app-identity'
 import { registerDesktopNotifications } from './desktop-notifications'
@@ -2602,6 +2603,24 @@ async function initializeApplication(): Promise<void> {
 }
 
 async function startApplication(): Promise<void> {
+  if (isDev && process.env.WEB2TERM_RENDERER_DIAG === '1') {
+    try {
+      const root = app.getAppPath()
+      const probe = createRequire(join(root, 'package.json'))(join(root, 'tools', 'diag', 'renderer-memory-probe.cjs')) as {
+        start(options: { throttleTarget(contents: Electron.WebContents): ReturnType<SessionRuntime['throttleProbeTarget']> }): void | Promise<void>
+      }
+      await probe.start({ throttleTarget: contents => {
+        for (const runtime of runtimes.values()) {
+          const target = runtime.throttleProbeTarget(contents)
+          if (target) return target
+        }
+        return null
+      } })
+    } catch {
+      console.warn('[renderer-diag] could not start the renderer memory probe')
+    }
+  }
+  if (quitting) return
   settings = { ...settings, theme: readStartupTheme(join(app.getPath('userData'), 'conversations.db')) }
   applyAppTheme(settings.theme)
   await createSplashWindow()
