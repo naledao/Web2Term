@@ -3993,7 +3993,7 @@ ${record.command}`
                     <div className="settings-proxy-row">
                       <label className="settings-proxy-row__label" htmlFor="settings-software-proxy">软件代理</label>
                       <input id="settings-software-proxy" ref={softwareProxyInputRef} className="address__input settings-input"
-                        value={softwareProxyDraft} spellCheck={false} placeholder={DEFAULT_SOFTWARE_PROXY}
+                        value={softwareProxyDraft} spellCheck={false} placeholder="http://127.0.0.1:7897"
                         aria-invalid={Boolean(softwareProxyError)} aria-describedby={`settings-software-proxy-hint${softwareProxyError ? ' settings-software-proxy-error' : ''}`}
                         onChange={(event) => { setSoftwareProxyDraft(event.target.value); setSoftwareProxyError('') }} />
                       <span className={`settings-state ${softwareProxyDraft.trim() ? 'settings-state--ok' : ''}`}><i />{softwareProxyDraft.trim() ? '已配置' : '直连'}</span>

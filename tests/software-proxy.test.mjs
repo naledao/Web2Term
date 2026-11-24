@@ -18,6 +18,7 @@ function load(path, dependencies = {}) {
 }
 const policy = load('../src/shared/software-proxy.ts')
 const plain = value => JSON.parse(JSON.stringify(value))
+const LOCAL_PROXY = 'http://127.0.0.1:7897'
 
 function fixture(hooks = {}) {
   const routes = [], requests = [], sockets = [], partitions = []
@@ -40,13 +41,14 @@ function fixture(hooks = {}) {
   return { network, routes, requests, sockets, partitions, get closed() { return closed } }
 }
 
-test('new installations use the default, while custom and cleared settings survive restart', () => {
-  assert.equal(policy.DEFAULT_SOFTWARE_PROXY, 'http://127.0.0.1:7897')
-  assert.equal(policy.readSoftwareProxy(null), policy.DEFAULT_SOFTWARE_PROXY)
-  assert.equal(policy.readSoftwareProxy(undefined), policy.DEFAULT_SOFTWARE_PROXY)
+test('new installations connect directly, while custom and cleared settings survive restart', () => {
+  assert.equal(policy.DEFAULT_SOFTWARE_PROXY, '')
+  assert.equal(policy.readSoftwareProxy(null), '')
+  assert.equal(policy.readSoftwareProxy(undefined), '')
+  assert.equal(policy.readSoftwareProxy('socks5://localhost:1080'), '')
   assert.equal(policy.readSoftwareProxy(''), '')
   assert.equal(policy.readSoftwareProxy('http://proxy.example.invalid:8080'), 'http://proxy.example.invalid:8080')
-  assert.equal(policy.normalizeSoftwareProxy(' 127.0.0.1:7897 '), policy.DEFAULT_SOFTWARE_PROXY)
+  assert.equal(policy.normalizeSoftwareProxy(' 127.0.0.1:7897 '), LOCAL_PROXY)
   assert.equal(policy.normalizeSoftwareProxy('https://[::1]:7897/'), 'https://[::1]:7897')
   for (const value of [42, null, 'socks5://localhost:1080', 'http://user:secret@localhost:7897',
     'http://localhost:0', 'http://localhost:99999', 'http://localhost/path', 'http://localhost?x=1',
@@ -61,7 +63,7 @@ test('backend HTTP waits for proxy configuration and keeps credentials out of th
   const applying = new Promise(resolve => { started = resolve })
   const f = fixture({ async setProxy() { started(); await gate } })
   await assert.rejects(f.network.softwareFetch('https://example.invalid'), /尚未初始化/u)
-  const ready = f.network.applySoftwareProxy(policy.DEFAULT_SOFTWARE_PROXY)
+  const ready = f.network.applySoftwareProxy(LOCAL_PROXY)
   await applying
   const controller = new AbortController()
   const headers = { Authorization: 'Bearer synthetic-token' }
@@ -72,7 +74,7 @@ test('backend HTTP waits for proxy configuration and keeps credentials out of th
   release()
   await ready
   await pending
-  assert.deepEqual(f.routes, [{ mode: 'fixed_servers', proxyRules: policy.DEFAULT_SOFTWARE_PROXY }])
+  assert.deepEqual(f.routes, [{ mode: 'fixed_servers', proxyRules: LOCAL_PROXY }])
   assert.equal(f.closed, 1)
   assert.ok(f.partitions.every(value => value === 'software-network'))
   const request = f.requests[0]
@@ -89,16 +91,16 @@ test('proxy changes route the next device handshake and clearing selects direct 
   const f = fixture()
   const options = { headers: { Authorization: 'Bearer synthetic-token' }, followRedirects: false, handshakeTimeout: 10000 }
   assert.throws(() => f.network.createSoftwareSocket('wss://example.invalid', options), /尚未初始化/u)
-  await f.network.applySoftwareProxy(policy.DEFAULT_SOFTWARE_PROXY)
+  await f.network.applySoftwareProxy(LOCAL_PROXY)
   const first = f.network.createSoftwareSocket('wss://example.invalid/ws/desktop', options)
-  assert.equal(first.options.agent.proxy, policy.DEFAULT_SOFTWARE_PROXY)
+  assert.equal(first.options.agent.proxy, LOCAL_PROXY)
   assert.equal(first.options.headers, options.headers)
   assert.equal(first.options.followRedirects, false)
   assert.equal(first.options.handshakeTimeout, 10000)
   await f.network.applySoftwareProxy('https://proxy.example.invalid:8443')
   const second = f.network.createSoftwareSocket('ws://example.invalid/ws/desktop', options)
   assert.equal(second.options.agent.proxy, 'https://proxy.example.invalid:8443')
-  assert.equal(first.options.agent.proxy, policy.DEFAULT_SOFTWARE_PROXY)
+  assert.equal(first.options.agent.proxy, LOCAL_PROXY)
   await f.network.applySoftwareProxy('')
   assert.deepEqual(f.routes.at(-1), { mode: 'direct' })
   assert.equal(f.network.createSoftwareSocket('wss://example.invalid/ws/desktop', options).options.agent, undefined)
@@ -107,7 +109,7 @@ test('proxy changes route the next device handshake and clearing selects direct 
 test('a failed configuration cannot send HTTP through a different route and a later save can recover', async () => {
   let fail = true
   const f = fixture({ setProxy() { if (fail) throw new Error('synthetic configuration failure') } })
-  await assert.rejects(f.network.applySoftwareProxy(policy.DEFAULT_SOFTWARE_PROXY), /synthetic/u)
+  await assert.rejects(f.network.applySoftwareProxy(LOCAL_PROXY), /synthetic/u)
   await assert.rejects(f.network.softwareFetch('https://example.invalid'), /synthetic/u)
   assert.equal(f.requests.length, 0)
   fail = false
@@ -143,8 +145,8 @@ test('settings validate before side effects, persist the normalized route and in
   await assert.rejects(callback(event, { softwareProxy: 'socks5://localhost:1080', theme: 'dark' }))
   assert.deepEqual(effects, [])
   const next = await callback(event, { softwareProxy: '127.0.0.1:7897' })
-  assert.equal(next.softwareProxy, policy.DEFAULT_SOFTWARE_PROXY)
+  assert.equal(next.softwareProxy, LOCAL_PROXY)
   assert.deepEqual(effects, [
-    ['applied', policy.DEFAULT_SOFTWARE_PROXY], ['saved', 'softwareProxy', policy.DEFAULT_SOFTWARE_PROXY], ['invalidated']
+    ['applied', LOCAL_PROXY], ['saved', 'softwareProxy', LOCAL_PROXY], ['invalidated']
   ])
 })

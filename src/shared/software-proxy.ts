@@ -1,4 +1,5 @@
-export const DEFAULT_SOFTWARE_PROXY = 'http://127.0.0.1:7897'
+/** No proxy unless the user saves one: new installations connect to the backend directly. */
+export const DEFAULT_SOFTWARE_PROXY = ''
 
 /** A single HTTP(S) proxy shared by backend HTTP and WebSocket connections. */
 export function normalizeSoftwareProxy(value: unknown): string {
@@ -21,7 +22,7 @@ export function normalizeSoftwareProxy(value: unknown): string {
   return address.origin
 }
 
-/** A saved empty value deliberately selects direct connections, including after restart. */
+/** Unsaved or corrupt settings connect directly; a saved address survives restart. */
 export function readSoftwareProxy(value: string | null | undefined): string {
   try { return normalizeSoftwareProxy(value ?? DEFAULT_SOFTWARE_PROXY) }
   catch { return DEFAULT_SOFTWARE_PROXY }
