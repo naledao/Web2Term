@@ -31,7 +31,8 @@ export default function AdminMachines() {
     finally { if (alive.current && revision === request.current) setLoading(false) }
   }, [query, offset])
 
-  useEffect(() => () => { alive.current = false }, [])
+  // StrictMode remounts in development: set the flag on every mount, not only at creation.
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   useEffect(() => { void load() }, [load])
   useEffect(() => {
     const timer = window.setTimeout(() => {

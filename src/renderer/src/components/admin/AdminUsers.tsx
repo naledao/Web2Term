@@ -73,7 +73,8 @@ export default function AdminUsers({ selfEmail, preset, onShowFeedback }: {
     finally { if (alive.current && revision === detailRequest.current) setDetailLoading(false) }
   }, [])
 
-  useEffect(() => () => { alive.current = false }, [])
+  // StrictMode remounts in development: set the flag on every mount, not only at creation.
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   useEffect(() => { void load() }, [load])
   useEffect(() => {
     const timer = window.setTimeout(() => { if (queryDraft.trim() !== query) { setOffset(0); setQuery(queryDraft.trim()) } }, 350)

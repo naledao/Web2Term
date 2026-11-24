@@ -6,7 +6,9 @@
 .workspace__titlebar-content .workspace__admin-button ~ .workspace__feedback-button { margin-left: -4px; }
 .workspace__admin-button:disabled { cursor: progress; opacity: .7; }
 
+/* Match the shared dark popover reset so it cannot override the panel width; the dark rule below only recolors. */
 .app-popover.feedback-panel,
+.workspace[data-theme='dark'] .app-popover.feedback-panel { width: min(520px, calc(100vw - 24px)); background: #fff !important; color: #283448; border: 1px solid #dce3ef; -webkit-app-region: no-drag; overflow-y: auto; }
 /* Tabs, login gate and the user's own feedback history. */
 .feedback__header h2 { outline: none; }
 .feedback__refresh { align-self: center; border: 1px solid #dbe2ed; border-radius: 6px; background: #f6f8fc; color: inherit; padding: 5px 10px; font-size: 12px; }
@@ -37,7 +39,6 @@
 .feedback__history .feedback__error { margin-bottom: 10px; }
 .feedback__inline-btn { margin-left: 8px; border: 1px solid currentColor; border-radius: 5px; background: transparent; color: inherit; padding: 2px 8px; font-size: 11px; }
 
-.workspace[data-theme='dark'] .app-popover.feedback-panel { width: min(520px, calc(100vw - 24px)); background: #fff !important; color: #283448; border: 1px solid #dce3ef; -webkit-app-region: no-drag; overflow-y: auto; }
 .feedback-panel button { font: inherit; cursor: pointer; }
 .feedback-panel button:disabled { cursor: default; opacity: .55; }
 .feedback-panel button:focus-visible { outline: 2px solid #8095d0; outline-offset: 2px; }
@@ -59,10 +60,6 @@
 .feedback__content textarea { box-sizing: border-box; width: 100%; min-height: 150px; max-height: 50vh; resize: vertical; padding: 10px 12px; border: 1px solid #dbe2ed; border-radius: 8px; background: #fff; color: inherit; font: inherit; font-size: 13px; line-height: 1.6; }
 .feedback__content textarea:focus { outline: none; border-color: #8095d0; box-shadow: 0 0 0 3px #8095d026; }
 .feedback__content textarea[aria-invalid='true'] { border-color: #d54c63; }
-.feedback__email input { box-sizing: border-box; width: 100%; height: 34px; padding: 0 12px; border: 1px solid #dbe2ed; border-radius: 8px; background: #fff; color: inherit; font: inherit; font-size: 13px; }
-.feedback__email input:focus { outline: none; border-color: #8095d0; box-shadow: 0 0 0 3px #8095d026; }
-.feedback__email input[aria-invalid='true'] { border-color: #d54c63; }
-.feedback__field-error { margin-top: 5px; color: #d54c63; font-size: 11px; }
 .feedback__meta { display: flex; justify-content: flex-end; gap: 12px; margin-top: -4px; color: #8590a4; font-size: 11px; line-height: 1.5; }
 .feedback__meta span:last-child { flex: none; font-variant-numeric: tabular-nums; }
 .feedback__meta .is-over { color: #d54c63; }
@@ -82,10 +79,9 @@
 .workspace[data-theme='dark'] .feedback__categories label, .workspace[data-theme='dark'] .feedback__actions button { background: #111; border-color: #353535; }
 .workspace[data-theme='dark'] .feedback__categories label:hover, .workspace[data-theme='dark'] .feedback__actions button:hover:not(:disabled) { border-color: #5a5a5a; }
 .workspace[data-theme='dark'] .feedback__categories label.is-selected { background: #1c2233; border-color: #6a7fc6; color: #c4cff5; }
-.workspace[data-theme='dark'] .feedback__content textarea, .workspace[data-theme='dark'] .feedback__email input { background: #111; border-color: #353535; }
-.workspace[data-theme='dark'] .feedback__content textarea:focus, .workspace[data-theme='dark'] .feedback__email input:focus { border-color: #6a7fc6; }
+.workspace[data-theme='dark'] .feedback__content textarea { background: #111; border-color: #353535; }
+.workspace[data-theme='dark'] .feedback__content textarea:focus { border-color: #6a7fc6; }
 .workspace[data-theme='dark'] .feedback__content [aria-invalid='true'] { border-color: #d56a7a; }
-.workspace[data-theme='dark'] .feedback__field-error { color: #eea4a4; }
 .workspace[data-theme='dark'] .feedback__actions .is-primary { background: #4a5f9f; border-color: #4a5f9f; color: #fff; }
 .workspace[data-theme='dark'] .feedback__actions .is-primary:hover:not(:disabled) { background: #566cae; border-color: #566cae; }
 .workspace[data-theme='dark'] .feedback__error { background: #1d1214; color: #eea4a4; }

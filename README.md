@@ -339,7 +339,7 @@ web2term autostart disable  # 关闭自启并停止系统服务
 
 ### 设置、数据与排查
 
-桌面端标题栏右侧提供 **版本更新说明** 入口及未读角标（`99+`）。打开面板可查看各版本说明，也可点 **全部已读** 将本机的所有未读说明标为已读。点击标题栏的 **反馈**，登录 Web2Term 账号后即可提交问题或建议，并在 **我的反馈** 中查看处理进度。管理员账号可通过标题栏的 **管理后台** 处理反馈、维护更新说明和管理账号。
+桌面端标题栏右侧提供 **版本更新说明** 入口及未读角标（`99+`）。打开面板可查看各版本说明，也可点 **全部已读** 将本机的所有未读说明标为已读。点击标题栏的 **反馈**，登录 Web2Term 账号后即可提交问题或建议，并在 **我的反馈** 中查看处理进度。反馈的联系邮箱自动使用登录邮箱。管理员账号可通过标题栏的 **管理后台** 处理反馈、维护更新说明和管理账号。
 
 应用设置包含 **外观**（浅／深色主题、头像裁切）、**对话**（默认模型、默认对话视图）、**后端服务**、**web2term 设备**、**邮件通知**、**网络代理**、**应用更新** 和 **浏览器登录态**。模型网页、SSH 和更新下载可分别配置代理。未设置软件代理时，后端请求和 Linux 小工具下载默认直连。网页登录遇到限制时，可使用支持的平台登录态导入入口。
 
@@ -635,7 +635,7 @@ See the [Linux tool README](agents/linux/README.md) and [terminal protocol](agen
 
 ### Settings, release notes, and diagnostics
 
-The titlebar displays a **版本更新说明** (release notes) button with an unread count badge (`99+`). Open it and select **全部已读** (mark all as read) to clear the unread count for this machine. Select **反馈** (feedback) and sign in to Web2Term to report a problem, suggest an improvement, or track your submissions. Accounts with administrator access can open **管理后台** (admin console) to manage feedback, release notes, and accounts.
+The titlebar displays a **版本更新说明** (release notes) button with an unread count badge (`99+`). Open it and select **全部已读** (mark all as read) to clear the unread count for this machine. Select **反馈** (feedback) and sign in to Web2Term to report a problem, suggest an improvement, or track your submissions. Web2Term uses your sign-in email as the contact address for feedback. Accounts with administrator access can open **管理后台** (admin console) to manage feedback, release notes, and accounts.
 
 Application Settings cover **外观** (light/dark theme, avatar cropping), **对话** (default model & default chat view), **后端服务**, **web2term 设备**, **邮件通知**, **网络代理** (web, SSH, software, and update download proxies), **应用更新**, and **浏览器登录态** (session cookie import/inspection). With no software proxy configured, the app connects directly to the backend and downloads the Linux tool directly.
 

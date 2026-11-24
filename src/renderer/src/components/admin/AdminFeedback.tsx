@@ -57,7 +57,8 @@ export default function AdminFeedback({ preset }: { preset?: FeedbackPreset | nu
     finally { if (alive.current && revision === listRequest.current) setLoading(false) }
   }, [])
 
-  useEffect(() => () => { alive.current = false }, [])
+  // StrictMode remounts in development: set the flag on every mount, not only at creation.
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   useEffect(() => { void load({ status, category, q: query, offset }) }, [status, category, query, offset, load])
   // Debounce typing in the search box.
   useEffect(() => {

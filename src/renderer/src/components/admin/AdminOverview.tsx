@@ -98,7 +98,8 @@ export default function AdminOverview({ active, onJump }: { active: boolean; onJ
     finally { if (alive.current && revision === request.current) setLoading(false) }
   }, [])
 
-  useEffect(() => () => { alive.current = false }, [])
+  // StrictMode remounts in development: set the flag on every mount, not only at creation.
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   // Refresh whenever the overview is shown again, at most once every 30 seconds.
   useEffect(() => { if (active && Date.now() - loadedAt > 30_000) void load() }, [active, load, loadedAt])
 

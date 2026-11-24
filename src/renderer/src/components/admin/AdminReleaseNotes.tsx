@@ -93,7 +93,8 @@ export default function AdminReleaseNotes({ theme, preset }: { theme: 'light' | 
     finally { if (alive.current && revision === listRequest.current) setLoading(false) }
   }, [])
 
-  useEffect(() => () => { alive.current = false }, [])
+  // StrictMode remounts in development: set the flag on every mount, not only at creation.
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   useEffect(() => { void load(status, offset) }, [status, offset, load])
   useEffect(() => { void window.api.getAppInfo().then(info => { if (alive.current) setAppVersion(info.version) }).catch(() => {}) }, [])
   // Debounce the sandboxed preview so typing stays smooth on long documents.

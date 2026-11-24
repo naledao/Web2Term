@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { BackendAuthState } from '../../../shared/types'
-import { FEEDBACK_CATEGORIES, FEEDBACK_CATEGORY_LABELS, FEEDBACK_EMAIL_MAX_CHARS, FEEDBACK_MAX_CHARS, FEEDBACK_STATUS_LABELS, isFeedbackEmail } from '../../../shared/feedback'
+import { FEEDBACK_CATEGORIES, FEEDBACK_CATEGORY_LABELS, FEEDBACK_MAX_CHARS, FEEDBACK_STATUS_LABELS } from '../../../shared/feedback'
 import type { FeedbackCategory, FeedbackItem } from '../../../shared/feedback'
 import AppPopover from './AppPopover'
 import BackendLoginForm from './BackendLoginForm'
@@ -34,8 +34,6 @@ export default function Feedback({ open, onOpen, onClose, onSignedIn }: { open: 
   const [view, setView] = useState<'submit' | 'history'>('submit')
   const [category, setCategory] = useState<FeedbackCategory>('bug')
   const [content, setContent] = useState('')
-  const [email, setEmail] = useState('')
-  const [emailTouched, setEmailTouched] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
   const [sent, setSent] = useState(false)
@@ -78,7 +76,8 @@ export default function Feedback({ open, onOpen, onClose, onSignedIn }: { open: 
     finally { if (alive.current && revision === historyRequest.current) setHistoryLoading(false) }
   }, [loginExpired])
 
-  useEffect(() => () => { alive.current = false }, [])
+  // StrictMode remounts in development: set the flag on every mount, not only at creation.
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   useEffect(() => {
     if (open) void refreshAuth()
     else { setError(''); setSent(false); setAuthError(''); setForceLogin(false); historyRequest.current++; setHistoryLoading(false) }
@@ -90,16 +89,14 @@ export default function Feedback({ open, onOpen, onClose, onSignedIn }: { open: 
 
   const length = [...content.trim()].length
   const tooLong = length > FEEDBACK_MAX_CHARS
-  const trimmedEmail = email.trim()
-  const emailInvalid = trimmedEmail !== '' && !isFeedbackEmail(trimmedEmail)
-  const showEmailError = emailInvalid && emailTouched
-  const canSubmit = signedIn && !sending && length > 0 && !tooLong && !emailInvalid
+  const canSubmit = signedIn && !sending && length > 0 && !tooLong
 
   const submit = async (): Promise<void> => {
     if (!canSubmit) return
     setSending(true); setError('')
     try {
-      const result = await window.api.submitFeedback({ category, content, email: trimmedEmail })
+      // No contact email is sent: the backend records the signed-in account's email.
+      const result = await window.api.submitFeedback({ category, content })
       if (!alive.current) return
       if (result.ok) {
         setSent(true); setContent(''); setCategory('bug')
@@ -159,15 +156,6 @@ export default function Feedback({ open, onOpen, onClose, onSignedIn }: { open: 
     <div className="feedback__meta">
       <span id="feedback-count" className={tooLong ? 'is-over' : ''}>{length} / {FEEDBACK_MAX_CHARS}</span>
     </div>
-    <label className="feedback__content feedback__email">
-      <span>联系邮箱（选填）</span>
-      <input type="email" value={email} disabled={sending} maxLength={FEEDBACK_EMAIL_MAX_CHARS} autoComplete="email" spellCheck={false}
-        placeholder={auth?.user ? `留空则使用登录邮箱 ${auth.user.email}` : '方便我们就这条反馈联系你'}
-        aria-invalid={showEmailError || undefined} aria-describedby={showEmailError ? 'feedback-email-error' : undefined}
-        onBlur={() => setEmailTouched(true)}
-        onChange={event => { setEmail(event.target.value); if (error) setError('') }} />
-      {showEmailError ? <small id="feedback-email-error" className="feedback__field-error">邮箱格式不正确</small> : null}
-    </label>
     {error ? <p className="feedback__error" role="alert">{error}</p> : null}
     <div className="feedback__actions">
       <button type="button" disabled={sending} onClick={onClose}>取消</button>

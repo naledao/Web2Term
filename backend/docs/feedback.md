@@ -30,7 +30,7 @@ Content-Type: application/json
 | --- | --- |
 | `category` | 必填，`bug` / `feature` / `improvement` / `other` |
 | `content` | 必填，去掉首尾空白后 1～5000 个字符；保留换行和制表符，拒绝其他控制字符 |
-| `email` | 选填联系邮箱，≤254 字符；留空时保存为账号的登录邮箱 |
+| `email` | 选填联系邮箱，≤254 字符；留空时保存为账号的登录邮箱。桌面端不提供该输入，始终留空 |
 | `machineId` | 选填，客户端本机 UUID，统一转为小写；只做排查用，不返回给客户端 |
 | `appVersion` / `platform` | 选填，单行文本，分别 ≤32 / ≤64 字符 |
 
