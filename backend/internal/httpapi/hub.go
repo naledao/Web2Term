@@ -208,6 +208,36 @@ func (h *hub) online(id string) bool {
 	return h.agents[id] != nil
 }
 
+func (h *hub) onlineCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.agents)
+}
+
+// disconnectUser closes every live agent and desktop connection of an account,
+// used after it is disabled or its logins are revoked. Reconnects must log in
+// again and are rejected by token validation. Cleanup runs through the usual
+// leave paths once each connection's read loop ends.
+func (h *hub) disconnectUser(userID int64) int {
+	h.mu.Lock()
+	var connections []*websocket.Conn
+	for _, p := range h.agents {
+		if p.userID == userID && p.conn != nil {
+			connections = append(connections, p.conn)
+		}
+	}
+	for _, p := range h.desktops {
+		if p.userID == userID && p.conn != nil {
+			connections = append(connections, p.conn)
+		}
+	}
+	h.mu.Unlock()
+	for _, conn := range connections {
+		go conn.Close(websocket.StatusPolicyViolation, "session revoked")
+	}
+	return len(connections)
+}
+
 func (h *hub) shutdown() {
 	h.mu.Lock()
 	h.closing = true

@@ -7,8 +7,8 @@
 
 构建、启动和 SSH 部署统一遵循 [后端说明](../README.md)，无需额外启动一个服务或部署第二个二进制。
 数据使用后端的 `WEB2TERM_DB_PATH`，默认 `data/web2term.db`；启动时在事务内执行嵌入的数据库迁移。
-管理令牌为空时，全部管理接口返回 `503 ADMIN_DISABLED`；读取和已读接口仍可使用。
-管理令牌独立于普通用户的登录 JWT，只有持有管理令牌的调用方才能维护说明。
+管理接口接受两种凭据：管理令牌，或 `user_account.role = 'ADMIN'` 账号的登录 JWT（桌面客户端“管理后台”使用后者）。
+管理令牌为空时只关闭令牌这条路，管理员账号仍可维护说明；读取和已读接口始终可用。普通账号的登录 JWT 不能维护说明。
 
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
@@ -99,11 +99,11 @@ Content-Type: application/json
 
 ## 管理接口
 
-全部请求需要 `Authorization: Bearer <RELEASE_NOTES_ADMIN_TOKEN>`。
+全部请求需要 `Authorization: Bearer <RELEASE_NOTES_ADMIN_TOKEN>`，或 `Authorization: Bearer <管理员账号的登录 JWT>`。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/api/v1/admin/release-notes?limit=20&offset=0` | 列出全部发布状态的记录，列表不包含正文 |
+| `GET` | `/api/v1/admin/release-notes?status=&limit=20&offset=0` | 列出记录，列表不包含正文；`status` 可选 0／1／2，留空表示全部 |
 | `POST` | `/api/v1/admin/release-notes` | 新增更新说明 |
 | `GET` | `/api/v1/admin/release-notes/{id}` | 获取完整维护记录 |
 | `PUT` | `/api/v1/admin/release-notes/{id}` | 完整替换版本、标题、HTML、状态和发布时间 |
@@ -132,7 +132,7 @@ Content-Type: application/json
 - JSON 请求禁止未知字段及多个顶层值；管理请求体上限为 8 MiB，以容纳 HTML 的 JSON 转义；已读请求体上限为 1 KiB。
 
 新增返回 HTTP 201，附带管理详情的 `Location`；更新返回 200，删除返回 204。
-版本号冲突返回 409，未提供或错误的管理令牌返回 401。
+版本号冲突返回 409。未提供或无效的凭据返回 401；普通账号的登录 JWT 返回 `403 ADMIN_REQUIRED`；无法完成账号校验时返回 `503 AUTH_UNAVAILABLE`。
 
 用户可在 `backend` 目录编辑 `examples/release-note.json` 后发布：
 

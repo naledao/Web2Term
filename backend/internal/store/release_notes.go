@@ -99,17 +99,26 @@ func (s *Store) DeleteReleaseNote(ctx context.Context, id int64) error {
 }
 
 func (s *Store) ListAdminReleaseNotes(ctx context.Context, limit, offset int) (AdminPage, error) {
+	return s.ListAdminReleaseNotesByStatus(ctx, nil, limit, offset)
+}
+
+// ListAdminReleaseNotesByStatus lists every note, optionally only one status, newest first.
+func (s *Store) ListAdminReleaseNotesByStatus(ctx context.Context, status *int, limit, offset int) (AdminPage, error) {
 	page := AdminPage{Items: []Note{}, Limit: limit, Offset: offset}
+	where, args := "", []any{}
+	if status != nil {
+		where, args = " WHERE status = ?", []any{*status}
+	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return page, err
 	}
 	defer tx.Rollback()
-	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM app_release_note").Scan(&page.Total); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM app_release_note"+where, args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT id, version, title, '', status, published_at, created_at, updated_at
-		FROM app_release_note ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
+		FROM app_release_note`+where+` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
 	if err != nil {
 		return page, err
 	}
@@ -125,6 +134,16 @@ func (s *Store) ListAdminReleaseNotes(ctx context.Context, limit, offset int) (A
 		return page, err
 	}
 	if err := rows.Close(); err != nil {
+		return page, err
+	}
+	for i := range page.Items {
+		count := 0
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM app_release_note_read WHERE release_note_id = ?", page.Items[i].ID).Scan(&count); err != nil {
+			return page, err
+		}
+		page.Items[i].ReadCount = &count
+	}
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(DISTINCT machine_id) FROM app_release_note_read").Scan(&page.MachineCount); err != nil {
 		return page, err
 	}
 	return page, tx.Commit()

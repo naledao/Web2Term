@@ -51,7 +51,9 @@ const config = defineConfig({
           index: resolve(__dirname, 'src/renderer/index.html'),
           overlay: resolve(__dirname, 'src/renderer/overlay.html'),
           // Lives in the renderer root so the dev server serves it at /splash.html too.
-          splash: resolve(__dirname, 'src/renderer/splash.html')
+          splash: resolve(__dirname, 'src/renderer/splash.html'),
+          // Role-gated administration window.
+          admin: resolve(__dirname, 'src/renderer/admin.html')
         }
       }
     }

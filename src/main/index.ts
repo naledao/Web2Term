@@ -47,6 +47,8 @@ import { DEFAULT_BACKEND_URL } from '../shared/backend-url'
 import { resolveBackendSettingsPatch, saveBackendSettings } from './backend-settings'
 import { BackendAuthService } from './backend-auth'
 import { ReleaseNotesService } from './release-notes'
+import { FeedbackService } from './feedback'
+import { AdminService } from './admin'
 import { DEFAULT_SOFTWARE_PROXY, normalizeSoftwareProxy, readSoftwareProxy } from '../shared/software-proxy'
 import { applySoftwareProxy, createSoftwareSocket, softwareFetch } from './software-network'
 import { QqMailService } from './qq-mail'
@@ -197,6 +199,8 @@ function readDefaultChatView(value: string | null): 'original' | 'local' | 'focu
 }
 
 let managerWindow: BrowserWindow | null = null
+/** Role-gated administration window; only administrator accounts can open it. */
+let adminWindow: BrowserWindow | null = null
 let applicationReady = false
 let computerUseOverlayWindow: BrowserWindow | null = null
 const linuxAgentDownloader = new LinuxAgentDownloader((state) => {
@@ -217,6 +221,13 @@ const notificationActivations = new NotificationActivationRouter(notificationPro
   target => runtimes.get(target.sessionId)?.focusNotification(target) ?? false,
   () => createManagerWindow())
 const releaseNotes = new ReleaseNotesService(() => ({ backendUrl: settings.backendUrl, machineId: localMachineId }), softwareFetch)
+const feedback = new FeedbackService(() => ({
+  auth: backendAuth?.getState() ?? { backendUrl: '', status: 'signed-out', user: null, expiresAt: null },
+  credentials: backendAuth?.getConnectionCredentials() ?? null,
+  machineId: localMachineId, appVersion: app.getVersion(), platform: `${process.platform}-${process.arch}`
+}), softwareFetch)
+const admin = new AdminService(() => backendAuth?.getConnectionCredentials() ?? null, softwareFetch, () => invalidateReleaseNotes(),
+  () => { void backendAuth?.refreshProfile() })
 function invalidateReleaseNotes(): void {
   releaseNotes.invalidate()
   if (managerWindow && !managerWindow.isDestroyed()) managerWindow.webContents.send(IpcChannels.releaseNotesChanged)
@@ -1299,6 +1310,57 @@ function createManagerWindow(): void {
   else void window.loadFile(join(__dirname, '../renderer/index.html'))
 }
 
+function isAdminEvent(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
+  return Boolean(adminWindow && !adminWindow.isDestroyed() && event.sender === adminWindow.webContents && event.senderFrame === event.sender.mainFrame)
+}
+
+function closeAdminWindow(): void {
+  if (adminWindow && !adminWindow.isDestroyed()) adminWindow.close()
+}
+
+function openAdminWindow(): void {
+  if (adminWindow && !adminWindow.isDestroyed()) {
+    if (adminWindow.isMinimized()) adminWindow.restore()
+    adminWindow.show()
+    adminWindow.focus()
+    return
+  }
+  const theme = settings.theme === 'dark' ? 'dark' : 'light'
+  const window = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    minWidth: 960,
+    minHeight: 600,
+    title: `${APP_NAME} 管理后台`,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: theme === 'dark' ? '#0b0b0b' : '#f5f7fb',
+    icon: app.isPackaged ? join(process.resourcesPath, 'tray-icon.png') : join(app.getAppPath(), 'build', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+  configureWindowsAppDetails(window)
+  adminWindow = window
+  window.once('ready-to-show', () => window.show())
+  window.on('closed', () => { if (adminWindow === window) adminWindow = null })
+  // The editor cancels unload while it has unsaved changes; ask instead of silently refusing to close.
+  window.webContents.on('will-prevent-unload', event => {
+    const choice = dialog.showMessageBoxSync(window, {
+      type: 'question', buttons: ['放弃修改并关闭', '继续编辑'], defaultId: 1, cancelId: 1,
+      title: '管理后台', message: '有未保存的修改', detail: '关闭后，编辑器中尚未保存的内容会丢失。'
+    })
+    if (choice === 0) event.preventDefault()
+  })
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('will-navigate', (event, url) => { if (url !== window.webContents.getURL()) event.preventDefault() })
+  if (rendererDevServerUrl) void window.loadURL(`${rendererDevServerUrl.replace(/\/$/u, '')}/admin.html?theme=${theme}`)
+  else void window.loadFile(join(__dirname, '../renderer/admin.html'), { query: { theme } })
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle(COMPUTER_OVERLAY_GET, event => {
     if (!computerUseOverlayWindow || computerUseOverlayWindow.isDestroyed() ||
@@ -2235,6 +2297,42 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.releaseNotesDetail, (event, request) => isManagerEvent(event) ? releaseNotes.detail(request) : deniedReleaseNotes)
   ipcMain.handle(IpcChannels.releaseNotesRead, (event, request) => isManagerEvent(event) ? releaseNotes.markRead(request) : deniedReleaseNotes)
   ipcMain.handle(IpcChannels.releaseNotesReadAll, (event, request) => isManagerEvent(event) ? releaseNotes.markAllRead(request) : deniedReleaseNotes)
+  const deniedFeedback = { ok: false as const, message: '反馈仅供主窗口使用。' }
+  ipcMain.handle(IpcChannels.feedbackSubmit, (event, draft: unknown) => isManagerEvent(event) ? feedback.submit(draft) : deniedFeedback)
+  ipcMain.handle(IpcChannels.feedbackList, (event, request) => isManagerEvent(event) ? feedback.list(request) : deniedFeedback)
+  const deniedAdmin = { ok: false as const, message: '管理接口仅供管理后台窗口使用。' }
+  ipcMain.handle(IpcChannels.backendAuthRefresh, async (event) => {
+    const signedOut = { backendUrl: '', status: 'signed-out' as const, user: null, expiresAt: null }
+    if (!isManagerEvent(event) || !backendAuth) return signedOut
+    return backendAuth.refreshProfile()
+  })
+  ipcMain.handle(IpcChannels.adminOpen, async (event): Promise<boolean> => {
+    if (!isManagerEvent(event) || !backendAuth) return false
+    // UI gate only; every admin request is authorised again by the backend.
+    const state = await backendAuth.refreshProfile()
+    if (state.status !== 'signed-in' || state.user?.role !== 'ADMIN') return false
+    openAdminWindow()
+    return true
+  })
+  ipcMain.handle(IpcChannels.adminAccount, async (event) => {
+    if (!isAdminEvent(event) || !backendAuth) return null
+    const state = await backendAuth.refreshProfile()
+    return state.status === 'signed-in' && state.user ? { email: state.user.email, nickname: state.user.nickname, backendUrl: state.backendUrl } : null
+  })
+  ipcMain.handle(IpcChannels.adminFeedbackList, (event, query) => isAdminEvent(event) ? admin.listFeedback(query) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminFeedbackGet, (event, id) => isAdminEvent(event) ? admin.getFeedback(id) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminFeedbackUpdate, (event, patch) => isAdminEvent(event) ? admin.updateFeedback(patch) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminReleaseNotesList, (event, query) => isAdminEvent(event) ? admin.listReleaseNotes(query) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminReleaseNoteGet, (event, id) => isAdminEvent(event) ? admin.getReleaseNote(id) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminReleaseNoteCreate, (event, input) => isAdminEvent(event) ? admin.createReleaseNote(input) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminReleaseNoteUpdate, (event, input) => isAdminEvent(event) ? admin.updateReleaseNote(input) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminReleaseNoteDelete, (event, id) => isAdminEvent(event) ? admin.deleteReleaseNote(id) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminUsersList, (event, query) => isAdminEvent(event) ? admin.listUsers(query) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminUserGet, (event, publicId) => isAdminEvent(event) ? admin.getUser(publicId) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminUserUpdate, (event, patch) => isAdminEvent(event) ? admin.updateUser(patch) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminUserRevoke, (event, publicId) => isAdminEvent(event) ? admin.revokeUserSessions(publicId) : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminStats, (event) => isAdminEvent(event) ? admin.getStats() : deniedAdmin)
+  ipcMain.handle(IpcChannels.adminMachinesList, (event, query) => isAdminEvent(event) ? admin.listMachines(query) : deniedAdmin)
   ipcMain.handle(IpcChannels.settingsUpdate, async (event, patch: AppSettingsPatch): Promise<AppSettings> => {
     if (!isManagerEvent(event) || event.senderFrame !== event.sender.mainFrame || !store) return { ...settings }
     // Validate before applying any setting so an invalid URL cannot partly save a patch.
@@ -2528,7 +2626,7 @@ async function initializeApplication(): Promise<void> {
         return safeStorage.decryptString(Buffer.from(value, 'base64'))
       },
       onBackendUrlSaved: setBackendUrlState,
-      onLoginChanged: () => { web2termConnection?.credentialsChanged(); windowsAgent?.credentialsChanged() }
+      onLoginChanged: () => { web2termConnection?.credentialsChanged(); windowsAgent?.credentialsChanged(); closeAdminWindow() }
     })
     web2termConnection = new Web2termConnection(conversationStore, backendAuth, {
       createSocket: createSoftwareSocket,

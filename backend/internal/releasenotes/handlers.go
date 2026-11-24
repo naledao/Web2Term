@@ -89,7 +89,16 @@ func (a *API) adminList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	page, err := a.store.ListAdminReleaseNotes(r.Context(), limit, offset)
+	var status *int
+	if value := r.URL.Query().Get("status"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < store.Draft || parsed > store.Offline {
+			writeError(w, http.StatusBadRequest, "INVALID_STATUS", "status 必须是 0（草稿）、1（已发布）或 2（已下线）。")
+			return
+		}
+		status = &parsed
+	}
+	page, err := a.store.ListAdminReleaseNotesByStatus(r.Context(), status, limit, offset)
 	if err != nil {
 		a.failure(w, r, err)
 		return

@@ -40,13 +40,30 @@ type Server struct {
 	log          *slog.Logger
 	limits       *loginLimits
 	releaseNotes http.Handler
+	feedback     *feedbackAPI
+	admin        *adminAPI
 }
 
 type Option func(*Server)
 
 // Mount the release-note API on the same listener and use the caller's database.
+// Administration accepts the static token or an administrator account's login token.
 func WithReleaseNotes(database *store.Store, adminToken string) Option {
-	return func(s *Server) { s.releaseNotes = releasenotes.New(database, adminToken, s.log) }
+	return func(s *Server) {
+		accounts := func(ctx context.Context, authorization string) error {
+			user, err := lookupAccount(ctx, s.users, database.UserByID, authorization)
+			switch {
+			case errors.Is(err, errUnauthenticated):
+				return releasenotes.ErrUnauthenticated
+			case err != nil:
+				return err
+			case user.Role != roleAdmin:
+				return releasenotes.ErrNotAdmin
+			}
+			return nil
+		}
+		s.releaseNotes = releasenotes.New(database, adminToken, s.log, accounts)
+	}
 }
 
 func New(devices DeviceStore, users AuthService, log *slog.Logger, options ...Option) *Server {
@@ -64,6 +81,22 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/api/v1/release-notes/", s.releaseNotes)
 		mux.Handle("/api/v1/admin/release-notes", s.releaseNotes)
 		mux.Handle("/api/v1/admin/release-notes/", s.releaseNotes)
+	}
+	if s.feedback != nil {
+		mux.HandleFunc("POST /api/v1/feedback", s.createFeedback)
+		mux.HandleFunc("GET /api/v1/feedback", s.listFeedback)
+	}
+	if s.admin != nil {
+		mux.HandleFunc("GET /api/user/me", s.me)
+		mux.HandleFunc("GET /api/v1/admin/feedback", s.adminListFeedback)
+		mux.HandleFunc("GET /api/v1/admin/feedback/{id}", s.adminGetFeedback)
+		mux.HandleFunc("PATCH /api/v1/admin/feedback/{id}", s.adminUpdateFeedback)
+		mux.HandleFunc("GET /api/v1/admin/users", s.adminListUsers)
+		mux.HandleFunc("GET /api/v1/admin/users/{publicId}", s.adminGetUser)
+		mux.HandleFunc("PATCH /api/v1/admin/users/{publicId}", s.adminUpdateUser)
+		mux.HandleFunc("POST /api/v1/admin/users/{publicId}/revoke-sessions", s.adminRevokeUserSessions)
+		mux.HandleFunc("GET /api/v1/admin/stats", s.adminStats)
+		mux.HandleFunc("GET /api/v1/admin/machines", s.adminListMachines)
 	}
 	mux.HandleFunc("POST /api/user/login/code", s.loginCode)
 	mux.HandleFunc("POST /api/user/login", s.login)
@@ -185,7 +218,11 @@ func validName(name string) bool {
 }
 
 func decode(w http.ResponseWriter, r *http.Request, target any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	return decodeLimited(w, r, target, 16<<10)
+}
+
+func decodeLimited(w http.ResponseWriter, r *http.Request, target any, maximum int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maximum)
 	d := json.NewDecoder(r.Body)
 	var body json.RawMessage
 	if err := d.Decode(&body); err != nil {

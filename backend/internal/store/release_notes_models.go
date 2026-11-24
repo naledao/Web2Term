@@ -68,6 +68,8 @@ type Note struct {
 	PublishedAt *int64 `json:"publishedAt"`
 	CreatedAt   int64  `json:"createdAt"`
 	UpdatedAt   int64  `json:"updatedAt"`
+	// ReadCount is only filled in the administration list: machines that have read this note.
+	ReadCount *int `json:"readCount,omitempty"`
 }
 
 type Summary struct {
@@ -97,4 +99,6 @@ type AdminPage struct {
 	Total  int    `json:"total"`
 	Limit  int    `json:"limit"`
 	Offset int    `json:"offset"`
+	// MachineCount is the number of distinct machines with any read record, for reach percentages.
+	MachineCount int `json:"machineCount"`
 }

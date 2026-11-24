@@ -22,15 +22,34 @@ type API struct {
 	logger       *slog.Logger
 	adminHash    [32]byte
 	adminEnabled bool
+	accounts     AccountAuthorizer
 	now          func() time.Time
 }
 
-func New(database *store.Store, adminToken string, logger *slog.Logger) http.Handler {
+var (
+	// ErrUnauthenticated: the Authorization header is not a valid login.
+	ErrUnauthenticated = errors.New("not authenticated")
+	// ErrNotAdmin: a valid login whose account is not an administrator.
+	ErrNotAdmin = errors.New("administrator required")
+)
+
+// AccountAuthorizer checks whether an Authorization header belongs to an
+// administrator account. It returns nil, ErrUnauthenticated, ErrNotAdmin, or
+// another error when the check itself could not be completed.
+type AccountAuthorizer func(ctx context.Context, authorization string) error
+
+// New mounts the release-note API. Administration accepts the static admin
+// token (when configured) and, when an AccountAuthorizer is given, any
+// administrator account's login token.
+func New(database *store.Store, adminToken string, logger *slog.Logger, accounts ...AccountAuthorizer) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	api := &API{store: database, logger: logger, adminHash: sha256.Sum256([]byte(adminToken)),
 		adminEnabled: adminToken != "", now: time.Now}
+	if len(accounts) > 0 {
+		api.accounts = accounts[0]
+	}
 	return api.handler()
 }
 
@@ -62,19 +81,36 @@ func (a *API) handler() http.Handler {
 
 func (a *API) admin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !a.adminEnabled {
+		if !a.adminEnabled && a.accounts == nil {
 			writeError(w, http.StatusServiceUnavailable, "ADMIN_DISABLED", "管理接口尚未启用。")
 			return
 		}
 		authorization := r.Header.Get("Authorization")
-		scheme, token, found := strings.Cut(authorization, " ")
-		digest := sha256.Sum256([]byte(token))
-		if !found || !strings.EqualFold(scheme, "Bearer") || subtle.ConstantTimeCompare(digest[:], a.adminHash[:]) != 1 {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "管理令牌无效。")
-			return
+		if a.adminEnabled {
+			scheme, token, found := strings.Cut(authorization, " ")
+			digest := sha256.Sum256([]byte(token))
+			if found && strings.EqualFold(scheme, "Bearer") && subtle.ConstantTimeCompare(digest[:], a.adminHash[:]) == 1 {
+				next(w, r)
+				return
+			}
 		}
-		next(w, r)
+		if a.accounts != nil {
+			err := a.accounts(r.Context(), authorization)
+			switch {
+			case err == nil:
+				next(w, r)
+				return
+			case errors.Is(err, ErrNotAdmin):
+				writeError(w, http.StatusForbidden, "ADMIN_REQUIRED", "需要管理员权限。")
+				return
+			case !errors.Is(err, ErrUnauthenticated):
+				a.logger.Error("administrator check failed")
+				writeError(w, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "暂时无法验证管理员身份，请稍后重试。")
+				return
+			}
+		}
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "管理令牌或登录凭据无效。")
 	}
 }
 

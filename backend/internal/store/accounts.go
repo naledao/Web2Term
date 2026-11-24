@@ -101,6 +101,11 @@ func (s *Store) LoginWithCode(ctx context.Context, email string, hash []byte, no
 	if err != nil {
 		return User{}, err
 	}
+	if u.Enabled {
+		if _, err := tx.ExecContext(ctx, "UPDATE user_account SET last_login_at = ? WHERE id = ?", now*1000, u.ID); err != nil {
+			return User{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return User{}, err
 	}
@@ -120,4 +125,18 @@ func scanUser(row *sql.Row) (User, error) {
 
 func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
 	return scanUser(s.db.QueryRowContext(ctx, "SELECT "+userColumns+" FROM user_account WHERE id = ?", id))
+}
+
+// SetUserRole changes an account's role ("USER" or "ADMIN"); the schema rejects other values.
+func (s *Store) SetUserRole(ctx context.Context, id int64, role string) error {
+	result, err := s.db.ExecContext(ctx, "UPDATE user_account SET role = ?, updated_at = "+nowSQL+" WHERE id = ?", role, id)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if changed == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

@@ -12,6 +12,7 @@ import ConfirmDialog from './components/ConfirmDialog'
 import NewSessionPopover from './components/NewSessionPopover'
 import Web2termWordmark from './components/Web2termWordmark'
 import ReleaseNotes from './components/ReleaseNotes'
+import Feedback from './components/Feedback'
 import './assets/workspace-empty.css'
 import './assets/workspace-brand.css'
 import './assets/workspace-updates.css'
@@ -81,6 +82,30 @@ export default function WorkspaceApp(): ReactElement {
   const deleteSessionTrigger = useRef<HTMLButtonElement | null>(null)
   const [appVersion, setAppVersion] = useState('')
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
+  /** UI gate for the administration entry; the backend authorises every admin request itself. */
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [adminOpening, setAdminOpening] = useState(false)
+  const lastProfileRefresh = useRef(0)
+  const refreshAdmin = useCallback((force = false): void => {
+    if (!force && Date.now() - lastProfileRefresh.current < 60_000) return
+    lastProfileRefresh.current = Date.now()
+    void window.api.refreshBackendProfile()
+      .then(state => setIsAdmin(state.status === 'signed-in' && state.user?.role === 'ADMIN'))
+      .catch(() => { /* Keep the previous state; a later focus retries. */ })
+  }, [])
+  useEffect(() => {
+    refreshAdmin(true)
+    const onFocus = (): void => refreshAdmin()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [refreshAdmin])
+  const openAdmin = async (): Promise<void> => {
+    if (adminOpening) return
+    setAdminOpening(true)
+    try { setIsAdmin(await window.api.openAdminWindow()) } catch { /* The button stays; the next attempt retries. */ }
+    finally { setAdminOpening(false) }
+  }
   const [updateNotice, setUpdateNotice] = useState<{ version: string } | null>(null)
   const updateNoticeAnchor = useRef<HTMLSpanElement>(null)
   const [updateDownloading, setUpdateDownloading] = useState(false)
@@ -316,7 +341,7 @@ export default function WorkspaceApp(): ReactElement {
 
   // Sidebar confirmations and the corner update notice leave the chat and tool windows usable.
   const workspaceModalOpen = transfersOpen || newSessionOpen || web2termDeviceDialogOpen
-    || projectEditor !== null || movingSession !== null || releaseNotesOpen
+    || projectEditor !== null || movingSession !== null || releaseNotesOpen || feedbackOpen
   const newSessionProject = projects.find(project => project.id === newSessionProjectId)
 
   return (
@@ -325,8 +350,12 @@ export default function WorkspaceApp(): ReactElement {
       <header className="workspace__titlebar">
         <div className="workspace__titlebar-content">
           <span className="workspace__window-title"><img src={brandIcon} alt="" aria-hidden="true" />Web2Term</span>
+          {isAdmin ? <button type="button" className="workspace__release-notes-button workspace__admin-button" disabled={adminOpening}
+            title="打开管理后台" onClick={() => void openAdmin()}>管理后台</button> : null}
+          <Feedback open={feedbackOpen} onSignedIn={() => refreshAdmin(true)}
+            onOpen={() => { window.api.setEmbedVisible(false); setReleaseNotesOpen(false); setFeedbackOpen(true) }} onClose={() => setFeedbackOpen(false)} />
           <ReleaseNotes open={releaseNotesOpen} theme={theme} appVersion={appVersion}
-            onOpen={() => { window.api.setEmbedVisible(false); setReleaseNotesOpen(true) }} onClose={() => setReleaseNotesOpen(false)} />
+            onOpen={() => { window.api.setEmbedVisible(false); setFeedbackOpen(false); setReleaseNotesOpen(true) }} onClose={() => setReleaseNotesOpen(false)} />
         </div>
       </header>
       <nav ref={navigationRef} className="workspace__nav">

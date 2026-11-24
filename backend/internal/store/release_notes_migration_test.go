@@ -57,7 +57,7 @@ func TestReleaseNotesMigrationPreservesAccountsDevicesAndReadState(t *testing.T)
 		t.Fatalf("pending login code lost: %v", err)
 	}
 	var version int
-	if err := db.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
+	if err := db.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
 		t.Fatalf("schema version: %d %v", version, err)
 	}
 	status := Published

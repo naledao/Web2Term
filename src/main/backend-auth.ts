@@ -294,6 +294,49 @@ export class BackendAuthService {
     }
   }
 
+  /**
+   * Re-read the signed-in account from GET /api/user/me so role changes (e.g. promotion to
+   * ADMIN) apply without a new login. Failures keep the saved state; the token is never exposed.
+   */
+  async refreshProfile(): Promise<BackendAuthState> {
+    const credentials = this.getConnectionCredentials()
+    const before = this.getState()
+    if (!credentials || !before.user) return before
+    try {
+      const response = await this.request(credentials.backendUrl.replace(/\/$/u, '') + '/api/user/me', {
+        method: 'GET', headers: { Accept: 'application/json', Authorization: `Bearer ${credentials.accessToken}` },
+        redirect: 'manual', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      })
+      if (response.status === 401) {
+        // Revoked, disabled or otherwise rejected: forget the login so the app asks for a new one.
+        await response.body?.cancel()
+        this.forgetLogin(credentials.accessToken)
+        return this.getState()
+      }
+      if (response.status !== 200) { await response.body?.cancel(); return this.getState() }
+      const user = readUser(JSON.parse(await readBody(response)))
+      const saved = object(JSON.parse(this.dependencies.decrypt(this.store.getSetting(AUTH_KEY) ?? '')))
+      // Ignore the answer if the login changed while the request was in flight.
+      if (saved.accessToken !== credentials.accessToken || saved.backendUrl !== credentials.backendUrl || user.publicId !== before.user.publicId) return this.getState()
+      const previous = readUser(saved.user)
+      if (previous.email === user.email && previous.nickname === user.nickname && previous.avatarUrl === user.avatarUrl && previous.role === user.role) return this.getState()
+      const secret = this.dependencies.encrypt(JSON.stringify({ ...saved, user }))
+      if (secret) this.store.setSettings({ [AUTH_KEY]: secret })
+      return this.getState()
+    } catch { return this.getState() }
+  }
+
+  /** Remove the saved login only if it is still the one the backend rejected. */
+  private forgetLogin(rejectedToken: string): void {
+    try {
+      const saved = object(JSON.parse(this.dependencies.decrypt(this.store.getSetting(AUTH_KEY) ?? '')))
+      if (saved.accessToken !== rejectedToken) return
+    } catch { return }
+    this.store.setSettings({ [AUTH_KEY]: '' })
+    this.log.write({ event: 'login_rejected_by_backend' })
+    this.dependencies.onLoginChanged?.()
+  }
+
   /** A login for one server must never be reused after changing servers. */
   setBackendUrl(backendUrl: string): void {
     this.updateBackendSettings({ backendUrl })

@@ -1,5 +1,7 @@
 import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult } from './emergency-stop'
 import type { ReleaseNoteDetail, ReleaseNoteRead, ReleaseNoteRequest, ReleaseNotesPage, ReleaseNotesPageRequest, ReleaseNotesReadAll, ReleaseNotesReadAllRequest, ReleaseNotesResult } from './release-notes'
+import type { FeedbackDraft, FeedbackItem, FeedbackPage, FeedbackPageRequest, FeedbackResult } from './feedback'
+import type { AdminAccount, AdminFeedbackItem, AdminFeedbackPage, AdminFeedbackPatch, AdminFeedbackQuery, AdminMachinesPage, AdminMachinesQuery, AdminReleaseNote, AdminReleaseNoteInput, AdminReleaseNotesPage, AdminReleaseNotesQuery, AdminReleaseNoteUpdate, AdminResult, AdminRevokeResult, AdminStats, AdminUser, AdminUserDetail, AdminUserPatch, AdminUsersPage, AdminUsersQuery } from './admin'
 import type { QqMailResult, QqMailSettings, QqMailSettingsDraft } from './qq-mail'
 import type { ToolboxInvocation } from './toolbox'
 import type { SshTextFile, SshTextFileTarget, SshTextFileSaveRequest, SshTextFileSaveResult } from './ssh-file-edit'
@@ -37,6 +39,25 @@ export const IpcChannels = {
   releaseNotesRead: 'release-notes:read',
   releaseNotesReadAll: 'release-notes:read-all',
   releaseNotesChanged: 'release-notes:changed',
+  feedbackSubmit: 'feedback:submit',
+  feedbackList: 'feedback:list',
+  backendAuthRefresh: 'backend-auth:refresh',
+  adminOpen: 'admin:open',
+  adminAccount: 'admin:account',
+  adminFeedbackList: 'admin:feedback-list',
+  adminFeedbackGet: 'admin:feedback-get',
+  adminFeedbackUpdate: 'admin:feedback-update',
+  adminReleaseNotesList: 'admin:release-notes-list',
+  adminReleaseNoteGet: 'admin:release-note-get',
+  adminReleaseNoteCreate: 'admin:release-note-create',
+  adminReleaseNoteUpdate: 'admin:release-note-update',
+  adminReleaseNoteDelete: 'admin:release-note-delete',
+  adminUsersList: 'admin:users-list',
+  adminUserGet: 'admin:user-get',
+  adminUserUpdate: 'admin:user-update',
+  adminUserRevoke: 'admin:user-revoke',
+  adminStats: 'admin:stats',
+  adminMachinesList: 'admin:machines-list',
   githubCliGetState: 'github-cli:get-state',
   githubCliOpenInstall: 'github-cli:open-install',
   githubCliLogout: 'github-cli:logout',
@@ -2359,6 +2380,31 @@ export interface AppApi {
   markReleaseNoteRead(request: ReleaseNoteRequest): Promise<ReleaseNotesResult<ReleaseNoteRead>>
   markAllReleaseNotesRead(request: ReleaseNotesReadAllRequest): Promise<ReleaseNotesResult<ReleaseNotesReadAll>>
   onReleaseNotesChanged(listener: () => void): () => void
+  /** Text-only feedback (bug / feature / improvement / other); requires a backend login. */
+  submitFeedback(draft: FeedbackDraft): Promise<FeedbackResult<FeedbackItem>>
+  /** The signed-in account's own feedback, newest first. */
+  listFeedback(request?: FeedbackPageRequest): Promise<FeedbackResult<FeedbackPage>>
+  /** Re-read the signed-in account (including its role) from the backend; main window only. */
+  refreshBackendProfile(): Promise<BackendAuthState>
+  /** Open the administration window; resolves false when the account is not an administrator. */
+  openAdminWindow(): Promise<boolean>
+  /** Administration window only. */
+  getAdminAccount(): Promise<AdminAccount | null>
+  listAdminFeedback(query: AdminFeedbackQuery): Promise<AdminResult<AdminFeedbackPage>>
+  getAdminFeedback(id: string): Promise<AdminResult<AdminFeedbackItem>>
+  updateAdminFeedback(patch: AdminFeedbackPatch): Promise<AdminResult<AdminFeedbackItem>>
+  listAdminReleaseNotes(query: AdminReleaseNotesQuery): Promise<AdminResult<AdminReleaseNotesPage>>
+  getAdminReleaseNote(id: string): Promise<AdminResult<AdminReleaseNote>>
+  createAdminReleaseNote(input: AdminReleaseNoteInput): Promise<AdminResult<AdminReleaseNote>>
+  /** Full replacement (PUT). */
+  updateAdminReleaseNote(input: AdminReleaseNoteUpdate): Promise<AdminResult<AdminReleaseNote>>
+  deleteAdminReleaseNote(id: string): Promise<AdminResult<null>>
+  listAdminUsers(query: AdminUsersQuery): Promise<AdminResult<AdminUsersPage>>
+  getAdminUser(publicId: string): Promise<AdminResult<AdminUserDetail>>
+  updateAdminUser(patch: AdminUserPatch): Promise<AdminResult<AdminUser>>
+  revokeAdminUserSessions(publicId: string): Promise<AdminResult<AdminRevokeResult>>
+  getAdminStats(): Promise<AdminResult<AdminStats>>
+  listAdminMachines(query: AdminMachinesQuery): Promise<AdminResult<AdminMachinesPage>>
   invokeToolbox(request: ToolboxInvocation): Promise<unknown>
   getAppInfo(): Promise<AppInfo>
   /** Check the local desktop's GitHub CLI installation and active github.com account. */

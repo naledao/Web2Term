@@ -55,7 +55,7 @@ func TestReleaseNotesSharesBackendAuthenticationAndListener(t *testing.T) {
 		t.Fatalf("device route: %d", w.Code)
 	}
 	body := `{"version":"0.1.200","title":"更新","contentHtml":"<article>完整 HTML</article>","status":1}`
-	if w := call("POST", "/api/v1/admin/release-notes", body, login.AccessToken); w.Code != 401 {
+	if w := call("POST", "/api/v1/admin/release-notes", body, login.AccessToken); w.Code != 403 {
 		t.Fatalf("ordinary login granted release administration: %d", w.Code)
 	}
 	w = call("POST", "/api/v1/admin/release-notes", body, admin)
@@ -91,8 +91,13 @@ func TestReleaseNotesPublicRoutesRemainAvailableWithoutAdminToken(t *testing.T) 
 	if w.Code != 200 {
 		t.Fatalf("public list: %d %s", w.Code, w.Body.String())
 	}
+	// Without a static token, administration falls back to account roles: a login
+	// that does not resolve to an account is unauthenticated, and an auth outage is not a 401.
 	w = request(t, h, "GET", "/api/v1/admin/release-notes", "", "Bearer owner")
-	if w.Code != 503 || !strings.Contains(w.Body.String(), "ADMIN_DISABLED") {
-		t.Fatalf("disabled admin: %d %s", w.Code, w.Body.String())
+	if w.Code != 401 || !strings.Contains(w.Body.String(), "UNAUTHORIZED") {
+		t.Fatalf("unknown account: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(t, h, "GET", "/api/v1/admin/release-notes", "", "Bearer outage"); w.Code != 503 {
+		t.Fatalf("auth outage: %d %s", w.Code, w.Body.String())
 	}
 }
