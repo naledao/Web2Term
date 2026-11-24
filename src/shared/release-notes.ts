@@ -18,4 +18,7 @@ export interface ReleaseNotesPage {
 export interface ReleaseNotesPageRequest { limit?: number; offset?: number }
 export interface ReleaseNoteRequest { id: string; source: string }
 export interface ReleaseNoteRead { id: string; readAt: number }
+export interface ReleaseNotesReadAllRequest { source: string }
+/** Every note published at or before `readAt` (server time) is read for this machine. */
+export interface ReleaseNotesReadAll { markedCount: number; readAt: number }
 export type ReleaseNotesResult<T> = { ok: true; source: string; value: T } | { ok: false; source: string; message: string }

@@ -185,3 +185,15 @@ func (s *Store) MarkReleaseNoteRead(ctx context.Context, id int64, machineID str
 		SET read_at = MAX(app_release_note_read.read_at, excluded.read_at) RETURNING read_at`, machineID, now, id, now).Scan(&readAt)
 	return readAt, mapError(err)
 }
+
+// MarkAllReleaseNotesRead marks every currently visible note read for one machine.
+// Earlier read times are kept; the result counts only notes that were unread.
+func (s *Store) MarkAllReleaseNotesRead(ctx context.Context, machineID string, now int64) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `INSERT INTO app_release_note_read (machine_id, release_note_id, read_at)
+		SELECT ?, n.id, ? FROM app_release_note n WHERE n.status = 1 AND n.published_at <= ?
+		ON CONFLICT (machine_id, release_note_id) DO NOTHING`, machineID, now, now)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return result.RowsAffected()
+}

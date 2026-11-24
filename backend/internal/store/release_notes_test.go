@@ -114,6 +114,47 @@ func TestDetailDoesNotMarkReadAndRepeatedReadIsMonotonic(t *testing.T) {
 	}
 }
 
+func TestMarkAllReadCoversOnlyVisibleNotesAndKeepsEarlierReadTimes(t *testing.T) {
+	s := openReleaseNotesTestStore(t)
+	first := create(t, s, input("0.1.1", Published, pointer(int64(100))), 100)
+	create(t, s, input("0.1.2", Published, pointer(int64(200))), 200)
+	create(t, s, input("0.1.3", Published, pointer(int64(300))), 300)
+	create(t, s, input("0.1.4", Draft, nil), 400)
+	create(t, s, input("0.1.5", Published, pointer(int64(2000))), 500)
+	create(t, s, input("0.1.6", Offline, pointer(int64(600))), 600)
+	if _, err := s.MarkReleaseNoteRead(t.Context(), first.ID, machineA, 700); err != nil {
+		t.Fatal(err)
+	}
+	marked, err := s.MarkAllReleaseNotesRead(t.Context(), machineA, 1000)
+	if err != nil || marked != 2 {
+		t.Fatalf("marked %d, %v", marked, err)
+	}
+	page, err := s.ListReleaseNotes(t.Context(), machineA, 1000, 20, 0)
+	if err != nil || page.Total != 3 || page.UnreadCount != 0 {
+		t.Fatalf("after read-all: %+v %v", page, err)
+	}
+	for _, item := range page.Items {
+		want := int64(1000)
+		if item.ID == first.ID {
+			want = 700
+		}
+		if !item.IsRead || item.ReadAt == nil || *item.ReadAt != want {
+			t.Fatalf("read state: %+v", item)
+		}
+	}
+	if marked, err = s.MarkAllReleaseNotesRead(t.Context(), machineA, 1100); err != nil || marked != 0 {
+		t.Fatalf("repeat marked %d, %v", marked, err)
+	}
+	other, err := s.ListReleaseNotes(t.Context(), machineB, 1000, 20, 0)
+	if err != nil || other.UnreadCount != 3 {
+		t.Fatalf("other machine: %+v %v", other, err)
+	}
+	future, err := s.ListReleaseNotes(t.Context(), machineA, 3000, 20, 0)
+	if err != nil || future.Total != 4 || future.UnreadCount != 1 {
+		t.Fatalf("later publication: %+v %v", future, err)
+	}
+}
+
 func TestPublishEditOfflineAndUniqueVersion(t *testing.T) {
 	s := openReleaseNotesTestStore(t)
 	note := create(t, s, input("v0.1.1", Draft, nil), 100)

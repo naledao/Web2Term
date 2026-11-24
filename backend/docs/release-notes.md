@@ -30,6 +30,7 @@ SQLite 使用 WAL、外键约束和 5000 毫秒 busy timeout；连接池与账�
 | `GET` | `/api/v1/release-notes?machineId=UUID&limit=20&offset=0` | 分页获取可展示的版本及当前机器的已读状态 |
 | `GET` | `/api/v1/release-notes/{id}?machineId=UUID` | 获取单个版本的 HTML 正文和阅读状态 |
 | `POST` | `/api/v1/release-notes/{id}/read` | 将某个版本登记为当前机器已读 |
+| `POST` | `/api/v1/release-notes/read-all` | 将当前可展示的全部版本登记为当前机器已读 |
 
 `limit` 为 1～100，默认 20；`offset` 为 0～1000000，默认 0。
 只公开 `status = 1` 且已到发布时间的说明，按发布时间及 ID 倒序排列。
@@ -74,6 +75,25 @@ Content-Type: application/json
   "readAt": 1793145600000
 }
 ```
+
+客户端“全部已读”一次登记当前所有可展示的版本：
+
+```http
+POST /api/v1/release-notes/read-all
+Content-Type: application/json
+
+{"machineId":"f15f800e-0123-4123-8123-123456789abc"}
+```
+
+```json
+{
+  "machineId": "f15f800e-0123-4123-8123-123456789abc",
+  "markedCount": 3,
+  "readAt": 1793145600000
+}
+```
+
+`markedCount` 只统计本次由未读变为已读的版本；已经读过的版本保留原来的 `readAt`。只覆盖 `published_at <= readAt` 的已发布版本，草稿、已下线和未到发布时间的说明不受影响，之后发布的版本仍为未读。重复调用是幂等的。
 
 重复提交只更新最近阅读时间；并发请求不会创建重复阅读记录，也不会将阅读时间倒退。
 

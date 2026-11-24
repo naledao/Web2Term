@@ -51,6 +51,8 @@ export default function ReleaseNotes({ open, onOpen, onClose, theme, appVersion 
   const readAttempts = useRef(new Set<string>())
   const inFlightReads = useRef(new Set<string>())
   const confirmedReads = useRef(new Map<string, number>())
+  // Per backend source: every note published at or before this server time was marked read at once.
+  const readAllBefore = useRef(new Map<string, number>())
   const readRevision = useRef(0)
   const [unread, setUnread] = useState<number | null>(null)
   const [catalog, setCatalog] = useState<Catalog>(EMPTY)
@@ -63,6 +65,8 @@ export default function ReleaseNotes({ open, onOpen, onClose, theme, appVersion 
   const [readError, setReadError] = useState<{ id: string; message: string } | null>(null)
   const [reading, setReading] = useState<string | null>(null)
   const [frameError, setFrameError] = useState(false)
+  const [readingAll, setReadingAll] = useState(false)
+  const [readAllError, setReadAllError] = useState('')
 
   const refreshBadge = useCallback(async (): Promise<void> => {
     const revision = ++badgeRequest.current, generation = epoch.current
@@ -81,7 +85,10 @@ export default function ReleaseNotes({ open, onOpen, onClose, theme, appVersion 
       const result = await window.api.getReleaseNote({ id: note.id, source })
       if (!alive.current || !visible.current || revision !== detailRequest.current || generation !== epoch.current) return
       if (result.ok) {
-        setDetail({ note: result.value, source: result.source })
+        const allReadAt = readAllBefore.current.get(result.source)
+        const value = !result.value.isRead && allReadAt !== undefined && result.value.publishedAt <= allReadAt
+          ? { ...result.value, isRead: true, readAt: allReadAt } : result.value
+        setDetail({ note: value, source: result.source })
         if (result.value.isRead) {
           confirmedReads.current.set(`${source}:${note.id}`, result.value.readAt!)
           readRevision.current++
@@ -97,6 +104,7 @@ export default function ReleaseNotes({ open, onOpen, onClose, theme, appVersion 
     const revision = ++listRequest.current, generation = epoch.current, reads = readRevision.current
     setLoading(true); setListError('')
     if (!append) {
+      setReadAllError('')
       ++detailRequest.current
       setCatalog(EMPTY); setSelected(null); setDetail(null); setDetailError(''); setDetailLoading(false)
     }
@@ -108,8 +116,10 @@ export default function ReleaseNotes({ open, onOpen, onClose, theme, appVersion 
       const page = result.value
       if (reads === readRevision.current) setUnread(page.unreadCount)
       else void refreshBadge()
+      const allReadAt = readAllBefore.current.get(result.source)
       const items = page.items.map(item => {
-        const readAt = confirmedReads.current.get(`${result.source}:${item.id}`)
+        const readAt = confirmedReads.current.get(`${result.source}:${item.id}`) ??
+          (!item.isRead && allReadAt !== undefined && item.publishedAt <= allReadAt ? allReadAt : undefined)
         return readAt === undefined ? item : { ...item, isRead: true, readAt }
       }).sort(compareReleaseNotes)
       setCatalog(previous => ({ items: append && previous.source === result.source
@@ -130,8 +140,9 @@ export default function ReleaseNotes({ open, onOpen, onClose, theme, appVersion 
     const off = window.api.onReleaseNotesChanged(() => {
       epoch.current++; listRequest.current++; detailRequest.current++; badgeRequest.current++
       readAttempts.current.clear()
-      confirmedReads.current.clear(); readRevision.current++
+      confirmedReads.current.clear(); readAllBefore.current.clear(); readRevision.current++
       setUnread(null); setCatalog(EMPTY); setSelected(null); setDetail(null); setDetailError(''); setReadError(null); setReading(null)
+      setReadingAll(false); setReadAllError('')
       if (visible.current) void loadPage()
       else void refreshBadge()
     })
@@ -169,6 +180,27 @@ export default function ReleaseNotes({ open, onOpen, onClose, theme, appVersion 
     }
   }
 
+  const markAllRead = async (): Promise<void> => {
+    const source = catalog.source
+    if (!visible.current || readingAll || !source) return
+    const generation = epoch.current
+    setReadingAll(true); setReadAllError('')
+    try {
+      const result = await window.api.markAllReleaseNotesRead({ source })
+      if (!alive.current || generation !== epoch.current) return
+      if (!result.ok) { setReadAllError(result.message); return }
+      const { readAt } = result.value
+      readAllBefore.current.set(result.source, readAt)
+      readRevision.current++
+      const mark = <T extends ReleaseNoteSummary>(item: T): T => !item.isRead && item.publishedAt <= readAt ? { ...item, isRead: true, readAt } : item
+      setCatalog(previous => previous.source === result.source ? { ...previous, items: previous.items.map(mark) } : previous)
+      setDetail(previous => previous?.source === result.source ? { ...previous, note: mark(previous.note) } : previous)
+      setReadError(null)
+      void refreshBadge()
+    } catch { if (alive.current && generation === epoch.current) setReadAllError('全部标记已读失败，请重试。') }
+    finally { if (alive.current && generation === epoch.current) setReadingAll(false) }
+  }
+
   const html = useMemo(() => detail ? releaseNotesDocument(detail.note.contentHtml, theme === 'dark') : '', [detail?.note.contentHtml, theme])
   const currentVersion = (appVersion || '').replace(/^v/, '')
   return <>
@@ -181,10 +213,13 @@ export default function ReleaseNotes({ open, onOpen, onClose, theme, appVersion 
       aria-labelledby="release-notes-title" initialFocus={heading} dismissOnOutside={false}>
       <header className="release-notes__header"><div><h2 id="release-notes-title" tabIndex={-1} ref={heading}>版本更新说明</h2>
         <p>{appVersion ? `当前客户端 v${currentVersion}` : '查看功能变化与修复记录'}{unread !== null ? ` · ${unread} 条未读` : ''}</p></div>
+        <button type="button" disabled={readingAll || loading || !catalog.source || !unread} title="将所有已发布的更新说明标记为已读"
+          onClick={() => void markAllRead()}>{readingAll ? '标记中…' : '全部已读'}</button>
         <button type="button" disabled={loading} onClick={() => void loadPage()}>{loading ? '加载中…' : '刷新'}</button>
         <button type="button" className="release-notes__close" aria-label="关闭更新说明" onClick={onClose}>×</button></header>
       <div className="release-notes__layout">
         <aside className="release-notes__versions" aria-label="版本列表" aria-busy={loading}>
+          {readAllError ? <div className="release-notes__feedback" role="alert"><p>{readAllError}</p></div> : null}
           {listError ? <div className="release-notes__feedback" role="alert"><p>{listError}</p><button type="button" disabled={loading} onClick={() => void loadPage()}>重新加载</button></div> : null}
           {!catalog.items.length && !listError ? <p className="release-notes__empty" role="status">{loading ? '正在加载版本列表…' : '暂无已发布的更新说明'}</p> : null}
           <ul>{catalog.items.map(item => <li key={item.id}><button type="button" className={selected?.id === item.id ? 'is-selected' : ''}

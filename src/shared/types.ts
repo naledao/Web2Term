@@ -1,5 +1,5 @@
 import type { DesktopInputWarning, EmergencyStopState, EmergencyStopResetResult } from './emergency-stop'
-import type { ReleaseNoteDetail, ReleaseNoteRead, ReleaseNoteRequest, ReleaseNotesPage, ReleaseNotesPageRequest, ReleaseNotesResult } from './release-notes'
+import type { ReleaseNoteDetail, ReleaseNoteRead, ReleaseNoteRequest, ReleaseNotesPage, ReleaseNotesPageRequest, ReleaseNotesReadAll, ReleaseNotesReadAllRequest, ReleaseNotesResult } from './release-notes'
 import type { QqMailResult, QqMailSettings, QqMailSettingsDraft } from './qq-mail'
 import type { ToolboxInvocation } from './toolbox'
 import type { SshTextFile, SshTextFileTarget, SshTextFileSaveRequest, SshTextFileSaveResult } from './ssh-file-edit'
@@ -35,6 +35,7 @@ export const IpcChannels = {
   releaseNotesList: 'release-notes:list',
   releaseNotesDetail: 'release-notes:detail',
   releaseNotesRead: 'release-notes:read',
+  releaseNotesReadAll: 'release-notes:read-all',
   releaseNotesChanged: 'release-notes:changed',
   githubCliGetState: 'github-cli:get-state',
   githubCliOpenInstall: 'github-cli:open-install',
@@ -2356,6 +2357,7 @@ export interface AppApi {
   listReleaseNotes(request?: ReleaseNotesPageRequest): Promise<ReleaseNotesResult<ReleaseNotesPage>>
   getReleaseNote(request: ReleaseNoteRequest): Promise<ReleaseNotesResult<ReleaseNoteDetail>>
   markReleaseNoteRead(request: ReleaseNoteRequest): Promise<ReleaseNotesResult<ReleaseNoteRead>>
+  markAllReleaseNotesRead(request: ReleaseNotesReadAllRequest): Promise<ReleaseNotesResult<ReleaseNotesReadAll>>
   onReleaseNotesChanged(listener: () => void): () => void
   invokeToolbox(request: ToolboxInvocation): Promise<unknown>
   getAppInfo(): Promise<AppInfo>

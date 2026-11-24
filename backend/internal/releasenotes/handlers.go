@@ -64,6 +64,26 @@ func (a *API) markRead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "machineId": machine, "isRead": true, "readAt": readAt})
 }
 
+func (a *API) markAllRead(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		MachineID string `json:"machineId"`
+	}
+	if !decodeJSON(w, r, 1024, &input) {
+		return
+	}
+	machine, ok := machineID(w, input.MachineID)
+	if !ok {
+		return
+	}
+	now := a.now().UnixMilli()
+	marked, err := a.store.MarkAllReleaseNotesRead(r.Context(), machine, now)
+	if err != nil {
+		a.failure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"machineId": machine, "markedCount": marked, "readAt": now})
+}
+
 func (a *API) adminList(w http.ResponseWriter, r *http.Request) {
 	limit, offset, ok := pagination(w, r)
 	if !ok {

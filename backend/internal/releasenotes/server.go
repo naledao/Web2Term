@@ -39,6 +39,7 @@ func (a *API) handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/release-notes", a.list)
 	mux.HandleFunc("GET /api/v1/release-notes/{id}", a.detail)
 	mux.HandleFunc("POST /api/v1/release-notes/{id}/read", a.markRead)
+	mux.HandleFunc("POST /api/v1/release-notes/read-all", a.markAllRead)
 	mux.HandleFunc("GET /api/v1/admin/release-notes", a.admin(a.adminList))
 	mux.HandleFunc("POST /api/v1/admin/release-notes", a.admin(a.adminCreate))
 	mux.HandleFunc("GET /api/v1/admin/release-notes/{id}", a.admin(a.adminDetail))

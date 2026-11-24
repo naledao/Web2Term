@@ -102,6 +102,38 @@ func TestPublicFlowPreservesHTMLAndSeparatesMachines(t *testing.T) {
 	}
 }
 
+func TestReadAllMarksPublicNotesForOneMachine(t *testing.T) {
+	h := testHandler(t, adminToken)
+	for _, version := range []string{"0.1.1", "0.1.2"} {
+		body, _ := json.Marshal(map[string]any{"version": version, "title": "test", "contentHtml": "<p>test</p>", "status": 1})
+		expectStatus(t, request(t, h, "POST", "/api/v1/admin/release-notes", string(body), adminToken), http.StatusCreated)
+	}
+	read := request(t, h, "POST", "/api/v1/release-notes/read-all", `{"machineId":"`+strings.ToUpper(testMachine)+`"}`, "")
+	expectStatus(t, read, http.StatusOK)
+	result := decode[struct {
+		MachineID   string `json:"machineId"`
+		MarkedCount int64  `json:"markedCount"`
+		ReadAt      int64  `json:"readAt"`
+	}](t, read)
+	if result.MachineID != testMachine || result.MarkedCount != 2 || result.ReadAt <= 0 {
+		t.Fatalf("read-all: %s", read.Body.String())
+	}
+	page := decode[store.Page](t, request(t, h, "GET", "/api/v1/release-notes?machineId="+testMachine, "", ""))
+	if page.UnreadCount != 0 || !page.Items[0].IsRead || !page.Items[1].IsRead {
+		t.Fatalf("after read-all: %+v", page)
+	}
+	other := decode[store.Page](t, request(t, h, "GET", "/api/v1/release-notes?machineId="+otherMachine, "", ""))
+	if other.UnreadCount != 2 {
+		t.Fatalf("other machine: %+v", other)
+	}
+	again := decode[struct {
+		MarkedCount int64 `json:"markedCount"`
+	}](t, request(t, h, "POST", "/api/v1/release-notes/read-all", `{"machineId":"`+testMachine+`"}`, ""))
+	if again.MarkedCount != 0 {
+		t.Fatalf("repeat read-all marked %d", again.MarkedCount)
+	}
+}
+
 func TestAdminAuthenticationAndDisabledMode(t *testing.T) {
 	h := testHandler(t, adminToken)
 	for _, token := range []string{"", "wrong"} {
@@ -178,6 +210,9 @@ func TestRejectMalformedRequests(t *testing.T) {
 		{"POST", "/api/v1/release-notes/1/read", `{"machineId":"` + testMachine + `","extra":1}`, "", 400},
 		{"POST", "/api/v1/release-notes/1/read", `{"machineId":"` + testMachine + `"} {}`, "", 400},
 		{"POST", "/api/v1/release-notes/1/read", `{"machineId":"` + strings.Repeat("a", 2048) + `"}`, "", 413},
+		{"POST", "/api/v1/release-notes/read-all", `{}`, "", 400},
+		{"POST", "/api/v1/release-notes/read-all", `{"machineId":"` + testMachine + `","extra":1}`, "", 400},
+		{"GET", "/api/v1/release-notes/read-all?machineId=" + testMachine, "", "", 400},
 		{"POST", "/api/v1/admin/release-notes", `{"version":"0.1.1","title":"test","status":1}`, adminToken, 400},
 		{"POST", "/api/v1/admin/release-notes", `{"version":"0.1.1","title":"test"}`, adminToken, 400},
 		{"POST", "/api/v1/admin/release-notes", `{"version":`, adminToken, 400},

@@ -54,6 +54,29 @@ test('public API preserves proxy prefix, omits credentials, and marks only on ex
   assert.equal(calls[2].options.method, 'POST')
 })
 
+test('read-all posts the machine once, validates the reply and explains a backend without the endpoint', async () => {
+  const calls = []
+  const { service } = fixture(async (url, options) => {
+    calls.push({ url, options })
+    assert.equal(options.credentials, 'omit')
+    assert.deepEqual(JSON.parse(options.body), { machineId: MACHINE })
+    return response({ machineId: MACHINE, markedCount: 3, readAt: 1793145600020 })
+  })
+  const result = await service.markAllRead({ source: SOURCE })
+  assert.deepEqual(plain(result), { ok: true, source: SOURCE, value: { markedCount: 3, readAt: 1793145600020 } })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url, `${BASE}/api/v1/release-notes/read-all`)
+  assert.equal(calls[0].options.method, 'POST')
+  assert.equal((await service.markAllRead({ source: 'old-backend' })).ok, false)
+  assert.equal(calls.length, 1)
+  for (const bad of [{ machineId: 'other', markedCount: 1, readAt: 1 }, { machineId: MACHINE, markedCount: -1, readAt: 1 }, { machineId: MACHINE, markedCount: 1 }]) {
+    const { service: invalid } = fixture(async () => response(bad))
+    assert.equal((await invalid.markAllRead({ source: SOURCE })).ok, false)
+  }
+  const { service: old } = fixture(async () => new Response('', { status: 404 }))
+  assert.match((await old.markAllRead({ source: SOURCE })).message, /一键已读/u)
+})
+
 test('empty settings, invalid pagination, IDs and stale sources do not make requests', async () => {
   let calls = 0
   const { service, state } = fixture(async () => { calls++; throw new Error('unexpected request') })
@@ -123,6 +146,7 @@ function renderer(api) {
   const ctx = createContext({
     alive: { current: true }, visible: { current: true }, epoch: { current: 0 }, listRequest: { current: 0 }, detailRequest: { current: 0 },
     readAttempts: { current: new Set() }, inFlightReads: { current: new Set() }, confirmedReads: { current: new Map() }, readRevision: { current: 0 },
+    readAllBefore: { current: new Map() }, readingAll: false, readAllError: '',
     catalog: { items: [note()], total: 1, offset: 1, source: SOURCE }, detail: { note: { ...note(), contentHtml: '<p>内容</p>' }, source: SOURCE },
     readError: null, reading: null, badgeRefreshes: 0,
     window: { api }, useCallback: fn => fn,
@@ -131,11 +155,12 @@ function renderer(api) {
     setUnread() {}, setLoading() {}, setListError() {}, setSelected() {}, setDetailError() {}, setDetailLoading() {}, setFrameError() {},
     setReading(value) { ctx.reading = typeof value === 'function' ? value(ctx.reading) : value },
     setReadError(value) { ctx.readError = value },
+    setReadingAll(value) { ctx.readingAll = value }, setReadAllError(value) { ctx.readAllError = value },
     setDetail(value) { ctx.detail = typeof value === 'function' ? value(ctx.detail) : value },
     setCatalog(value) { ctx.catalog = typeof value === 'function' ? value(ctx.catalog) : value }
   })
   ctx.compareReleaseNotes = actual('compareReleaseNotes', ctx)
-  return { ctx, markRead: actual('markRead', ctx), loadPage: actual('loadPage', ctx), selectNote: actual('select', ctx) }
+  return { ctx, markRead: actual('markRead', ctx), markAllRead: () => actual('markAllRead', ctx)(), loadPage: actual('loadPage', ctx), selectNote: actual('select', ctx) }
 }
 
 test('loading a catalog does not mark a note; displaying it saves once and retains unread state on failure until retry', async () => {
@@ -213,6 +238,45 @@ test('already-read, closed and invalidated views never apply a read result', asy
   assert.equal(f.ctx.badgeRefreshes, 0)
 })
 
+test('read-all marks loaded notes and the open detail, and later stale pages stay read', async () => {
+  let resolveList, writes = 0
+  const later = { ...note('2'), publishedAt: 1793145600030 }
+  const f = renderer({
+    async markAllReleaseNotesRead(request) { writes++; assert.equal(request.source, SOURCE); return { ok: true, source: SOURCE, value: { markedCount: 1, readAt: 1793145600020 } } },
+    listReleaseNotes: () => new Promise(resolve => { resolveList = resolve })
+  })
+  await f.markAllRead()
+  assert.equal(writes, 1)
+  assert.equal(f.ctx.catalog.items[0].isRead, true)
+  assert.equal(f.ctx.catalog.items[0].readAt, 1793145600020)
+  assert.equal(f.ctx.detail.note.isRead, true)
+  assert.equal(f.ctx.readingAll, false)
+  assert.equal(f.ctx.badgeRefreshes, 1)
+  const pending = f.loadPage({ offset: 1, source: SOURCE })
+  resolveList({ ok: true, source: SOURCE, value: { ...page([note('3'), later], 2), offset: 1 } })
+  await pending
+  const byId = Object.fromEntries(f.ctx.catalog.items.map(item => [item.id, item]))
+  assert.equal(byId['3'].isRead, true)
+  assert.equal(byId['2'].isRead, false)
+})
+
+test('a failed or invalidated read-all leaves notes unread', async () => {
+  let resolveRead
+  const failed = renderer({ async markAllReleaseNotesRead() { return { ok: false, source: SOURCE, message: '服务暂时不可用' } } })
+  await failed.markAllRead()
+  assert.equal(failed.ctx.readAllError, '服务暂时不可用')
+  assert.equal(failed.ctx.catalog.items[0].isRead, false)
+  assert.equal(failed.ctx.readAllBefore.current.size, 0)
+  const f = renderer({ markAllReleaseNotesRead: () => new Promise(resolve => { resolveRead = resolve }) })
+  const original = plain(f.ctx.catalog)
+  const pending = f.markAllRead()
+  f.ctx.epoch.current++
+  resolveRead({ ok: true, source: SOURCE, value: { markedCount: 1, readAt: 1793145600020 } })
+  await pending
+  assert.deepEqual(plain(f.ctx.catalog), original)
+  assert.equal(f.ctx.badgeRefreshes, 0)
+})
+
 test('release-note IPC rejects embedded frames and other windows before dispatch', async () => {
   const path = '../src/main/index.ts'
   const file = ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
@@ -221,16 +285,16 @@ test('release-note IPC rejects embedded frames and other windows before dispatch
   function visit(node) {
     if (ts.isFunctionDeclaration(node) && node.name?.text === 'isManagerEvent') guard = node
     if (ts.isCallExpression(node) && node.expression.getText(file) === 'ipcMain.handle' &&
-      ['IpcChannels.releaseNotesList', 'IpcChannels.releaseNotesDetail', 'IpcChannels.releaseNotesRead'].includes(node.arguments[0]?.getText(file))) callbacks.push(node.arguments[1])
+      ['IpcChannels.releaseNotesList', 'IpcChannels.releaseNotesDetail', 'IpcChannels.releaseNotesRead', 'IpcChannels.releaseNotesReadAll'].includes(node.arguments[0]?.getText(file))) callbacks.push(node.arguments[1])
     ts.forEachChild(node, visit)
   }
   visit(file)
   assert.ok(guard)
-  assert.equal(callbacks.length, 3)
+  assert.equal(callbacks.length, 4)
   const mainFrame = {}, webContents = { mainFrame }, otherFrame = {}
   let dispatched = 0
   const context = createContext({ managerWindow: { isDestroyed: () => false, webContents }, deniedReleaseNotes: { ok: false },
-    releaseNotes: { list() { dispatched++; return { ok: true } }, detail() { dispatched++; return { ok: true } }, markRead() { dispatched++; return { ok: true } } } })
+    releaseNotes: { list() { dispatched++; return { ok: true } }, detail() { dispatched++; return { ok: true } }, markRead() { dispatched++; return { ok: true } }, markAllRead() { dispatched++; return { ok: true } } } })
   const evaluate = source => new Script(ts.transpileModule('(' + source + ')', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText).runInContext(context)
   context.isManagerEvent = evaluate(guard.getText(file))
   for (const node of callbacks) {

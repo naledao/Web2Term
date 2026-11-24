@@ -2234,6 +2234,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.releaseNotesList, (event, request) => isManagerEvent(event) ? releaseNotes.list(request) : deniedReleaseNotes)
   ipcMain.handle(IpcChannels.releaseNotesDetail, (event, request) => isManagerEvent(event) ? releaseNotes.detail(request) : deniedReleaseNotes)
   ipcMain.handle(IpcChannels.releaseNotesRead, (event, request) => isManagerEvent(event) ? releaseNotes.markRead(request) : deniedReleaseNotes)
+  ipcMain.handle(IpcChannels.releaseNotesReadAll, (event, request) => isManagerEvent(event) ? releaseNotes.markAllRead(request) : deniedReleaseNotes)
   ipcMain.handle(IpcChannels.settingsUpdate, async (event, patch: AppSettingsPatch): Promise<AppSettings> => {
     if (!isManagerEvent(event) || event.senderFrame !== event.sender.mainFrame || !store) return { ...settings }
     // Validate before applying any setting so an invalid URL cannot partly save a patch.

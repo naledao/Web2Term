@@ -1,5 +1,5 @@
 import { normalizeBackendUrl } from '../shared/backend-url'
-import type { ReleaseNoteDetail, ReleaseNoteRead, ReleaseNoteRequest, ReleaseNoteSummary, ReleaseNotesPage, ReleaseNotesPageRequest, ReleaseNotesResult } from '../shared/release-notes'
+import type { ReleaseNoteDetail, ReleaseNoteRead, ReleaseNoteRequest, ReleaseNoteSummary, ReleaseNotesPage, ReleaseNotesPageRequest, ReleaseNotesReadAll, ReleaseNotesReadAllRequest, ReleaseNotesResult } from '../shared/release-notes'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const API = '/api/v1/release-notes'
@@ -67,7 +67,7 @@ export class ReleaseNotesService {
         if (response.status !== 200) {
           await response.body?.cancel()
           throw new Error(response.status >= 300 && response.status < 400 ? '后端返回了重定向，请在设置中填写最终服务地址。' :
-            response.status === 404 ? '更新说明不存在、已下线，或后端尚未提供更新说明接口。' :
+            response.status === 404 ? (path === '/read-all' ? '后端尚未提供一键已读接口，请更新后端后重试。' : '更新说明不存在、已下线，或后端尚未提供更新说明接口。') :
               response.status === 429 ? '请求过于频繁，请稍后重试。' : '更新说明服务暂时不可用，请稍后重试。')
         }
         const reader = response.body?.getReader()
@@ -124,6 +124,14 @@ export class ReleaseNotesService {
       const raw = object(await send(`/${id}/read`, 'POST'))
       if (idOf(raw.id) !== id || raw.machineId !== machineId || raw.isRead !== true || !timestamp(raw.readAt)) return invalid()
       return { id, readAt: raw.readAt }
+    }, typeof input?.source === 'string' ? input.source : '')
+  }
+
+  markAllRead(input: ReleaseNotesReadAllRequest): Promise<ReleaseNotesResult<ReleaseNotesReadAll>> {
+    return this.operation(async (send, _source, machineId) => {
+      const raw = object(await send('/read-all', 'POST'))
+      if (raw.machineId !== machineId || !integer(raw.markedCount) || !timestamp(raw.readAt)) return invalid()
+      return { markedCount: raw.markedCount, readAt: raw.readAt }
     }, typeof input?.source === 'string' ? input.source : '')
   }
 }

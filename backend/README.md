@@ -128,6 +128,7 @@ HTTP 层额外限制同一来源 IP 每 10 分钟最多发送 5 次验证码、�
 | `GET` | `/api/v1/release-notes?machineId=UUID` | 分页查询公开版本及当前机器阅读状态 |
 | `GET` | `/api/v1/release-notes/{id}?machineId=UUID` | 获取 HTML 正文 |
 | `POST` | `/api/v1/release-notes/{id}/read` | 登记当前机器已读 |
+| `POST` | `/api/v1/release-notes/read-all` | 将全部可展示版本登记为当前机器已读 |
 | `GET/POST` | `/api/v1/admin/release-notes` | 管理列表和新增版本 |
 | `GET/PUT/DELETE` | `/api/v1/admin/release-notes/{id}` | 读取、替换或删除维护记录 |
 

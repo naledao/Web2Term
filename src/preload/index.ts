@@ -111,6 +111,7 @@ const api: AppApi = {
   listReleaseNotes: request => ipcRenderer.invoke(IpcChannels.releaseNotesList, request),
   getReleaseNote: request => ipcRenderer.invoke(IpcChannels.releaseNotesDetail, request),
   markReleaseNoteRead: request => ipcRenderer.invoke(IpcChannels.releaseNotesRead, request),
+  markAllReleaseNotesRead: request => ipcRenderer.invoke(IpcChannels.releaseNotesReadAll, request),
   onReleaseNotesChanged: listener => {
     const handler = (): void => listener()
     ipcRenderer.on(IpcChannels.releaseNotesChanged, handler)
