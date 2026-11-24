@@ -4,6 +4,21 @@ on:
   push:
     branches:
       - main
+    # Skip a release only when every changed file is outside the desktop app.
+    # Keep build/** (incl. build/macos-installation.md, the release body) and
+    # agents/** (the Linux agent release runs after this workflow) triggering.
+    paths-ignore:
+      - 'backend/**'
+      - 'website/**'
+      - 'docs/**'
+      - 'tests/**'
+      - 'tools/**'
+      - 'README.md'
+      - 'AGENTS.md'
+      - 'DESIGN.md'
+      - 'PRODUCT.md'
+      - '.github/workflows/backend-deploy.yml'
+      - '.github/workflows/website.yml'
 
 permissions:
   contents: write

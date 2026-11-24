@@ -38,7 +38,7 @@ npm run dev
 （包括 `git switch -c`、`git checkout -b`、worktree，以及为了「先隔离一下」而开的临时分支）。
 
 即使工具或通用规范建议「在默认分支上先开分支」，在本仓库也以这条为准。
-提交和推送仍然只在用户要求时进行；注意推送到 `main` 会触发自动发版（见下文「推送后写更新说明」）。
+提交和推送仍然只在用户要求时进行；注意推送到 `main` 可能触发自动发版和后端部署（见下文「推送后写更新说明」）。
 
 ## 不要主动编辑 tools 目录中的文件
 
@@ -72,7 +72,20 @@ npm run dist:win     # 打 Windows 安装包
 
 ## 推送后写更新说明
 
-每次推送到 `main` 都会触发 `Build and Release Desktop`，自动把 patch 版本号加一并发布 Release。推送后：
+推送到 `main` 时，各 workflow 按改动的路径触发：
+
+| workflow | 触发条件 | 结果 |
+| --- | --- | --- |
+| `Build and Release Desktop` | 本次推送中**有任何文件不在**下列路径里：`backend/**`、`website/**`、`docs/**`、`tests/**`、`tools/**`、根目录的 `README.md` / `AGENTS.md` / `DESIGN.md` / `PRODUCT.md`、`backend-deploy.yml` / `website.yml` | patch 版本号加一并发布 Release；随后 `Build and Release Linux Agent` 上传 Linux Agent |
+| `Build and deploy Go backend over SSH` | 改了 `backend/**` 或它自己 | 部署后端，不发新版本 |
+| `website.yml` | 改了 `website/**` 或它自己 | 部署网站，不发新版本 |
+
+准确的过滤规则以 `.github/workflows/desktop-release.yml` 里的 `paths-ignore` 为准。推送前先判断这次会不会发版，并告诉用户。
+
+**会发新版本时**，推送后：
 
 1. 用 `web2term-release-notes` 为新版本写更新说明，格式参照上一版，内容面向用户，先存为**草稿**。
 2. 等这次 workflow 成功、GitHub Release 出现后，再发布这份更新说明。workflow 失败就保持草稿，并告诉用户。
+
+**不发新版本时**（只改了后端、网站、文档、测试、诊断工具），不写更新说明。后端改动只要等部署 workflow 成功即可；失败就告诉用户。
+用户能感知的后端变化，等下一次桌面端发版时写进那一版的更新说明。
