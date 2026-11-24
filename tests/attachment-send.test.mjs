@@ -652,6 +652,20 @@ test('the ignored model picker cannot supply draft images even inside the compos
   assert.equal(app.send.clicks, 0)
 })
 
+test('the model picker on an English page is ignored by its language-neutral attributes', () => {
+  const app = fixture()
+  app.controller.releaseFileSend(token)
+  const icon = element('img')
+  Object.assign(icon, { src: 'data:image/png;base64,AA==', naturalWidth: 128, naturalHeight: 128 })
+  icon.getBoundingClientRect = () => ({ width: 24, height: 24 })
+  const model = element('button', { 'aria-label': 'Choose ChatGPT model', 'aria-haspopup': 'menu', 'data-selected-reasoning-effort': 'high' }, [icon])
+  app.root.replaceChildren(...app.root.childNodes, model)
+
+  assert.equal(app.controller.attachmentDiagnostics([]).images, 0)
+  assert.equal(app.controller.beginFileSend(`${token}-english-model-icon`, requestedFiles), 'ok')
+  assert.equal(app.send.clicks, 0)
+})
+
 test('adapter assistant and fallback user wrappers bound attachment discovery before history', () => {
   for (const marker of ['assistant', 'user-fallback']) {
     const page = {

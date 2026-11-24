@@ -243,7 +243,7 @@ test('Gemini rejects an unavailable level and does not retry a selection the pag
   assert.equal(unchanged.settings.effort, 'high')
   assert.deepEqual(f.clicks, ['open', 'dismiss', 'open', 'hover-effort', 'medium'])
 })
-function fixture() {
+function fixture({ triggerLabel = '选择 ChatGPT 模型' } = {}) {
   let open = false, view = 'effort', model = 'GPT-6', effort = 'high', now = 0, step = 0
   let focused = true, owner = true, blocked = false, duplicates = false, range = '2', afterInput = null, hit = null
   let triggerVisible = true, effortPresent = true
@@ -257,7 +257,7 @@ function fixture() {
     getBoundingClientRect() { return { left: box[0], top: box[1], width: box[2], height: box[3], right: box[0] + box[2], bottom: box[1] + box[3] } }
   })
   let trigger = node('High', { id: 'native-trigger' }, [10, 10, 160, 32], () => triggerVisible)
-  trigger.getAttribute = key => ({ 'aria-label': '选择 ChatGPT 模型', 'aria-haspopup': 'menu',
+  trigger.getAttribute = key => ({ 'aria-label': triggerLabel, 'aria-haspopup': 'menu',
     'aria-expanded': String(open), 'aria-controls': open ? 'native-menu' : null,
     [rules.effortAttribute]: effortPresent ? effort : null })[key] ?? null
   const models = ['GPT-6', 'GPT-5.6 Sol'].map((text, i) => {
@@ -341,6 +341,29 @@ test('the measured trigger without the legacy marker reads settings and closes i
   assert.equal(f.isOpen(), false)
   assert.equal(f.composer.draft, 'keep this draft exactly')
   assert.equal(shared.validFocusModelSettings(result.settings), true)
+})
+
+test('an English page with a localized trigger label still reads the model and effort', async () => {
+  // 2026-11-23: the account language was English and the Chinese aria-label never matched,
+  // leaving the focus view on 正在等待模型控件… with modelSettingsReady false.
+  for (const triggerLabel of ['Choose ChatGPT model', 'Model selector', null]) {
+    const f = fixture({ triggerLabel })
+    assert.equal(f.context.queryAll([CHATGPT_PAGE.focus.modelSettings.triggerSelector]).length, 1, String(triggerLabel))
+    const result = await f.change('read')
+    assert.equal(result.outcome, 'ok', String(triggerLabel))
+    assert.equal(result.settings.model, 'GPT-6')
+    assert.equal(result.settings.effort, 'high')
+    assert.equal(f.isOpen(), false)
+    assert.equal(f.composer.draft, 'keep this draft exactly')
+  }
+})
+
+test('the ChatGPT trigger and file-draft ignore rules do not depend on the UI language', () => {
+  for (const selector of [CHATGPT_PAGE.focus.modelSettings.triggerSelector, CHATGPT_PAGE.fileDraftIgnoreSelector]) {
+    assert.ok(selector.split(',').some(part => !part.includes('aria-label')), selector)
+  }
+  assert.ok([].concat(CHATGPT_PAGE.focus.edit.cancelLabel).includes('Cancel'))
+  assert.ok(CHATGPT_PAGE.focus.edit.buttonSelectors.some(selector => selector.includes('"Edit message"')))
 })
 
 test('confirmed settings survive trigger replacement and temporary removal without opening the menu', async () => {

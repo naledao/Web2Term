@@ -93,6 +93,26 @@ ChatGPT 的模型选项来自当前网页菜单；DeepSeek 仍使用用户指定
 回归夹具按按钮实际属性匹配选择器，覆盖旧属性缺失时的首次读取；不再直接放行任意已配置选择器。
 构建通过，等待用户测试。
 
+## 2026-11-23：英文界面下一直「正在等待模型控件…」
+
+用户在另一台机器上使用英文界面的 ChatGPT（原始视图显示 `Ask ChatGPT`，输入框内是 `High ⌄` 按钮）。
+`chatgpt-focus-ui-2026-11-23T16-08-42-490Z-1296-1.log` 第 3、4 行为 `"ready":true,"modelSettingsReady":false`：
+输入框已找到，模型触发器始终未匹配。
+
+原触发器选择器要求 `aria-label="选择 ChatGPT 模型"`，这个标签随账号语言本地化，英文页面不存在。
+现改为 `button[aria-haspopup="menu"][data-selected-reasoning-effort]`：属性名不随语言变化，
+定位时仍要求唯一、可见、可用，打开后仍核对 `aria-controls` / `aria-labelledby` 双向关联。
+`fileDraftIgnoreSelector` 同时保留中文标签与该属性组合。
+
+同一平台中其他依赖中文的匹配一并补充英文候选，**均未实测**，排在已实测的中文项之后：
+发送 `Send prompt` / `Send`（限定输入框底栏）、停止 `Stop` / `Stop streaming`（裸 `Stop` 只在底栏内匹配，
+避免全页误判让自动化静默停止）、编辑 `Edit message`、取消 `Cancel`、文件预览 `Download` / `Close`。
+`downloadLabel`、`closeLabel`、`cancelLabel` 改为接受字符串或多语言数组。
+
+英文模型菜单内部结构（`menuitemradio`、滑杆、强度属性）沿用中文页面的实测，未在英文页面单独验证。
+如英文页面仍读取失败，请在英文界面下运行 `chatgpt-model-settings-probe.cjs` 并提供日志。
+构建通过，等待用户测试。
+
 ## 用户验收
 
 智能体只完成静态检查和 `npm run build`，不执行测试、启动 Electron 或访问真实页面。

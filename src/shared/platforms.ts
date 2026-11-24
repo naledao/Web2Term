@@ -270,7 +270,8 @@ export interface PageAdapter {
  * `assistantSelectors`; these are the parts only the focus view uses.
  */
 export interface FocusPageRules {
-  files?: { nativeLinkSelector: string; viewerSelector: string; headerSelector: string; downloadLabel: string; closeLabel: string }
+  /** Labels accept one string or one per UI language (the page follows the account's language). */
+  files?: { nativeLinkSelector: string; viewerSelector: string; headerSelector: string; downloadLabel: string | string[]; closeLabel: string | string[] }
   /** Citation popovers are read after the user hovers or opens the focus trigger. */
   citations?: {
     triggerSelector: string; popupSelector: string
@@ -331,7 +332,7 @@ export interface FocusPageRules {
     buttonSelectors: string[]
     editorSelector: string
     submitSelector: string
-    cancelLabel: string
+    cancelLabel: string | string[]
     submissionPath: string
   }
   /**
@@ -668,10 +669,18 @@ export const CHATGPT_PAGE: PageAdapter = {
    * Scoped entry first, for the same reason as the stop button: `queryFirst` searches the
    * whole document, and `data-composer-footer-responsive` is the footer the probe walked up to.
    */
+  /*
+   * English UI (2026-11-23, user screenshot: "Ask ChatGPT"): the labels follow the account
+   * language. The English entries are NOT measured yet; they are kept after the measured
+   * Chinese ones so a Chinese page resolves exactly as before.
+   */
   sendButtonSelectors: [
     '[data-composer-footer-responsive] button[aria-label="发送"]',
     'button[aria-label="发送"]',
+    '[data-composer-footer-responsive] button[aria-label="Send prompt"]',
+    '[data-composer-footer-responsive] button[aria-label="Send"]',
     '[data-testid="send-button"]',
+    'button[aria-label="Send prompt"]',
     'button[aria-label="Send message"]',
     'button[aria-label="发送消息"]'
   ],
@@ -700,6 +709,10 @@ export const CHATGPT_PAGE: PageAdapter = {
   stopButtonSelectors: [
     '[data-composer-footer-responsive] button[aria-label="停止"]',
     'button[aria-label="停止"]',
+    // English UI, unmeasured. A bare "Stop" stays scoped to the composer footer: an unscoped
+    // false positive here silently stops the automation (see above).
+    '[data-composer-footer-responsive] button[aria-label="Stop"]',
+    '[data-composer-footer-responsive] button[aria-label="Stop streaming"]',
     '[data-testid="stop-button"]',
     'button[aria-label="Stop generating"]',
     'button[aria-label="Stop streaming"]',
@@ -748,7 +761,8 @@ export const CHATGPT_PAGE: PageAdapter = {
   fileSplitNameCards: true,
   // 2026-10-05 attachment capture: this button contains the selected model.
   // Version text such as GPT-6.1 must not look like a file draft or uncleared upload.
-  fileDraftIgnoreSelector: 'button[aria-label="选择 ChatGPT 模型"]',
+  // The data attribute matches the same button whatever the UI language (2026-11-23 English page).
+  fileDraftIgnoreSelector: 'button[aria-label="选择 ChatGPT 模型"], button[aria-haspopup="menu"][data-selected-reasoning-effort]',
   /*
    * The focus view's reads. The stop button decides generating, and the stable message id
    * anchors the reply to a send.
@@ -779,7 +793,8 @@ export const CHATGPT_PAGE: PageAdapter = {
     // tabpanel with viewer-header, and its 下载 button producing the original Blob.
     files: { nativeLinkSelector: 'span[data-d-component="pressable"][role="link"][tabindex="0"]',
       viewerSelector: '[role="tabpanel"][data-app-shell-tab-panel-controller]', headerSelector: '[data-testid="viewer-header"]',
-      downloadLabel: '下载', closeLabel: '关闭' },
+      // English labels are unmeasured; the page follows the account language.
+      downloadLabel: ['下载', 'Download'], closeLabel: ['关闭', 'Close'] },
     // User-run model-settings probes 2026-10-24T16-38 and T16-43:
     // one shared Radix menu, hidden model track with aria-checked, visible
     // reasoning slider 0..2, and the trigger's selected effort even when closed.
@@ -787,7 +802,10 @@ export const CHATGPT_PAGE: PageAdapter = {
       kind: 'chatgpt',
       newChatPath: '/', conversationPathPattern: '^/(?:g/[^/?#]+/)?c/[^/?#]+/?$',
       // User probe 2026-10-29T06-21: the legacy data-codex-intelligence-trigger is gone.
-      triggerSelector: 'button[aria-label="选择 ChatGPT 模型"][aria-haspopup="menu"][data-selected-reasoning-effort]',
+      // 2026-11-23 English page: aria-label is localized ("选择 ChatGPT 模型" only on a Chinese
+      // page), so the trigger is found by its menu role and effort attribute alone. The lookup
+      // still requires exactly one visible match and the aria-controls/aria-labelledby pairing.
+      triggerSelector: 'button[aria-haspopup="menu"][data-selected-reasoning-effort]',
       modelSelector: '[role="menuitemradio"]', viewToggleSelector: '[data-model-picker-view-toggle]',
       effortAttribute: 'data-selected-reasoning-effort', sliderSelector: '[data-reasoning-slider]',
       sliderRootSelector: '[data-model-picker-power-slider] [data-orientation="horizontal"]',
@@ -819,9 +837,10 @@ export const CHATGPT_PAGE: PageAdapter = {
     edit: {
       turnSelector: '[data-turn-key]', turnIdAttr: 'data-turn-key',
       userTextSelector: '[data-content-search-unit-key$=":user"]',
-      buttonSelectors: ['button[aria-label="编辑消息"]'],
-      editorSelector: '[contenteditable="true"][data-composer-markdown][aria-label="编辑消息"]',
-      submitSelector: 'button[type="submit"]', cancelLabel: '取消',
+      // English labels are unmeasured; the page follows the account language.
+      buttonSelectors: ['button[aria-label="编辑消息"]', 'button[aria-label="Edit message"]'],
+      editorSelector: '[contenteditable="true"][data-composer-markdown][aria-label="编辑消息"], [contenteditable="true"][data-composer-markdown][aria-label="Edit message"]',
+      submitSelector: 'button[type="submit"]', cancelLabel: ['取消', 'Cancel'],
       submissionPath: '/backend-api/f/conversation'
     },
     reasoningScopeSelector: '[data-content-search-turn-key]',

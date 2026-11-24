@@ -61,7 +61,10 @@ class Element {
 }
 const fileRules = { nativeLinkSelector: 'span[data-d-component="pressable"][role="link"][tabindex="0"]',
   viewerSelector: '[role="tabpanel"][data-app-shell-tab-panel-controller]', headerSelector: '[data-testid="viewer-header"]', downloadLabel: '下载', closeLabel: '关闭' }
-function page() {
+// The shipped ChatGPT rules, for the account-language cases. Only the static rule table is read.
+const shippedFileRules = load('../src/shared/platforms.ts', { './types': { chatgptConversationIdFromPath() {}, isConversationId() {} } })
+  .CHATGPT_PAGE.focus.files
+function page({ rules = fileRules, downloadLabel = '下载', closeLabel = '关闭文件预览' } = {}) {
   let opens = 0, downloads = 0, panels = []
   const listeners = new Map()
   const link = new Element('span', { 'data-d-component': 'pressable', role: 'link', tabindex: '0', 'aria-label': '下载 HTML 页面' },
@@ -69,13 +72,13 @@ function page() {
   link.onclick = event => { if (event?.isTrusted) { opens++; panels = [panel] } }
   const dil = new Element('div', { 'data-dil-message-id': 'answer-1' }, [new Element('p', {}, [link])])
   const answer = new Element('article', {}, [dil])
-  const download = new Element('button', { 'aria-label': '下载', 'aria-busy': 'false' })
+  const download = new Element('button', { 'aria-label': downloadLabel, 'aria-busy': 'false' })
   download.onclick = event => { if (event?.isTrusted) downloads++ }
-  const close = new Element('button', { 'aria-label': '关闭文件预览' })
+  const close = new Element('button', { 'aria-label': closeLabel })
   close.onclick = () => { panels = [] }
   const panel = new Element('div', { role: 'tabpanel', 'data-app-shell-tab-panel-controller': 'true',
     'data-tab-id': 'native-file-1', 'aria-label': 'article_views_ii.html' }, [new Element('header', { 'data-testid': 'viewer-header' }, [download, close]), new Element('iframe')])
-  const context = createContext({ PAGE: { focus: { files: fileRules, smartUi: { rootSelector: '[data-dil-message-id]', sourceIdAttr: 'data-dil-message-id' } } },
+  const context = createContext({ PAGE: { focus: { files: rules, smartUi: { rootSelector: '[data-dil-message-id]', sourceIdAttr: 'data-dil-message-id' } } },
     Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL, location: { pathname: '/c/one' }, state: { programmatic: false },
     focusCitationOperation: null, focusEditing: null, focusModeChanging: null, focusFileControl: null, fileSend: null,
     innerWidth: 1000, innerHeight: 800, setTimeout, clearTimeout, queueMicrotask,
@@ -127,6 +130,21 @@ test('the observed href-less pressable requires an acknowledged native click to 
   assert.deepEqual(f.counts(), { opens: 1, downloads: 1 })
   f.api.closeFocusFileViewer(viewer, '/c/one')
   assert.equal(f.api.readFocusFileViewer('/c/one').outcome, 'pending')
+})
+
+test('the shipped ChatGPT rules find the viewer controls on both Chinese and English pages', () => {
+  for (const [downloadLabel, closeLabel] of [['下载', '关闭文件预览'], ['Download', 'Close file preview']]) {
+    const f = page({ rules: shippedFileRules, downloadLabel, closeLabel })
+    f.dispatch('click', f.link)
+    const viewers = f.context.focusFileViewersOf()
+    assert.equal(viewers.length, 1, downloadLabel)
+    assert.equal(viewers[0].download, f.download)
+    assert.equal(viewers[0].close, f.close)
+  }
+  // An unrelated label is not a download control, so the viewer is not offered at all.
+  const other = page({ rules: shippedFileRules, downloadLabel: 'Save' })
+  other.dispatch('click', other.link)
+  assert.equal(other.context.focusFileViewersOf().length, 0)
 })
 
 test('changed controls, ambiguous entries and another file tab cannot be activated by old metadata', () => {

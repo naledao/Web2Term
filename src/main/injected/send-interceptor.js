@@ -48,13 +48,18 @@
     sendButtonSelectors: [
       '[data-composer-footer-responsive] button[aria-label="发送"]',
       'button[aria-label="发送"]',
+      '[data-composer-footer-responsive] button[aria-label="Send prompt"]',
+      '[data-composer-footer-responsive] button[aria-label="Send"]',
       '[data-testid="send-button"]',
+      'button[aria-label="Send prompt"]',
       'button[aria-label="Send message"]',
       'button[aria-label="发送消息"]'
     ],
     stopButtonSelectors: [
       '[data-composer-footer-responsive] button[aria-label="停止"]',
       'button[aria-label="停止"]',
+      '[data-composer-footer-responsive] button[aria-label="Stop"]',
+      '[data-composer-footer-responsive] button[aria-label="Stop streaming"]',
       '[data-testid="stop-button"]',
       'button[aria-label="Stop generating"]',
       'button[aria-label="Stop streaming"]',
@@ -68,7 +73,7 @@
     messageSelectors: ['[data-content-search-unit-key]', '[data-chatgpt-selection-message-id]', '[data-dil-response][data-dil-message-id]'],
     messageIdAttr: 'data-chatgpt-selection-message-id',
     messageIdAttrs: ['data-chatgpt-selection-message-id', 'data-dil-message-id'],
-    fileDraftIgnoreSelector: 'button[aria-label="选择 ChatGPT 模型"]',
+    fileDraftIgnoreSelector: 'button[aria-label="选择 ChatGPT 模型"], button[aria-haspopup="menu"][data-selected-reasoning-effort]',
     disabledControlSelectors: [],
     fileTurnPositionAttr: '',
     fileTurnPositionSelector: '',
@@ -845,8 +850,10 @@
       const header = panel.querySelector(rules.headerSelector), fileName = panel.getAttribute('aria-label') || ''
       if (!header || !panel.querySelector('iframe') || !/^[^\\/\u0000-\u001f\u007f]{1,240}$/.test(fileName) || ['.', '..'].includes(fileName)) return []
       const buttons = [...header.querySelectorAll('button[aria-label]')]
-      const download = buttons.filter(button => button.getAttribute('aria-label') === rules.downloadLabel)
-      const close = buttons.filter(button => (button.getAttribute('aria-label') || '').includes(rules.closeLabel))
+      // A label is one string or one per UI language.
+      const downloadLabels = [].concat(rules.downloadLabel), closeLabels = [].concat(rules.closeLabel)
+      const download = buttons.filter(button => downloadLabels.includes(button.getAttribute('aria-label')))
+      const close = buttons.filter(button => closeLabels.some(label => label && (button.getAttribute('aria-label') || '').includes(label)))
       if (download.length !== 1) return []
       const identity = panel.getAttribute('data-tab-id') || panel.id || fileName
       let hash = 2166136261
@@ -3604,7 +3611,7 @@
       // After submit, leave an uncertain result alone: no automatic retry or cancellation.
       if (!submitted && current() && editor?.isConnected) {
         const cancel = [...(editor.closest('form')?.querySelectorAll('button[type="button"]') || [])]
-          .find(node => collapse(node.textContent) === rules.cancelLabel)
+          .find(node => [].concat(rules.cancelLabel).includes(collapse(node.textContent)))
         if (cancel) pressButton(cancel)
       }
       if (focusEditing === token) focusEditing = null
