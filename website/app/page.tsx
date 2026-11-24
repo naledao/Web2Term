@@ -117,6 +117,11 @@ const features: { title: string; body: string; tag: string; guideUrl?: string; g
     body: '使用本机 GitHub CLI 账号搜索、筛选和排序仓库，选择目录克隆并查看进度。可让当前 AI 协助登录；此入口需要本机安装 GitHub CLI。',
     tag: 'GITHUB REPOSITORIES',
   },
+  {
+    title: '在桌面端提交反馈、查看更新',
+    body: '点击标题栏的「反馈」，登录 Web2Term 账号后可报告问题、提交建议，并在「我的反馈」查看处理进度。打开「版本更新说明」可查看各版本变化，也可一键标记全部已读。',
+    tag: 'FEEDBACK AND RELEASE NOTES',
+  },
 ]
 
 const toolboxTools = [
