@@ -127,6 +127,24 @@ func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
 	return scanUser(s.db.QueryRowContext(ctx, "SELECT "+userColumns+" FROM user_account WHERE id = ?", id))
 }
 
+// AdminEmails lists the login emails of enabled administrators, oldest account first.
+func (s *Store) AdminEmails(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT email FROM user_account WHERE role = 'ADMIN' AND enabled = 1 ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	emails := []string{}
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			return nil, err
+		}
+		emails = append(emails, email)
+	}
+	return emails, rows.Err()
+}
+
 // SetUserRole changes an account's role ("USER" or "ADMIN"); the schema rejects other values.
 func (s *Store) SetUserRole(ctx context.Context, id int64, role string) error {
 	result, err := s.db.ExecContext(ctx, "UPDATE user_account SET role = ?, updated_at = "+nowSQL+" WHERE id = ?", role, id)

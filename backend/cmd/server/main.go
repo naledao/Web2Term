@@ -13,6 +13,7 @@ import (
 
 	"web2term/backend/internal/auth"
 	"web2term/backend/internal/config"
+	"web2term/backend/internal/feedbacknotify"
 	"web2term/backend/internal/httpapi"
 	"web2term/backend/internal/store"
 )
@@ -48,7 +49,11 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	api := httpapi.New(db, accounts, log, httpapi.WithReleaseNotes(db, cfg.ReleaseNotesAdminToken), httpapi.WithFeedback(db), httpapi.WithAdmin(db))
+	options := []httpapi.Option{httpapi.WithReleaseNotes(db, cfg.ReleaseNotesAdminToken), httpapi.WithFeedback(db), httpapi.WithAdmin(db)}
+	if cfg.SMTP.Host != "" {
+		options = append(options, httpapi.WithFeedbackNotifier(feedbacknotify.New(db, auth.SMTPMailer{Config: cfg.SMTP})))
+	}
+	api := httpapi.New(db, accounts, log, options...)
 	server := &http.Server{
 		Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 20 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 60 * time.Second,

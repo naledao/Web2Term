@@ -30,7 +30,7 @@ $env:SMTP_FROM = $env:SMTP_USERNAME
 | `WEB2TERM_DB_PATH` | `data/web2term.db` | SQLite 文件；相对路径基于进程工作目录 |
 | `WEB2TERM_JWT_SECRET` | 必填 | 至少 32 字节随机密钥，重启后应保持不变；更换会使已签发令牌失效 |
 | `RELEASE_NOTES_ADMIN_TOKEN` | 空 | 更新说明管理接口的独立 Bearer 令牌；空值禁用管理接口，公共读取与已读登记仍可使用 |
-| `SMTP_HOST` | 空 | SMTP 主机，QQ 邮箱为 `smtp.qq.com` |
+| `SMTP_HOST` | 空 | SMTP 主机，QQ 邮箱为 `smtp.qq.com`；同时用于登录验证码和新反馈的管理员邮件提醒 |
 | `SMTP_PORT` | `465` | SMTP 端口 |
 | `SMTP_MODE` | `tls` | `tls` 使用隐式 TLS；`starttls` 强制 STARTTLS；不允许明文认证 |
 | `SMTP_USERNAME` | 空 | SMTP 登录账号 |

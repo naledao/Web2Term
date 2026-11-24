@@ -91,3 +91,24 @@ func TestFeedbackSchemaRejectsInvalidRows(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminEmailsListsOnlyEnabledAdministrators(t *testing.T) {
+	s := openTestStore(t)
+	ctx := t.Context()
+	first := feedbackUser(t, s, "first-admin@example.invalid", 1000)
+	feedbackUser(t, s, "user@example.invalid", 1000)
+	disabled := feedbackUser(t, s, "disabled-admin@example.invalid", 1000)
+	second := feedbackUser(t, s, "second-admin@example.invalid", 1000)
+	for _, user := range []User{first, disabled, second} {
+		if err := s.SetUserRole(ctx, user.ID, "ADMIN"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.db.Exec("UPDATE user_account SET enabled = 0 WHERE id = ?", disabled.ID); err != nil {
+		t.Fatal(err)
+	}
+	emails, err := s.AdminEmails(ctx)
+	if err != nil || len(emails) != 2 || emails[0] != first.Email || emails[1] != second.Email {
+		t.Fatalf("admin emails: %v %v", emails, err)
+	}
+}

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -110,5 +111,65 @@ func TestFeedbackRequiresLoginAndListsOnlyOwnItems(t *testing.T) {
 		if w := call("GET", "/api/v1/feedback"+query, "", owner); w.Code != 400 {
 			t.Fatalf("bad pagination %s: %d", query, w.Code)
 		}
+	}
+}
+
+type recordingNotifier struct {
+	calls chan store.Feedback
+	users chan int64
+}
+
+func (n recordingNotifier) Notify(_ context.Context, userID int64, item store.Feedback) (int, error) {
+	n.users <- userID
+	n.calls <- item
+	return 1, nil
+}
+
+func TestStoredFeedbackNotifiesAdministratorsAfterResponding(t *testing.T) {
+	_, db := fixture(t)
+	mailer := &releaseNotesMail{}
+	accounts, err := auth.New(db, mailer, strings.Repeat("fixture-secret-", 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifier := recordingNotifier{calls: make(chan store.Feedback, 4), users: make(chan int64, 4)}
+	api := New(db, accounts, slog.New(slog.NewTextHandler(io.Discard, nil)), WithFeedback(db), WithFeedbackNotifier(notifier))
+	h := api.Handler()
+	call := func(method, path, body, token string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := call("POST", "/api/user/login/code", `{"email":"owner@example.invalid"}`, ""); w.Code != 204 {
+		t.Fatalf("login code: %d", w.Code)
+	}
+	var login auth.LoginResponse
+	w := call("POST", "/api/user/login", `{"email":"owner@example.invalid","code":"`+mailer.code+`"}`, "")
+	if err := json.Unmarshal(w.Body.Bytes(), &login); err != nil || w.Code != 200 {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	if w := call("POST", "/api/v1/feedback", `{"category":"praise","content":"x"}`, login.AccessToken); w.Code != 400 {
+		t.Fatalf("invalid submit: %d", w.Code)
+	}
+	w = call("POST", "/api/v1/feedback", `{"category":"feature","content":"想要导出"}`, login.AccessToken)
+	var created store.Feedback
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || w.Code != 201 {
+		t.Fatalf("submit: %d %s", w.Code, w.Body.String())
+	}
+	api.Shutdown() // waits for the background notification
+	if len(notifier.calls) != 1 {
+		t.Fatalf("notifications: %d, want 1", len(notifier.calls))
+	}
+	if got := <-notifier.calls; got.ID != created.ID || got.Content != "想要导出" || got.Email != "owner@example.invalid" {
+		t.Fatalf("notified item: %+v", got)
+	}
+	user, err := db.UserByID(t.Context(), <-notifier.users)
+	if err != nil || user.Email != "owner@example.invalid" {
+		t.Fatalf("notified user: %+v %v", user, err)
 	}
 }

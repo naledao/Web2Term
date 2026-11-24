@@ -19,6 +19,12 @@ type FeedbackStore interface {
 	ListFeedback(context.Context, int64, int, int) ([]store.Feedback, int, error)
 }
 
+// FeedbackNotifier tells administrators about a stored submission. It returns
+// how many administrators were addressed and any delivery error.
+type FeedbackNotifier interface {
+	Notify(ctx context.Context, userID int64, item store.Feedback) (int, error)
+}
+
 type feedbackAPI struct {
 	store FeedbackStore
 	now   func() time.Time
@@ -27,6 +33,39 @@ type feedbackAPI struct {
 // WithFeedback mounts the signed-in feedback API on the shared listener and database.
 func WithFeedback(database FeedbackStore) Option {
 	return func(s *Server) { s.feedback = &feedbackAPI{store: database, now: time.Now} }
+}
+
+// WithFeedbackNotifier emails administrators after each stored submission.
+func WithFeedbackNotifier(notifier FeedbackNotifier) Option {
+	return func(s *Server) { s.feedbackNotifier = notifier }
+}
+
+// notifyFeedback runs after the response so slow or failing mail never affects
+// the submission. Logs carry only the feedback ID and counts, never content or addresses.
+func (s *Server) notifyFeedback(userID int64, item store.Feedback) {
+	if s.feedbackNotifier == nil {
+		return
+	}
+	// Add must not race with Shutdown's Wait; after shutdown starts, new emails are dropped.
+	s.notifyMu.Lock()
+	if s.notifyClosed {
+		s.notifyMu.Unlock()
+		return
+	}
+	s.notifications.Add(1)
+	s.notifyMu.Unlock()
+	go func() {
+		defer s.notifications.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		admins, err := s.feedbackNotifier.Notify(ctx, userID, item)
+		switch {
+		case err != nil:
+			s.log.Error("feedback notification failed", "feedbackId", item.ID, "admins", admins)
+		case admins == 0:
+			s.log.Warn("feedback notification skipped: no enabled administrator", "feedbackId", item.ID)
+		}
+	}()
 }
 
 const (
@@ -125,6 +164,7 @@ func (s *Server) createFeedback(w http.ResponseWriter, r *http.Request) {
 		feedbackFailure(w, http.StatusInternalServerError, "INTERNAL_ERROR", "反馈保存失败，请稍后重试")
 	default:
 		writeJSON(w, http.StatusCreated, item)
+		s.notifyFeedback(userID, item)
 	}
 }
 

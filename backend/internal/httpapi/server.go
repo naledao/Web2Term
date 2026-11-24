@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -42,6 +43,11 @@ type Server struct {
 	releaseNotes http.Handler
 	feedback     *feedbackAPI
 	admin        *adminAPI
+	// Background feedback emails; Shutdown waits for them before the database closes.
+	feedbackNotifier FeedbackNotifier
+	notifications    sync.WaitGroup
+	notifyMu         sync.Mutex
+	notifyClosed     bool
 }
 
 type Option func(*Server)
@@ -110,7 +116,13 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-func (s *Server) Shutdown() { s.hub.shutdown() }
+func (s *Server) Shutdown() {
+	s.hub.shutdown()
+	s.notifyMu.Lock()
+	s.notifyClosed = true
+	s.notifyMu.Unlock()
+	s.notifications.Wait()
+}
 
 func (s *Server) loginCode(w http.ResponseWriter, r *http.Request) {
 	if !s.limits.allow(r.RemoteAddr, "code", 5) {
