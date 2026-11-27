@@ -165,7 +165,7 @@
     prefixIncludesReplyProtocol: false,
     replyProtocolFullLength: 0,
     injectedCount: 0,
-    /** True while WE are driving the composer; suppresses prefixing/interception. */
+    /** True while we own the composer or await the prompt configuration after completion. */
     programmatic: false,
     lastCommandMessageId: null,
     // A settled command is waiting for its result even while awaitingReplySince
@@ -211,7 +211,7 @@
   let computerPageEpoch = null
 
   let taskPromptConfigured = false
-  const resetTaskPrompt = (generation = state.taskPromptGeneration + 1) => {
+  const resetTaskPrompt = (generation) => {
     computerReplyWait = null
     computerSourceSubmissionId = null
     mailSourceSubmissionId = null
@@ -409,6 +409,24 @@
   }
 
   let pendingAssistantCompletion = null
+  let completionBoundaryTimer = null
+  const reportedCompletions = new Set()
+  const completionKeyOf = (node) => {
+    const id = messageIdOf(node)
+    return id ? JSON.stringify([location.pathname, id]) : null
+  }
+  const releaseCompletionBoundary = () => {
+    if (completionBoundaryTimer === null) return
+    clearTimeout(completionBoundaryTimer)
+    completionBoundaryTimer = null
+    state.programmatic = false
+  }
+  const waitForCompletionBoundary = () => {
+    // The main process owns the generation. Hold new sends until its configuration
+    // arrives, with a timeout for a discarded event or a lost configuration.
+    state.programmatic = true
+    completionBoundaryTimer = setTimeout(releaseCompletionBoundary, 2000)
+  }
   let geminiRefusal = null
   const setReplyWaiting = (since, reason, messageId = null, computerBaseline = null, commandResult = false) => {
     pendingAssistantCompletion = null
@@ -424,6 +442,7 @@
       pageEpoch: computerPageEpoch
     } : null
     if (reason === 'history-baseline' || reason === 'configured-baseline' || reason === 'task-ended') {
+      releaseCompletionBoundary()
       computerSourceSubmissionId = null
       mailSourceSubmissionId = null
     }
@@ -3672,8 +3691,17 @@
     } catch (_) { /* The send is still held; the notice is only a courtesy. */ }
   }
 
+  const holdSendForCompletion = (event) => {
+    if (completionBoundaryTimer === null || !event.isTrusted) return false
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    showSendBlockNotice('正在同步任务状态，草稿已保留。', 2500)
+    return true
+  }
+
   const intercept = (event) => {
     const element = getComposer(event.target)
+    if (element && holdSendForCompletion(event)) return true
     // Our own sends must pass through untouched: no prefix, no interception.
     if (state.programmatic) {
       noteUserSend(event, 'programmatic-send', element)
@@ -3908,6 +3936,7 @@
     if (!editor) return false
     if (event.type === 'click' && !event.target.closest(PAGE.nativeEdit.submitSelector)) return false
     if (event.type === 'keydown' && (event.target !== editor || event.shiftKey || event.isComposing || event.repeat || event.defaultPrevented)) return true
+    if (holdSendForCompletion(event)) return true
     // The automatic resend armed its own attempt before pressing send.
     if (!event.isTrusted || nativeEditRetry?.auto) return true
     if (collapse(editor.value) !== '') startNativeEditRetry(row, false)
@@ -5238,7 +5267,12 @@
       setReplyWaiting(0, 'non-command-reply', messageId)
       if (completed) {
         state.taskActive = false
-        resetTaskPrompt()
+        const key = completionKeyOf(latest)
+        if (key) {
+          reportedCompletions.add(key)
+          if (reportedCompletions.size > 256) reportedCompletions.delete(reportedCompletions.values().next().value)
+        }
+        waitForCompletionBoundary()
       }
       // A resend that gave up still ends the task, but its raw DSML never enters the transcript.
       if (!dsmlInProse(text, latest)) {
@@ -5282,6 +5316,13 @@
 
     if (!node) {
       noteScan('', 'no-visible-turns')
+      return
+    }
+    // A newer turn can temporarily disappear while the site updates its visible branch.
+    // A previously reported completion must never consume the current reply wait.
+    const completedReply = completionKeyOf(node)
+    if (completedReply && reportedCompletions.has(completedReply)) {
+      noteScan(turnKeyOf(node), 'completed-reply-history')
       return
     }
     // Before the role check: a turn cut off while thinking may have no answer marker yet.
@@ -5621,7 +5662,7 @@
    * in auto mode the command it finds should run.
    */
   const checkNow = () => {
-    if (state.failedCommand?.status === 'uncertain') return false
+    if (completionBoundaryTimer !== null || state.failedCommand?.status === 'uncertain') return false
     if (settleTimer) clearTimeout(settleTimer)
     settleTimer = null
     state.lastCommandMessageId = null
@@ -6802,6 +6843,8 @@
     configure(config) {
       if (!config) return { ...state }
       if (typeof config.computerPageEpoch === 'string' && config.computerPageEpoch !== computerPageEpoch) {
+        releaseCompletionBoundary()
+        reportedCompletions.clear()
         computerPageEpoch = config.computerPageEpoch
         computerReplyWait = null
         pendingComputerRecognition = null
@@ -6842,6 +6885,7 @@
           config.taskPromptGeneration >= state.taskPromptGeneration &&
           (!taskPromptConfigured || config.taskPromptGeneration > state.taskPromptGeneration)) {
         if (config.taskPromptGeneration > state.taskPromptGeneration) {
+          releaseCompletionBoundary()
           computerReplyWait = null
           computerSourceSubmissionId = null
           mailSourceSubmissionId = null
@@ -7722,9 +7766,18 @@
         !/^[a-f0-9]{8}$/.test(request.signature || '') || location.pathname !== expectedPath) return null
       if (focusCitationOperation || focusEditing || focusModeChanging || state.programmatic || fileSend) return { outcome: 'busy', sources: [] }
       const locate = () => {
-        const nodes = queryAllAssistant().filter(node => messageIdOf(node) === request.sourceMessageId && isVisibleElement(node))
-        return nodes.length === 1 ? focusCitationGroupsOf(nodes[0]).find(group =>
-          group.data.index === request.index && group.data.signature === request.signature) : null
+        // The selection wrapper and its nested DIL response can both carry the
+        // message id. They count as one match only if they resolve to the same trigger.
+        let match = null
+        for (const node of queryAllAssistant()) {
+          if (messageIdOf(node) !== request.sourceMessageId || !isVisibleElement(node)) continue
+          const group = focusCitationGroupsOf(node).find(candidate =>
+            candidate.data.index === request.index && candidate.data.signature === request.signature)
+          if (!group) continue
+          if (match && match.element !== group.element) return null
+          match = group
+        }
+        return match
       }
       const group = locate()
       if (!group || group.expected > 40) return null
@@ -7773,6 +7826,9 @@
     prepareFocusCitationClick(token) {
       const operation = focusCitationOperation
       if (!operation || operation.token !== token || operation.clicked) return null
+      // Grouped native badges show their list on hover. Clicking the badge can
+      // open its primary source, so reserve clicks for explicitly selected cards.
+      if (operation.group.native && operation.group.expected > 1) return null
       operation.clicked = true
       const point = operation.point()
       if (point) operation.clickArmed = true

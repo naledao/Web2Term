@@ -4322,7 +4322,8 @@ body {
   margin-top: 0;
 }
 
-.ssh-connect__field > span {
+.ssh-connect__field > span,
+.ssh-connect__password-label {
   display: block;
   margin-bottom: 7px;
   color: #25324a;
@@ -4353,6 +4354,49 @@ body {
 .ssh-connect__input:focus {
   border-color: #7184f7;
   box-shadow: 0 0 0 3px rgba(82, 101, 255, 0.1);
+}
+
+.ssh-connect__password {
+  position: relative;
+}
+
+.ssh-connect__password .ssh-connect__input {
+  padding-inline-end: 68px;
+}
+
+.ssh-connect__password-toggle {
+  position: absolute;
+  inset-block: 5px;
+  inset-inline-end: 5px;
+  min-width: 54px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ssh-connect__password-toggle:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.ssh-connect__password-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.ssh-connect__password-toggle:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.ssh-connect__password-error {
+  margin: 6px 0 0;
+  color: #a1242d;
+  font-size: 13px;
 }
 
 .ssh-connect__row {
@@ -11386,8 +11430,13 @@ body {
 
 .workspace[data-theme='dark'] .ssh-connect__host-copy strong,
 .workspace[data-theme='dark'] .ssh-connect__field > span,
+.workspace[data-theme='dark'] .ssh-connect__password-label,
 .workspace[data-theme='dark'] .ssh-connect__advanced-toggle {
   color: #dce8f8;
+}
+
+.workspace[data-theme='dark'] .ssh-connect__password-error {
+  color: #ff9ca5;
 }
 
 .workspace[data-theme='dark'] .ssh-connect__host-copy small,

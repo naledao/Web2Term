@@ -221,6 +221,7 @@ export const IpcChannels = {
   extraTerminalInterrupt: 'extra-terminals:interrupt',
   extraTerminalClose: 'extra-terminals:close',
   extraTerminalsChanged: 'extra-terminals:changed',
+  extraTerminalPtyOpen: 'extra-terminals:pty-open',
   backgroundTasksGet: 'background-tasks:get',
   backgroundTaskStop: 'background-tasks:stop',
   backgroundTasksChanged: 'background-tasks:changed',
@@ -233,6 +234,7 @@ export const IpcChannels = {
   terminalNotesChanged: 'terminal-notes:changed',
   sshGetState: 'ssh:get-state',
   sshListHosts: 'ssh:list-hosts',
+  sshGetSavedPassword: 'ssh:get-saved-password',
   sshConnect: 'ssh:connect',
   sshDisconnect: 'ssh:disconnect',
   sshDismiss: 'ssh:dismiss',
@@ -1873,16 +1875,22 @@ export interface ExtraTerminal {
   title: string
   /** Fixed at creation from what the session terminal was connected to then. */
   transport: 'local' | 'ssh' | 'web2term'
+  sshHostId?: string
   /** Header text, e.g. 本机 · PowerShell, or the SSH host / web2term device. */
   label: string
   /** Why a remote terminal cannot take commands right now; empty when it can. */
   message: string
   shellKind: EnvironmentKind
   alive: boolean
+  opening?: boolean
   running: boolean
   cwd: string
   lines: TerminalLine[]
 }
+
+export interface ExtraTerminalPtySize { cols: number; rows: number }
+
+export type ExtraTerminalPtyRestart = 'reconnect' | 'reset'
 
 export interface ExtraTerminalsState {
   terminals: ExtraTerminal[]
@@ -1895,8 +1903,8 @@ export interface ExtraTerminalsState {
 /**
  * A stored SSH target.
  *
- * The password is NOT part of this: it lives encrypted in the database, and all
- * the renderer ever learns is whether one is stored.
+ * The host list exposes whether an encrypted password is stored. The SSH form
+ * requests the password separately when the user chooses to show it.
  */
 export interface SshHost {
   id: string
@@ -2702,6 +2710,7 @@ export interface AppApi {
   interruptExtraTerminal(id: string): Promise<void>
   closeExtraTerminal(id: string): Promise<ExtraTerminalsState>
   onExtraTerminalsChanged(listener: (state: ExtraTerminalsState) => void): () => void
+  openExtraTerminalPty(id: string, restart?: ExtraTerminalPtyRestart): Promise<void>
   getBackgroundTasks(sessionId: string): Promise<BackgroundTasksState>
   getScheduledTasks(sessionId: string): Promise<ScheduledTasksState>
   saveScheduledTask(draft: ScheduledTaskDraft): Promise<ScheduledTasksState>
@@ -2778,6 +2787,8 @@ export interface AppApi {
 
   /** Saved SSH targets, newest first. */
   listSshHosts(): Promise<SshHost[]>
+  /** Read one saved SSH password after the user chooses to show it. */
+  getSavedSshPassword(id: string): Promise<string | null>
   getRemoteRipgrepState(sessionId: string): Promise<RemoteRipgrepState | null>
   dismissRemoteRipgrep(request: RemoteRipgrepRequest): Promise<boolean>
   requestRemoteRipgrepInstall(request: RemoteRipgrepRequest): Promise<RemoteRipgrepTaskResult>

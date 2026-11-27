@@ -6,7 +6,8 @@ import { Menu } from '@base-ui/react/menu'
 import { Dialog } from '@base-ui/react/dialog'
 import AvatarEditor from 'react-avatar-editor'
 import type { AvatarEditorRef } from 'react-avatar-editor'
-import SshDirectoryPicker from './components/SshDirectoryPicker'
+import SshTerminalLocation from './components/SshTerminalLocation'
+import SshPasswordField from './components/SshPasswordField'
 import { canEditSshTextFile } from '@shared/ssh-file-edit'
 import type { SshTextFileTarget } from '@shared/ssh-file-edit'
 import RemoteRipgrepDialog from './components/RemoteRipgrepDialog'
@@ -22,11 +23,12 @@ import ToolPromptsDialog from './components/ToolPromptsDialog'
 import type { FocusToolSkill } from '@shared/focus-skills'
 import type { AutonomousTaskState } from '@shared/autonomous-task'
 import TerminalActionsMenu from './components/TerminalActionsMenu'
+import TerminalCommandInput from './components/TerminalCommandInput'
 import ToolboxPanel from './components/ToolboxPanel'
 import TerminalNotesPanel from './components/TerminalNotesPanel'
 import ExtraTerminalPane from './components/ExtraTerminalPane'
-import OutputText from './components/OutputText'
-import { OUTPUT_WINDOW_CHARS } from '@shared/output-window'
+import TerminalTranscript from './components/TerminalTranscript'
+import ExtraSshTerminalPane from './components/ExtraSshTerminalPane'
 import BackgroundTasksPane from './components/BackgroundTasksPane'
 import ScheduledTasksPane from './components/ScheduledTasksPane'
 import type { ScheduledTasksState } from '@shared/scheduled-tasks'
@@ -48,8 +50,7 @@ import type { QuestionChatState } from '@shared/deepseek-question'
 import { supportsSelectionQuestion } from '@shared/deepseek-question'
 import type { CommandLanguage } from './components/CommandViewer'
 import { conversationScrollKey } from './conversation-scroll'
-import { canNavigateCommandHistory, navigateCommandHistory, terminalCommandHistory } from './terminal-command-history'
-import type { CommandHistoryCursor } from './terminal-command-history'
+import { terminalCommandHistory } from './terminal-command-history'
 import brandIcon from './assets/brand-icon.png'
 import type { IApi as FilemanagerApi, IEntity as FilemanagerEntity } from '@svar-ui/react-filemanager'
 import type { CSSProperties, FormEvent, JSX, PointerEvent as ReactPointerEvent } from 'react'
@@ -281,18 +282,6 @@ function isRecentQuestion(payloadJson: string): boolean {
   } catch {
     return false
   }
-}
-
-function formatTerminalCommand(text: string, posix: boolean): string {
-  if (!posix) return `> ${text}`
-  return /(?:^|\s)[$#]\s+\S/.test(text) ? text : `$ ${text}`
-}
-
-type TerminalTranscriptLine = TerminalState['lines'][number]
-
-interface TerminalTranscriptBlock {
-  command: TerminalTranscriptLine | null
-  lines: TerminalTranscriptLine[]
 }
 
 function formatTime(epochMs: number): string {
@@ -592,8 +581,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [cookieSetDraft, setCookieSetDraft] = useState('')
   const [cookieSetResult, setCookieSetResult] = useState<SessionImportResult | null>(null)
   const [importingCookieSet, setImportingCookieSet] = useState(false)
-  const [commandDraft, setCommandDraft] = useState('')
-  const commandHistoryCursor = useRef<CommandHistoryCursor | null>(null)
   // Keep the opened instruction stable while the runner moves on to another command.
   const [commandPreview, setCommandPreview] = useState<{ command: string; description: string; language: CommandLanguage } | null>(null)
   const commandPreviewOpen = commandPreview !== null
@@ -675,6 +662,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     password: '',
     proxy: ''
   })
+  const sshPasswordHostId = sshHosts.find((host) => host.id === sshDraft.id && host.hasPassword)?.id ?? null
   const [sshProxyDraft, setSshProxyDraft] = useState('')
   const [softwareProxyDraft, setSoftwareProxyDraft] = useState(DEFAULT_SOFTWARE_PROXY)
   const [softwareProxyError, setSoftwareProxyError] = useState('')
@@ -696,11 +684,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     : web2termActive ? `web2term:${terminal?.transport?.deviceId ?? ''}` : 'local'
   const commandHistory = useMemo(() => terminalCommandHistory(sessionId, commandHistoryTarget), [sessionId, commandHistoryTarget])
   const commandHistoryLines = sshActive ? ssh.lines : terminal?.lines
-  useEffect(() => {
-    if (commandHistoryCursor.current) setCommandDraft(commandHistoryCursor.current.draft)
-    commandHistoryCursor.current = null
-  }, [commandHistory])
-  useEffect(() => { commandHistory.observe(commandHistoryLines ?? []) }, [commandHistory, commandHistoryLines])
   const posixTerminal = remoteTerminal || terminal?.shellKind === 'posix'
   /**
    * True while a host is actually in charge — as opposed to the pane merely still
@@ -716,7 +699,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const toolboxPaneRef = useRef<HTMLElement>(null)
   const panelRef = useRef<HTMLElement>(null)
   const terminalSwitchRef = useRef<HTMLButtonElement>(null)
-  const terminalOutputRef = useRef<HTMLDivElement>(null)
   const promptBodyRef = useRef<HTMLDivElement>(null)
   const promptTriggerRef = useRef<HTMLButtonElement | null>(null)
   const promptCloseButtonRef = useRef<HTMLButtonElement>(null)
@@ -827,22 +809,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     if (!conversationId) return ''
     return conversations.find((conversation) => conversation.id === conversationId)?.goal?.trim() ?? ''
   }, [conversations, conversationId])
-
-  const visibleTerminalLines = sshActive ? ssh?.lines ?? [] : terminal?.lines ?? []
-  const terminalBlocks = useMemo<TerminalTranscriptBlock[]>(() => {
-    const lines = sshActive ? ssh?.lines ?? [] : terminal?.lines ?? []
-    const blocks: TerminalTranscriptBlock[] = []
-
-    for (const line of lines) {
-      if (line.kind === 'command' || blocks.length === 0) {
-        blocks.push(line.kind === 'command' ? { command: line, lines: [] } : { command: null, lines: [line] })
-      } else {
-        blocks[blocks.length - 1].lines.push(line)
-      }
-    }
-
-    return blocks
-  }, [sshActive, ssh?.lines, terminal?.lines])
 
   useEffect(() => {
     if (interceptor?.taskStartedAt == null || interceptor.taskFinishedAt != null) return
@@ -1161,14 +1127,6 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   useEffect(() => {
     if (!editing) setAddress(embed.url)
   }, [embed.url, editing])
-
-  // Keep the newest terminal output in view. Both transcripts are watched: while
-  // an SSH session is attached the pane renders the SSH one, and the model's own
-  // commands are mirrored into it.
-  useEffect(() => {
-    const element = terminalOutputRef.current
-    if (element && terminalVisible) element.scrollTop = element.scrollHeight
-  }, [terminal?.lines, ssh?.lines, terminalVisible])
 
   /**
    * The embedded page is a NATIVE view, not a DOM node, so it cannot be
@@ -1550,27 +1508,17 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     }
   }, [])
 
-  const submitCommand = useCallback(
-    async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-      event.preventDefault()
-      const text = commandDraft
-      commandHistory.observe(commandHistoryLines ?? [])
-      commandHistory.remember(text)
-      commandHistoryCursor.current = null
-      setCommandDraft('')
-      try {
-        // One input box, two destinations: whatever the pane is currently showing.
-        if (sshActive) {
-          setSsh(await window.api.sendSshInput(text))
-        } else {
-          setTerminal(await window.api.sendTerminalInput(text))
-        }
-      } catch {
-        /* ignore */
+  const submitCommand = useCallback(async (text: string): Promise<void> => {
+    try {
+      if (sshActive) {
+        setSsh(await window.api.sendSshInput(text))
+      } else {
+        setTerminal(await window.api.sendTerminalInput(text))
       }
-    },
-    [commandDraft, sshActive, commandHistory, commandHistoryLines]
-  )
+    } catch {
+      /* ignore */
+    }
+  }, [sshActive])
 
   const connectSsh = useCallback(async (draft: SshHostDraft): Promise<void> => {
     setTerminalActionError('')
@@ -2912,66 +2860,72 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               : !interceptor?.installed || !interceptor.enabled || !interceptor.promptInjectionEnabled ? '请先启用当前对话的终端模式和提示词注入'
                 : taskRunning ? '请等待当前 AI 任务结束后再登录' : null} /> : null}
 
-        {(extraTerminals ?? []).map((item) => (
-          <ExtraTerminalPane key={item.id} sessionId={sessionId} terminal={item} visible={panelTab === `extra:${item.id}` && !panelCollapsed} />
-        ))}
+        {(extraTerminals ?? []).map((item) => {
+          const visible = panelTab === `extra:${item.id}` && !panelCollapsed
+          const sameSshHost = item.sshHostId === ssh?.hostId
+          return item.transport === 'ssh'
+            ? <ExtraSshTerminalPane
+                key={item.id}
+                sessionId={sessionId}
+                terminal={item}
+                visible={visible}
+                actionsVisible={visible && chatSurfaceVisible}
+                directoryAvailable={sameSshHost && ssh?.status === 'connected'}
+                target={sameSshHost ? ssh?.target : undefined}
+                onClose={() => void closeExtraTerminal(item.id)}
+              />
+            : <ExtraTerminalPane key={item.id} sessionId={sessionId} terminal={item} visible={visible} />
+        })}
 
       <section ref={toolboxPaneRef} className="terminal-pane panel__view" hidden={panelTab !== 'terminal'} aria-label="终端">
         <div className="terminal-pane__meta">
           <div className="terminal-pane__location">
-            <span className="terminal-pane__id" title={sshActive ? ssh?.target : web2termActive
-              ? [terminal?.transport?.deviceId, terminal?.transport?.message, terminal?.transport?.logPath && '日志：' + terminal.transport.logPath].filter(Boolean).join('\n')
-              : undefined}>
-              {sshActive ? ssh?.name || 'SSH' : web2termActive
-                ? 'web2term · ' + (terminal?.transport?.deviceName || '设备')
-                : '本机' + (terminal?.shellLabel ? ' · ' + terminal.shellLabel : '')}
-            </span>
             {sshActive ? (
-              ssh?.status === 'connected' && sshCwdEditing ? (
-                <SshDirectoryPicker
-                  basePath={sshCwd || '/'}
-                  onPick={(path) => {
-                    setSshCwdEditing(false)
-                    void applyCwd(path)
-                  }}
-                  onClose={() => setSshCwdEditing(false)}
-                />
-              ) : (
-                <span className={ssh?.status === 'connected' ? 'terminal-pane__directory terminal-pane__directory--editable' : 'terminal-pane__directory'}
-                  title={ssh?.status === 'connected'
-                    ? [sshCwd, ssh.ptyCwd && ssh.ptyCwd !== sshCwd ? '手动交互终端目录：' + ssh.ptyCwd : '', '双击编辑目录'].filter(Boolean).join('\n')
-                    : ssh?.message}
-                  onDoubleClick={() => {
-                    if (ssh?.status === 'connected') setSshCwdEditing(true)
-                  }}>
-                  {ssh?.status === 'connected' ? sshCwd || '等待确定工作目录…' : ssh?.message || '尚未连接'}
-                </span>
-              )
-            ) : cwdDraft !== null ? (
-              <form className="terminal-pane__cwd-form" onSubmit={submitCwd}>
-                <input
-                  className="terminal-pane__cwd-input"
-                  value={cwdDraft}
-                  spellCheck={false}
-                  autoFocus
-                  aria-label="终端目录"
-                  onFocus={(event) => event.currentTarget.select()}
-                  onChange={(event) => setCwdDraft(event.target.value)}
-                  onBlur={() => setCwdDraft(null)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') setCwdDraft(null)
-                  }}
-                />
-              </form>
-            ) : (
-              <span className={!web2termActive || terminal?.alive ? 'terminal-pane__directory terminal-pane__directory--editable' : 'terminal-pane__directory'}
-                title={[terminal?.cwd, !web2termActive || terminal?.alive ? '双击编辑目录' : ''].filter(Boolean).join('\n')}
-                onDoubleClick={() => {
-                  if (!web2termActive || terminal?.alive) setCwdDraft(terminal?.cwd ?? '')
-                }}>
-                {terminal?.cwd || '等待确定工作目录…'}
+              <SshTerminalLocation
+                name={ssh.name || 'SSH'}
+                target={ssh.target}
+                cwd={sshCwd}
+                ptyCwd={ssh.ptyCwd}
+                message={ssh.message}
+                connected={ssh.status === 'connected'}
+                canEdit={ssh.status === 'connected'}
+                editing={sshCwdEditing}
+                onEdit={setSshCwdEditing}
+                onPick={(path) => void applyCwd(path)}
+              />
+            ) : <>
+              <span className="terminal-pane__id" title={web2termActive
+                ? [terminal?.transport?.deviceId, terminal?.transport?.message, terminal?.transport?.logPath && '日志：' + terminal.transport.logPath].filter(Boolean).join('\n')
+                : undefined}>
+                {web2termActive ? 'web2term · ' + (terminal?.transport?.deviceName || '设备')
+                  : '本机' + (terminal?.shellLabel ? ' · ' + terminal.shellLabel : '')}
               </span>
-            )}
+              {cwdDraft !== null ? (
+                <form className="terminal-pane__cwd-form" onSubmit={submitCwd}>
+                  <input
+                    className="terminal-pane__cwd-input"
+                    value={cwdDraft}
+                    spellCheck={false}
+                    autoFocus
+                    aria-label="终端目录"
+                    onFocus={(event) => event.currentTarget.select()}
+                    onChange={(event) => setCwdDraft(event.target.value)}
+                    onBlur={() => setCwdDraft(null)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') setCwdDraft(null)
+                    }}
+                  />
+                </form>
+              ) : (
+                <span className={!web2termActive || terminal?.alive ? 'terminal-pane__directory terminal-pane__directory--editable' : 'terminal-pane__directory'}
+                  title={[terminal?.cwd, !web2termActive || terminal?.alive ? '双击编辑目录' : ''].filter(Boolean).join('\n')}
+                  onDoubleClick={() => {
+                    if (!web2termActive || terminal?.alive) setCwdDraft(terminal?.cwd ?? '')
+                  }}>
+                  {terminal?.cwd || '等待确定工作目录…'}
+                </span>
+              )}
+            </>}
           </div>
           <TerminalActionsMenu
             containerRef={toolboxPaneRef}
@@ -3292,106 +3246,34 @@ ${record.command}`
               </div>
             ) : null}
 
-            <div className="terminal-pane__output" ref={terminalOutputRef}>
-              {visibleTerminalLines.length === 0 ? (
-                <p className="terminal-pane__empty">
-                  {sshActive ? ssh?.message || '正在连接…' : web2termActive ? terminal?.transport?.message || '正在连接设备…' : '还没有输出。在下面直接输入命令，或让模型在这里执行。'}
-                </p>
-              ) : (
-                terminalBlocks.map((block, blockIndex) => (
-                  <div
-                    key={`${blockIndex}-${block.command?.text ?? 'system'}`}
-                    className={block.command ? 'terminal-entry' : 'terminal-entry terminal-entry--system'}
-                  >
-                    {block.command ? (
-                      <pre className="line line--command">
-                        {formatTerminalCommand(block.command.text, posixTerminal)}
-                      </pre>
-                    ) : null}
-                    {block.lines.length > 0 ? (
-                      <div className="terminal-entry__body">
-                        {block.lines.map((line, lineIndex) => (
-                          line.kind === 'output' && line.text.length > OUTPUT_WINDOW_CHARS ? <OutputText key={`${blockIndex}-${lineIndex}-${line.kind}`} className="line line--output" text={line.text} /> :
-                            <pre key={`${blockIndex}-${lineIndex}-${line.kind}`} className={`line line--${line.kind}`}>{line.text}</pre>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ))
-              )}
-            </div>
+            <TerminalTranscript
+              lines={sshActive ? ssh?.lines : terminal?.lines}
+              posix={posixTerminal}
+              visible={terminalVisible}
+              emptyMessage={sshActive ? ssh?.message || '正在连接…'
+                : web2termActive ? terminal?.transport?.message || '正在连接设备…'
+                  : '还没有输出。在下面直接输入命令，或让模型在这里执行。'}
+            />
 
-            <form className={remoteTerminal ? 'terminal-pane__input terminal-pane__input--ssh' : 'terminal-pane__input'} onSubmit={submitCommand}>
-              <span className={remoteTerminal ? 'terminal-pane__prompt terminal-pane__prompt--ssh' : 'terminal-pane__prompt'} aria-hidden="true">
-                {posixTerminal ? '$' : <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="18" rx="3"/><path d="M7 9l3 3-3 3"/><path d="M13 15h4"/></svg>}
-              </span>
-              <textarea
-                className="address__input terminal-pane__command-input"
-                value={commandDraft}
-                rows={Math.min(8, commandDraft.split('\n').length)}
-                spellCheck={false}
-                placeholder={
-                  web2termActive && !terminal?.alive
-                    ? terminal?.transport?.message || '正在连接设备…'
-                    : sshActive
-                    ? ssh?.status === 'connected'
-                      ? '输入或粘贴命令，回车发送，Shift+回车换行'
-                      : '尚未连接'
-                    : '输入或粘贴命令，回车执行，Shift+回车换行'
-                }
-                aria-label={web2termActive ? 'web2term 命令' : sshActive ? 'SSH 命令' : '终端命令'}
-                title="↑/↓ 选择历史命令；多行输入时在第一行/最后一行切换历史"
-                disabled={web2termActive ? !terminal?.alive : sshActive ? ssh?.status !== 'connected' : false}
-                onChange={(event) => {
-                  commandHistoryCursor.current = null
-                  setCommandDraft(event.target.value)
-                }}
-                onPaste={(event) => {
-                  const editor = event.currentTarget
-                  const pasted = event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n')
-                  if (editor.selectionEnd !== editor.value.length || !pasted.endsWith('\n')) return
-                  const text = pasted.slice(0, -1)
-                  // Code-block copying adds one terminal newline. Keep intentional
-                  // blank lines and pastes within a draft, where a separator matters.
-                  if (!text.trim() || text.endsWith('\n')) return
-                  event.preventDefault()
-                  const next = editor.value.slice(0, editor.selectionStart) + text
-                  commandHistoryCursor.current = null
-                  setCommandDraft(next)
-                  requestAnimationFrame(() => editor.setSelectionRange(next.length, next.length))
-                }}
-                onKeyDown={(event) => {
-                  if (event.nativeEvent.isComposing) return
-                  if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
-                    const direction = event.key === 'ArrowUp' ? 'up' : 'down'
-                    const editor = event.currentTarget
-                    if (canNavigateCommandHistory(editor.value, editor.selectionStart, editor.selectionEnd, direction)) {
-                      commandHistory.observe(commandHistoryLines ?? [])
-                      const recalled = navigateCommandHistory(commandHistoryCursor.current, commandHistory.snapshot(), editor.value, direction)
-                      if (recalled) {
-                        event.preventDefault()
-                        commandHistoryCursor.current = recalled.cursor
-                        setCommandDraft(recalled.value)
-                        requestAnimationFrame(() => {
-                          if (editor.isConnected && editor.value === recalled.value) editor.setSelectionRange(recalled.value.length, recalled.value.length)
-                        })
-                        return
-                      }
-                    }
-                  }
-                  if (event.ctrlKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === 'c'
-                    && event.currentTarget.selectionStart === event.currentTarget.selectionEnd) {
-                    event.preventDefault()
-                    void interruptTerminal()
-                    return
-                  }
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault()
-                    event.currentTarget.form?.requestSubmit()
-                  }
-                }}
-              />
-            </form>
+            <TerminalCommandInput
+              history={commandHistory}
+              historyLines={commandHistoryLines}
+              remote={remoteTerminal}
+              posix={posixTerminal}
+              placeholder={
+                web2termActive && !terminal?.alive
+                  ? terminal?.transport?.message || '正在连接设备…'
+                  : sshActive
+                  ? ssh?.status === 'connected'
+                    ? '输入或粘贴命令，回车发送，Shift+回车换行'
+                    : '尚未连接'
+                  : '输入或粘贴命令，回车执行，Shift+回车换行'
+              }
+              label={web2termActive ? 'web2term 命令' : sshActive ? 'SSH 命令' : '终端命令'}
+              disabled={web2termActive ? !terminal?.alive : sshActive ? ssh?.status !== 'connected' : false}
+              onSubmit={text => void submitCommand(text)}
+              onInterrupt={() => void interruptTerminal()}
+            />
           </>
       </section>
       </aside>
@@ -3424,7 +3306,7 @@ ${record.command}`
         ) : null}
         {isAuto ? (
           <span className="statusbar__mode">
-            {automation?.paused ? '自动执行 · 已暂停' : '自动执行中'}
+            {automation?.paused ? '自动执行 · 已暂停' : taskRunning ? '自动执行中' : '自动执行'}
           </span>
         ) : null}
         {ssh?.remoteExec ? (
@@ -4291,10 +4173,12 @@ ${record.command}`
                     </button>
                     {sshAdvancedOpen ? (
                       <div className="ssh-connect__advanced-body">
-                        <label className="ssh-connect__field">
-                          <span>密码</span>
-                          <input className="ssh-connect__input" type="password" value={sshDraft.password} placeholder="留空 = 使用这台主机已保存的密码" onChange={(event) => setSshDraft({ ...sshDraft, password: event.target.value })} />
-                        </label>
+                        <SshPasswordField
+                          key={`${sshDraft.id ?? ''}:${sshPasswordHostId ?? ''}`}
+                          password={sshDraft.password}
+                          savedHostId={sshPasswordHostId}
+                          onChange={(password) => setSshDraft((draft) => ({ ...draft, password }))}
+                        />
                         <label className="ssh-connect__field">
                           <span>代理（可选）</span>
                           <input className="ssh-connect__input" value={sshDraft.proxy} spellCheck={false} placeholder="留空 = 使用设置里的 SSH 代理" onChange={(event) => setSshDraft({ ...sshDraft, proxy: event.target.value })} />

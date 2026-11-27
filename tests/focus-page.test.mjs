@@ -923,20 +923,27 @@ test('focus attachments follow native idle while retaining the old wait until su
 })
 
 function completionFixture() {
-  const f = fixture(), timers = []
+  const f = fixture(), timers = [], boundaryTimers = new Map()
   const reply = { id: 'previous-answer', body: '【任务完成】上一轮已经完成。', isConnected: true }
   Object.assign(f.context, {
     pendingAssistantCompletion: null, pendingComputerRecognition: null, geminiRefusal: null,
+    completionBoundaryTimer: null, reportedCompletions: new Set(), completionKeyOf: node => node.id,
     computerReplyWait: null, computerReplySerial: 0, computerSourceSubmissionId: null, mailSourceSubmissionId: null,
     computerPageEpoch: 'page-one', computerBaselineOf: () => ({}),
     queryAllAssistant: () => [reply], continueCutOffReply: () => false, replyIsGenerating: () => false,
     handleSafetyLeak: () => false, geminiRefusalAfterCommand: () => null, legacyTaskSource: () => ({}), snapshotReplyScan: () => ({}), replyScanSnapshot: {},
     attachmentRoot: () => ({}), findAttachmentInput: () => ({ setAttribute() {} }),
     fileSendStatus: () => ({ status: 'ready' }), discardUserImageCapture() {}, scheduleCheck() {},
-    setTimeout(callback, delay) { assert.equal(delay, 250); timers.push(callback) }
+    setTimeout(callback, delay) {
+      if (delay === 250) return timers.push(callback)
+      assert.equal(delay, 2000)
+      const id = Symbol()
+      boundaryTimers.set(id, callback)
+      return id
+    },
+    clearTimeout(id) { boundaryTimers.delete(id) }
   })
-  f.context.setReplyWaiting = arrow('setReplyWaiting', f.context)
-  f.context.resetTaskPrompt = arrow('resetTaskPrompt', f.context)
+  for (const name of ['setReplyWaiting', 'releaseCompletionBoundary', 'waitForCompletionBoundary']) f.context[name] = arrow(name, f.context)
   f.context.state.awaitingReplySince = 123
   f.context.state.taskActive = true
   const api = Object.fromEntries(['beginFileSend', 'beginFocusFileSend', 'prepareFocusFileSendCaption', 'releaseFileSend']
@@ -985,7 +992,8 @@ test('a completion first observed during an upload waits and resumes if the uplo
   assert.equal(f.api.releaseFileSend('new-upload'), true)
   f.tick()
   assert.equal(f.context.state.awaitingReplySince, 0)
-  assert.equal(f.context.state.taskPromptGeneration, 2)
+  assert.equal(f.context.state.taskPromptGeneration, 1)
+  assert.equal(f.context.state.programmatic, true, 'the page waits for main before allowing another send')
   assert.equal(f.context.state.taskActive, false)
   assert.equal(f.reports.filter(report => report.event === 'task-finished' && report.completed).length, 1)
   assert.equal(f.timers.length, 0)

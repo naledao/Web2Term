@@ -719,9 +719,8 @@ export const CHATGPT_PAGE: PageAdapter = {
     'button[aria-label="停止生成"]'
   ],
   /*
-   * The id-bearing message wrappers. The current DIL renderer uses a separate
-   * `data-dil-message-id`; both selectors identify the response root itself, so the
-   * overlap is between renderer versions rather than two nodes for one turn.
+   * A DIL response can be nested inside a selection wrapper with the same
+   * message id. Both nodes can match for one turn.
    */
   assistantSelectors: ['[data-chatgpt-selection-message-id]', '[data-dil-response][data-dil-message-id]'],
   // Cached ChatGPT turns can follow the active conversation in document order.
@@ -735,8 +734,7 @@ export const CHATGPT_PAGE: PageAdapter = {
   assistantReplySelectors: ['[data-markdown-text-style="assistant-message"]', '[data-dil-response]'],
   /*
    * BOTH roles, for locating the scroll container only (`findScroller` takes the last match
-   * and walks up). Overlap between these two is harmless here in a way it is not for
-   * `assistantSelectors`: nothing keys identity off this list.
+   * and walks up).
    */
   messageSelectors: ['[data-content-search-unit-key]', '[data-chatgpt-selection-message-id]', '[data-dil-response][data-dil-message-id]'],
   messageIdAttr: 'data-chatgpt-selection-message-id',

@@ -134,6 +134,7 @@ import type {
 } from '../shared/types'
 import { CommandRunner } from './commands'
 import { ExtraTerminals } from './extra-terminals'
+import { sshWorkingDirectory } from '../shared/ssh-directory'
 import { BackgroundTasks } from './background-tasks'
 import { backgroundLaunchPlan, startManagedBackground } from './background-launch'
 import { BackgroundTaskResults } from './background-task-results'
@@ -455,13 +456,8 @@ export class SessionRuntime {
   /** User-opened terminals beside the model's; each takes the transport and directory it has right now. */
   readonly extraTerminals = new ExtraTerminals({
     target: () => this.extraTerminalTarget(),
-    openSsh: (hostId, cwd, handlers) => {
-      const state = this.ssh.getState()
-      if (state.hostId !== hostId || state.status !== 'connected') {
-        return Promise.reject(new Error('这个终端所属的 SSH 主机已断开或已切换，请关闭后重新新建。'))
-      }
-      return this.ssh.openExtraShell(cwd, handlers)
-    },
+    openSsh: (hostId, cwd, size) => this.ssh.openExtraPty(hostId, cwd, size),
+    sshHome: (hostId) => this.ssh.remoteHome(hostId),
     onChanged: (state) => this.send(IpcChannels.extraTerminalsChanged, state)
   })
 
@@ -4882,6 +4878,10 @@ export class SessionRuntime {
     return this.options.store.listSshHosts()
   }
 
+  getSavedSshPassword(id: string): string | null {
+    return decryptSecret(this.options.store.getSshSecret(id)) || null
+  }
+
   removeSshHost(id: string): SshHost[] {
     this.options.store.removeSshHost(id)
     return this.options.store.listSshHosts()
@@ -5239,7 +5239,7 @@ export class SessionRuntime {
     }
     const ssh = this.ssh.getState()
     if (ssh.attached && ssh.status === 'connected') {
-      return { transport: 'ssh', label: ssh.name || ssh.target || 'SSH', hostId: ssh.hostId, cwd: ssh.modelCwd }
+      return { transport: 'ssh', label: ssh.name || ssh.target || 'SSH', hostId: ssh.hostId, cwd: sshWorkingDirectory(ssh) }
     }
     return { transport: 'local', cwd: this.runner.getTerminalState().cwd || this.lastPersistedLocalCwd }
   }

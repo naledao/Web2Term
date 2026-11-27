@@ -93,6 +93,7 @@ import type {
   SshPdfPreviewData,
   TerminalNotes,
   TerminalState,
+  ExtraTerminalPtyRestart,
   ExtraTerminalsState,
   LinuxAgentDownloadState,
   UpdateStatus,
@@ -480,6 +481,8 @@ removeConversation: (id: string): Promise<Conversation[]> =>
   },
 
   listSshHosts: (): Promise<SshHost[]> => ipcRenderer.invoke(IpcChannels.sshListHosts),
+  getSavedSshPassword: (id: string): Promise<string | null> =>
+    ipcRenderer.invoke(IpcChannels.sshGetSavedPassword, id),
 
   connectSsh: (draft: SshHostDraft): Promise<SshState> =>
     ipcRenderer.invoke(IpcChannels.sshConnect, draft),
@@ -639,6 +642,8 @@ removeConversation: (id: string): Promise<Conversation[]> =>
     ipcRenderer.invoke(IpcChannels.extraTerminalSetCwd, id, path),
   interruptExtraTerminal: (id: string): Promise<void> => ipcRenderer.invoke(IpcChannels.extraTerminalInterrupt, id),
   closeExtraTerminal: (id: string): Promise<ExtraTerminalsState> => ipcRenderer.invoke(IpcChannels.extraTerminalClose, id),
+  openExtraTerminalPty: (id: string, restart?: ExtraTerminalPtyRestart): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.extraTerminalPtyOpen, id, restart),
   onExtraTerminalsChanged: (listener: (state: ExtraTerminalsState) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, state: ExtraTerminalsState): void => listener(state)
     ipcRenderer.on(IpcChannels.extraTerminalsChanged, handler)

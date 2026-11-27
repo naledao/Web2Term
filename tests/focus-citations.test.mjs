@@ -181,6 +181,55 @@ test('the measured href-less DIL badge and its button-only dialog retain the ful
   assert.equal(f.isOpen(), false)
 })
 
+test('a GitHub+1 badge is unique across nested message wrappers and reads both cards on hover', async () => {
+  const f = fixture({ native: true })
+  const badge = f.group.querySelector('[data-d-component="badge"]')
+  badge.childNodes[0].nodeValue = 'GitHub+1'
+  f.answer.attrs['data-dil-response'] = ''
+  const outer = new Element('div', { 'data-chatgpt-selection-message-id': 'answer-1' }, [
+    new Element('div', { 'data-markdown-text-style': 'assistant-message' }, [f.answer])
+  ])
+  f.context.PAGE.assistantReplySelectors = CHATGPT_PAGE.assistantReplySelectors
+  f.context.replyRootOf = actual('replyRootOf', f.context)
+  f.context.messageIdOf = node => node.getAttribute('data-chatgpt-selection-message-id') || node.getAttribute('data-dil-message-id')
+  f.context.queryAllAssistant = () => [outer, f.answer]
+  const request = { ...f.context.focusCitationGroupsOf(outer)[0].data, token: 'read-token' }
+
+  const first = f.popup.children[0]
+  const second = new Element('button', { 'data-d-component': 'pressable', 'aria-label': '打开第二条来源' }, [
+    new Element('div', { 'data-d-component': 'row' }, [new Element('span', { 'data-d-component': 'text' }, ['第二个站点'])]),
+    new Element('span', { 'data-d-component': 'text', 'data-d-weight': 'medium' }, ['第二条来源'])
+  ])
+  second.onclick = () => assert.fail('reading the list must not open a source')
+  const list = new Element('div', { 'data-d-component': 'col', 'data-d-scrollable': 'true' }, [first, second])
+  list.parentElement = f.popup
+  f.popup.childNodes = [list]
+  const portal = new Element('div', { 'data-radix-popper-content-wrapper': '' }, [f.popup])
+  f.context.document.querySelectorAll = () => f.isOpen() ? [portal, f.popup] : []
+
+  assert.equal(f.api.prepareFocusCitation(request, '/c/one').outcome, 'pending')
+  assert.equal(f.api.prepareFocusCitationClick('read-token'), null, 'the grouped badge click can open its primary source')
+  f.open(true, true)
+  const result = await f.api.finishFocusCitation('read-token', 0)
+  assert.equal(result.outcome, 'ok')
+  assert.deepEqual(plain(result.sources.map(item => [item.kind, item.title, item.native.index])), [
+    ['preview', 'Models & Pricing', 0],
+    ['preview', '第二条来源', 1]
+  ])
+  f.api.closeFocusCitation('read-token')
+  assert.equal(f.isOpen(), false)
+
+  const distinct = new Element('div', { ...f.answer.attrs }, [
+    new Element('span', { ...f.group.attrs }, [
+      new Element('div', { ...badge.attrs }, ['GitHub+1'])
+    ])
+  ])
+  distinct.children[0].onclick = () => {}
+  f.context.queryAllAssistant = () => [outer, f.answer, distinct]
+  assert.equal(f.api.prepareFocusCitation(request, '/c/one'), null, 'distinct matching badges remain ambiguous')
+  assert.equal(f.listeners.size, 0)
+})
+
 test('button previews require the owning badge and its explicit ARIA-linked dialog', async () => {
   const f = fixture({ native: true })
   f.api.prepareFocusCitation(f.request, '/c/one'); f.open(true, false)

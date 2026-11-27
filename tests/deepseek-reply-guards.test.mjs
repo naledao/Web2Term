@@ -320,6 +320,52 @@ const commandCodeTurn = (key, text) => element('div', { 'data-virtual-list-item-
   element('div', { class: 'ds-assistant-message-main-content' }, [element('pre', {}, [element('code', {}, text)])])
 ])
 
+test('ChatGPT does not consume a new reply wait when a previously completed turn becomes visible again', () => {
+  const reply = (id, body) => element('div', { 'data-chatgpt-selection-message-id': id }, [
+    element('div', { 'data-markdown-text-style': 'assistant-message' }, body)
+  ])
+  const complete = '【任务完成】\n已核对结果。'
+  const previous = reply('previous-completion', complete)
+  const app = fixture([previous], CHATGPT_PAGE)
+  app.navigate('/c/active-chat')
+  const finishes = () => app.events.filter(event => event.event === 'task-finished')
+
+  app.confirmSend()
+  app.scan(); app.tick(250)
+  assert.equal(finishes()[0]?.completed, true)
+  assert.equal(app.controller.status().taskPromptGeneration, 0)
+  assert.equal(app.controller.status().programmatic, true)
+  app.controller.configure({ taskPromptGeneration: 0 })
+  assert.equal(app.controller.status().programmatic, true, 'an old configuration cannot release the send')
+  app.controller.configure({ taskPromptGeneration: 1 })
+  assert.equal(app.controller.status().programmatic, false)
+
+  app.confirmSend()
+  const command = reply('new-command', [element('pre', {}, [element('code', {}, commandJson('echo pending'))])])
+  app.replaceNodes([previous, command])
+  app.scan()
+  assert.equal(app.commands().at(-1)?.messageId, 'new-command')
+  const waitingSince = app.controller.status().awaitingReplySince
+  command.rendered = false
+  app.scan(); app.tick(250)
+  assert.equal(app.events.some(event => event.event === 'scan' && event.reason === 'completed-reply-history' &&
+    event.messageId === 'previous-completion'), true)
+  assert.equal(finishes().length, 1)
+  assert.equal(app.controller.status().awaitingReplySince, waitingSince)
+  assert.equal(app.controller.status().taskActive, true)
+  assert.equal(app.controller.status().taskPromptGeneration, 1)
+
+  app.confirmResult()
+  app.replaceNodes([previous, command, reply('new-completion', complete)])
+  app.scan(); app.tick(250)
+  assert.deepEqual(finishes().map(event => [event.messageId, event.completed, event.taskPromptGeneration]), [
+    ['previous-completion', true, 0], ['new-completion', true, 1]
+  ])
+  app.tick(2000)
+  assert.equal(app.controller.status().programmatic, false, 'a lost configuration cannot leave sends locked')
+  assert.equal(app.controller.status().taskPromptGeneration, 1, 'the page cannot advance the generation when the wait expires')
+})
+
 test('a trusted native Stop prevents analysis recovery after generation becomes idle', () => {
   for (const trusted of [true, false]) {
     const composer = element('textarea', { placeholder: '发送消息' })

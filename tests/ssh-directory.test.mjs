@@ -40,6 +40,7 @@ const forbidden = () => { throw new Error('real I/O is forbidden in this test') 
 const { SshManager } = load('../src/main/ssh.ts', {
   ssh2: { Client: class { constructor() { forbidden() } } },
   'node:crypto': crypto,
+  'node:string_decoder': stringDecoder,
   'node:fs/promises': { stat: forbidden, unlink: forbidden },
   'node:http': { request: forbidden },
   'node:https': { request: forbidden },
@@ -48,6 +49,8 @@ const { SshManager } = load('../src/main/ssh.ts', {
   './ssh-command-stop': load('../src/main/ssh-command-stop.ts'),
   './git-diagnostic': { writeGitDiagnostic() {} },
   './ssh-pdf-preview': { SshPdfPreviewReader: class { cancel() {} } },
+  './ssh-pty-transcript': load('../src/main/ssh-pty-transcript.ts'),
+  './ssh-file-edit': {},
   '../shared/ssh-directory': directory
 })
 

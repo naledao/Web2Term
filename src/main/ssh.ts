@@ -1,29 +1,24 @@
 import { Client } from 'ssh2'
 import type { ClientChannel, SFTPWrapper } from 'ssh2'
 import { randomUUID } from 'node:crypto'
+import { StringDecoder } from 'node:string_decoder'
 import { stat, unlink } from 'node:fs/promises'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { Socket } from 'node:net'
 import { basename, posix } from 'node:path'
-import type { SshDownloadTask, SshFileEntry, SshState, SshUploadTask, TerminalLine } from '../shared/types'
+import type { ExtraTerminalPtySize, SshDownloadTask, SshFileEntry, SshState, SshUploadTask, TerminalLine } from '../shared/types'
 import { REMOTE_SHELL_COMMAND, RemoteShell } from './remote-shell'
 import { stopSshCommand } from './ssh-command-stop'
 import type { GitBackend } from './git'
 import { writeGitDiagnostic } from './git-diagnostic'
 import { sshWorkingDirectory } from '../shared/ssh-directory'
 import { SshPdfPreviewReader } from './ssh-pdf-preview'
+import { SshPtyTranscript } from './ssh-pty-transcript'
 import { readSshTextFile, saveSshTextFile, withSshFileChannel } from './ssh-file-edit'
 import type { SshTextFile, SshTextFileTarget, SshTextFileSaveRequest, SshTextFileSaveResult } from '../shared/ssh-file-edit'
 import type { SshPdfPreviewRequest, SshPdfPreviewData } from '../shared/types'
 
-/** Strips ANSI/VT and OSC sequences — there is no terminal emulator to render them. */
-const ANSI_RE = /\u001B(?:\][^\u0007]*(?:\u0007|\u001B\\)|[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g
-
-/** A visible PTY echo that contains a POSIX shell prompt and a command. */
-const SHELL_COMMAND_RE = /(?:^|[~./\\w:[\]@()-]+)\s*[$#]\s+\S/
-
-const MAX_LINES = 500
 const CONNECT_TIMEOUT_MS = 20_000
 const PROXY_TIMEOUT_MS = 15_000
 
@@ -157,19 +152,14 @@ export class SshManager {
   /** Retained for manual retries until the pane is dismissed, including unsaved credentials. */
   private connectionTarget: SshTarget | null = null
   private stream: ClientChannel | null = null
-  private buffer = ''
-  /** Index of a PTY line that has not received its newline yet (for password prompts). */
-  private partialLineIndex: number | null = null
-  /** Set only for the next visible PTY line after a manual input, never stores its text. */
-  private manualInputPending = false
-  /** Readline advertises whether it can receive a paste as one editable block. */
-  private bracketedPaste = false
-  private pasteModeTail = ''
+  private readonly transcript = new SshPtyTranscript(
+    () => this.homeDir,
+    (cwd) => this.syncPtyCwd(cwd)
+  )
   /** Working directory parsed from the interactive PTY prompt (best effort). */
   private ptyCwd = ''
   /** Remote $HOME, resolved once so a `~` in the prompt can be expanded. */
   private homeDir = ''
-  private lines: TerminalLine[] = []
   private state: SshState = { ...EMPTY }
 
   /** The channel the model's commands run on, once it is up. */
@@ -205,7 +195,7 @@ export class SshManager {
       remoteExec: this.exec !== null && this.exec.alive,
       modelCwd: this.exec?.cwd ?? '',
       ptyCwd: this.ptyCwd,
-      lines: [...this.lines]
+      lines: this.transcript.snapshot()
     }
   }
 
@@ -221,9 +211,7 @@ export class SshManager {
   get connectionKey(): object | null { return this.client }
 
   /**
-   * Open another command shell on the live connection, for a terminal the user
-   * added from the panel. Its own exec channel: it shares nothing with the
-   * model's shell or the PTY except the TCP connection.
+   * Open a separate command shell on the live connection for background task monitoring.
    */
   openExtraShell(cwd: string, handlers: { onOutput: (chunk: string) => void; onClosed: (interrupted: boolean) => void }): Promise<RemoteShell> {
     const client = this.client
@@ -253,24 +241,64 @@ export class SshManager {
     })
   }
 
+  remoteHome(hostId: string): string {
+    return this.state.status === 'connected' && this.state.hostId === hostId ? this.homeDir : ''
+  }
+
+  /** Open an independent interactive channel for a user-created terminal. */
+  openExtraPty(hostId: string, cwd: string, size: ExtraTerminalPtySize): Promise<ClientChannel> {
+    const client = this.client
+    if (!client || this.state.status !== 'connected' || this.state.hostId !== hostId) {
+      return Promise.reject(new Error('原 SSH 主机未连接。请连接该主机后重新打开终端。'))
+    }
+    const pty = { term: 'xterm-256color', ...size }
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const timeout = setTimeout(() => {
+        settled = true
+        reject(new Error('等待远端分配 SSH 交互终端超时。'))
+      }, CONNECT_TIMEOUT_MS)
+      const opened = (error: Error | undefined, stream?: ClientChannel): void => {
+        if (settled) {
+          stream?.close()
+          return
+        }
+        settled = true
+        clearTimeout(timeout)
+        if (error || !stream) {
+          reject(new Error(`无法打开 SSH 交互终端：${error?.message || '远端未返回终端通道。'}`))
+          return
+        }
+        if (this.client !== client || this.state.status !== 'connected') {
+          stream.close()
+          reject(new Error('原 SSH 连接已断开。'))
+          return
+        }
+        resolve(stream)
+      }
+      try {
+        if (cwd === '') {
+          client.shell(pty, opened)
+        } else {
+          // Set the working directory before starting the interactive shell. A command
+          // written to a live PTY could instead be consumed by a login or TUI prompt.
+          client.exec(`cd ${posixQuote(cwd)} && exec "\${SHELL:-/bin/sh}" -i`, { pty }, opened)
+        }
+      } catch (error) {
+        opened(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+  }
+
   /** Mirror a line produced by the model's own shell into this transcript. */
   pushModelLine(line: TerminalLine): void {
-    this.finishPartialLine()
-    this.lines.push({ kind: line.kind, text: line.text })
-    if (this.lines.length > MAX_LINES) this.lines.splice(0, this.lines.length - MAX_LINES)
+    this.transcript.appendModelLine(line)
     this.scheduleMirrorPush()
   }
 
   /** Mirror streamed remote output, appended to the trailing output line. */
   pushModelOutput(chunk: string): void {
-    const text = chunk.replace(/\r/g, '')
-    if (text === '') return
-    const hadPartial = this.finishPartialLine()
-    const last = this.lines[this.lines.length - 1]
-    if (!hadPartial && last && last.kind === 'output') last.text += text
-    else this.lines.push({ kind: 'output', text })
-    if (this.lines.length > MAX_LINES) this.lines.splice(0, this.lines.length - MAX_LINES)
-    this.scheduleMirrorPush()
+    if (this.transcript.appendModelOutput(chunk)) this.scheduleMirrorPush()
   }
 
   /**
@@ -290,10 +318,7 @@ export class SshManager {
     this.teardown()
     this.connectionTarget = { ...target }
 
-    if (!automatic && !preserveTranscript) this.lines = []
-    this.buffer = ''
-    this.partialLineIndex = null
-    this.manualInputPending = false
+    if (!automatic && !preserveTranscript) this.transcript.resetStream(true)
     this.execAttempts = 0
     this.ptyCwd = ''
     this.homeDir = ''
@@ -340,8 +365,10 @@ export class SshManager {
         this.reconnectPtyCwd = resumePtyCwd
         this.pushLine('notice', `已连接 ${this.state.target}`)
 
-        stream.on('data', (chunk: Buffer) => { if (this.client === client) this.consume(chunk.toString('utf8')) })
-        stream.stderr.on('data', (chunk: Buffer) => { if (this.client === client) this.consume(chunk.toString('utf8')) })
+        const output = new StringDecoder('utf8')
+        const stderr = new StringDecoder('utf8')
+        stream.on('data', (chunk: Buffer) => { if (this.client === client) this.consume(output.write(chunk)) })
+        stream.stderr.on('data', (chunk: Buffer) => { if (this.client === client) this.consume(stderr.write(chunk)) })
         stream.on('close', () => {
           if (this.client !== client) return
           this.handleConnectionLost('远程会话已关闭')
@@ -421,10 +448,7 @@ export class SshManager {
       this.connect(target, cwd, ptyCwd)
       this.pushLine('notice', '终端已重置，正在重新建立 SSH 会话')
     } else {
-      this.lines = []
-      this.buffer = ''
-      this.partialLineIndex = null
-      this.manualInputPending = false
+      this.transcript.resetStream(true)
       this.pushLine('notice', '终端已重置')
     }
     this.emit()
@@ -435,8 +459,7 @@ export class SshManager {
   restoreAttachment(target: Pick<SshTarget, 'hostId' | 'name' | 'host' | 'port'>): SshState {
     this.teardown()
     this.connectionTarget = null
-    this.lines = []
-    this.buffer = ''
+    this.transcript.resetStream(true)
     this.execAttempts = 0
     this.state = {
       ...EMPTY,
@@ -466,8 +489,7 @@ export class SshManager {
   dismiss(): SshState {
     this.teardown()
     this.connectionTarget = null
-    this.lines = []
-    this.buffer = ''
+    this.transcript.resetStream(true)
     this.state = { ...EMPTY, lines: [] }
     this.emit()
     return this.getState()
@@ -936,19 +958,9 @@ export class SshManager {
       return
     }
 
-    // Keep every newline, including blank lines in here-documents. When Readline
-    // enables bracketed paste, insert a multiline draft as one block before Enter:
-    // later lines must not accidentally become answers to a sudo password prompt.
-    // Never mirror the input: it may be a password, and the PTY supplies its echo.
-    const normalized = text.replace(/\r\n?/g, '\n')
-    const payload = this.bracketedPaste && normalized.includes('\n')
-      ? `\x1b[200~${normalized}\x1b[201~\r`
-      : normalized.replace(/\n/g, '\r')
-    this.manualInputPending = payload.trim() !== ''
     try {
-      stream.write(payload.endsWith('\r') ? payload : `${payload}\r`)
+      this.transcript.send(text, (payload) => stream.write(payload))
     } catch (error) {
-      this.manualInputPending = false
       this.pushLine('error', `写入交互式终端失败：${(error as Error).message}`)
       this.emit()
     }
@@ -963,11 +975,8 @@ export class SshManager {
       return
     }
 
-    this.manualInputPending = false
-    this.finishPartialLine()
     try {
-      // This is a terminal control key, not a line of shell input. No Enter.
-      stream.write('\x03')
+      this.transcript.interrupt((payload) => stream.write(payload))
       this.pushLine('notice', '已向远程交互终端发送 Ctrl+C')
     } catch (error) {
       this.pushLine('error', `发送 Ctrl+C 失败：${(error as Error).message}`)
@@ -1144,10 +1153,7 @@ export class SshManager {
       this.mirrorTimer = null
     }
 
-    this.partialLineIndex = null
-
-    this.bracketedPaste = false
-    this.pasteModeTail = ''
+    this.transcript.resetStream()
 
     // Disposed BEFORE the client goes away: `RemoteShell.dispose()` marks itself
     // disposed, so its close handler does not try to reopen a channel on a
@@ -1180,111 +1186,16 @@ export class SshManager {
   }
 
   private pushLine(kind: TerminalLine['kind'], text: string): void {
-    // Commands added here are PTY echoes, including their shell prompt. Model
-    // commands use pushModelLine and remain eligible for command history.
-    this.lines.push(kind === 'command' ? { kind, text, inputEcho: true } : { kind, text })
-    if (this.lines.length > MAX_LINES) {
-      const removed = this.lines.length - MAX_LINES
-      this.lines.splice(0, removed)
-      if (this.partialLineIndex !== null) {
-        this.partialLineIndex -= removed
-        if (this.partialLineIndex < 0) this.partialLineIndex = null
-      }
-    }
+    this.transcript.append(kind, text)
   }
 
-  /**
-   * Split an incoming stream into lines.
-   *
-   * A PTY emits CRLF, and programs that redraw in place emit a bare CR. Both end
-   * a line here: there is no terminal emulator to move a cursor, so treating a
-   * bare CR as "overwrite" would just lose output.
-   */
   private consume(text: string): void {
-    // DECSET/DECRST may be split across SSH packets. Observe them before ANSI
-    // removal and retain just enough bytes to recognise a split sequence.
-    const modeText = this.pasteModeTail + text
-    for (const match of modeText.matchAll(/\x1b\[\?2004([hl])/g)) {
-      this.bracketedPaste = match[1] === 'h'
-    }
-    this.pasteModeTail = modeText.slice(-7)
-    this.buffer += text
-
-    for (;;) {
-      const index = this.buffer.search(/[\r\n]/)
-      if (index === -1) break
-
-      const line = this.buffer.slice(0, index)
-      const isCrLf = this.buffer[index] === '\r' && this.buffer[index + 1] === '\n'
-      this.buffer = this.buffer.slice(index + (isCrLf ? 2 : 1))
-      this.pushVisible(line)
-    }
-
-    // Prompts such as `[sudo] password for user:` do not end in a newline. Keep
-    // the partial line visible so the user knows when it is safe to type the
-    // password; the input itself is never copied into the transcript.
-    if (this.buffer !== '') this.pushPartial(this.buffer)
-
+    if (text === '') return
+    this.transcript.consume(text)
     this.emit()
   }
 
-  private pushVisible(rawLine: string): void {
-    const cleaned = rawLine.replace(ANSI_RE, '').replace(/\r/g, '')
-    this.notePtyPrompt(cleaned)
-    if (this.partialLineIndex !== null) {
-      // A newline completes a prompt that was buffered without one. Preserve the
-      // prompt as a historical line, then let the next real output start a new line.
-      const index = this.partialLineIndex
-      this.partialLineIndex = null
-      if (cleaned.trim() === '') return
-      const partial = this.lines[index]
-      if (partial && partial.kind === 'output') {
-        if (this.manualInputPending && SHELL_COMMAND_RE.test(cleaned)) {
-          partial.kind = 'command'
-          partial.inputEcho = true
-          this.manualInputPending = false
-        }
-        partial.text = cleaned
-        return
-      }
-    }
-    // Blank lines are mostly PTY filler; dropping them keeps the pane readable.
-    if (cleaned.trim() === '') return
-    const kind = this.manualInputPending && SHELL_COMMAND_RE.test(cleaned) ? 'command' : 'output'
-    this.manualInputPending = false
-    this.pushLine(kind, cleaned)
-  }
-
-  private pushPartial(rawLine: string): void {
-    const cleaned = rawLine.replace(ANSI_RE, '').replace(/\r/g, '')
-    if (cleaned === '') return
-    this.notePtyPrompt(cleaned)
-
-    if (this.partialLineIndex === null) {
-      this.pushLine('output', cleaned)
-      this.partialLineIndex = this.lines.length - 1
-      return
-    }
-
-    const line = this.lines[this.partialLineIndex]
-    if (line && line.kind === 'output') line.text = cleaned
-  }
-
-  /**
-   * Read the working directory out of a shell prompt such as user@host:/srv$.
-   *
-   * Best effort by design: prompt formats vary (and can be customised), so a
-   * line that does not look like a prompt simply leaves the last known value in
-   * place. A leading ~ is expanded with the remote $HOME once it is known.
-   */
-  private notePtyPrompt(cleaned: string): void {
-    const match = /:([~][^\s$#]*|[^\s:$#][^\s$#]*)[$#]\s*$/.exec(cleaned.trim())
-    if (!match) return
-    let dir = match[1]
-    if (dir.startsWith('~')) {
-      if (this.homeDir === '') return
-      dir = this.homeDir + dir.slice(1)
-    }
+  private syncPtyCwd(dir: string): void {
     if (dir === '' || dir === this.ptyCwd) return
     this.ptyCwd = dir
     // The two shells started apart; a manual `cd` is the user saying "this is
@@ -1295,10 +1206,5 @@ export class SshManager {
         if (ok) this.emit()
       })
     }
-  }  /** Stop treating the last PTY line as an in-progress prompt. */
-  private finishPartialLine(): boolean {
-    if (this.partialLineIndex === null) return false
-    this.partialLineIndex = null
-    return true
   }
 }

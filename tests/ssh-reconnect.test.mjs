@@ -5,6 +5,7 @@ import * as crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import * as path from 'node:path'
+import * as stringDecoder from 'node:string_decoder'
 import { test } from 'node:test'
 import { Script } from 'node:vm'
 import ts from 'typescript'
@@ -14,6 +15,9 @@ const compile = source => ts.transpileModule(source, {
 }).outputText
 const plain = value => JSON.parse(JSON.stringify(value))
 const source = readFileSync(new URL('../src/main/ssh.ts', import.meta.url), 'utf8')
+const transcript = {}
+new Script(compile(readFileSync(new URL('../src/main/ssh-pty-transcript.ts', import.meta.url), 'utf8')))
+  .runInNewContext({ exports: transcript })
 const target = { hostId: 'host-a', name: '测试主机', host: 'example.invalid', port: 2222,
   username: 'tester', password: 'memory-only-password', proxy: '' }
 const forbidden = () => assert.fail('real I/O is forbidden')
@@ -24,17 +28,30 @@ function fixture(t) {
   class Channel extends EventEmitter {
     stderr = new EventEmitter()
     writes = []
+    closed = false
     write(text) { this.writes.push(text) }
-    close() { this.emit('close') }
+    close() { this.closed = true; this.emit('close') }
   }
   class Client extends EventEmitter {
     pty = new Channel()
     execCommands = []
+    execRequests = []
+    shellRequests = []
     ended = false
     constructor() { super(); clients.push(this) }
     connect(options) { this.options = plain(options) }
-    shell(_options, callback) { callback(null, this.pty) }
-    exec(command, callback) { this.execCommands.push(command); callback(null, new Channel()) }
+    shell(options, callback) {
+      const channel = this.shellRequests.length === 0 ? this.pty : new Channel()
+      this.shellRequests.push({ options, channel })
+      callback(null, channel)
+    }
+    exec(command, options, callback) {
+      if (typeof options === 'function') { callback = options; options = undefined }
+      const channel = new Channel()
+      this.execCommands.push(command)
+      this.execRequests.push({ options, channel })
+      callback(null, channel)
+    }
     end() { this.ended = true; this.emit('close') }
   }
   class RemoteShell {
@@ -46,12 +63,15 @@ function fixture(t) {
   }
   const dependencies = {
     ssh2: { Client }, 'node:crypto': crypto, 'node:path': path,
+    'node:string_decoder': stringDecoder,
     'node:fs/promises': { stat: forbidden, unlink: forbidden },
     'node:http': { request: forbidden }, 'node:https': { request: forbidden },
     './remote-shell': { RemoteShell, REMOTE_SHELL_COMMAND: 'fixture-shell' },
     './ssh-command-stop': { stopSshCommand: forbidden },
     './git-diagnostic': { writeGitDiagnostic() {} },
     './ssh-pdf-preview': { SshPdfPreviewReader: class { cancel() {} } },
+    './ssh-pty-transcript': transcript,
+    './ssh-file-edit': {},
     '../shared/ssh-directory': { sshWorkingDirectory: state => state.modelCwd || state.ptyCwd }
   }
   const exports = {}
@@ -75,6 +95,22 @@ function fixture(t) {
     }
   }
 }
+
+test('numbered SSH terminals request independent PTYs and start in the inherited directory', async t => {
+  const f = fixture(t)
+  f.manager.connect(target)
+  await f.ready()
+  const client = f.clients[0], size = { cols: 96, rows: 31 }
+  const inHome = await f.manager.openExtraPty(target.hostId, '', size)
+  const inProject = await f.manager.openExtraPty(target.hostId, "/work/a'b", size)
+  assert.notEqual(inHome, client.pty)
+  assert.notEqual(inHome, inProject)
+  assert.deepEqual(plain(client.shellRequests[1].options), { term: 'xterm-256color', ...size })
+  assert.deepEqual(plain(client.execRequests.at(-1).options), { pty: { term: 'xterm-256color', ...size } })
+  assert.match(client.execCommands.at(-1), /^cd '\/work\/a'"'"'b' && exec /)
+  assert.deepEqual(client.pty.writes, [], 'startup never writes a cd command to the original interactive terminal')
+  await assert.rejects(f.manager.openExtraPty('other-host', '', size), /原 SSH 主机未连接/)
+})
 
 test('a failed handshake can retry with the same unsaved credentials and transcript', t => {
   const f = fixture(t)

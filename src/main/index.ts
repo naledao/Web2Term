@@ -105,6 +105,7 @@ import type {
   TerminalNotes,
   TerminalNotesOwner,
   TerminalState,
+  ExtraTerminalPtyRestart,
   ExtraTerminalsState,
   LinuxAgentDownloadState,
   UpdateStatus,
@@ -2096,6 +2097,10 @@ function registerIpcHandlers(): void {
   })
   ipcMain.handle(IpcChannels.extraTerminalClose, (event, id: string): ExtraTerminalsState =>
     runtimeForEvent(event)?.extraTerminals.close(String(id ?? '')) ?? { terminals: [] })
+  ipcMain.handle(IpcChannels.extraTerminalPtyOpen, (event, id: string, restart?: ExtraTerminalPtyRestart) => {
+    if (restart !== undefined && restart !== 'reconnect' && restart !== 'reset') return
+    return runtimeForEvent(event)?.extraTerminals.openPty(String(id ?? ''), restart)
+  })
   ipcMain.handle(IpcChannels.environmentGet, (event) =>({ ...(runtimeForEvent(event)?.environment ?? nodeFallback()) }))
   ipcMain.handle(IpcChannels.remoteRipgrepGet, (event, sessionId: string) => {
     const runtime = runtimeForEvent(event)
@@ -2132,6 +2137,10 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IpcChannels.sshGetState, (event): SshState => runtimeForEvent(event)?.ssh.getState() ?? { ...EMPTY_SSH_STATE })
   ipcMain.handle(IpcChannels.sshListHosts, (event): SshHost[] => runtimeForEvent(event)?.listSshHosts() ?? [])
+  ipcMain.handle(IpcChannels.sshGetSavedPassword, (event, id: unknown): string | null => {
+    if (typeof id !== 'string' || id === '') return null
+    return runtimeForEvent(event)?.getSavedSshPassword(id) ?? null
+  })
   ipcMain.handle(IpcChannels.sshRemoveHost, (event, id: string): SshHost[] => runtimeForEvent(event)?.removeSshHost(String(id ?? '')) ?? [])
   ipcMain.handle(IpcChannels.sshConnect, (event, draft: SshHostDraft): SshState => runtimeForEvent(event)?.connectSsh(draft) ?? { ...EMPTY_SSH_STATE })
   ipcMain.handle(IpcChannels.sshDisconnect, (event): SshState => runtimeForEvent(event)?.ssh.disconnect() ?? { ...EMPTY_SSH_STATE })

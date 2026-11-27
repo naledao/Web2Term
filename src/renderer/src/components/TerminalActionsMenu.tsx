@@ -8,18 +8,20 @@ export type TerminalActionId = 'interrupt' | 'reconnect' | 'reset' | 'close' | '
 
 interface TerminalActionsMenuProps {
   containerRef: RefObject<HTMLElement | null>
-  triggerRef: RefObject<HTMLButtonElement | null>
+  triggerRef?: RefObject<HTMLButtonElement | null>
   visible: boolean
   mode: 'local' | 'ssh' | 'web2term'
+  tabScoped?: boolean
   connected: boolean
+  directoryDisabled?: boolean
   reconnecting: boolean
   resetDisabled: boolean
   closeDisabled: boolean
   closing: boolean
   uploading: boolean
-  sendDelaySeconds: number
+  sendDelaySeconds?: number
   onAction: (action: TerminalActionId) => void
-  onSendDelayChange: (seconds: number) => Promise<void>
+  onSendDelayChange?: (seconds: number) => Promise<void>
 }
 
 type MenuPage = 'main' | 'connection'
@@ -64,7 +66,7 @@ function ActionButton({ children, icon, disabled, danger, trailing, onClick }: {
 }
 
 export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JSX.Element {
-  const { containerRef, triggerRef, visible, mode, connected, reconnecting, resetDisabled, closeDisabled,
+  const { containerRef, triggerRef, visible, mode, tabScoped, connected, directoryDisabled, reconnecting, resetDisabled, closeDisabled,
     closing, uploading, sendDelaySeconds, onAction, onSendDelayChange } = props
   const [open, setOpen] = useState(false)
   const [page, setPage] = useState<MenuPage>('main')
@@ -79,7 +81,7 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
   const commitDelay = useCallback((): void => {
     const raw = delayDraftRef.current
     delayDraftRef.current = null
-    if (raw === null) return
+    if (raw === null || !onSendDelayChange) return
     const value = raw.trim() === '' ? 0 : Number(raw)
     if (!Number.isFinite(value)) { setDelayDraft(null); return }
     const seconds = Math.min(600, Math.max(0, Math.floor(value)))
@@ -142,50 +144,52 @@ export default function TerminalActionsMenu(props: TerminalActionsMenuProps): JS
         <Popover.Popup ref={popupRef} className="terminal-actions__popup" initialFocus={false} finalFocus={() => !suppressRestoreRef.current}>
           {page === 'main' ? <>
             <Popover.Title className="terminal-actions__heading">终端操作</Popover.Title>
-            <ActionButton icon={<ActionIcon name="stop" />} danger onClick={() => choose('interrupt')}>中断当前命令</ActionButton>
+            <ActionButton icon={<ActionIcon name="stop" />} danger disabled={tabScoped && !connected} onClick={() => choose('interrupt')}>中断当前命令</ActionButton>
             {mode !== 'local' ? <ActionButton icon={<ActionIcon name="reconnect" />} disabled={resetDisabled} onClick={() => choose('reconnect')}>
               {reconnecting ? '正在连接…' : '重新连接'}
             </ActionButton> : null}
             <ActionButton icon={<ActionIcon name="reset" />} disabled={resetDisabled} onClick={() => choose('reset')}>
               重置终端
             </ActionButton>
-            {mode !== 'web2term' ? <ActionButton icon={<ActionIcon name="connection" />} trailing={next} onClick={() => setPage('connection')}>切换连接</ActionButton> : null}
+            {!tabScoped && mode !== 'web2term' ? <ActionButton icon={<ActionIcon name="connection" />} trailing={next} onClick={() => setPage('connection')}>切换连接</ActionButton> : null}
             {mode !== 'local' ? <ActionButton icon={<ActionIcon name="close" />} disabled={closeDisabled} onClick={() => choose('close')}>
-              {closing ? '关闭中…' : mode === 'ssh' ? '关闭 SSH 面板' : '关闭设备终端'}
+              {closing ? '关闭中…' : tabScoped ? '关闭终端' : mode === 'ssh' ? '关闭 SSH 面板' : '关闭设备终端'}
             </ActionButton> : null}
             <div className="terminal-actions__separator" />
-            <ActionButton icon={<ActionIcon name="folder" />} disabled={!connected} onClick={() => choose('directory')}>选择工作目录</ActionButton>
+            <ActionButton icon={<ActionIcon name="folder" />} disabled={!connected || directoryDisabled} onClick={() => choose('directory')}>选择工作目录</ActionButton>
             {mode === 'local' ? <ActionButton icon={<ActionIcon name="edit" />} onClick={() => choose('edit-directory')}>手动输入目录</ActionButton> : null}
-            {mode === 'ssh' ? <>
+            {!tabScoped && mode === 'ssh' ? <>
               <ActionButton icon={<ActionIcon name="upload" />} disabled={!connected || uploading} onClick={() => choose('upload')}>{uploading ? '上传中…' : '上传文件'}</ActionButton>
               <ActionButton icon={<ActionIcon name="files" />} disabled={!connected} onClick={() => choose('files')}>浏览远程文件</ActionButton>
             </> : null}
-            <div className="terminal-actions__separator" />
-            <label className="terminal-actions__delay">
-              <span>回传等待</span>
-              <span className="terminal-actions__delay-field">
-                <input type="number" inputMode="numeric" min={0} max={600} step={1} aria-label="回传前的等待秒数"
-                  aria-invalid={delayError ? true : undefined}
-                  title="命令执行完成后的回传等待时间：0–600 秒。0 表示立即发送；上下箭头每次调整 1 秒，离开输入框或按 Enter 保存。"
-                  value={delayDraft ?? String(sendDelaySeconds)}
-                  onChange={(event) => { delayDraftRef.current = event.target.value; setDelayDraft(event.target.value); setDelayError('') }}
-                  onBlur={commitDelay}
-                  onKeyDown={(event) => {
-                    if (event.nativeEvent.isComposing) return
-                    if (event.key === 'Enter') {
-                      event.preventDefault()
-                      commitDelay()
-                      setOpen(false)
-                    }
-                    if (event.key === 'Escape') {
-                      delayDraftRef.current = null
-                      setDelayDraft(null)
-                    }
-                  }} />
-                <span>秒</span>
-              </span>
-            </label>
-            {delayError ? <p className="terminal-actions__delay-error" role="alert">{delayError}</p> : null}
+            {onSendDelayChange ? <>
+              <div className="terminal-actions__separator" />
+              <label className="terminal-actions__delay">
+                <span>回传等待</span>
+                <span className="terminal-actions__delay-field">
+                  <input type="number" inputMode="numeric" min={0} max={600} step={1} aria-label="回传前的等待秒数"
+                    aria-invalid={delayError ? true : undefined}
+                    title="命令执行完成后的回传等待时间：0–600 秒。0 表示立即发送；上下箭头每次调整 1 秒，离开输入框或按 Enter 保存。"
+                    value={delayDraft ?? String(sendDelaySeconds ?? 0)}
+                    onChange={(event) => { delayDraftRef.current = event.target.value; setDelayDraft(event.target.value); setDelayError('') }}
+                    onBlur={commitDelay}
+                    onKeyDown={(event) => {
+                      if (event.nativeEvent.isComposing) return
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        commitDelay()
+                        setOpen(false)
+                      }
+                      if (event.key === 'Escape') {
+                        delayDraftRef.current = null
+                        setDelayDraft(null)
+                      }
+                    }} />
+                  <span>秒</span>
+                </span>
+              </label>
+              {delayError ? <p className="terminal-actions__delay-error" role="alert">{delayError}</p> : null}
+            </> : null}
           </> : <>
             <Popover.Title className="terminal-actions__sr-only">连接方式</Popover.Title>
             <button type="button" className="terminal-actions__item terminal-actions__back" onClick={() => setPage('main')}>

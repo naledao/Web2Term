@@ -703,7 +703,7 @@ function mainFixture(conversationId = 'chat-A') {
   }
 }
 
-test('a settled model completion reaches main with the old generation and finishes without complete_task', () => {
+test('a settled model completion reaches main with the current generation and finishes without complete_task', () => {
   for (const text of ['【任务完成】\n演示文稿尚未保存，内容已列在回复中。', '任务完成。', '**【任务完成】**']) {
     const page = pageFixture(), main = mainFixture(), submission = page.confirm()
     main.submit(submission)
@@ -712,7 +712,9 @@ test('a settled model completion reaches main with the old generation and finish
       options: {}, deferredCommands: new Map(), backgroundTasks: { cancelNotifications() {} },
       backgroundTaskResults: { isSending: false, cancel() { cancelled++ } }
     })
-    main.embed.installInterceptor = async () => {}
+    main.embed.installInterceptor = async () => page.controller.configure({
+      taskPromptGeneration: main.embed.taskPromptGeneration, taskPromptInjected: false
+    })
     main.embed.interceptor.taskStartedAt = 100000
     main.embed.interceptor.taskFinishedAt = null
     main.embed.handlers.onTaskCompleted = (id, source) => main.runtime.completeComputerTaskFromModel('deepseek', id, source)
@@ -721,14 +723,15 @@ test('a settled model completion reaches main with the old generation and finish
     assert.ok(event)
     assert.equal(event.completed, true)
     assert.equal(event.sourceSubmissionId, submission)
-    assert.equal(event.taskPromptGeneration, 3, 'the ending event retains its pre-reset owner')
-    assert.equal(page.controller.status().taskPromptGeneration, 4)
+    assert.equal(event.taskPromptGeneration, 3, 'the ending event belongs to the current generation')
+    assert.equal(page.controller.status().taskPromptGeneration, 3, 'the page waits for main to publish the new generation')
     main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(event))
     const done = main.records.get(main.writes.at(-1).id)
     assert.equal(done.status, 'completed')
     assert.equal(done.modelCompletion.messageId, event.messageId)
     assert.equal(main.coordinator.current('deepseek'), null)
     assert.equal(main.embed.taskPromptGeneration, 4)
+    assert.equal(page.controller.status().taskPromptGeneration, 4)
     assert.equal(cancelled, 1)
     main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(event))
     assert.equal(cancelled, 1, 'duplicate ending events do not finish or notify twice')
@@ -761,7 +764,7 @@ test('refused completion keeps page/main generations aligned for the next confir
     main.embed.handlers.onTaskCompleted = () => { completedCalls++; return false }
     page.replace([turn('2', '【任务完成】\n可以使用安卓模拟器。')]); page.settle()
     const completion = page.events.find(e => e.event === 'task-finished')
-    assert.equal(page.controller.status().taskPromptGeneration, 4)
+    assert.equal(page.controller.status().taskPromptGeneration, 3)
     const event = { ...completion, ...(rejection === 'missing-source' ? { sourceSubmissionId: undefined } : {}) }
     main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(event))
     assert.equal(main.embed.taskPromptGeneration, 4)
@@ -776,9 +779,15 @@ test('refused completion keeps page/main generations aligned for the next confir
       return 'focus-turn-after-completion'
     }
     main.embed.deliverUserMessage = async () => {}
-    const nextSubmission = page.confirm()
+    if (pendingConfig) {
+      assert.equal(page.controller.status().programmatic, true, 'new sends are held until main publishes the boundary')
+      assert.equal(page.controller.status().taskPromptGeneration, 3)
+    }
     if (pendingConfig) page.controller.configure(pendingConfig)
-    assert.notEqual(page.controller.status().awaitingReplySince, 0, 'a delayed same-generation configure preserves the next reply wait')
+    assert.equal(page.controller.status().programmatic, false)
+    const nextSubmission = page.confirm()
+    page.controller.configure({ taskPromptGeneration: 4, taskPromptInjected: false })
+    assert.notEqual(page.controller.status().awaitingReplySince, 0, 'a repeated same-generation configure preserves the next reply wait')
     const next = page.events.filter(e => e.event === 'user-message').at(-1)
     main.embed.handlePageReport('[cmd-terminal] ' + JSON.stringify(next))
     assert.equal(started, 1)

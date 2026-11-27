@@ -288,7 +288,7 @@ test('the native composer isolates multiline goals for first sends, follow-ups, 
   function visit(node) {
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'intercept') interceptNode = node.initializer
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'USER_TEXT_SENTINEL') sentinelNode = node.initializer
-    if (ts.isVariableDeclaration(node) && ['userPromptInjection', 'reportUserInjection', 'userTextOf'].includes(node.name.getText(source))) helpers.set(node.name.getText(source), node.initializer)
+    if (ts.isVariableDeclaration(node) && ['holdSendForCompletion', 'userPromptInjection', 'reportUserInjection', 'userTextOf'].includes(node.name.getText(source))) helpers.set(node.name.getText(source), node.initializer)
     ts.forEachChild(node, visit)
   }
   visit(source)
@@ -296,25 +296,34 @@ test('the native composer isolates multiline goals for first sends, follow-ups, 
   assert.ok(sentinelNode)
   const sentinel = new Script('(' + sentinelNode.getText(source) + ')').runInNewContext({})
   const original = '目标：整理报表\n必要条件：\n  保留  两列原始数据\n预期产物：D:\\结果.xlsx\n'
-  for (const mode of ['first', 'follow-up', 'retry', 'legacy-retry', 'off', 'off-retry', 'empty']) {
+  for (const mode of ['first', 'follow-up', 'retry', 'legacy-retry', 'off', 'off-retry', 'empty', 'completion-sync']) {
     let draft = mode.includes('retry') ? 'SYSTEM\n' + (mode === 'legacy-retry' ? '\u0000\u0001' : sentinel) + original : mode === 'empty' ? '' : original
-    let submitted, sendContext
+    let submitted, sendContext, prevented = false
+    const waitingForCompletion = mode === 'completion-sync'
     const reports = [], element = {}
     const context = {
       state: { enabled: true, promptInjectionEnabled: !mode.startsWith('off'), prefix: 'SYSTEM\n', taskPromptGeneration: 1,
         replyProtocolPrefix: 'SHORT\n\n', replyProtocolVersion: 1, prefixIncludesReplyProtocol: true, replyProtocolFullLength: 6,
-        taskPromptInjected: mode === 'follow-up', programmatic: false, injectedCount: 0 },
-      draftRejected: false, USER_TEXT_SENTINEL: sentinel, SEND_ATTEMPT_BUDGET_MS: 1000, SEND_BUTTON_GRACE_MS: 100,
+        taskPromptInjected: mode === 'follow-up', programmatic: waitingForCompletion, injectedCount: 0 },
+      draftRejected: false, completionBoundaryTimer: waitingForCompletion ? 1 : null,
+      USER_TEXT_SENTINEL: sentinel, SEND_ATTEMPT_BUDGET_MS: 1000, SEND_BUTTON_GRACE_MS: 100,
       getComposer: () => element, noteUserSend() {},
       readComposer: () => draft, collapse: value => String(value).replace(/\s+/g, ' ').trim(),
       hasDraftImageAttachment: () => false, beginUserImageCapture: () => 'attachment-token',
+      showSendBlockNotice() {},
       insertText: (_, text) => { draft = text; return true }, report: event => reports.push(event), setTimeout: fn => { fn(); return 1 },
       submitWithRetry: (text, ...args) => { submitted = text; sendContext = args.at(-1) }
     }
     for (const [name, node] of helpers) context[name] = new Script('(' + node.getText(source) + ')').runInNewContext(context)
     const intercept = new Script('(' + interceptNode.getText(source) + ')').runInNewContext(context)
-    assert.equal(intercept({ target: element, preventDefault() {}, stopImmediatePropagation() {} }), mode !== 'empty', mode)
+    assert.equal(intercept({ target: element, isTrusted: true, preventDefault() { prevented = true }, stopImmediatePropagation() {} }), mode !== 'empty', mode)
     if (mode === 'empty') { assert.equal(submitted, undefined); continue }
+    if (waitingForCompletion) {
+      assert.equal(prevented, true)
+      assert.equal(submitted, undefined)
+      assert.equal(draft, original)
+      continue
+    }
     const expectedPrefix = mode.startsWith('off') ? '' : mode === 'follow-up' ? 'SHORT\n\n' : 'SYSTEM\n'
     assert.equal(submitted, expectedPrefix ? expectedPrefix + sentinel + original : original, mode)
     assert.equal(draft, submitted, 'the real composer contents match the submitted payload')

@@ -27,7 +27,7 @@ const events = new Set([
   'continue-generation', 'command-recovery', 'native-edit', 'gemini-refusal'
 ])
 const reasons = new Set([
-  'no-turns', 'no-visible-turns', 'not-assistant-turn', 'no-key', 'already-handled', 'question-still-generating',
+  'no-turns', 'no-visible-turns', 'not-assistant-turn', 'no-key', 'already-handled', 'completed-reply-history', 'question-still-generating',
   'question-not-live', 'invalid-question', 'invalid-read-files', 'no-command', 'still-generating',
   'terminal-mode-off', 'result-sent', 'user-sent', 'question-detected', 'non-command-reply',
   'history-baseline', 'manual-resume', 'file-send-submitted', 'configured-baseline', 'task-ended',

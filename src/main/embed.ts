@@ -2699,11 +2699,9 @@ export class ChatGptEmbed {
             // The coordinator's completion callback may already have ended this embed.
             if (this.taskPromptGeneration === generation) this.completeTask()
           } finally {
-            // The page already advanced before reporting completion. Even when task
-            // authority refuses the completion, acknowledge this *prompt* boundary.
-            // Otherwise its next confirmed human send (generation + 1) is discarded,
-            // leaving focus replies attached to the preceding user turn. This reset
-            // grants no task authority and does not mark a refused task completed.
+            // Publish the new prompt generation only after validating and deduplicating
+            // the report. An auxiliary or refused completion can refresh the prompt
+            // without ending the task or changing its timer.
             if (this.taskPromptGeneration === generation) this.resetTaskPrompt()
             completionBoundarySynced = this.taskPromptGeneration === generation + 1
           }
