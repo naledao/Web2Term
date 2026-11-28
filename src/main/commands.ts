@@ -770,7 +770,7 @@ export class CommandRunner {
     return true
   }
 
-  /** Replay a saved command as a new execution without asking the model to regenerate it. */
+  /** Replay a saved terminal command or file read as a new execution. */
   runRecentCommand(conversationId: string, messageId: string): RecentCommandRunResult {
     if (this.disposed || this.deps.currentConversationId() !== conversationId) return 'unavailable'
     if (this.deps.terminalModeEnabled?.() === false) return 'terminal-mode-off'
@@ -781,11 +781,21 @@ export class CommandRunner {
     // A replay must not interrupt other work, including manually entered terminal commands.
     if (this.inFlight.size > 0 || this.activeShell || this.deps.remoteShell()?.running) return 'busy'
     const selected = this.deps.store.listRecentCommandJson(conversationId).find((item) => item.messageId === messageId)
-    if (!selected) return 'unavailable'
-    // The original execution has the normalized command and timeout represented by this JSON.
+    if (!selected || (selected.tool && selected.tool !== 'read_files')) return 'unavailable'
     const original = this.deps.store.getExecution(selected.messageId)
-    if (!original || original.conversationId !== conversationId || original.kind !== 'command') return 'unavailable'
-    if (original.command.trim() === '' || isPlaceholderCommand(original.command)) return 'invalid'
+    if (!original || original.conversationId !== conversationId ||
+      original.kind !== (selected.tool === 'read_files' ? 'read_files' : 'command')) return 'unavailable'
+    let fileRequest: StoredFileReadRequest | undefined
+    if (original.kind === 'read_files') {
+      if (!original.fileRequest) return 'invalid'
+      if (!this.toolEnabled(original) || !this.deps.filePlatform()) return 'file-tool-unavailable'
+      let current: FileReadContext
+      try { current = this.deps.fileContext() } catch { return 'file-tool-unavailable' }
+      const source = original.fileRequest.context
+      if (source.scope !== current.scope || source.hostId !== current.hostId) return 'file-host-changed'
+      // Relative paths stay bound to the directory where the original request was recorded.
+      fileRequest = original.fileRequest
+    } else if (original.command.trim() === '' || isPlaceholderCommand(original.command)) return 'invalid'
 
     // Keep the original output and the page's durable deduplication key untouched.
     const replayId = `rerun:${randomUUID()}`
@@ -798,11 +808,12 @@ export class CommandRunner {
       description: original.description,
       timeoutSeconds: original.timeoutSeconds,
       status: 'pending',
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      ...(fileRequest ? { fileRequest } : {})
     })
     if (!created) return 'unavailable'
     this.deps.onTaskStarted?.()
-    this.appendLine({ kind: 'notice', text: '正在重新执行历史指令，完成后自动将结果返回给 AI' })
+    this.appendLine({ kind: 'notice', text: fileRequest ? '正在重新读取历史指令中的文件，完成后自动回传附件' : '正在重新执行历史指令，完成后自动将结果返回给 AI' })
     this.broadcastExecutions(conversationId)
     void this.execute(replayId, true).catch((error) => {
       if (this.disposed) return

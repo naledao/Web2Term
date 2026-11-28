@@ -42,7 +42,7 @@ import type { ToolKind } from './tool-window-state'
 import ConversationTranscript from './components/ConversationTranscript'
 import FocusChatView from './components/FocusChatView'
 import type { ChatView } from '@shared/focus-chat'
-import { DEFAULT_CHAT_VIEW, focusPlatformLabels, supportsFocusView } from '@shared/focus-chat'
+import { DEFAULT_CHAT_VIEW, FOCUS_TOOL_LABELS, focusPlatformLabels, supportsFocusView } from '@shared/focus-chat'
 import { ACCOUNT_PLATFORM_IDS, DEFAULT_PLATFORM_ACCOUNT, DEFAULT_PLATFORM_ACCOUNT_ID, supportsPlatformAccounts } from '@shared/platform-accounts'
 import type { AccountPlatformId, PlatformAccount } from '@shared/platform-accounts'
 import QuestionChatPanel from './components/QuestionChatPanel'
@@ -275,13 +275,13 @@ function statusTone(status: ExecutionStatus): string {
   return 'badge'
 }
 
-/** A 重新执行指令 entry that asks the user again instead of running a command. */
-function isRecentQuestion(payloadJson: string): boolean {
+function recentCommandCategory(payloadJson: string): 'question' | 'background' | 'command' {
   try {
-    return isQuestionPayload(JSON.parse(payloadJson))
-  } catch {
-    return false
-  }
+    const payload = JSON.parse(payloadJson)
+    if (isQuestionPayload(payload)) return 'question'
+    if (typeof payload?.command === 'string' && payload.background === true) return 'background'
+  } catch { /* An invalid older payload still renders as a command for inspection. */ }
+  return 'command'
 }
 
 function formatTime(epochMs: number): string {
@@ -440,6 +440,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
   const [recentCommands, setRecentCommands] = useState<RecentCommandJson[]>([])
   const [recentCommandLoading, setRecentCommandLoading] = useState(false)
   const [recentCommandRunning, setRecentCommandRunning] = useState<string | null>(null)
+  const [recentCommandCopied, setRecentCommandCopied] = useState<string | null>(null)
   const [recentCommandError, setRecentCommandError] = useState('')
   const [conversationTranscript, setConversationTranscript] = useState<{ ownerKey: string | null; messages: ConversationMessage[] }>({ ownerKey: null, messages: [] })
   const conversationRequestRef = useRef(0)
@@ -1329,6 +1330,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
     }
 
     setRecentCommandError('')
+    setRecentCommandCopied(null)
     setRecentCommandLoading(true)
     setRecentCommandOpen(true)
     try {
@@ -1354,9 +1356,11 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
         const errors = {
           busy: '当前任务或终端正在运行，请结束后再重试。',
           unavailable: '当前对话或所选指令已失效，请重新打开。',
-          invalid: '这条历史指令为空、是占位符，或问题格式无效，无法执行。',
+          invalid: '这条历史指令的内容无效，无法执行。',
           paused: '当前已暂停，请先恢复后再执行历史指令。',
-          'terminal-mode-off': '请先开启终端模式，再执行历史指令。'
+          'terminal-mode-off': '请先开启终端模式，再执行历史指令。',
+          'file-tool-unavailable': '当前文件读取工具不可用，请检查工具设置和终端连接。',
+          'file-host-changed': '请切回原指令使用的本机或 SSH 主机，再重新读取文件。'
         }
         setRecentCommandError(errors[result])
       }
@@ -1366,6 +1370,14 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
       setRecentCommandRunning(null)
     }
   }, [conversationId, taskRunning, recentCommandRunning])
+
+  const copyRecentCommand = async (item: RecentCommandJson): Promise<void> => {
+    setRecentCommandError('')
+    try {
+      await navigator.clipboard.writeText(item.payloadJson)
+      setRecentCommandCopied(item.messageId)
+    } catch { setRecentCommandError('复制失败，可以选中指令手动复制。') }
+  }
 
   useEffect(() => {
     setRecentCommandOpen(false)
@@ -2726,7 +2738,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               aria-expanded={recentCommandOpen}
               aria-haspopup="dialog"
               aria-controls={recentCommandOpen ? `recent-command-picker-${sessionId}` : undefined}
-              title="选择最近三条指令之一，在当前终端执行并自动将结果返回给 AI"
+              title="查看最近三条指令，重跑命令、重新读取文件或复制工具指令"
               onClick={() => void openRecentCommands()}
             >
               重新执行指令
@@ -2744,7 +2756,7 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
               <div className="recent-command-picker__header">
                 <div>
                   <strong>选择历史指令</strong>
-                  <p>最近三条 · 指令在当前终端执行并自动回传结果；问题会重新弹出，回答后发给 AI</p>
+                  <p>最近三条，可按条目重跑、重新提问或复制。</p>
                 </div>
                 <button type="button" className="recent-command-picker__close" aria-label="关闭选择区域" onClick={() => setRecentCommandOpen(false)}>×</button>
               </div>
@@ -2754,26 +2766,34 @@ export default function App({ sessionId, sessionKind, initialSshDialogOpen = fal
                 <p className="recent-command-picker__empty">当前对话暂无已保存的指令。</p>
               ) : (
                 <div className="recent-command-picker__list">
-                  {recentCommands.map((item, index) => (
-                    <div className="recent-command-picker__item" key={item.messageId}>
+                  {recentCommands.map((item, index) => {
+                    const category = recentCommandCategory(item.payloadJson)
+                    const question = category === 'question'
+                    const fileRead = item.tool === 'read_files'
+                    const copyOnly = !!item.tool && !fileRead
+                    const label = item.tool === 'read_files' ? '文件读取' : item.tool ? FOCUS_TOOL_LABELS[item.tool] : question ? '问题' : category === 'background' ? '后台任务' : ''
+                    const terminalModeOff = !question && !copyOnly && !interceptor?.enabled
+                    const action = copyOnly ? (recentCommandCopied === item.messageId ? '已复制' : '复制指令')
+                      : question ? (recentCommandRunning === item.messageId ? '正在打开问题…' : '重新提问')
+                        : fileRead ? (recentCommandRunning === item.messageId ? '正在启动读取…' : '重新读取并回传')
+                          : recentCommandRunning === item.messageId ? '正在启动执行…' : '执行此指令'
+                    return <div className="recent-command-picker__item" key={item.messageId}>
                       <div className="recent-command-picker__meta">
-                        <strong>第 {index + 1} 条{isRecentQuestion(item.payloadJson) ? ' · 问题' : ''}{index === 0 ? ' · 最新' : ''}</strong>
+                        <strong>第 {index + 1} 条{label ? ' · ' + label : ''}{index === 0 ? ' · 最新' : ''}</strong>
                         <time>{new Date(item.createdAt).toLocaleString('zh-CN')}</time>
                       </div>
                       <pre className="recent-command-picker__json">{item.payloadJson}</pre>
                       <button
                         type="button"
                         className="btn btn--primary recent-command-picker__send"
-                        disabled={recentCommandRunning !== null || (!isRecentQuestion(item.payloadJson) && !interceptor?.enabled)}
-                        title={!isRecentQuestion(item.payloadJson) && !interceptor?.enabled ? '请先开启终端模式' : undefined}
-                        onClick={() => void runRecentCommand(item.messageId)}
+                        disabled={recentCommandRunning !== null || terminalModeOff}
+                        title={terminalModeOff ? '请先开启终端模式' : fileRead ? '按原请求的主机和目录重新读取文件，并向当前对话回传附件' : undefined}
+                        onClick={() => { if (copyOnly) void copyRecentCommand(item); else void runRecentCommand(item.messageId) }}
                       >
-                        {isRecentQuestion(item.payloadJson)
-                          ? recentCommandRunning === item.messageId ? '正在打开问题…' : '重新提问'
-                          : recentCommandRunning === item.messageId ? '正在启动执行…' : '执行此指令'}
+                        {action}
                       </button>
                     </div>
-                  ))}
+                  })}
                 </div>
               )}
               {recentCommandError ? <p className="recent-command-picker__error" role="alert">{recentCommandError}</p> : null}

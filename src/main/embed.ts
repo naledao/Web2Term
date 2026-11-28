@@ -26,8 +26,8 @@ import { writeQuestionLog } from './question-chat-page'
 import { supportsSelectionQuestion } from '../shared/deepseek-question'
 import type { QuestionChatAction, QuestionChatState, SelectionQuestionDraft } from '../shared/deepseek-question'
 import type { SavedQuestionContextReader } from '../shared/deepseek-context-markdown'
-import { validFocusModelSettingDiagnostic, type FocusPageSnapshot, type FocusSendOutcome, type FocusAttachmentInfo, type FocusEditDiagnostic, type FocusModelSettingsRequest, type FocusModelSettingsResult } from '../shared/focus-chat'
-import { focusInterceptorPage, supportsFocusView, validFocusComposerModes, validFocusModelSettings, validFocusSendFailure } from '../shared/focus-chat'
+import { validFocusModelSettingDiagnostic, type FocusPageSnapshot, type FocusSendOutcome, type FocusAttachmentInfo, type FocusComposerModeId, type FocusEditDiagnostic, type FocusModelSettingsRequest, type FocusModelSettingsResult, type GeminiComposerMode } from '../shared/focus-chat'
+import { focusInterceptorPage, supportsFocusView, validFocusComposerModes, validFocusModelSettings, validFocusSendFailure, validGeminiComposerMode } from '../shared/focus-chat'
 import { sendPageFiles } from './page-files'
 import { sendQuestionChatAttachment } from './question-chat-send'
 import { writeRawSendDiagnostic } from './raw-send-log'
@@ -45,6 +45,8 @@ import type { FocusFileLinkTarget } from '../shared/focus-file-links'
 import { captureNativeFocusFile } from './focus-file-preview'
 import type { CapturedFocusFileResult, FocusFileCaptureDiagnostic } from './focus-file-preview'
 import { dispatchFocusModelClick } from './focus-model-click'
+import { readGeminiUsage } from './gemini-usage'
+import type { GeminiUsageResult } from '../shared/gemini-usage'
 import type { FocusUiAction, FocusUiRecovery } from '../shared/focus-smart-ui'
 import { parseReadFilesRequest } from '../shared/file-requests'
 import type { FileSendOutcome } from '../shared/file-requests'
@@ -1602,7 +1604,12 @@ export class ChatGptEmbed {
     } catch { return null }
   }
 
-  async readFocusSnapshot(): Promise<FocusPageSnapshot | null> {
+  async readFocusGeminiUsage(force: boolean): Promise<GeminiUsageResult | null> {
+    const contents = this.platform.id === 'gemini' ? this.focusPage() : null
+    return contents ? readGeminiUsage(contents, force) : null
+  }
+
+  async readFocusSnapshot(savedGeminiMode?: { conversationId: string; mode: GeminiComposerMode }): Promise<FocusPageSnapshot | null> {
     this.hiddenViewProbe?.active()
     const contents = this.focusPage()
     if (!contents) return null
@@ -1610,7 +1617,7 @@ export class ChatGptEmbed {
     try {
       const url = contents.getURL()
       const raw = await Promise.race([
-        contents.executeJavaScript('window.__cmdTerminalInterceptor?.focusSnapshot() ?? null'),
+        contents.executeJavaScript('window.__cmdTerminalInterceptor?.focusSnapshot(' + (savedGeminiMode ? JSON.stringify(savedGeminiMode) : '') + ') ?? null'),
         new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 2500) })
       ]) as FocusPageSnapshot | null
       if (!raw || contents.isDestroyed() || contents.getURL() !== url || raw.path !== new URL(url).pathname ||
@@ -1624,6 +1631,7 @@ export class ChatGptEmbed {
       if (raw.smartReplies !== undefined && (!Array.isArray(raw.smartReplies) || raw.smartReplies.length > 8 || raw.smartReplies.some(reply =>
         !reply || typeof reply.sourceMessageId !== 'string' || reply.sourceMessageId.length > 160 || typeof reply.answer !== 'string' || reply.answer.length > 250000))) return null
       if (raw.composerModes !== undefined && !validFocusComposerModes(raw.composerModes)) return null
+      if (raw.composerMode !== undefined && (this.platform.id !== 'gemini' || !validGeminiComposerMode(raw.composerMode))) return null
       if (raw.modelSettings !== undefined && !validFocusModelSettings(raw.modelSettings)) return null
       if (raw.modelSettingsReady !== undefined && typeof raw.modelSettingsReady !== 'boolean') return null
       if (raw.sendFailure != null && !validFocusSendFailure(raw.sendFailure)) return null
@@ -1664,9 +1672,9 @@ export class ChatGptEmbed {
     }
   }
 
-  async setFocusComposerMode(id: 'thinking' | 'search', active: boolean): Promise<FocusSendOutcome> {
+  async setFocusComposerMode(id: FocusComposerModeId, active: boolean): Promise<FocusSendOutcome> {
     const contents = this.focusPage()
-    if (!contents || this.platform.id !== 'deepseek' || this.focusEditToken) return 'unavailable'
+    if (!contents || !this.platform.page.focus?.composerModes || this.focusEditToken) return 'unavailable'
     const url = contents.getURL()
     let timer: ReturnType<typeof setTimeout> | undefined
     try {

@@ -19,6 +19,7 @@ import type { FocusUiRequest } from './focus-smart-ui'
 import type { FocusCitationRequest, FocusCitationResult, FocusCitationOpenRequest } from './focus-citations'
 import type { FocusFileLinkRequest, FocusFilePreviewRequest, FocusFilePreviewResult, FocusFilePreviewHandle } from './focus-file-links'
 import type { FocusHtmlPreviewRequest, FocusHtmlPreviewOutcome } from './focus-html-preview'
+import type { GeminiUsageResult } from './gemini-usage'
 import type { RemoteRipgrepState, RemoteRipgrepRequest, RemoteRipgrepTaskResult } from './remote-ripgrep'
 import type { QuestionChatAction, QuestionChatState } from './deepseek-question'
 import type { GithubCliState, GithubCloneProgressEvent, GithubCloneRequest, GithubCloneResult, GithubLoginTaskResult, GithubLogoutResult, GithubRepositoryPage, GithubRepositoryRequest } from './github'
@@ -91,6 +92,7 @@ export const IpcChannels = {
   focusHtmlPreview: 'focus-html:preview',
   focusChatComposerMode: 'focus-chat:composer-mode',
   focusChatModelSettings: 'focus-chat:model-settings',
+  focusChatGeminiUsage: 'focus-chat:gemini-usage',
   focusChatAsk: 'focus-chat:ask',
   embedState: 'embed:state',
   questionChatGetState: 'question-chat:get-state',
@@ -1711,9 +1713,12 @@ export interface RecentCommandJson {
   messageId: string
   payloadJson: string
   createdAt: number
+  tool?: RecentToolKind
 }
 
-export type RecentCommandRunResult = 'ok' | 'busy' | 'unavailable' | 'invalid' | 'paused' | 'terminal-mode-off'
+export type RecentToolKind = 'read_files' | 'read_tool_prompt' | 'scheduled_task' | 'send_email' | 'computer'
+
+export type RecentCommandRunResult = 'ok' | 'busy' | 'unavailable' | 'invalid' | 'paused' | 'terminal-mode-off' | 'file-tool-unavailable' | 'file-host-changed'
 
 /** Progress of downloading the web2term Linux tool from the client. */
 export interface LinuxAgentDownloadState {
@@ -1732,10 +1737,19 @@ export function isQuestionPayload(payload: unknown): boolean {
   return type === 'question' || type === 'questions'
 }
 
-/** What 重新执行指令 keeps: a command object, or a question object to ask again. */
+export function recentToolKind(payload: unknown): RecentToolKind | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || 'command' in payload || 'questions' in payload) return undefined
+  const type = (payload as { type?: unknown }).type
+  switch (type) {
+    case 'read_files': case 'read_tool_prompt': case 'scheduled_task': case 'send_email': case 'computer': return type
+    default: return undefined
+  }
+}
+
+/** The history picker keeps command, question, and tool request objects. */
 export function isRecentCommandPayload(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
-  return typeof (payload as { command?: unknown }).command === 'string' || isQuestionPayload(payload)
+  return typeof (payload as { command?: unknown }).command === 'string' || isQuestionPayload(payload) || recentToolKind(payload) !== undefined
 }
 
 /** One command lifted out of an assistant reply, and what happened to it. */
@@ -2481,6 +2495,7 @@ export interface AppApi {
   /** Current embed snapshot; call once on mount to cover events fired before subscribing. */
   getEmbedState(): Promise<EmbedState>
   getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
+  getFocusGeminiUsage(owner: FocusOwner, force: boolean): Promise<GeminiUsageResult | null>
   getCompaction(owner: FocusOwner): Promise<CompactionState | null>
   listPlatformAccounts(platformId: AccountPlatformId): Promise<PlatformAccount[]>
   addPlatformAccount(owner: FocusOwner, label: string): Promise<PlatformAccount>

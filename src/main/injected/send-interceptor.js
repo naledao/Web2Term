@@ -2664,7 +2664,7 @@
     .filter(({ value, label }) => /^[A-Za-z0-9][A-Za-z0-9 ._()+:/-]{0,79}$/.test(value) && label.length > 0 && label.length <= 100)
 
   /** Passive between explicit refreshes; never opens a menu from the polling loop. */
-  const focusModelSettingsOf = () => {
+  const focusModelSettingsOf = (composerMode) => {
     const rules = PAGE.focus?.modelSettings
     if (!rules) { focusModelCache = null; return { model: null, effort: null, models: [], efforts: [] } }
     // A home send may pass through an interim /c/<id> before its final route.
@@ -2677,13 +2677,16 @@
         (rules.kind === 'claude' && focusModelCache.path === '/') ||
         focusModelCache.firstSendGeneration === state.taskPromptGeneration) && sending &&
       new RegExp(rules.conversationPathPattern).test(location.pathname)
-    if (!focusModelCache || (focusModelCache.path !== location.pathname && !firstSend)) {
+    if (!focusModelCache || (focusModelCache.path !== location.pathname && !firstSend) ||
+      (composerMode && focusModelCache.composerMode !== composerMode)) {
       focusModelCache = { path: location.pathname, data: { model: null, effort: null, models: [], efforts: [] } }
     }
+    if (composerMode) focusModelCache.composerMode = composerMode
     if (firstSend && focusModelCache.path !== location.pathname) focusModelCache.firstSendGeneration = state.taskPromptGeneration
     if (!sending || focusModelCache.firstSendGeneration !== state.taskPromptGeneration) delete focusModelCache.firstSendGeneration
     focusModelCache.path = location.pathname
     const data = focusModelCache.data
+    if (focusModelCache.composerMode === 'task') data.effortSupported = false
     // React can replace or briefly remove the trigger while sending. A missing
     // DOM node is not evidence that the confirmed selection changed.
     const parts = focusModelPickerParts()
@@ -2758,6 +2761,7 @@
       const exact = data.models.filter(option => option.label.toLowerCase() === label.toLowerCase())
       const matching = exact.length ? exact : data.models.filter(option => focusGeminiModelName(option.label) === focusGeminiModelName(label))
       data.model = checked.length === 1 ? checked[0].value : matching.length === 1 ? matching[0].value : null
+      if (data.effortSupported === false) return { ...data, models: data.models.slice(), efforts: [] }
       if (focusModelCache.effortModel !== data.model) {
         data.efforts = []
         focusModelCache.effortModel = data.model
@@ -2796,27 +2800,36 @@
     return { ...data, models: data.models.slice(), efforts: data.efforts.slice() }
   }
 
-  const focusComposerModeControls = () => {
+  const focusComposerModeMatches = (control, rule, choice) => {
+    const text = collapse(control.textContent)
+    if (!choice) return rule.labels.includes(text)
+    const labels = [text.toLowerCase(), collapse(control.getAttribute('aria-label')).toLowerCase()]
+    return rule.labels.some(name => labels.includes(name.toLowerCase()))
+  }
+
+  const focusComposerModeControls = (composer = getComposer()) => {
     const rules = PAGE.focus?.composerModes || []
     if (!rules.length) return []
+    const choice = PAGE.focus.composerModeChoice
+    if (choice && !new RegExp(choice.pathPattern).test(location.pathname)) return []
     const selector = PAGE.focus.composerModeControlSelector || CONTROL_SELECTOR
-    let node = getComposer()?.parentElement, partial = []
+    let node = composer?.parentElement, partial = []
     for (let depth = 0; node && node !== document.body && depth < 10; depth++, node = node.parentElement) {
-      const controls = [...node.querySelectorAll(selector)].filter(isVisibleElement)
-      const found = rules.filter(rule => controls.some(control => rule.labels.includes(collapse(control.textContent))))
-      // The inner footer can contain attachment/send only. Keep walking until the
-      // named mode switches are actually present, not just any two buttons.
+      const controls = [...node.querySelectorAll(selector)].filter(control => isVisibleElement(control) &&
+        (!choice || !control.closest('nav, aside, header, [role="navigation"]')))
+      const found = rules.filter(rule => controls.some(control => focusComposerModeMatches(control, rule, choice)))
       if (found.length === rules.length) return controls
       if (!partial.length && found.length) partial = controls
     }
-    return partial
+    return choice ? [] : partial
   }
 
-  /** Read only the two named switches inside the current composer's input region. */
-  const focusComposerModesOf = () => {
-    const controls = focusComposerModeControls()
-    return (PAGE.focus?.composerModes || []).map(rule => {
-      const matches = controls.filter(control => rule.labels.includes(collapse(control.textContent)))
+  const focusComposerModesOf = (composer = getComposer()) => {
+    const choice = PAGE.focus?.composerModeChoice
+    const controls = focusComposerModeControls(composer)
+    const rules = PAGE.focus?.composerModes || []
+    const modes = rules.map(rule => {
+      const matches = controls.filter(control => focusComposerModeMatches(control, rule, choice))
       const control = matches.length === 1 ? matches[0] : null
       let active = null
       if (control) {
@@ -2830,8 +2843,47 @@
           if (on !== off) active = on
         }
       }
-      return { control, data: { id: rule.id, active, disabled: !control || active === null || controlDisabled(control) } }
+      return { control, data: { id: rule.id, active, disabled: !control || (!choice && active === null) || controlDisabled(control) } }
     })
+    if (!choice) return modes
+    if (modes.length !== 2 || modes.some(mode => !mode.control) || modes[0].control === modes[1].control) return []
+    const [first, second] = modes.map(mode => mode.data)
+    if (first.active === null && second.active === null) {
+      // The home composer can also identify the mode by its exact, mode-specific placeholder.
+      const placeholders = [composer, composer?.closest('rich-textarea')].flatMap(node =>
+        ['aria-placeholder', 'data-placeholder', 'placeholder'].map(attr => collapse(node?.getAttribute(attr)).toLowerCase()))
+      const matches = rules.filter(rule => rule.placeholders?.some(label => placeholders.includes(label.toLowerCase())))
+      if (matches.length === 1) for (const { data } of modes) data.active = data.id === matches[0].id
+    } else if (first.active === null) first.active = !second.active
+    else if (second.active === null) second.active = !first.active
+    else if (first.active === second.active) first.active = second.active = null
+    return modes
+  }
+
+  const focusGeminiConversationTask = (rules) => {
+    const viewportWidth = document.documentElement?.clientWidth || window.innerWidth
+    if (!viewportWidth) return false
+    const labels = rules.taskStatusLabels.map(label => label.toLowerCase())
+    // Existing Gemini tasks have a status pill beside the conversation menu at
+    // the top right. A completion label within a reply or dialog is unrelated.
+    const excluded = 'user-query, model-response, message-content, nav, aside, [role="navigation"], [role="menu"], [role="dialog"], [contenteditable="true"]'
+    return [...document.querySelectorAll(CONTROL_SELECTOR + ', [role="status"], mat-chip, mat-chip-option')].some(node => {
+      if (!['aria-label', 'title'].map(attr => collapse(node.getAttribute(attr)).toLowerCase())
+        .concat(collapse(node.textContent).toLowerCase()).some(label => labels.includes(label))) return false
+      if (node.closest(excluded) || !isVisibleElement(node)) return false
+      const rect = node.getBoundingClientRect()
+      return rect.top >= 0 && rect.bottom <= 96 && rect.left >= Math.max(viewportWidth / 2, viewportWidth - 240) && rect.right <= viewportWidth
+    })
+  }
+
+  const focusGeminiComposerMode = (modes, savedMode) => {
+    const rules = PAGE.focus?.composerModeChoice
+    if (!rules) return undefined
+    if (new RegExp(rules.pathPattern).test(location.pathname)) return modes.find(mode => mode.active === true)?.id
+    if (!new RegExp(rules.conversationPathPattern).test(location.pathname)) return undefined
+    if (focusGeminiConversationTask(rules)) return 'task'
+    if (savedMode === 'chat' || savedMode === 'task') return savedMode
+    return focusModelCache?.path === location.pathname ? focusModelCache.composerMode : undefined
   }
 
   const findComposerControl = (selectors) => {
@@ -6445,7 +6497,7 @@
         clone.querySelectorAll('svg, mat-icon, gem-icon, [aria-hidden="true"]').forEach((icon) => icon.remove())
         return labels.includes(collapse(node.getAttribute('aria-label') || '')) || labels.includes(collapse(clone.textContent || ''))
       })
-      // Only the unique Files entry in a visible menu qualifies. Drive/photos,
+      // Only the unique local upload entry in a visible menu qualifies. Drive/photos,
       // hidden helper buttons and filenames mentioned in history cannot qualify.
       // It can open a chooser directly OR expose the measured local submenu;
       // the main process polls until the native chooser event arrives.
@@ -7258,9 +7310,17 @@
       const rules = PAGE.focus?.modelSettings
       if (!rules || !['read', 'model', 'effort'].includes(kind) || typeof token !== 'string' ||
         !/^[a-zA-Z0-9-]{1,80}$/.test(token) || (kind === 'read' ? value !== null : typeof value !== 'string' || value.length > 80)) return result('invalid', 'invalid-request')
-      if (location.pathname !== expectedPath || !getComposer()) return result('unavailable', 'page-unavailable')
+      const composer = getComposer()
+      if (location.pathname !== expectedPath || !composer) return result('unavailable', 'page-unavailable')
       if (focusModeChanging || focusEditing || fileSend || state.programmatic || state.awaitingReplySince || state.pendingQuestion || findStopButton()) {
         return { ...result('busy', 'page-busy'), diagnostic: { stage: 'prepare', target: 'trigger', detail: 'page-busy', stepCount: 0 } }
+      }
+      let geminiTaskMode = false
+      if (rules.kind === 'gemini') {
+        const composerMode = focusGeminiComposerMode(focusComposerModesOf(composer).map(mode => mode.data))
+        const settings = focusModelSettingsOf(composerMode)
+        geminiTaskMode = settings.effortSupported === false
+        if (geminiTaskMode && kind === 'effort') return { outcome: 'unavailable', reason: 'option-unavailable', settings }
       }
       const operation = { token, generation: state.taskPromptGeneration, path: expectedPath, click: null, lastFailure: null, step: 0, current: null }
       operation.current = () => focusModeChanging === operation && location.pathname === operation.path && state.taskPromptGeneration === operation.generation
@@ -7562,7 +7622,7 @@
       }
       finally {
         let closed = true, closingTarget = 'root-menu'
-        if (rules.kind === 'gemini' && (openedHere || openedEffortHere) && operation.current()) {
+        if (rules.kind === 'gemini' && !geminiTaskMode && (openedHere || openedEffortHere) && operation.current()) {
           const effort = geminiEffortParts()
           if (effort?.expanded) {
             closingTarget = 'effort-menu'
@@ -7611,17 +7671,20 @@
 
     /** One requested mode change. No draft writes, submit, state replay or automatic retry. */
     async setComposerMode(id, active, expectedPath) {
-      if (typeof active !== 'boolean' || !(PAGE.focus?.composerModes || []).some(rule => rule.id === id)) return 'invalid'
-      if (location.pathname !== expectedPath || !getComposer()) return 'unavailable'
-      if (focusModeChanging || focusEditing || fileSend || state.programmatic || state.awaitingReplySince !== 0 || findStopButton()) return 'busy'
+      const choice = PAGE.focus?.composerModeChoice
+      if (typeof active !== 'boolean' || (choice && !active) || !(PAGE.focus?.composerModes || []).some(rule => rule.id === id)) return 'invalid'
+      const composer = getComposer()
+      if (location.pathname !== expectedPath || !composer) return 'unavailable'
+      if (focusModeChanging || focusEditing || fileSend || state.programmatic || state.awaitingReplySince !== 0 || state.pendingQuestion || findStopButton()) return 'busy'
       const operation = { path: expectedPath, generation: state.taskPromptGeneration }
       const current = () => focusModeChanging === operation && location.pathname === operation.path &&
         state.taskPromptGeneration === operation.generation
       const locate = () => focusComposerModesOf().find(mode => mode.data.id === id)
       let mode = locate()
-      if (!mode?.control || mode.data.active === null) return 'unavailable'
+      if (!mode?.control || (!choice && mode.data.active === null)) return 'unavailable'
       if (mode.data.disabled) return 'busy'
       if (mode.data.active === active) return 'ok'
+      if (choice && (collapse(readComposer(composer)) || draftAttachmentEvidence())) return 'busy'
       focusModeChanging = operation
       try {
         pressButton(mode.control)
@@ -7963,13 +8026,18 @@
       return { visibility: document.visibilityState, idle: !!getComposer() && !focusEditing && !focusModeChanging && !fileSend &&
         !state.programmatic && !state.awaitingReplySince && !state.pendingQuestion && focusGenerationState() === 'idle' }
     },
-    focusSnapshot() {
+    focusSnapshot(savedGeminiMode) {
       // Every page-specific read below comes from the platform's measured focus rules.
       const rules = PAGE.focus || { reasoningSelectors: [] }
       const composer = getComposer()
       const sendFailure = focusSendFailureOf()?.data ?? null
-      const composerModes = rules.composerModes ? focusComposerModesOf().map(mode => mode.data) : undefined
-      const modelSettings = rules.modelSettings ? focusModelSettingsOf() : undefined
+      const composerModes = rules.composerModes ? focusComposerModesOf(composer).map(mode => mode.data) : undefined
+      const savedMode = savedGeminiMode && savedGeminiMode.conversationId === location.pathname.split('/')[2] ? savedGeminiMode.mode : undefined
+      const chosenMode = rules.composerModeChoice ? focusGeminiComposerMode(composerModes ?? [], savedMode) : undefined
+      const modelSettings = rules.modelSettings ? focusModelSettingsOf(chosenMode) : undefined
+      // The model cache can carry the confirmed home mode through the first send.
+      const composerMode = chosenMode ?? (rules.composerModeChoice && new RegExp(rules.composerModeChoice.conversationPathPattern).test(location.pathname)
+        ? focusModelCache?.composerMode : undefined)
       const modelControl = rules.modelSettings ? focusModelPickerParts() : null
       const modelSettingsReady = rules.modelSettings ? !!modelControl && !controlDisabled(modelControl.trigger) : undefined
       const rendered = new Map()
@@ -7996,7 +8064,7 @@
           // through a widget marker. Oversize replies use the normal answer channel.
           return answer.length <= 250000 ? [{ sourceMessageId: messageIdOf(node), answer }] : []
         }) : []
-      if (focusEditing) return { path: location.pathname, ready: !!composer, nativeDraft: false, waiting: true, generating: 'unknown', reply: null, smartReplies, composerModes, modelSettings, modelSettingsReady }
+      if (focusEditing) return { path: location.pathname, ready: !!composer, nativeDraft: false, waiting: true, generating: 'unknown', reply: null, smartReplies, composerModes, composerMode, modelSettings, modelSettingsReady }
       const generating = focusGenerationState()
       const rows = queryAllAssistant().filter(node => isAssistantTurn(node))
       let node = focusReplyPosition === null ? latestReplyNode(rows) :
@@ -8068,7 +8136,7 @@
       }
       const historyDraft = !!rules.edit && queryAll([rules.edit.editorSelector]).some(isVisibleElement)
       return { path: location.pathname, ready: !!composer, nativeDraft: historyDraft || (!!composer && collapse(readComposer(composer)) !== ''),
-        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply, smartReplies, composerModes, modelSettings, modelSettingsReady, sendFailure }
+        waiting: state.awaitingReplySince !== 0 || state.programmatic, generating, reply, smartReplies, composerModes, composerMode, modelSettings, modelSettingsReady, sendFailure }
     },
 
     async recoverCommand(token, generation, allowSend, manual = false, expectedMessageId = null) {

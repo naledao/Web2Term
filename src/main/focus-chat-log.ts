@@ -1,20 +1,21 @@
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FOCUS_MODEL_SETTING_DETAILS, FOCUS_MODEL_SETTING_TARGETS, type FocusOwner, type FocusSendOutcome, type FocusEditDiagnostic, type FocusModelSettingDetail, type FocusModelSettingTarget } from '../shared/focus-chat'
+import { FOCUS_MODEL_SETTING_DETAILS, FOCUS_MODEL_SETTING_TARGETS, validFocusComposerModeId, type FocusComposerModeId, type FocusOwner, type FocusSendOutcome, type FocusEditDiagnostic, type FocusModelSettingDetail, type FocusModelSettingTarget } from '../shared/focus-chat'
 import type { FocusFilePreviewStage } from '../shared/focus-file-links'
 
 interface FocusDiagnostic extends FocusEditDiagnostic {
   target?: FocusModelSettingTarget
   detail?: FocusModelSettingDetail
   stepCount?: number
-  event: 'view-state' | 'send-retry-request' | 'send-retry-outcome' | 'send-request' | 'send-outcome' | 'edit-request' | 'edit-page' | 'edit-outcome' | 'smart-ui-request' | 'smart-ui-page' | 'smart-ui-outcome' | 'smart-ui-recovered' | 'composer-mode-request' | 'composer-mode-outcome' | 'model-setting-request' | 'model-setting-outcome' | 'end-task' | 'user-started' | 'user-captured' | 'user-stored' | 'user-discarded' | 'file-preview-request' | 'file-preview-page' | 'file-preview-outcome' | 'file-preview-saved' | 'citation-open-request' | 'citation-open-page' | 'citation-open-outcome'
+  event: 'view-state' | 'send-retry-request' | 'send-retry-outcome' | 'send-request' | 'send-outcome' | 'edit-request' | 'edit-page' | 'edit-outcome' | 'smart-ui-request' | 'smart-ui-page' | 'smart-ui-outcome' | 'smart-ui-recovered' | 'composer-mode-request' | 'composer-mode-outcome' | 'model-setting-request' | 'model-setting-outcome' | 'gemini-usage-outcome' | 'end-task' | 'user-started' | 'user-captured' | 'user-stored' | 'user-discarded' | 'file-preview-request' | 'file-preview-page' | 'file-preview-outcome' | 'file-preview-saved' | 'citation-open-request' | 'citation-open-page' | 'citation-open-outcome'
   sourceIndex?: number
   fileStage?: FocusFilePreviewStage
   sendFailed?: boolean
   retryable?: boolean
   setting?: 'read' | 'model' | 'effort'
-  composerMode?: 'thinking' | 'search'
+  composerMode?: FocusComposerModeId
+  composerModesAvailable?: boolean
   active?: boolean
   action?: 'choose' | 'submit'
   taskOpen?: boolean
@@ -48,13 +49,13 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
     const details: Record<string, string | number | boolean | null> = {
       event: payload.event, sessionId: identifier(owner.sessionId), conversationId: identifier(owner.conversationId)
     }
-    for (const key of ['ready', 'modelSettingsReady', 'nativeDraft', 'waiting', 'sendFailed', 'retryable', 'taskOpen', 'anchored', 'submitted', 'originalMatches', 'draftMatches',
+    for (const key of ['ready', 'modelSettingsReady', 'composerModesAvailable', 'nativeDraft', 'waiting', 'sendFailed', 'retryable', 'taskOpen', 'anchored', 'submitted', 'originalMatches', 'draftMatches',
       'requestBodyReadable', 'requestTextMatches', 'requestOriginalMatches', 'requestStateMatches', 'requestStatePresent', 'requestPathMatches',
       'nativeClickReceived', 'clickTrusted', 'clickPrevented'] as const) if (typeof payload[key] === 'boolean') details[key] = payload[key]!
     if (payload.action === 'choose' || payload.action === 'submit') details.action = payload.action
     if (payload.fileStage && ['prepare', 'open', 'viewer', 'download', 'read'].includes(payload.fileStage)) details.fileStage = payload.fileStage
     if (payload.setting && ['read', 'model', 'effort'].includes(payload.setting)) details.setting = payload.setting
-    if (payload.composerMode === 'thinking' || payload.composerMode === 'search') details.composerMode = payload.composerMode
+    if (validFocusComposerModeId(payload.composerMode)) details.composerMode = payload.composerMode
     if (typeof payload.active === 'boolean') details.active = payload.active
     for (const key of ['turnCount', 'executionCount', 'reasoningCount', 'searchCount', 'answerLength', 'inputLength', 'attachmentCount', 'savedAttachmentCount',
       'groupCount', 'candidateCount', 'originalLength', 'pageTextLength', 'editorTextLength', 'editorStableReads',
@@ -79,7 +80,8 @@ export function writeFocusDiagnostic(owner: FocusOwner, payload: FocusDiagnostic
       'option-unavailable', 'selection-confirmed', 'selection-unconfirmed', 'slider-unavailable', 'menu-close-unconfirmed', 'page-busy', 'conversation-changed',
       'file-download-received', 'file-download-completed', 'file-download-failed', 'file-preview-timeout',
       'too-large', 'timeout', 'file-unavailable', 'source-navigation-received', 'source-navigation-opened',
-      'source-navigation-timeout', 'source-navigation-failed', 'invalid-source-url'].includes(payload.reason ?? '')) details.reason = payload.reason!
+      'source-navigation-timeout', 'source-navigation-failed', 'invalid-source-url',
+      'usage-redirected', 'usage-timeout', 'usage-unavailable'].includes(payload.reason ?? '')) details.reason = payload.reason!
     for (const key of ['turnId', 'messageId'] as const) if (payload[key] !== undefined) details[key] = identifier(payload[key] ?? null)
     if (payload.imageSource === 'provided' || payload.imageSource === 'page') details.imageSource = payload.imageSource
     if (['active', 'idle', 'unknown'].includes(payload.generating ?? '')) details.generating = payload.generating!

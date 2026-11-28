@@ -1,5 +1,6 @@
 import { chatgptConversationIdFromPath, isConversationId } from './types'
 import type { EnvironmentKind } from './types'
+import type { FocusComposerModeId } from './focus-chat'
 
 /**
  * What the app needs to know about a chat website to drive it.
@@ -315,7 +316,8 @@ export interface FocusPageRules {
     }
   })
   composerModeControlSelector?: string
-  composerModes?: Array<{ id: 'thinking' | 'search'; labels: string[]; activeSelector?: string; inactiveSelector?: string }>
+  composerModeChoice?: { pathPattern: string; conversationPathPattern: string; taskStatusLabels: string[] }
+  composerModes?: Array<{ id: FocusComposerModeId; labels: string[]; placeholders?: string[]; activeSelector?: string; inactiveSelector?: string }>
   smartUi?: {
     rootSelector: string
     sourceIdAttr: string
@@ -1302,11 +1304,21 @@ export const GEMINI_PAGE: PageAdapter = {
   fileTurnPositionAttr: 'id',
   fileUploadMenuSelectors: ['button[aria-label="上传和工具"]', 'button[aria-label="Upload files"]'],
   fileLocalUploadSelector: 'button[data-test-id="local-images-files-uploader-button"]',
-  fileLocalUploadLabels: ['文件', 'Files'],
+  // The visible gem-menu-item can say “上传文件” while the legacy button is hidden.
+  fileLocalUploadLabels: ['文件', 'Files', '上传文件', 'Upload files'],
   focus: {
     userTurnSelector: 'user-query',
     reasoningScopeSelector: 'model-response',
     reasoningSelectors: ['thinking-overlay'],
+    composerModeChoice: {
+      pathPattern: '^/app/?$', conversationPathPattern: '^/app/[0-9a-fA-F]{16}/?$',
+      taskStatusLabels: ['完成', '已完成', '任务已完成', '任務已完成', 'Done', 'Completed', 'Task completed', 'Mark as done']
+    },
+    composerModeControlSelector: 'button, [role="button"], [role="radio"], [role="tab"]',
+    composerModes: [
+      { id: 'chat', labels: ['对话', '對話', '聊天', 'Chat'], placeholders: ['问问 Gemini', '问问Gemini', '詢問 Gemini', 'Ask Gemini', 'Message Gemini'] },
+      { id: 'task', labels: ['任务', '任務', 'Task', 'Tasks'], placeholders: ['描述任务', '描述任務', 'Describe a task'] }
+    ],
     modelSettings: {
       kind: 'gemini', newChatPath: '/app', conversationPathPattern: '^/app/[0-9a-fA-F]{16}/?$',
       composerScopeSelector: 'input-area, fieldset.input-area-fieldset',

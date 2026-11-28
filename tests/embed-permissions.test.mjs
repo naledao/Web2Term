@@ -30,7 +30,7 @@ function fixture(partitionArg) {
     return dependencies[name]
   } })
   exports.blockGeminiWebNotifications(partitionArg)
-  return { partitions, check, request, block: exports.blockGeminiWebNotifications }
+  return { partitions, check, request, block: exports.blockGeminiWebNotifications, blockReadOnly: exports.blockGeminiReadOnlyPagePermissions }
 }
 
 test('Gemini reply notifications are denied for pages and service workers', () => {
@@ -63,4 +63,13 @@ test('custom Gemini account partitions also block notifications idempotently', (
   const decisions = []
   f.request(null, 'notifications', granted => decisions.push(granted), {})
   assert.deepEqual(decisions, [false])
+})
+
+test('quota pages have no interactive permissions while the chat page in the same session retains them', () => {
+  const f = fixture(), usage = {}, chat = {}
+  f.blockReadOnly(usage)
+  assert.equal(f.check(usage, 'media'), false)
+  assert.equal(f.check(chat, 'media'), true)
+  f.request(usage, 'clipboard-read', granted => assert.equal(granted, false))
+  f.request(chat, 'clipboard-read', granted => assert.equal(granted, true))
 })

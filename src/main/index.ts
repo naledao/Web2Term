@@ -1766,6 +1766,8 @@ function registerIpcHandlers(): void {
     focusRuntime(event, request)?.setFocusComposerMode(request) ?? 'unavailable')
   ipcMain.handle(IpcChannels.focusChatModelSettings, (event, request) =>
     focusRuntime(event, request)?.updateFocusModelSettings(request) ?? { outcome: 'unavailable', settings: null })
+  ipcMain.handle(IpcChannels.focusChatGeminiUsage, (event, owner, force) =>
+    typeof force === 'boolean' ? focusRuntime(event, owner)?.getFocusGeminiUsage(owner, force) ?? null : null)
   ipcMain.handle(IpcChannels.questionChatGetState, (event, sessionId: string) => questionRuntime(event, sessionId)?.embed.getQuestionChatState() ?? null)
   ipcMain.handle(IpcChannels.questionChatCreate, (event, sessionId: string, platformId: string) => {
     const runtime = questionRuntime(event, sessionId)

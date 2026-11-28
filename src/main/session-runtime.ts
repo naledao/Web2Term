@@ -56,8 +56,9 @@ import { validFocusFileLinkTarget, validFocusFilePreviewToken } from '../shared/
 import type { FocusFileLinkRequest, FocusFilePreviewRequest, FocusFilePreviewHandle, FocusFilePreviewResult } from '../shared/focus-file-links'
 import type { CapturedFocusFile } from './focus-file-preview'
 import type { FocusUiRequest } from '../shared/focus-smart-ui'
+import type { GeminiUsageResult } from '../shared/gemini-usage'
 import type { FocusComposerModeRequest, FocusModelSettingsRequest, FocusModelSettingsResult } from '../shared/focus-chat'
-import { focusOwnerAccountId, validFocusModelSettingsRequest } from '../shared/focus-chat'
+import { focusOwnerAccountId, validFocusModelSettingsRequest, validGeminiComposerMode } from '../shared/focus-chat'
 import { focusPromptInjectionState, estimateFocusConversation, estimateContextText } from '../shared/focus-token-usage'
 import { validFocusToolSkills, focusSkillUnavailable, focusSkillMessage, focusSkillPrefix } from '../shared/focus-skills'
 import type { ContextUsageEntry } from '../shared/context-usage'
@@ -77,6 +78,7 @@ import {
   readFilesToolPrompt,
   backgroundTaskToolPrompt,
   fileReadingPlatform,
+  recentToolKind,
   canEditTerminalNotes,
   terminalNotesOwnerKey
 } from '../shared/types'
@@ -1241,12 +1243,22 @@ export class SessionRuntime {
         this.updateInjectionLedger(platform.id, ledger => addInjectionTraffic(ledger, textLength))
       },
       onContextTraffic: chars => { if (isCurrent()) this.updateInjectionLedger(platform.id, ledger => addInjectionTraffic(ledger, chars)) },
-      onScheduledTask: call => { if (isActive()) this.receiveScheduledTask(call) },
+      onScheduledTask: call => {
+        if (!isActive()) return
+        this.recordRecentToolInstruction('scheduled_task', call.conversationId, call.messageId, call.rawJson)
+        this.receiveScheduledTask(call)
+      },
       onMailNotification: call => {
-        if (isActive()) this.mailNotifications.receive(call,
+        if (!isActive()) return
+        this.recordRecentToolInstruction('send_email', call.conversationId, call.messageId, call.rawJson)
+        this.mailNotifications.receive(call,
           JSON.stringify([this.id, platform.id, call.conversationId, call.sourceSubmissionId, call.messageId]))
       },
-      onToolPromptRead: call => { if (isActive()) this.toolPromptReads.receive(call) },
+      onToolPromptRead: call => {
+        if (!isActive()) return
+        this.recordRecentToolInstruction('read_tool_prompt', call.conversationId, call.messageId, call.rawJson)
+        this.toolPromptReads.receive(call)
+      },
       onAssistantMessage: (messageId, text, fallback) => {
         if (!isCurrent()) return
         this.captureConversationMessage(platform.id, 'assistant', text, messageId)
@@ -1366,7 +1378,15 @@ export class SessionRuntime {
         this.handleDetectedCommand(command)
         this.focusChat.command(platform.id, command.messageId, command.live)
       },
-      onComputerRequest: request => isCurrent() && this.receiveComputerUseRequest(platform.id, request),
+      onComputerRequest: request => {
+        if (!isCurrent()) return false
+        const accepted = this.receiveComputerUseRequest(platform.id, request)
+        const conversationId = platform.conversationIdFromPath(request.pagePath)
+        if (accepted && request.outcome === 'candidate' && conversationId) {
+          this.recordRecentToolInstruction('computer', conversationId, request.messageId, request.rawJson)
+        }
+        return accepted
+      },
       onComputerDocumentChanged: () => {
         if (!isCurrent()) return
         this.interruptTaskControl(platform.id)
@@ -2272,6 +2292,12 @@ export class SessionRuntime {
     finally { if (locked) this.focusSending = false; this.focusUiRecovering = false }
   }
 
+  private recordRecentToolInstruction(tool: FocusToolKind, conversationId: string, messageId: string, rawJson: string): void {
+    try {
+      if (recentToolKind(JSON.parse(rawJson)) === tool) this.options.store.saveRecentCommandJson(conversationId, messageId, rawJson)
+    } catch { /* A history write must not affect ownership, execution or delivery of the tool. */ }
+  }
+
   /** Observation callbacks retain the accepted call's owner and never participate in tool admission. */
   private observeFocusTool(tool: FocusToolKind, call: { messageId: string; rawJson: string; conversationId: string; sourceSubmissionId?: string }): FocusToolObserver | undefined {
     try {
@@ -2315,6 +2341,16 @@ export class SessionRuntime {
     } catch { /* Legacy/UI-created plans do not carry a model tool-call association. */ }
   }
 
+  async getFocusGeminiUsage(owner: FocusOwner, force: boolean): Promise<GeminiUsageResult | null> {
+    if (!this.active || owner.platformId !== 'gemini' || !this.ownsFocus(owner)) return null
+    const embed = this.embed
+    const result = await embed.readFocusGeminiUsage(force)
+    if (!result || !this.active || !this.ownsFocus(owner) || this.embed !== embed) return null
+    writeFocusDiagnostic(owner, { event: 'gemini-usage-outcome', outcome: result.outcome === 'ok' ? 'ok' : 'unavailable',
+      reason: result.outcome === 'ok' ? undefined : `usage-${result.outcome}` })
+    return result
+  }
+
   async getFocusChat(owner: FocusOwner): Promise<FocusChatState | null>
   async getFocusChat(owner: FocusOwner, cursor: FocusHistoryCursor): Promise<FocusChatUpdate | null>
   async getFocusChat(owner: FocusOwner, cursor?: FocusHistoryCursor): Promise<FocusChatUpdate | null> {
@@ -2323,8 +2359,17 @@ export class SessionRuntime {
     await this.recoverFocusUi(owner)
     if (!this.ownsFocus(owner)) return null
     const token = this.focusChat.token(owner.platformId)
-    const page = await this.embed.readFocusSnapshot()
+    const geminiModeKey = owner.platformId === 'gemini' && owner.conversationId
+      ? 'geminiComposerMode:' + JSON.stringify([focusOwnerAccountId(owner) ?? null, owner.conversationId]) : null
+    const savedMode = geminiModeKey ? this.options.store.getSetting(geminiModeKey) : null
+    const knownMode = geminiModeKey && validGeminiComposerMode(savedMode) ? savedMode : undefined
+    const page = await this.embed.readFocusSnapshot(knownMode && owner.conversationId
+      ? { conversationId: owner.conversationId, mode: knownMode } : undefined)
     if (!this.ownsFocus(owner)) return null
+    const composerMode = page?.composerMode ?? knownMode
+    if (geminiModeKey && composerMode && composerMode !== knownMode) {
+      try { this.options.store.setSetting(geminiModeKey, composerMode) } catch { /* Keep using the live mode if storage is unavailable. */ }
+    }
     const upgradedMessageId = page ? this.focusChat.snapshot(owner.platformId, token, page) : undefined
     if (upgradedMessageId && owner.conversationId && page?.reply?.answer) {
       this.options.store.refreshAssistantMessageMarkdown(owner.conversationId, upgradedMessageId, page.reply.answer)
@@ -2345,6 +2390,8 @@ export class SessionRuntime {
       page.modelSettingsReady && this.active && !!this.window && !this.window.isDestroyed() && this.window.isFocused()
     writeFocusDiagnostic(owner, { event: 'view-state', ready: page?.ready === true,
       modelSettingsReady,
+      composerModesAvailable: owner.platformId === 'gemini' && page ? !!page.composerModes?.length : undefined,
+      composerMode,
       sendFailed: !!page?.sendFailure, retryable: page?.sendFailure?.retryable === true,
       nativeDraft: page?.nativeDraft === true, waiting: page?.waiting === true, generating: page?.generating ?? 'unknown',
       turnCount: this.focusChat.turns(owner.platformId, owner.conversationId).length,
@@ -2373,6 +2420,7 @@ export class SessionRuntime {
       hiddenMessageIds: sameTurns ? undefined : this.focusChat.hiddenMessageIds(owner.platformId, owner.conversationId),
       smartReplies: page?.smartReplies ?? [],
       composerModes: page?.composerModes ?? [],
+      composerMode,
       modelSettings: page?.modelSettings,
       modelSettingsReady,
       promptInjection: focusPromptInjectionState(owner.platformId,
@@ -2776,14 +2824,19 @@ export class SessionRuntime {
   }
 
   async setFocusComposerMode(request: FocusComposerModeRequest): Promise<FocusSendOutcome> {
-    if (!this.ownsFocus(request) || request.platformId !== 'deepseek') return 'unavailable'
-    if (!['thinking', 'search'].includes(request.id) || typeof request.active !== 'boolean') return 'invalid'
+    if (!this.active || !this.ownsFocus(request)) return 'unavailable'
+    const rules = this.activePlatform.page.focus
+    if (!rules?.composerModes || (rules.composerModeChoice && request.conversationId !== null)) return 'unavailable'
+    if (!rules.composerModes.some(mode => mode.id === request.id) || typeof request.active !== 'boolean' ||
+      (rules.composerModeChoice && !request.active)) return 'invalid'
     if (this.focusSending || this.focusRevision || this.runner.hasInFlightWork() || this.embed.getInterceptorStatus().pendingQuestion) return 'busy'
+    if (rules.composerModeChoice && (this.taskRunning() || this.stoppingTask || this.aiOutboundQueue.stateFor(request).pending)) return 'busy'
+    const embed = this.embed
     this.focusSending = true
     writeFocusDiagnostic(request, { event: 'composer-mode-request', composerMode: request.id, active: request.active })
     try {
-      const result = await this.embed.setFocusComposerMode(request.id, request.active)
-      const outcome = this.ownsFocus(request) ? result : 'cancelled'
+      const result = await embed.setFocusComposerMode(request.id, request.active)
+      const outcome = this.active && this.embed === embed && this.ownsFocus(request) ? result : 'cancelled'
       writeFocusDiagnostic(request, { event: 'composer-mode-outcome', composerMode: request.id, active: request.active, outcome })
       return outcome
     } finally { this.focusSending = false }

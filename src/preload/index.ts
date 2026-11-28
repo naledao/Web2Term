@@ -242,6 +242,7 @@ const api: AppApi = {
 
   getEmbedState: (): Promise<EmbedState> => ipcRenderer.invoke(IpcChannels.embedGetState),
   getFocusChat: (owner: FocusOwner): Promise<FocusChatState | null> => ipcRenderer.invoke(IpcChannels.focusChatGet, owner),
+  getFocusGeminiUsage: (owner, force) => ipcRenderer.invoke(IpcChannels.focusChatGeminiUsage, owner, force),
   getCompaction: owner => ipcRenderer.invoke(IpcChannels.compactionGet, owner),
   listPlatformAccounts: platformId => ipcRenderer.invoke(IpcChannels.platformAccountsList, platformId),
   addPlatformAccount: (owner, label) => ipcRenderer.invoke(IpcChannels.platformAccountAdd, owner, label),

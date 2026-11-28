@@ -180,7 +180,7 @@ const modelPlatforms = [
     id: 'gemini',
     name: 'Gemini',
     icon: '/models/gemini.svg',
-    detail: '专注对话 · 多账号隔离 · 模型与思考等级 · Google 登录',
+    detail: '专注对话 · 对话与任务模式 · 当前及每周用量 · 多账号隔离',
     tone: 'violet',
   },
   {

@@ -47,6 +47,15 @@
 .focus-chat__model-refresh{display:inline-flex;flex:none;align-items:center;justify-content:center;width:30px;height:30px;padding:6px;border:0;border-radius:6px;background:transparent}
 .focus-chat__model-refresh svg{width:18px;height:18px}
 .focus-chat__model-refresh:hover:not(:disabled){background:var(--fc-soft)}
+.focus-chat__gemini-usage{display:flex;align-items:center;gap:5px;min-width:0;max-width:100%;font-size:11px;line-height:1.5}
+.focus-chat__gemini-usage-data{min-width:0}
+.focus-chat__gemini-usage dl{display:flex;flex-wrap:wrap;gap:4px 14px;margin:0}
+.focus-chat__gemini-usage dl>div{min-width:0}
+.focus-chat__gemini-usage dt,.focus-chat__gemini-usage dd{display:inline;margin:0}
+.focus-chat__gemini-usage dt,.focus-chat__gemini-usage-status,.focus-chat__gemini-usage small{color:color-mix(in srgb,var(--fc-text) 76%,var(--fc-bg))}
+.focus-chat__gemini-usage strong{margin-left:5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.focus-chat__gemini-usage small{display:block;font-size:inherit;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+@media(max-width:680px){.focus-chat__gemini-usage{order:4;width:100%}}
 .focus-chat__model-status{font-size:12px;color:var(--fc-text)}
 .focus-chat__notice button,.focus-chat__error button{padding:4px 8px;border:1px solid var(--fc-border);border-radius:6px;background:var(--fc-bg);font-size:11px}
 .focus-chat__muted{color:var(--fc-muted)}
@@ -225,6 +234,10 @@
 .focus-composer__mode:disabled{cursor:default;opacity:.6}
 .focus-composer__mode[data-state="unknown"]{border-style:dashed}
 .focus-composer__mode-pending{min-width:1em;text-align:center}
+.focus-composer__modes[data-selection=single]{flex:none;flex-wrap:nowrap;gap:2px;padding:2px;border:1px solid var(--fc-border);border-radius:999px;background:var(--fc-soft)}
+.focus-composer__modes[data-selection=single] .focus-composer__mode{min-width:52px;min-height:28px;border-color:transparent;border-style:solid;background:transparent}
+.focus-composer__modes[data-selection=single] .focus-composer__mode[aria-pressed=true]{background:var(--fc-bg);border-color:var(--fc-border);color:var(--fc-text);font-weight:650}
+.focus-composer__modes[data-selection=single] .focus-composer__mode:hover:not(:disabled){border-color:var(--fc-accent)}
 .focus-composer__tools>span{margin-left:auto;color:var(--fc-muted);font-size:11px}
 .focus-composer__tools .focus-composer__send{width:34px;height:34px;border:0;border-radius:50%;display:grid;place-items:center;padding:0;background:var(--fc-accent);color:var(--fc-bg);font-size:19px;line-height:1}
 .focus-composer__send .focus-composer__stop-icon,.focus-composer__send .focus-composer__pending-icon{display:block;width:16px;height:16px}

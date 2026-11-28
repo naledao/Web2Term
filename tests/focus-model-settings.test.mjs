@@ -35,6 +35,9 @@ function automaticRead(context) {
   context.compaction ??= { blocked: false }
   context.modelSettingsKind ??= context.owner.platformId
   context.geminiReadModel ??= { current: null }
+  context.geminiReadMode ??= { current: null }
+  context.geminiMode ??= null
+  context.setSettingError ??= () => {}
   Object.defineProperty(context, 'modelSettingsBlocked', { get: () => !context.ready || context.working || context.editingId || context.compaction.blocked })
   context.setTimeout ??= callback => { callback(); return 1 }
   context.clearTimeout ??= () => {}
@@ -53,6 +56,7 @@ function automaticRead(context) {
 function geminiFixture() {
   const rules = GEMINI_PAGE.focus.modelSettings
   let open = false, effortOpen = false, active = '56fdd199312815e2', activeEffort = 'high', now = 0, nextHit, reject = false, requireClick = false
+  let composerMode = 'chat', nativeTask = false
   const clicks = [], draft = { value: '保持草稿', closest: selector => selector === rules.composerScopeSelector ? scope : null }
   const element = (attributes, label, left, localName = 'button') => ({
     isConnected: true, localName, label, getAttribute: name => attributes[name] ?? null,
@@ -123,6 +127,8 @@ function geminiFixture() {
     focusModelCache: null, focusModeChanging: null, focusEditing: null, fileSend: null,
     state: { taskPromptGeneration: 1, programmatic: false, awaitingReplySince: 0, pendingQuestion: false },
     getComposer: () => draft, findStopButton: () => null,
+    focusComposerModesOf: () => nativeTask ? [] : [{ data: { id: composerMode, active: true } }],
+    focusGeminiConversationTask: () => nativeTask,
     queryAll: selectors => selectors.includes(rules.triggerSelector) ? [otherTrigger, trigger] : [],
     collapse: value => String(value || '').replace(/\s+/g, ' ').trim(), controlDisabled: node => node.getAttribute('aria-disabled') === 'true',
     isVisibleElement: visible,
@@ -130,7 +136,8 @@ function geminiFixture() {
       queueMicrotask(() => { void dispatchFocusModelClick(contents, payload.focusModelToken, payload.count, () => true, () => true) })
     } })
   for (const name of ['focusModelPickerParts', 'focusGeminiModelLabel', 'focusGeminiModelName', 'focusGeminiModelOptions',
-    'focusGeminiEffortParts', 'focusGeminiEffortValue', 'focusGeminiEffortOptions', 'focusModelSettingsOf']) context[name] = actual(name, context)
+    'focusGeminiEffortParts', 'focusGeminiEffortValue', 'focusGeminiEffortOptions', 'focusModelSettingsOf',
+    'focusGeminiComposerMode']) context[name] = actual(name, context)
   const api = {}
   context.focusModelClickPoint = actual('focusModelClickPoint', context)
   for (const name of ['prepareFocusModelClick', 'finishFocusModelClick', 'updateModelSettings']) api[name] = actual(name, context, true)
@@ -174,6 +181,7 @@ function geminiFixture() {
       }
     } }
   return { context, clicks, draft, read: context.focusModelSettingsOf, declineChange() { reject = true }, clickOnly() { requireClick = true },
+    setComposerMode(mode) { composerMode = mode }, showNativeTask() { nativeTask = true },
     change: (kind, value = null) => api.updateModelSettings(kind, value, context.location.pathname, 'gemini-operation') }
 }
 
@@ -227,6 +235,46 @@ test('Gemini selects strength from the linked menu and confirms it after the sub
     assert.deepEqual(f.clicks, ['open', requireClick ? 'open-effort' : 'hover-effort', 'medium'])
     assert.equal(f.read().effort, 'medium')
   }
+})
+
+test('Gemini task mode reads and changes models without reading or changing thinking strength', async () => {
+  const f = geminiFixture()
+  assert.equal((await f.change('read')).settings.effort, 'high')
+  f.clicks.length = 0
+  f.setComposerMode('task')
+  const effort = await f.change('effort', 'medium')
+  assert.equal(effort.outcome, 'unavailable')
+  assert.deepEqual(f.clicks, [])
+
+  const read = await f.change('read')
+  assert.equal(read.outcome, 'ok')
+  assert.equal(read.settings.effortSupported, false)
+  assert.equal(read.settings.effort, null)
+  assert.equal(read.settings.efforts.length, 0)
+  assert.equal(shared.validFocusModelSettings(read.settings), true)
+  assert.deepEqual(f.clicks, ['open', 'dismiss'])
+  assert.equal((await f.change('model', 'argon')).outcome, 'ok')
+  assert.equal(f.read().model, 'argon')
+
+  f.context.location.pathname = '/app/0123456789abcdef'
+  f.context.state.awaitingReplySince = 1
+  assert.equal(f.read().effortSupported, false, 'the setting survives navigation caused by the first send')
+  f.context.location.pathname = '/app'
+  f.context.state.awaitingReplySince = 0
+  f.setComposerMode('chat')
+  assert.equal((await f.change('read')).settings.effortSupported, undefined)
+  assert.equal(f.read().effort, 'high')
+})
+
+test('an existing Gemini task without home mode switches only reads the model picker', async () => {
+  const f = geminiFixture()
+  f.context.location.pathname = '/app/0123456789abcdef'
+  f.showNativeTask()
+  const read = await f.change('read')
+  assert.equal(read.outcome, 'ok')
+  assert.equal(read.settings.effortSupported, false)
+  assert.equal(read.settings.efforts.length, 0)
+  assert.deepEqual(f.clicks, ['open', 'dismiss'])
 })
 
 test('Gemini rejects an unavailable level and does not retry a selection the page did not apply', async () => {
@@ -531,6 +579,21 @@ test('Gemini reads each changed model once when its levels need refreshing', () 
   effect()
   assert.deepEqual(reads, [])
   context.state.modelSettings = { model: 'hydrogen', efforts: [] }
+  effect(); effect()
+  assert.deepEqual(reads, ['read'])
+})
+
+test('Gemini task mode skips a read for missing thinking strength once the model is known', () => {
+  const reads = [], errors = []
+  const context = createContext({ owner: { platformId: 'gemini' }, visible: true, ready: true, working: false,
+    editingId: null, sendLock: { current: false }, modelReadAttempted: { current: false }, modelReadAttempts: { current: 0 },
+    geminiMode: 'task', settingPending: null, state: { modelSettingsReady: true, modelSettings: { model: 'neon', efforts: [] } },
+    setSettingError: value => errors.push(value), updateModelSettings: kind => reads.push(kind) })
+  const effect = automaticRead(context)
+  effect()
+  assert.deepEqual(reads, [])
+  assert.deepEqual(errors, [''])
+  context.geminiMode = 'chat'
   effect(); effect()
   assert.deepEqual(reads, ['read'])
 })
@@ -850,6 +913,16 @@ test('Gemini renders both settings with native labels and disables them during a
   assert.match(html, /value="medium" selected="">中/)
   assert.match(html, /Gemini 模型设置/)
   assert.match(html, /aria-label="刷新模型和思考强度"/)
+})
+
+test('Gemini task mode shows the model selector and a model-only refresh button', () => {
+  const html = renderToStaticMarkup(Controls({ platformLabel: 'Gemini', showEffort: false, settings: {
+    model: 'neon', effort: 'medium', models: [{ value: 'neon', label: '4 Neon' }], efforts: [{ value: 'medium', label: '中' }]
+  }, disabled: false, pending: null, onChange() {}, onRefresh() {} }))
+  assert.equal((html.match(/<select/g) || []).length, 1)
+  assert.match(html, /value="neon" selected="">4 Neon/)
+  assert.match(html, /aria-label="刷新模型"/)
+  assert.doesNotMatch(html, /思考强度/)
 })
 
 function claudeFixture() {

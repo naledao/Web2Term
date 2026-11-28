@@ -18,7 +18,7 @@ import type { BackgroundCommandOptions } from '../shared/background-tasks'
 import { normalizeTerminalNotesDirectory } from './terminal-notes'
 import { interruptRunningCommands, recoverInterruptedExecutions } from './execution-recovery'
 import type { StoredFileReadRequest, FileDeliveryStatus } from '../shared/file-requests'
-import { isRecentCommandPayload } from '../shared/types'
+import { isRecentCommandPayload, recentToolKind } from '../shared/types'
 import type { FocusTurn } from '../shared/focus-chat'
 import type { AccountPlatformId, PlatformAccount } from '../shared/platform-accounts'
 import type {
@@ -26,6 +26,7 @@ import type {
   ConversationImageAttachmentInput,
   ExecutionRecord,
   ExecutionStatus,
+  RecentCommandJson,
   ScrapedConversation,
   SshHost,
   WorkspaceProject,
@@ -1068,7 +1069,7 @@ export class ConversationStore {
     return true
   }
 
-  /** Persist a complete command or question JSON object; keep only the latest three per conversation. */
+  /** Persist request JSON that is not already stored with a file execution. */
   saveRecentCommandJson(conversationId: string, messageId: string, payloadJson: string): void {
     if (!isRecentCommandPayload(JSON.parse(payloadJson))) throw new Error('Invalid command JSON payload')
     this.db.exec('BEGIN IMMEDIATE')
@@ -1084,12 +1085,32 @@ export class ConversationStore {
       throw error
     }
   }
-  /** Read the three newest command JSON payloads for one conversation. */
-  listRecentCommandJson(conversationId: string): Array<{ messageId: string; payloadJson: string; createdAt: number }> {
+  /** Merge request JSON with durable file executions, including files read by older versions. */
+  listRecentCommandJson(conversationId: string): RecentCommandJson[] {
     const rows = this.db.prepare(`SELECT message_id, payload_json, created_at FROM recent_command_json
       WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 3`)
       .all(conversationId) as unknown as Array<{ message_id: string; payload_json: string; created_at: number }>
-    return rows.map((row) => ({ messageId: row.message_id, payloadJson: row.payload_json, createdAt: row.created_at }))
+    const entries: RecentCommandJson[] = rows.map(row => {
+      const entry: RecentCommandJson = { messageId: row.message_id, payloadJson: row.payload_json, createdAt: row.created_at }
+      try {
+        const tool = recentToolKind(JSON.parse(row.payload_json))
+        if (tool) entry.tool = tool
+      } catch { /* Preserve an older entry for inspection if its payload is damaged. */ }
+      return entry
+    })
+    const files = this.db.prepare(`SELECT message_id, file_request, created_at FROM executions
+      WHERE conversation_id = ? AND kind = 'read_files' AND file_request IS NOT NULL AND message_id NOT LIKE 'rerun:%'
+      ORDER BY created_at DESC, rowid DESC`).iterate(conversationId) as Iterable<{ message_id: string; file_request: string; created_at: number }>
+    let fileCount = 0
+    for (const row of files) {
+      try {
+        const request = parseReadFilesRequest(JSON.parse(row.file_request))
+        if (!request || entries.some(entry => entry.messageId === row.message_id)) continue
+        entries.push({ messageId: row.message_id, payloadJson: JSON.stringify(request, null, 2), createdAt: row.created_at, tool: 'read_files' })
+        if (++fileCount === 3) break
+      } catch { /* Invalid legacy requests cannot appear as runnable tool instructions. */ }
+    }
+    return entries.sort((left, right) => right.createdAt - left.createdAt).slice(0, 3)
   }
   autonomousTaskGeneration(sessionId: string): number {
     const row = this.db.prepare('SELECT COALESCE(MAX(generation), 0) AS generation FROM autonomous_tasks WHERE session_id = ?')

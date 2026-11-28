@@ -54,6 +54,7 @@ function fixture() {
     replyRootOf: node => node.querySelector?.(context.PAGE.assistantReplySelectors[0]) || node,
     dsmlInProse: () => false, looksLikeScheduledReply: () => false, looksLikeMailReply: () => false, looksLikeToolPromptReadReply: () => false,
     readReplyText: node => node.body || '', readReplyMarkdown: node => node.markdown || '', smartUiCardsOf: () => [], smartUiLayoutsOf: () => [], focusComposerModesOf: () => [],
+    focusModelCache: null, focusGeminiComposerMode: () => undefined,
     focusModelSettingsOf: () => ({ model: null, effort: null, models: [], efforts: [] }),
     focusModelPickerParts: () => null,
     extractCommand: () => null, PAGE: DEEPSEEK_PAGE,

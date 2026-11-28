@@ -179,13 +179,21 @@ export interface FocusOwner {
 export function focusOwnerAccountId(owner: { accountId?: string; claudeAccountId?: string }): string | undefined {
   return owner.accountId ?? owner.claudeAccountId
 }
-export type FocusComposerModeId = 'thinking' | 'search'
 export const FOCUS_COMPOSER_MODES = [{ id: 'thinking', label: '深度思考' }, { id: 'search', label: '智能搜索' }] as const
+export const GEMINI_FOCUS_COMPOSER_MODES = [{ id: 'chat', label: '对话' }, { id: 'task', label: '任务' }] as const
+export type GeminiComposerMode = (typeof GEMINI_FOCUS_COMPOSER_MODES)[number]['id']
+export function validGeminiComposerMode(value: unknown): value is GeminiComposerMode {
+  return value === 'chat' || value === 'task'
+}
+export type FocusComposerModeId = (typeof FOCUS_COMPOSER_MODES | typeof GEMINI_FOCUS_COMPOSER_MODES)[number]['id']
 export interface FocusComposerMode { id: FocusComposerModeId; active: boolean | null; disabled: boolean }
 export interface FocusComposerModeRequest extends FocusOwner { id: FocusComposerModeId; active: boolean }
+export function validFocusComposerModeId(value: unknown): value is FocusComposerModeId {
+  return FOCUS_COMPOSER_MODES.some(mode => mode.id === value) || GEMINI_FOCUS_COMPOSER_MODES.some(mode => mode.id === value)
+}
 export function validFocusComposerModes(value: unknown): value is FocusComposerMode[] {
   return Array.isArray(value) && value.length <= 2 && new Set(value.map(mode => mode?.id)).size === value.length && value.every(mode =>
-    !!mode && ['thinking', 'search'].includes(mode.id) && (mode.active === null || typeof mode.active === 'boolean') && typeof mode.disabled === 'boolean')
+    !!mode && validFocusComposerModeId(mode.id) && (mode.active === null || typeof mode.active === 'boolean') && typeof mode.disabled === 'boolean')
 }
 export interface FocusModelOption { value: string; label: string }
 export interface FocusModelSettings {
@@ -193,6 +201,7 @@ export interface FocusModelSettings {
   effort: string | null
   models: FocusModelOption[]
   efforts: FocusModelOption[]
+  effortSupported?: boolean
 }
 export type FocusModelSettingKind = 'read' | 'model' | 'effort'
 export const FOCUS_MODEL_SETTING_STAGES = ['prepare', 'locate', 'open', 'verify', 'confirm'] as const
@@ -241,6 +250,8 @@ export function validFocusModelSettings(value: unknown): value is FocusModelSett
       typeof item.value === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._()+:/-]{0,79}$/.test(item.value) &&
       typeof item.label === 'string' && item.label.trim().length > 0 && item.label.length <= 100 && !/[\u0000-\u001f]/.test(item.label))
   return options(settings.models) && options(settings.efforts) &&
+    (settings.effortSupported === undefined || typeof settings.effortSupported === 'boolean') &&
+    (settings.effortSupported !== false || (settings.effort === null && settings.efforts.length === 0)) &&
     (settings.model === null || settings.models.some(item => item.value === settings.model)) &&
     (settings.effort === null || settings.efforts.some(item => item.value === settings.effort))
 }
@@ -270,6 +281,8 @@ export interface FocusPageSnapshot {
   reply: { sourceMessageId: string; parts: FocusPart[]; answer: string } | null
   smartReplies?: { sourceMessageId: string; answer: string }[]
   composerModes?: FocusComposerMode[]
+  /** Gemini mode can be known on a conversation page without switch controls. */
+  composerMode?: GeminiComposerMode
   modelSettings?: FocusModelSettings
   /** The current page has one rendered, enabled model trigger; independent of the composer. */
   modelSettingsReady?: boolean
@@ -288,6 +301,7 @@ export interface FocusChatState extends FocusOwner {
   hiddenMessageIds?: string[]
   smartReplies?: { sourceMessageId: string; answer: string }[]
   composerModes?: FocusComposerMode[]
+  composerMode?: GeminiComposerMode
   modelSettings?: FocusModelSettings
   modelSettingsReady?: boolean
   /** Display-only snapshot of the same planner that owns the next task's prefix. */

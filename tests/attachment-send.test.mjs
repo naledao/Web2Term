@@ -122,7 +122,9 @@ function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div'
   const add = element('button', { 'aria-label': '添加文件等内容' })
   const send = element('button', { 'aria-label': '发送' })
   const input = element('input', { type: 'file', multiple: '', accept: inputAccept })
-  const root = element('form', {}, [cards, composer, add, send, input])
+  const geminiFieldset = pageOverrides.fileComposerRootSelector === 'fieldset.input-area-fieldset'
+  const root = geminiFieldset ? element('fieldset', { class: 'input-area-fieldset' }, [cards, composer, add, send, input])
+    : element('form', {}, [cards, composer, add, send, input])
   const body = element('body', {}, [root])
   const listeners = new Map(), reports = []
   const document = {
@@ -154,7 +156,7 @@ function fixture(files = requestedFiles, pageOverrides = {}, composerTag = 'div'
   assert.equal(controller.beginFileSend(token, files), 'ok')
   controller.fileSelectionApplied(token)
   return {
-    controller, composer, cards, send, root, body, reports,
+    controller, composer, cards, send, root, body, document, reports,
     navigate(path) { location.pathname = path },
     render(names, attributes = []) {
       cards.replaceChildren(...names.map((name, index) => element('div', { 'data-fixture-card': '' }, [
@@ -982,37 +984,50 @@ test('native draft-card scope and card-linked filename tooltips remain supported
   assert.equal(app.status().namesSeen, false, 'an unreferenced tooltip must not stand in for a removed card')
 })
 
-test('fileChooserDiagnostics inspects open gem-menu items and menu triggers while redacting unsafe text', () => {
+test('Gemini targets the visible Upload files item when the legacy button is hidden and redacts diagnostic text', () => {
   const secretFiles = [{ fileName: 'secret-notes.md', mimeType: 'text/markdown', sizeBytes: 120 }]
   const app = fixture(secretFiles, platformExports.GEMINI_PAGE, 'div', '', '/app')
   app.controller.releaseFileSend(token)
   const trigger = element('button', { 'aria-label': '上传和工具', 'aria-haspopup': 'menu', 'aria-expanded': 'true' })
-  const fieldset = element('fieldset', { class: 'input-area-fieldset' }, [app.composer, trigger, app.send])
-  const safeItem = element('gem-menu-item', { role: 'menuitem', 'data-test-id': 'synthetic-gem-uploader' }, [
-    element('mat-icon', { fonticon: 'upload_file', 'aria-hidden': 'true' }),
-    element('span', { class: 'label' }, '上传文件')
+  app.root.replaceChildren(app.composer, trigger, app.send)
+  const label = element('span', { class: 'label' }, '上传文件')
+  const local = element('gem-menu-item', { role: 'menuitem', 'aria-haspopup': 'false', 'aria-label': '上传文件. 文档、数据、代码文件' }, [
+    element('mat-icon', { fonticon: 'attach_file', 'aria-hidden': 'true' }, 'attach_file'), label
   ])
+  local.getBoundingClientRect = () => ({ left: 344, top: 547, width: 224, height: 37 })
+  app.document.elementFromPoint = (x, y) => x === 456 && y === 565.5 ? label : null
   const unsafeItem = element('gem-menu-item', { role: 'menuitem' }, [
     element('span', { class: 'label' }, 'secret-notes.md'),
     element('span', {}, 'https://example.test/private')
   ])
-  const gemMenu = element('gem-menu', { role: 'menu', 'data-test-id': 'upload-menu' }, [safeItem, unsafeItem])
+  const legacy = element('button', { role: 'menuitem', 'data-test-id': 'local-images-files-uploader-button', 'aria-hidden': 'true' }, '上传文件')
+  const drive = element('gem-menu-item', { role: 'menuitem' }, '从云端硬盘添加')
+  const more = element('gem-menu-item', { role: 'menuitem', 'aria-haspopup': 'menu' }, '更多上传选项')
+  const gemMenu = element('gem-menu', { role: 'menu', 'data-test-id': 'upload-menu' }, [local, unsafeItem, drive, more, legacy])
   const overlay = element('div', { class: 'cdk-overlay-pane' }, [gemMenu])
-  app.body.replaceChildren(fieldset, overlay)
-  assert.equal(app.controller.beginFileSend(`${token}-gemini-diag`, secretFiles), 'ok')
+  app.body.replaceChildren(app.root, overlay)
+  const uploadToken = `${token}-gemini-diag`
+  assert.equal(app.controller.beginFileSend(uploadToken, secretFiles), 'ok')
   const diag = app.controller.fileChooserDiagnostics()
   assert.equal(diag.rootFound, true)
   assert.equal(diag.menuCount, 1)
+  assert.equal(diag.localSelectorAllCount, 1)
   assert.equal(diag.localEntryCount, 0)
-  assert.equal(diag.captionEntryCount, 0)
+  assert.equal(diag.captionEntryCount, 1)
   assert.equal(diag.menuButtons.length, 1)
   assert.equal(diag.menuButtons[0].ariaExpanded, 'true')
   assert.equal(diag.chooserMenus.length, 1)
   assert.equal(diag.chooserMenus[0].tag, 'gem-menu')
   assert.equal(diag.chooserMenus[0].items[0].tag, 'gem-menu-item')
-  assert.equal(diag.chooserMenus[0].items[0].dataTestId, 'synthetic-gem-uploader')
-  assert.deepEqual(diag.chooserMenus[0].items[0].icons, ['upload_file'])
+  assert.equal(diag.chooserMenus[0].items[0].hitMatched, true)
+  assert.deepEqual(Array.from(diag.chooserMenus[0].items[0].icons), ['attach_file'])
   assert.equal(diag.chooserMenus[0].items[0].primaryLabel, '上传文件')
   assert.equal(diag.chooserMenus[0].items[1].primaryLabel.startsWith('[file:'), true)
   assert.equal(diag.chooserMenus[0].items[1].text.startsWith('[len:'), true)
+  const click = app.controller.openFileChooser(uploadToken)
+  assert.equal(click.kind, 'caption')
+  assert.equal(click.target.tag, 'gem-menu-item')
+  assert.equal(click.status, 'waiting', 'the main process still waits for the native chooser event')
+  assert.equal(local.clicks, 0, 'the page returns a click target rather than simulating a click')
+  assert.equal(app.controller.openFileChooser(uploadToken), 'waiting', 'the same entry is only targeted once')
 })

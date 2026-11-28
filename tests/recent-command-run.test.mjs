@@ -27,10 +27,12 @@ function fixture(t, options = {}) {
   const records = new Map([[original.messageId, original]])
   const recent = [{ messageId: original.messageId, payloadJson: JSON.stringify({
     command: original.command, description: original.description, timeout_seconds: original.timeoutSeconds
-  }), createdAt: 10 }]
+  }), createdAt: 10, ...options.recent }]
   const events = []
   const sent = []
   const calls = []
+  const fileReads = []
+  const fileSends = []
   const diagnostics = []
   let currentConversationId = 'chat-a'
   let terminalMode = true
@@ -69,7 +71,7 @@ function fixture(t, options = {}) {
   const remoteShell = options.remote ? new FakeShell({ initialCwd: '/remote/current' }) : null
   const exports = {}
   new Script(compiled, { filename: 'commands.cjs' }).runInNewContext({
-    exports, process, console, setTimeout, clearTimeout,
+    exports, process, console, setTimeout, clearTimeout, AbortController,
     require(id) {
       if (id === 'node:crypto') return crypto
       if (id === './shell') return { ConversationShell: FakeShell, IDLE_TIMEOUT_MS: 300000, MAX_RUNTIME_MS: 1800000 }
@@ -85,13 +87,16 @@ function fixture(t, options = {}) {
       createExecution(record) {
         if (records.has(record.messageId)) return false
         records.set(record.messageId, {
-          ...record, kind: 'command', fileRequest: null, deliveryStatus: null,
+          ...record, kind: record.fileRequest ? 'read_files' : 'command', fileRequest: record.fileRequest ?? null,
+          deliveryStatus: record.fileRequest ? 'pending' : null,
           exitCode: null, output: '', startedAt: null, finishedAt: null
         })
         return true
       },
       listExecutions: (id) => [...records.values()].filter((record) => record.conversationId === id),
       setExecutionStatus: (id, status) => { records.get(id).status = status },
+      setFileDeliveryStatus: (id, status) => { records.get(id).deliveryStatus = status },
+      appendConversationMessage() {},
       finishExecution: (id, outcome) => Object.assign(records.get(id), outcome),
       interruptRunningCommands() {}
     },
@@ -99,6 +104,18 @@ function fixture(t, options = {}) {
     onCommandDiagnostic: details => diagnostics.push(details),
     executionAllowed: () => options.executionAllowed !== false,
     terminalModeEnabled: () => terminalMode,
+    toolEnabled: options.toolEnabled,
+    fileContext: options.fileContext ?? (() => ({ scope: 'local', hostId: '', cwd: 'C:\\current-workspace' })),
+    filePlatform: () => ({ id: 'gemini', label: 'Gemini' }),
+    async prepareFiles(request) {
+      fileReads.push(request)
+      return { attachments: [{ fileName: 'main.ts' }], failed: false, text: '读取成功', summary: '', images: [], async cleanup() {} }
+    },
+    async sendFilesToPage(result, _token, current) {
+      assert.equal(current(), true)
+      fileSends.push(result.attachments)
+      return 'ok'
+    },
     remoteShell: () => remoteShell,
     onTaskStarted: () => events.push('task-started'),
     captureBackgroundTasks: options.captureBackgroundTasks,
@@ -110,7 +127,7 @@ function fixture(t, options = {}) {
   runner.restoreMode(options.mode ?? 'manual')
   t.after(() => runner.disposeAll())
   return {
-    runner, records, original, recent, sent, events, calls, diagnostics, remoteShell,
+    runner, records, original, recent, sent, events, calls, fileReads, fileSends, diagnostics, remoteShell,
     get localShell() { return localShell },
     switchConversation(id) { currentConversationId = id },
     setTerminalMode(enabled) { terminalMode = enabled },
@@ -126,6 +143,44 @@ test('unknown stored tools cannot run or replay through terminal controls', asyn
   await f.runner.runExecution('original'); await f.settled()
   assert.equal(f.calls.length, 0); assert.equal(f.localShell, undefined)
   assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'unavailable')
+})
+
+test('replays a history file read using its original directory and a separate execution record', async t => {
+  const fileRequest = { type: 'read_files', files: [{ path: 'src/main.ts' }], description: '读取源码',
+    context: { scope: 'local', hostId: '', cwd: 'C:\\original-workspace' } }
+  const f = fixture(t, { original: { kind: 'read_files', fileRequest, deliveryStatus: 'failed' }, recent: { tool: 'read_files' } })
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'ok')
+  assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'busy')
+  await f.settled()
+  assert.deepEqual(f.fileReads, [fileRequest])
+  assert.equal(f.fileSends.length, 1)
+  assert.equal(f.calls.length, 0)
+  const replay = [...f.records.values()].at(-1)
+  assert.match(replay.messageId, /^rerun:/)
+  assert.equal(replay.deliveryStatus, 'sent')
+  assert.equal(f.original.deliveryStatus, 'failed')
+})
+
+test('declines file replay on another host or with the tool disabled', t => {
+  const fileRequest = { type: 'read_files', files: [{ path: 'src/main.ts' }], description: '读取源码',
+    context: { scope: 'ssh', hostId: 'original-host', cwd: '/repo' } }
+  const original = { kind: 'read_files', fileRequest }
+  const recent = { tool: 'read_files' }
+  const changed = fixture(t, { original, recent, fileContext: () => ({ scope: 'ssh', hostId: 'other-host', cwd: '/repo' }) })
+  assert.equal(changed.runner.runRecentCommand('chat-a', 'original'), 'file-host-changed')
+  const disabled = fixture(t, { original, recent, toolEnabled: () => false })
+  assert.equal(disabled.runner.runRecentCommand('chat-a', 'original'), 'file-tool-unavailable')
+  assert.equal(changed.records.size, 1)
+  assert.equal(disabled.records.size, 1)
+})
+
+test('tool instructions that are only shown or copied cannot execute even with a colliding command record', t => {
+  for (const tool of ['read_tool_prompt', 'scheduled_task', 'send_email', 'computer']) {
+    const f = fixture(t, { recent: { tool } })
+    assert.equal(f.runner.runRecentCommand('chat-a', 'original'), 'unavailable')
+    assert.equal(f.records.size, 1)
+    assert.deepEqual(f.calls, [])
+  }
 })
 
 test('an unconfirmed remote interruption keeps a replacement pending without running locally or in a busy remote shell', async t => {

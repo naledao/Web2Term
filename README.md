@@ -71,8 +71,10 @@ flowchart LR
 - **会话持久化**：保存对话名称、模型平台、账号绑定、对话地址、执行记录和远程设备绑定。切换模型保留当前终端及连接；任务执行中限制切换，避免把结果发到其他对话。
 - **三种视图**：“专注对话”（默认视图）在本地界面组织消息、思考／检索过程、执行记录与工具调用卡片；“原始”显示模型网站；“会话摘要”查看本地保存的对话内容。可在 **设置 → 对话** 中修改默认模型和默认对话视图。
 - **多账号管理、隔离与额度**：ChatGPT、DeepSeek、Gemini 和 Claude 均可在专注对话顶部打开账号管理弹窗，添加带备注的新账号、切换账号或删除非默认账号。每个账号使用独立的 Electron 浏览器分区（`persist:<platform>-<id>`），登录态与会话地址互不干扰；还可将账号标记为“有额度”或“无额度”，供跨账号交接使用。
+- **历史指令**：右侧「控制」面板可查看最近三条命令、问题和工具指令。文件读取支持在原主机重新读取并回传，其他新增的工具指令支持复制原始内容。
 - **专注对话增强**：
   - **模型与回答设置**：ChatGPT（模型与推理强度 Instant / Medium / High）、Gemini（模型与思考等级 低 / 中 / 高）和 Claude（模型含更多模型子菜单与思考强度）支持在专注对话顶部读取与切换；DeepSeek 顶部展示固定模型信息，并在附件旁提供“深度思考”和“智能搜索”开关。
+  - **Gemini 模式与用量**：新会话可在输入框切换「对话」和「任务」。任务模式隐藏思考强度。专注对话顶部显示当前账号的当前用量、每周限额和重置时间，支持手动刷新。
   - **有序发送队列**：输入框上方停靠“发送队列”，序列化发送用户消息、工具结果、定时任务投递与问题回复，显示等待原因（如等待页面空闲或网页输入框）和尝试次数；等待中的用户消息可编辑、删除或在空输入框按 `↑` 取回，发送中支持二次点击确认取消，队首未确认时可核对后跳过或恢复草稿。
   - **富媒体与交互**：支持添加最多 3 个附件与粘贴图片；渲染 KaTeX 数学公式、Mermaid 图表（图表／源码切换）、HTML 代码块独立沙箱窗口“运行预览”（桌面宽度、390px 手机宽度、源码查看与重新运行，单次上限 200 万字符）；顶部显示上下文估算明细与完整提示词注入倒计时。ChatGPT 另支持内联消息编辑、单选／多题智能交互卡片、原生柱状／折线图表、引用来源浮层与原生文件预览。
 - **补充说明与提示词预览**：在右侧“控制”面板的“说明”中编辑 Markdown，项目中的对话共享同一份说明，未归属项目的对话按机器和当前目录保存（子目录不自动继承）。“查看系统提示词”展示执行环境、补充说明和自动目录；“查看工具提示词”管理常驻自动目录中的 **文件读取（`read_files`）** 和 **后台任务（`background: true`）**。
@@ -466,7 +468,9 @@ Projects group conversations and share supplementary Markdown instructions. Remo
 
 - **Three chat views:** **Focus view** (default), **Original** (embedded website), and **Local summary** (configured under **Settings → 对话**).
 - **Multi-account management & isolation:** ChatGPT, DeepSeek, Gemini, and Claude each support adding labeled accounts (`1–40` characters) in Focus view. Each account uses an isolated Electron partition (`persist:<platform>-<id>`) with separate login cookies and session URLs, supports **有额度 / 无额度** (quota) tagging, and allows removing non-default accounts (wiping local storage/cache/auth).
+- **Instruction history:** The Control panel lists the three most recent commands, questions, and tool requests. File reads can be run again on the original host and sent back to the model. Other newly supported tool requests can be copied.
 - **Focus-view model & composer tools:** ChatGPT (model & reasoning effort Instant / Medium / High), Gemini (model & thinking level), and Claude (model incl. More models & effort) can be read and switched in the Focus header; DeepSeek shows fixed model info plus **深度思考** and **智能搜索** toggles beside the attachment button.
+- **Gemini modes and usage:** In a new conversation, switch between Chat and Tasks in the composer. Tasks hides the thinking-level control. The Focus header shows the active account’s current and weekly usage, with reset times and manual refresh.
 - **Outbound send queue & rich rendering:** The send queue shows the active send, retry reason, and numbered waiting messages (waiting user items can be edited, deleted, or pulled back with `↑` in an empty composer; active sends take a two-click cancel). Answers render KaTeX math, Mermaid diagrams (diagram/source toggle), and an isolated sandbox **HTML live preview** window (`运行预览`: desktop, 390px mobile, source view, re-run; up to 2M characters), plus context token breakdown and full-prompt injection countdown. ChatGPT also supports inline message editing, single/multi-question interactive Smart UI radio cards, native charts, citation popovers, and native file previews.
 - **Selection questions & side chats:** Side chats open a separate conversation on the same platform without executing terminal commands. Selection questions (“询问 AI”) attach context exported from locally saved messages across all four platforms.
 

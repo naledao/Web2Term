@@ -17,7 +17,7 @@ function moduleAt(path, dependencies = {}) {
   return exports
 }
 const shared = moduleAt('../src/shared/focus-chat.ts')
-const { DEEPSEEK_PAGE } = moduleAt('../src/shared/platforms.ts')
+const { DEEPSEEK_PAGE, GEMINI_PAGE } = moduleAt('../src/shared/platforms.ts')
 const { default: Modes } = moduleAt('../src/renderer/src/components/FocusComposerModes.tsx', {
   react: React, 'react/jsx-runtime': jsxRuntime, '@shared/focus-chat': shared
 })
@@ -33,6 +33,35 @@ function actual(path, name, context, method = false) {
   return new Script(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText).runInContext(context)
 }
 const pagePath = '../src/main/injected/send-interceptor.js'
+
+test('existing Gemini tasks use the conversation header and preserve mode without home switches', () => {
+  const path = '/app/0123456789abcdef'
+  const status = (textContent, box, inReply = false) => ({
+    textContent, getAttribute: () => null, closest: selector => inReply && selector.includes('model-response'),
+    getBoundingClientRect: () => box
+  })
+  const header = { top: 20, bottom: 52, left: 1160, right: 1210 }
+  const rows = [status('完成', header, true), status('已完成', { ...header, top: 560, bottom: 592 }),
+    status('Done', { ...header, left: 240, right: 290 })]
+  const context = createContext({ PAGE: GEMINI_PAGE, location: { pathname: path },
+    CONTROL_SELECTOR: 'button, [role="button"]', focusModelCache: null,
+    document: { documentElement: { clientWidth: 1248 }, querySelectorAll: () => rows },
+    collapse: value => String(value || '').trim(), isVisibleElement: () => true })
+  context.focusGeminiConversationTask = actual(pagePath, 'focusGeminiConversationTask', context)
+  const read = actual(pagePath, 'focusGeminiComposerMode', context)
+  assert.equal(read([]), undefined)
+  assert.equal(read([], 'chat'), 'chat')
+  rows.push(status('完成', header))
+  assert.equal(read([], 'chat'), 'task', 'the live header can correct the stored mode')
+  rows.pop()
+  context.focusModelCache = { path, composerMode: 'task' }
+  assert.equal(read([]), 'task', 'a transiently missing header keeps the confirmed mode')
+  context.location.pathname = '/app/abcdef0123456789'
+  assert.equal(read([]), undefined, 'the previous conversation does not supply the mode')
+  context.location.pathname = '/app/'
+  assert.equal(read([{ id: 'chat', active: true }, { id: 'task', active: false }], 'task'), 'chat')
+})
+
 function fixture() {
   const control = (text, active) => ({ textContent: text, attrs: { 'aria-pressed': String(active) }, disabled: false,
     getAttribute(key) { return this.attrs[key] ?? null }, matches() { return false } })
@@ -46,6 +75,7 @@ function fixture() {
     setTimeout(callback, delay) { now += delay; queueMicrotask(callback) },
     pressButton(node) { calls.push(node); if (toggleWorks) node.attrs['aria-pressed'] = String(node.attrs['aria-pressed'] !== 'true'); afterClick?.() }
   })
+  context.focusComposerModeMatches = actual(pagePath, 'focusComposerModeMatches', context)
   context.focusComposerModesOf = actual(pagePath, 'focusComposerModesOf', context)
   return { context, thinking, search, calls, composer, read: context.focusComposerModesOf,
     change: actual(pagePath, 'setComposerMode', context, true),
@@ -60,6 +90,7 @@ test('mode discovery walks past the attachment/send footer until both named swit
   const context = createContext({ PAGE: DEEPSEEK_PAGE, CONTROL_SELECTOR: 'button, [role="button"]',
     document: { body }, getComposer: () => ({ parentElement: inner }), isVisibleElement: node => node.visible,
     collapse: value => String(value || '').trim() })
+  context.focusComposerModeMatches = actual(pagePath, 'focusComposerModeMatches', context)
   const read = actual(pagePath, 'focusComposerModeControls', context)
   assert.deepEqual(Array.from(read()), [attachment, send, thinking, search])
   search.visible = false
@@ -167,6 +198,7 @@ test('busy, missing, disabled and unsupported switches never click', async () =>
 
 test('snapshot boundary rejects duplicate IDs, malformed states and extra switches', () => {
   assert.equal(shared.validFocusComposerModes([{ id: 'thinking', active: null, disabled: true }]), true)
+  assert.equal(shared.validFocusComposerModes([{ id: 'chat', active: true, disabled: false }, { id: 'task', active: false, disabled: false }]), true)
   for (const modes of [[{ id: 'other', active: false, disabled: false }], [{ id: 'thinking', active: 'on', disabled: false }],
     [{ id: 'search', active: true }], Array(2).fill({ id: 'thinking', active: false, disabled: false }), Array(3).fill({})]) {
     assert.equal(shared.validFocusComposerModes(modes), false)
@@ -178,7 +210,7 @@ test('runtime serializes switches with sends and rejects a stale home/chat owner
   const context = createContext({ writeFocusDiagnostic: (_owner, value) => diagnostics.push(value) })
   const change = actual('../src/main/session-runtime.ts', 'setFocusComposerMode', context, true)
   let release, current = true
-  const runtime = { ownsFocus: () => current, focusSending: false, focusRevision: null,
+  const runtime = { active: true, activePlatform: { page: DEEPSEEK_PAGE }, ownsFocus: () => current, focusSending: false, focusRevision: null,
     runner: { hasInFlightWork: () => false }, embed: { getInterceptorStatus: () => ({}),
       setFocusComposerMode: () => new Promise(resolve => { release = resolve }) } }
   const pending = change.call(runtime, { ...owner, id: 'thinking', active: true })
@@ -192,20 +224,102 @@ test('runtime serializes switches with sends and rejects a stale home/chat owner
 })
 
 test('focus controls show native checked/unknown/pending state without optimistic selection', () => {
-  const html = renderToStaticMarkup(React.createElement(Modes, { modes: [
+  const html = renderToStaticMarkup(React.createElement(Modes, { platformId: 'deepseek', modes: [
     { id: 'thinking', active: true, disabled: false }, { id: 'search', active: false, disabled: false }
   ], disabled: false, pending: null, onChange() {} }))
   assert.match(html, /aria-pressed="true"/)
   assert.match(html, /aria-pressed="false"/)
   assert.equal((html.match(/type="button"/g) ?? []).length, 2)
   assert.match(html, /深度思考/); assert.match(html, /智能搜索/)
-  const unknown = renderToStaticMarkup(React.createElement(Modes, { modes: [], disabled: false, pending: null, onChange() {} }))
+  const unknown = renderToStaticMarkup(React.createElement(Modes, { platformId: 'deepseek', modes: [], disabled: false, pending: null, onChange() {} }))
   assert.equal((unknown.match(/data-state="unknown"/g) ?? []).length, 2)
   assert.equal((unknown.match(/disabled=""/g) ?? []).length, 2)
   assert.equal(unknown.includes('aria-pressed='), false)
-  const pending = renderToStaticMarkup(React.createElement(Modes, { modes: [
+  const pending = renderToStaticMarkup(React.createElement(Modes, { platformId: 'deepseek', modes: [
     { id: 'thinking', active: false, disabled: false }
   ], disabled: false, pending: 'thinking', onChange() {} }))
   assert.match(pending, /aria-busy="true"/)
   assert.match(pending, /aria-pressed="false"/)
+})
+
+test('Gemini selects one home mode, checks the rendered composer, and preserves native drafts', async () => {
+  const f = fixture()
+  let placeholder = 'Ask Gemini', attachmentDraft = false
+  const control = textContent => ({ textContent, visible: true, disabled: false, attrs: {},
+    closest() { return this.inNavigation ? {} : null }, getAttribute(key) { return this.attrs[key] ?? null } })
+  const chat = control('对话'), task = control('任务'), sidebarTask = { ...control('任务'), inNavigation: true }
+  const send = control('发送'), body = {}
+  const controls = [send, chat, task, sidebarTask]
+  const outer = { parentElement: body, querySelectorAll: () => controls }
+  f.composer.parentElement = { parentElement: outer, querySelectorAll: () => [send] }
+  f.composer.getAttribute = key => key === 'data-placeholder' ? placeholder : null
+  f.composer.closest = () => null
+  f.composer.draft = ''
+  Object.assign(f.context, { PAGE: GEMINI_PAGE, document: { body }, location: { pathname: '/app' },
+    isVisibleElement: node => node.visible, readComposer: node => node.draft, draftAttachmentEvidence: () => attachmentDraft,
+    pressButton(node) { f.calls.push(node); placeholder = node === task ? '描述任务' : 'Ask Gemini' } })
+  f.context.focusComposerModeControls = actual(pagePath, 'focusComposerModeControls', f.context)
+  const selected = () => f.read().find(mode => mode.data.active === true)?.data.id
+  assert.equal(selected(), 'chat')
+  assert.equal(await f.change('task', false, '/app'), 'invalid')
+  assert.equal(await f.change('task', true, '/app'), 'ok')
+  assert.equal(selected(), 'task')
+  assert.equal(await f.change('task', true, '/app'), 'ok')
+  f.composer.draft = '原网页草稿'
+  assert.equal(await f.change('chat', true, '/app'), 'busy')
+  assert.equal(f.composer.draft, '原网页草稿')
+  f.composer.draft = ''
+  attachmentDraft = true
+  assert.equal(await f.change('chat', true, '/app'), 'busy')
+  attachmentDraft = false
+  assert.equal(await f.change('chat', true, '/app'), 'ok')
+  assert.equal(selected(), 'chat')
+  assert.deepEqual(f.calls, [task, chat])
+
+  placeholder = 'Unrecognized placeholder'
+  assert.equal(selected(), undefined)
+  task.attrs['aria-selected'] = 'true'
+  assert.equal(selected(), 'task')
+  chat.attrs['aria-selected'] = 'true'
+  assert.equal(selected(), undefined, 'conflicting states do not show a selected mode')
+  controls.push(control('任务'))
+  assert.equal(f.read().length, 0, 'ambiguous mode controls cannot be clicked')
+  controls.pop()
+  task.visible = false
+  assert.equal(f.read().length, 0)
+  task.visible = true
+  f.context.location.pathname = '/app/0123456789abcdef'
+  assert.equal(await f.change('chat', true, f.context.location.pathname), 'unavailable')
+  assert.deepEqual(f.calls, [task, chat])
+})
+
+test('Gemini runtime rejects mode changes with an active task, queued message or existing conversation', async () => {
+  const context = createContext({ writeFocusDiagnostic() {} })
+  const change = actual('../src/main/session-runtime.ts', 'setFocusComposerMode', context, true)
+  const owner = { sessionId: 'one', platformId: 'gemini', conversationId: null }
+  const calls = []
+  let taskRunning = false, pending = 0
+  const runtime = { active: true, activePlatform: { page: GEMINI_PAGE }, ownsFocus: () => true, taskRunning: () => taskRunning,
+    aiOutboundQueue: { stateFor: () => ({ pending }) }, runner: { hasInFlightWork: () => false },
+    embed: { getInterceptorStatus: () => ({}), async setFocusComposerMode(id, active) { calls.push([id, active]); return 'ok' } } }
+  const request = { ...owner, id: 'task', active: true }
+  assert.equal(await change.call(runtime, { ...request, conversationId: '0123456789abcdef' }), 'unavailable')
+  assert.equal(await change.call(runtime, { ...request, id: 'thinking' }), 'invalid')
+  taskRunning = true
+  assert.equal(await change.call(runtime, request), 'busy')
+  taskRunning = false; pending = 1
+  assert.equal(await change.call(runtime, request), 'busy')
+  pending = 0
+  assert.equal(await change.call(runtime, request), 'ok')
+  assert.deepEqual(calls, [['task', true]])
+})
+
+test('Gemini renders the two modes with the native selection while pending', () => {
+  const html = renderToStaticMarkup(React.createElement(Modes, { platformId: 'gemini', modes: [
+    { id: 'chat', active: false, disabled: false }, { id: 'task', active: true, disabled: false }
+  ], disabled: false, pending: 'chat', onChange() {} }))
+  assert.match(html, /aria-busy="true"[^>]*>对话/)
+  assert.match(html, /aria-pressed="true"[^>]*>任务/)
+  assert.equal((html.match(/aria-pressed="true"/g) ?? []).length, 1)
+  assert.equal((html.match(/disabled=""/g) ?? []).length, 2)
 })

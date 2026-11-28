@@ -34,6 +34,7 @@ import OutputText from './OutputText'
 import { buildFocusTurnTimeline, mergeFocusChatUpdate } from '@shared/focus-history'
 import { estimateFocusConversation } from '@shared/focus-token-usage'
 import FocusModelSettings from './FocusModelSettings'
+import FocusGeminiUsage from './FocusGeminiUsage'
 import { parseFocusLayout } from '@shared/focus-layout'
 import type { FocusLayoutData } from '@shared/focus-layout'
 import { parseFocusUi } from '@shared/focus-smart-ui'
@@ -702,6 +703,7 @@ function FocusChatView(props: Props): JSX.Element {
   const modelReadAttempted = useRef(false)
   const modelReadAttempts = useRef(0)
   const geminiReadModel = useRef<string | null>(null)
+  const geminiReadMode = useRef<FocusComposerModeId | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const skillsOpen = !!skillQuery && !skillsDismissed && !editingId
   const readEpoch = useRef(0)
@@ -840,11 +842,18 @@ function FocusChatView(props: Props): JSX.Element {
   const working = !sendFailure && (props.needsAnswer || state?.waiting === true || state?.generating === 'active' || lastTurn?.status === 'working')
   const nativeGenerating = state?.generating === 'active'
   const ready = state?.ready === true
+  const composerModes = state?.composerModes ?? []
+  const geminiModesAvailable = owner.platformId === 'gemini' && composerModes.length > 0
+  const geminiMode = owner.platformId === 'gemini' ? state?.composerMode ?? null : null
+  const showEffort = geminiMode !== 'task' && state?.modelSettings?.effortSupported !== false &&
+    (owner.platformId !== 'gemini' || geminiMode === 'chat' || !!state?.modelSettings?.efforts.length)
+  const modeChangeBlocked = sending || stopping || working || !!sendFailure || !!editingId || !ready || compaction.blocked || settingPending !== null ||
+    (geminiModesAvailable && (props.taskRunning || !!state?.nativeDraft || !!state?.outboundQueue?.pending))
   // Computer use waits for its Windows helper; the composer keeps the draft meanwhile.
   const skillModeUnavailable = state?.promptInjection?.phase === 'disabled' ? '请先启用终端模式和提示词注入，再使用按需技能。' : ''
   const selectedUnavailable = selectedSkills.length ? skillModeUnavailable || selectedSkills.map(id => focusSkillUnavailable(id, toolState)).find(Boolean) || '' : ''
   const sendBlock = selectedUnavailable || (selectedSkills.includes('computer') ? state?.sendBlock || '' : '')
-  const modelSettingsBlocked = working || props.taskRunning || stopping || !!editingId || !ready || compaction.blocked
+  const modelSettingsBlocked = working || props.taskRunning || stopping || changingMode !== null || !!editingId || !ready || compaction.blocked
   const updateModelSettings = useCallback(async (kind: FocusModelSettingKind, value?: string, automatic = false): Promise<void> => {
     if (sendLock.current || modelSettingsBlocked || !visible) return
     sendLock.current = true; settingBusy.current = true; readEpoch.current++
@@ -872,6 +881,13 @@ function FocusChatView(props: Props): JSX.Element {
   useEffect(() => {
     if (!modelSettingsKind || !visible || modelSettingsBlocked || sendLock.current) return
     const settings = state?.modelSettings
+    if (geminiMode && geminiReadMode.current !== geminiMode) {
+      geminiReadMode.current = geminiMode
+      modelReadAttempted.current = false
+      modelReadAttempts.current = 0
+      geminiReadModel.current = null
+      setSettingError('')
+    }
     if ((modelSettingsKind === 'gemini' || modelSettingsKind === 'claude') && settings?.model) {
       // Strength availability follows the confirmed model. Read the new model once.
       if (geminiReadModel.current && geminiReadModel.current !== settings.model) {
@@ -884,7 +900,7 @@ function FocusChatView(props: Props): JSX.Element {
     // A new conversation id remounts this view after the first send. Its page
     // snapshot already carries the confirmed settings; do not reopen a hidden
     // native menu as soon as the task finishes.
-    if (settings?.model && (modelSettingsKind === 'chatgpt' || settings.efforts.length > 0)) { modelReadAttempted.current = true; return }
+    if (settings?.model && (geminiMode === 'task' || settings.effortSupported === false || modelSettingsKind === 'chatgpt' || settings.efforts.length > 0)) { modelReadAttempted.current = true; return }
     // The home composer can mount well before its model trigger. Passive snapshots
     // wait for that control without consuming the one owned menu read or locking send.
     if (state?.modelSettingsReady !== true || settingPending !== null) return
@@ -897,7 +913,7 @@ function FocusChatView(props: Props): JSX.Element {
       void updateModelSettings('read', undefined, true)
     }, 500)
     return () => clearTimeout(timer)
-  }, [ownerKey, modelSettingsKind, visible, modelSettingsBlocked, sending, settingPending, state?.modelSettings?.model, state?.modelSettings?.efforts.length,
+  }, [ownerKey, modelSettingsKind, visible, modelSettingsBlocked, sending, settingPending, geminiMode, state?.modelSettings?.model, state?.modelSettings?.efforts.length, state?.modelSettings?.effortSupported,
     state?.modelSettingsReady, updateModelSettings])
   useEffect(() => {
     if (state?.modelSettings?.model) setSettingError('')
@@ -911,7 +927,9 @@ function FocusChatView(props: Props): JSX.Element {
     props.onNewChat()
   }
   const changeMode = async (id: FocusComposerModeId, active: boolean): Promise<void> => {
-    if (sendLock.current || working || editingId || !ready) return
+    if (sendLock.current || modeChangeBlocked) return
+    const gemini = owner.platformId === 'gemini'
+    const modeName = gemini ? 'Gemini 模式' : '开关状态'
     sendLock.current = true
     readEpoch.current++
     setChangingMode(id); setError('')
@@ -921,9 +939,9 @@ function FocusChatView(props: Props): JSX.Element {
       const next = await window.api.getFocusChat(owner)
       if (!alive.current) return
       if (next && focusOwnerKey(next) === ownerKey) applySnapshot(next)
-      if (outcome !== 'ok') setError(outcome === 'busy' ? '当前正在处理任务，请稍后切换回答模式。' :
-        '开关状态尚未确认，请到原始视图检查后再发送。')
-    } catch { if (alive.current) setError('暂时无法同步开关状态，请到原始视图检查。') }
+      if (outcome === 'busy') setError(gemini ? 'Gemini 网页有草稿或正在处理消息，请检查原始视图后再切换。' : '当前正在处理任务，请稍后切换回答模式。')
+      else if (outcome !== 'ok') setError(`${modeName}尚未确认，请在原始视图核对后再发送。`)
+    } catch { if (alive.current) setError(`${modeName}暂时无法同步，请到原始视图检查。`) }
     finally { sendLock.current = false; if (alive.current) setChangingMode(null) }
   }
   const richAnswers = useMemo(() => new Map((state?.smartReplies ?? []).map(reply => [reply.sourceMessageId, reply.answer])), [state?.smartReplies])
@@ -1402,11 +1420,15 @@ function FocusChatView(props: Props): JSX.Element {
         <dt>当前模型</dt><dd className="focus-chat__model-name">DeepSeek-V4.1-Flash-1017</dd>
         <dt>思考强度</dt><dd>high</dd>
       </dl> : null}
+      {owner.conversationId && geminiMode ? <dl className="focus-chat__model-info" aria-label="Gemini 会话模式">
+        <dt>模式</dt><dd>{geminiMode === 'task' ? '任务' : '对话'}</dd>
+      </dl> : null}
       {modelSettingsKind ? <FocusModelSettings settings={state?.modelSettings ?? null} platformLabel={modelLabel}
-        disabled={modelSettingsBlocked || sending} pending={settingPending}
+        disabled={modelSettingsBlocked || sending} pending={settingPending} showEffort={showEffort}
         waiting={ready && (modelSettingsKind === 'chatgpt' || state?.modelSettingsReady === true) && !state?.modelSettings?.model &&
           !modelReadAttempted.current && settingPending === null}
         onChange={(kind, value) => { void updateModelSettings(kind, value) }} onRefresh={() => { void updateModelSettings('read') }} /> : null}
+      {owner.platformId === 'gemini' ? <FocusGeminiUsage key={ownerKey} owner={owner} visible={visible} /> : null}
       <FocusTokenUsage usage={tokenUsage} injection={state?.promptInjection} loading={!messagesReady || state === null} />
     </header>
     <div className="focus-chat__transcript" ref={transcriptRef}>
@@ -1554,7 +1576,9 @@ function FocusChatView(props: Props): JSX.Element {
             <button type="button" disabled={sending} aria-label={'移除附件 ' + item.file.name} onClick={() => removeFile(item.id)}>×</button>
           </div>)}</div> : null}
         <textarea ref={composerInput} value={draft} disabled={!!editingId || compaction.blocked} maxLength={20000} rows={2} aria-label="消息"
-          placeholder={queueTrayVisible ? '继续输入，新消息会排在队列后按顺序发送… 输入 // 选择技能' : '描述你想完成的任务… 输入 // 选择技能'}
+          placeholder={queueTrayVisible ? '继续输入，新消息会排在队列后按顺序发送… 输入 // 选择技能' :
+            (owner.platformId === 'gemini' && owner.conversationId ? '接着提问…' :
+              geminiMode === 'chat' ? '给 Gemini 发消息…' : geminiMode === 'task' ? '描述任务…' : '描述你想完成的任务…') + ' 输入 // 选择技能'}
           aria-expanded={skillsOpen} aria-controls={skillsOpen ? 'focus-skills-' + owner.sessionId : undefined}
           aria-activedescendant={skillsOpen && activeSkill ? 'focus-skill-' + activeSkill.id + '-' + owner.sessionId : undefined}
           onSelect={event => setSkillCaret(event.currentTarget.selectionStart)}
@@ -1602,8 +1626,8 @@ function FocusChatView(props: Props): JSX.Element {
         <input ref={fileInput} type="file" multiple hidden onChange={event => { addFiles([...event.currentTarget.files ?? []]); event.currentTarget.value = '' }} />
         <div className="focus-composer__tools"><div className="focus-composer__left">
           <button type="button" className="focus-composer__attachment" disabled={sending || !!editingId || changingMode !== null || settingPending !== null || compaction.blocked} onClick={() => fileInput.current?.click()} title="添加附件，也可直接粘贴截图或文件">＋ 附件</button>
-          {owner.platformId === 'deepseek' ? <FocusComposerModes modes={state?.composerModes ?? []} disabled={sending || stopping || !!working || !!sendFailure || !!editingId || !ready || compaction.blocked}
-            pending={changingMode} onChange={(id, active) => { void changeMode(id, active) }} /> : null}
+          {owner.platformId === 'deepseek' || geminiModesAvailable ? <FocusComposerModes platformId={geminiModesAvailable ? 'gemini' : 'deepseek'} modes={composerModes}
+            disabled={modeChangeBlocked} pending={changingMode} onChange={(id, active) => { void changeMode(id, active) }} /> : null}
         </div><span>{modelLabel}</span>
           {nativeGenerating || stopping ? <button type="button" className="focus-composer__send" disabled={stopping || sending || !ready} onClick={() => void stop()} aria-label="停止生成">{stopping ? <ComposerPendingIcon /> : <svg className="focus-composer__stop-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="3" width="10" height="10" rx="0.5" fill="currentColor" /></svg>}</button> :
             <button type="submit" className="focus-composer__send" disabled={sending || props.needsAnswer || !!sendFailure || changingMode !== null || settingPending !== null || !!editingId || !ready || !!state?.nativeDraft || !!sendBlock || compaction.blocked || skillsOpen || (!!state?.outboundQueue?.blocked) || (!draft.trim() && !draftFiles.length)} aria-label="发送消息" title={state?.outboundQueue?.blockedReason || sendBlock || undefined}>{sending ? <ComposerPendingIcon /> : '↑'}</button>}

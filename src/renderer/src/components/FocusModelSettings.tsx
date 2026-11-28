@@ -1,19 +1,21 @@
 import type { JSX } from 'react'
 import type { FocusModelSettings as ModelSettings, FocusModelSettingKind } from '@shared/focus-chat'
 
-export default function FocusModelSettings({ settings, disabled, pending, waiting = false, platformLabel = 'ChatGPT', onChange, onRefresh }: {
+export default function FocusModelSettings({ settings, disabled, pending, waiting = false, showEffort = true, platformLabel = 'ChatGPT', onChange, onRefresh }: {
   settings: ModelSettings | null
   disabled: boolean
   pending: FocusModelSettingKind | null
   waiting?: boolean
+  showEffort?: boolean
   platformLabel?: string
   onChange(kind: 'model' | 'effort', value: string): void
   onRefresh(): void
 }): JSX.Element {
   const model = { kind: 'model', label: '当前模型', options: settings?.models ?? [], value: settings?.model } as const
   const effort = { kind: 'effort', label: '思考强度', options: settings?.efforts ?? [], value: settings?.effort } as const
+  const refreshLabel = showEffort ? '刷新模型和思考强度' : '刷新模型'
   return <div className="focus-chat__model-controls" role="group" aria-label={`${platformLabel} 模型设置`} aria-busy={pending !== null}>
-    {[model, effort].map(item =>
+    {(showEffort ? [model, effort] : [model]).map(item =>
       <label className="focus-chat__model-field" key={item.kind}>
         <span>{item.label}</span>
         <span className="focus-chat__model-select">
@@ -26,7 +28,7 @@ export default function FocusModelSettings({ settings, disabled, pending, waitin
         </span>
       </label>)}
     <button type="button" className="focus-chat__model-refresh" disabled={disabled || pending !== null}
-      aria-label="刷新模型和思考强度" title={pending ? '正在同步原网页设置' : '从原网页重新读取模型和思考强度'} onClick={onRefresh}>
+      aria-label={refreshLabel} title={pending ? '正在同步原网页设置' : `从原网页重新读取${showEffort ? '模型和思考强度' : '模型'}`} onClick={onRefresh}>
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M16 6a7 7 0 1 0 1 7M16 2v4h-4" /></svg>
     </button>
     {pending || waiting ? <span className="focus-chat__model-status" role="status">{pending === 'read' ? '读取中…' : pending ? '切换中…' : '正在等待模型控件…'}</span> : null}
